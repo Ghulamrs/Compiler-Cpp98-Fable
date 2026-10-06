@@ -8,6 +8,9 @@
 //
 // Outputs, written next to the first input (or into the -o directory):
 //   <name>-report.txt     complete text report
+//   <name>-health.txt     version 2 health check findings
+//   <name>-symbols.json   symbol table (also -symbols.txt, tab-separated)
+//   <name>-symbols.map    linker-style map: modules, symbols, cross reference
 //   <name>-report.html    self-contained HTML report with the class diagram
 //   <name>-report.pdf     the same report as PDF (diagram + text)
 //   <name>-diagram.svg    class diagram picture
@@ -16,10 +19,12 @@
 // Strict C++98.
 #include "CodeBase.hpp"
 #include "Diagram.hpp"
+#include "Health.hpp"
 #include "Html.hpp"
 #include "PathUtil.hpp"
 #include "Pdf.hpp"
 #include "Report.hpp"
+#include "Symbols.hpp"
 
 #include <cstring>
 #include <iostream>
@@ -45,8 +50,10 @@ void usage()
         "  --no-follow      do not parse #include'd files that are not part of the input\n"
         "  --no-directives  omit the per-file preprocessor listing from the reports\n"
         "  --no-locals      omit local variables from the reports\n"
-        "  --text-only      write only the .txt report\n"
+        "  --text-only      write only the .txt report (and the health report)\n"
         "  --stdout         print the text report to the console, write no files\n"
+        "  --health         print the health report to the console, write no files\n"
+        "  --strict         exit code 3 when the health check finds errors\n"
         "  -q               quiet: print only errors\n"
         "  -h, --help       this text\n";
 }
@@ -76,7 +83,7 @@ int main(int argc, char* argv[])
 {
     std::vector<std::string> inputs;
     std::string outDir, outName;
-    bool follow = true, textOnly = false, toStdout = false, quiet = false;
+    bool follow = true, textOnly = false, toStdout = false, quiet = false, healthOnly = false, strict = false;
     ReportOptions opt;
 
     for (int i = 1; i < argc; ++i) {
@@ -89,6 +96,8 @@ int main(int argc, char* argv[])
         else if (a == "--no-locals") opt.locals = false;
         else if (a == "--text-only") textOnly = true;
         else if (a == "--stdout") toStdout = true;
+        else if (a == "--health") healthOnly = true;
+        else if (a == "--strict") strict = true;
         else if (a == "-q") quiet = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "unknown option: " << a << "\n"; usage(); return 2; }
         else inputs.push_back(a);
@@ -108,9 +117,14 @@ int main(int argc, char* argv[])
         return 1;
     }
     cb.link();
+    cb.checkHealth();
+    int errors = 0, warnings = 0, infos = 0;
+    countFindings(cb.findings(), errors, warnings, infos);
+    const int strictExit = (strict && errors > 0) ? 3 : 0;
 
+    if (healthOnly) { std::cout << renderHealthText(cb); return strictExit ? strictExit : (ok ? 0 : 1); }
     std::string text = renderTextReport(cb, opt);
-    if (toStdout) { std::cout << text; return ok ? 0 : 1; }
+    if (toStdout) { std::cout << text; return strictExit ? strictExit : (ok ? 0 : 1); }
 
     if (outDir.empty()) outDir = cb.baseDirectory();
     if (outName.empty()) outName = stem(inputs[0]);
@@ -119,6 +133,10 @@ int main(int argc, char* argv[])
 
     std::vector<std::string> written;
     if (!writeOut(base + "-report.txt", text, quiet, written)) ok = false;
+    if (!writeOut(base + "-health.txt", renderHealthText(cb), quiet, written)) ok = false;
+    if (!writeOut(base + "-symbols.json", renderSymbolsJson(cb), quiet, written)) ok = false;
+    if (!writeOut(base + "-symbols.txt", renderSymbolsText(cb), quiet, written)) ok = false;
+    if (!writeOut(base + "-symbols.map", renderSymbolsMap(cb), quiet, written)) ok = false;
     if (!textOnly) {
         DiagramLayout layout;
         layout.build(cb);
@@ -133,9 +151,10 @@ int main(int argc, char* argv[])
         computeTotals(cb, t);
         std::cout << "\n" << cb.title() << ": " << t.files << " files (" << t.headers << " headers, " << t.sources << " sources), "
                   << t.lines << " lines, " << (t.classes + t.structs + t.unions) << " classes, " << t.methods << " methods, "
-                  << t.freeFunctions << " free functions, " << t.globals << " globals, " << t.macros << " macros, "
-                  << t.diagnostics << " parser diagnostics\n";
+                  << t.freeFunctions << " free functions, " << t.globals << " globals, " << t.macros << " macros\n"
+                  << "health: " << errors << " errors, " << warnings << " warnings, " << infos << " info\n";
         for (size_t i = 0; i < cb.messages().size(); ++i) std::cout << "  note: " << cb.messages()[i] << "\n";
     }
+    if (strictExit) return strictExit;
     return ok ? 0 : 1;
 }

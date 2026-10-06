@@ -63,7 +63,7 @@ try {
         'class util::FixedStack::Iterator',
         'struct geom::Rect::Corner',
         'include/Legacy.h   (included by main.cpp)',
-        'include not found:      #include "Missing.h"',
+        '[E100] src/main.cpp:9',
         'function-try-block',
         'double sum = 0.0',
         'const Shape* s = m_shapes[i]',
@@ -74,7 +74,7 @@ try {
         'operator bool',
         'operator<<',
         'virtual double area() const = 0',
-        'method without a body:  util::Matrix2::rows()',
+        'util::Matrix2::rows() const is declared but no definition was found',
         'void (*m_callback)(const Shape&)',
         'extern int g_shapeVersion',
         'typedef void (*ReportFn)(const Shape&)',
@@ -95,6 +95,14 @@ try {
     foreach ($f in @('Sample-report.html', 'Sample-report.pdf', 'Sample-diagram.svg', 'Sample-diagram.dot')) {
         $p = "out\sample\$f"
         if ((Test-Path $p) -and ((Get-Item $p).Length -gt 500)) { Write-Host "  ok   $f ($((Get-Item $p).Length) bytes)" } else { Write-Host "  FAIL missing or empty: $f"; $failed++ }
+    }
+    $symbols = Get-Content "out\sample\Sample-symbols.json" -Raw
+    foreach ($e in @('"kind": "class", "name": "Circle", "qualified": "geom::Circle"', '"kind": "method", "name": "area"', '"kind": "local", "name": "sum"', '"kind": "macro", "name": "SAMPLE_MAX"', '"kind": "parameter", "name": "radius"')) {
+        if ($symbols.Contains($e)) { Write-Host "  ok   symbols: $e" } else { Write-Host "  FAIL symbols missing: $e"; $failed++ }
+    }
+    $map = Get-Content "out\sample\Sample-symbols.map" -Raw
+    foreach ($e in @(' Symbols by module', ' Cross reference', 'geom::Circle::area', 'geom::Canvas::add  (', ' Entry point', 'main(int argc, char* argv[])')) {
+        if ($map.Contains($e)) { Write-Host "  ok   map: $e" } else { Write-Host "  FAIL map missing: $e"; $failed++ }
     }
     $pdf = Get-Content "out\sample\Sample-report.pdf" -Raw
     if ($pdf.StartsWith('%PDF-1.4') -and $pdf.Contains('%%EOF')) { Write-Host "  ok   PDF structure" } else { Write-Host "  FAIL PDF structure"; $failed++ }
@@ -121,10 +129,37 @@ try {
     if (-not $report3.Contains('template <typename T, int N>')) { throw "Vector template not found in the plain-files report" }
     Write-Host "  ok   Vector template found"
 
+    # ---- test 4: health checker on the deliberately broken folder ----------------
+    Write-Host "=== Test 4: health checker (sample-bad folder) ==="
+    New-Item -ItemType Directory -Force "out\bad" | Out-Null
+    & ".\cppparse.exe" -o "out\bad" -n "bad" --text-only "..\cppparse\sample-bad"
+    if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on sample-bad" }
+    $health = Get-Content "out\bad\bad-health.txt" -Raw
+    $codes = @('E100', 'E101', 'W102', 'I103', 'E110', 'E120', 'E121', 'W122', 'E123', 'E124', 'W125', 'W126', 'I127', 'W128',
+               'E130', 'E131', 'W132', 'W133', 'E134', 'E135', 'E136', 'W137', 'W138', 'W140', 'W141', 'E142', 'E143', 'E144',
+               'E145', 'I146', 'W147', 'W150', 'W151', 'W152', 'W153', 'W154', 'W155', 'E156', 'W157', 'E160', 'W161', 'E162',
+               'E163', 'W164', 'W165')
+    $failed = 0
+    foreach ($code in $codes) {
+        if ($health.Contains("[$code]")) { Write-Host "  ok   $code" } else { Write-Host "  FAIL code not reported: $code"; $failed++ }
+    }
+    & ".\cppparse.exe" --strict --health "..\cppparse\sample-bad" | Out-Null
+    if ($LASTEXITCODE -eq 3) { Write-Host "  ok   --strict exit code 3" } else { Write-Host "  FAIL --strict exit code was $LASTEXITCODE"; $failed++ }
+    if ($failed -ne 0) { throw "$failed check(s) failed on sample-bad" }
+
+    # the good sample must produce only the intended findings
+    $goodHealth = Get-Content "out\sample\Sample-health.txt" -Raw
+    if ($goodHealth -match "errors (\d+), warnings (\d+), info (\d+)") {
+        Write-Host "  sample (good) project: errors $($Matches[1]), warnings $($Matches[2]), info $($Matches[3])"
+        if ([int]$Matches[1] -gt 1) { throw "the good sample reports more than the one intended error (Missing.h)" }
+    }
+
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
-    Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}"
+    Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"
+    $global:LASTEXITCODE = 0
 }
 finally {
     Pop-Location
 }
+exit 0

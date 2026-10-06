@@ -54,6 +54,10 @@ std::string TemplateInfo::text() const
 
 LocalVariable::LocalVariable() : line(0) {}
 
+CallInfo::CallInfo() : kind(Plain), argCount(0), line(0) {}
+BodyNote::BodyNote() : line(0) {}
+Finding::Finding() : severity(Info), line(0) {}
+
 ExceptionInfo::ExceptionInfo()
     : tryBlocks(0), catchHandlers(0), throwStatements(0), functionTryBlock(false)
 {
@@ -64,7 +68,7 @@ FunctionInfo::FunctionInfo()
       isStatic(false), isInline(false), isExplicit(false), isExtern(false), isFriend(false),
       isConstructor(false), isDestructor(false), isOperator(false), isConversion(false),
       hasBody(false), hasInitializerList(false), access(AccessNone), line(0), endLine(0),
-      definition(0), ownerClass(0)
+      returnsValue(0), returnsVoid(0), definition(0), ownerClass(0)
 {
 }
 

@@ -27,6 +27,10 @@ public:
     // computes derived-class lists and field associations. Call once.
     void link();
 
+    // Runs the version 2 health checks (after link()).
+    void checkHealth();
+    const std::vector<Finding>&       findings()  const { return m_findings; }
+
     const std::vector<SourceFile*>&   files()     const { return m_files; }
     const std::vector<ProjectInfo>&   projects()  const { return m_projects; }
     const std::vector<SolutionInfo>&  solutions() const { return m_solutions; }
@@ -64,6 +68,7 @@ private:
     std::vector<SolutionInfo>           m_solutions;
     std::vector<ClassInfo*>             m_classes;
     std::vector<std::string>            m_messages;
+    std::vector<Finding>                m_findings;
     std::map<std::string, SourceFile*>  m_byPath;
     std::map<std::string, ClassInfo*>   m_byQualified;
     std::map<std::string, std::vector<ClassInfo*> > m_bySimple;

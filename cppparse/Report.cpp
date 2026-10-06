@@ -1,5 +1,6 @@
 // Report.cpp - totals, shared helpers and the plain-text report.
 #include "Report.hpp"
+#include "Health.hpp"
 #include "PathUtil.hpp"
 
 #include <sstream>
@@ -16,7 +17,7 @@ Totals::Totals()
       globals(0), globalExterns(0), globalStatics(0), staticMemberDefinitions(0), locals(0), parameters(0),
       typedefs(0), enums(0), enumerators(0), usings(0), namespaces(0), friends(0),
       tryBlocks(0), catchHandlers(0), throwStatements(0), functionTryBlocks(0), functionsWithTry(0),
-      diagnostics(0), messages(0)
+      diagnostics(0), messages(0), healthErrors(0), healthWarnings(0), healthInfos(0)
 {
 }
 
@@ -125,7 +126,6 @@ void treeRec(const ClassInfo* c, const std::string& indent, std::vector<std::str
 void inheritanceTreeLines(const CodeBase& cb, std::vector<std::string>& lines)
 {
     const std::vector<ClassInfo*>& classes = cb.classes();
-    std::vector<std::string> externalsDone;
     for (size_t i = 0; i < classes.size(); ++i) {
         const ClassInfo* c = classes[i];
         if (!c->isDefinition) continue;
@@ -257,9 +257,9 @@ void computeTotals(const CodeBase& cb, Totals& t)
         t.usings += static_cast<int>(sf.usings.size());
         for (size_t i = 0; i < sf.namespaces.size(); ++i) addUnique(ns, sf.namespaces[i]);
     }
-    // a free declaration whose definition was found elsewhere is not "declared only"
     t.namespaces = static_cast<int>(ns.size());
     t.messages = static_cast<int>(cb.messages().size());
+    countFindings(cb.findings(), t.healthErrors, t.healthWarnings, t.healthInfos);
 }
 
 void totalsLines(const Totals& t, std::vector<std::string>& L)
@@ -288,6 +288,7 @@ void totalsLines(const Totals& t, std::vector<std::string>& L)
     L.push_back("Exception handling: try " + intToString(t.tryBlocks) + " (function-try-blocks " + intToString(t.functionTryBlocks) + "), catch " +
                 intToString(t.catchHandlers) + ", throw " + intToString(t.throwStatements) + ", functions with try: " + intToString(t.functionsWithTry));
     L.push_back("Parser diagnostics: " + intToString(t.diagnostics) + ";  loader messages: " + intToString(t.messages));
+    L.push_back("Health findings: errors " + intToString(t.healthErrors) + ", warnings " + intToString(t.healthWarnings) + ", info " + intToString(t.healthInfos));
 }
 
 // ---- text report ---------------------------------------------------------------
@@ -646,36 +647,11 @@ std::string renderTextReport(const CodeBase& cb, const ReportOptions& opt)
     }
 
     // 7. health
-    t.section(7, "HEALTH (preview of the version 2 checker)");
+    t.section(7, "HEALTH  (version 2 checker; also written to <name>-health.txt)");
     {
-        int n = 0;
-        for (size_t f = 0; f < files.size(); ++f)
-            for (size_t d = 0; d < files[f]->directives.size(); ++d) {
-                const Directive& dir = files[f]->directives[d];
-                if (dir.kind == Directive::Include && !dir.inactive && !dir.systemInclude && dir.resolvedPath.empty()) {
-                    t.line(4, "include not found:      #include \"" + dir.argument + "\"   at " + locationText(cb, files[f]->path, dir.line, 0)); ++n;
-                }
-            }
-        for (size_t i = 0; i < classes.size(); ++i)
-            for (size_t m = 0; m < classes[i]->methods.size(); ++m) {
-                const FunctionInfo& fn = classes[i]->methods[m];
-                if (!fn.definition && !fn.isPureVirtual && fn.linkNote != "= default" && fn.linkNote != "= delete") {
-                    t.line(4, "method without a body:  " + classes[i]->qualifiedName + "::" + fn.name + "(" + fn.paramText + ")   declared at " + locationText(cb, fn.file, fn.line, 0)); ++n;
-                }
-            }
-        for (size_t f = 0; f < files.size(); ++f)
-            for (size_t k = 0; k < files[f]->functions.size(); ++k) {
-                const FunctionInfo& fn = files[f]->functions[k];
-                if (!fn.qualifier.empty() && fn.declaredAt.empty()) { t.line(4, "definition without declaration: " + fn.fullName() + "(" + fn.paramText + ")   " + locationText(cb, fn.file, fn.line, 0) + "  [" + fn.linkNote + "]"); ++n; }
-                if (fn.qualifier.empty() && !fn.hasBody && !fn.definition) { t.line(4, "free function declared but no body found: " + fn.fullName() + "(" + fn.paramText + ")   " + locationText(cb, fn.file, fn.line, 0)); ++n; }
-            }
-        for (size_t i = 0; i < classes.size(); ++i)
-            for (size_t b = 0; b < classes[i]->bases.size(); ++b)
-                if (!classes[i]->bases[b].resolved && classes[i]->isDefinition) { t.line(4, "base class not defined in the parsed files: " + classes[i]->qualifiedName + " : " + classes[i]->bases[b].name); ++n; }
-        std::vector<std::string> diags;
-        collectDiagnostics(cb, diags);
-        for (size_t i = 0; i < diags.size(); ++i) { t.line(4, "parser: " + diags[i]); ++n; }
-        if (n == 0) t.line(4, "no findings");
+        std::vector<std::string> lines;
+        healthLines(cb, lines);
+        for (size_t i = 0; i < lines.size(); ++i) t.line(lines[i]);
     }
 
     // 8. totals

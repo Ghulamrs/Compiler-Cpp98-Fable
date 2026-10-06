@@ -69,6 +69,38 @@ struct LocalVariable {
     LocalVariable();
 };
 
+// a call site inside a function body
+struct CallInfo {
+    enum Kind { Plain, Member, Pointer, Scoped, New, Construct };
+    Kind        kind;
+    std::string name;        // callee name as written (unqualified)
+    std::string qualifier;   // "Foo" for Foo::bar(...)
+    std::string receiver;    // identifier before '.' / '->', or "this"
+    int         argCount;
+    int         line;
+    CallInfo();
+};
+
+// a suspicious pattern noticed while scanning a body
+struct BodyNote {
+    std::string code;        // "assign-in-condition", "empty-statement", "catch-by-value", ...
+    std::string text;
+    int         line;
+    BodyNote();
+};
+
+// a health finding produced by the version 2 checker
+struct Finding {
+    enum Severity { Error, Warning, Info };
+    Severity    severity;
+    std::string code;        // "E142"
+    std::string file;
+    int         line;
+    std::string message;
+    std::string detail;
+    Finding();
+};
+
 struct ExceptionInfo {
     int                      tryBlocks;
     int                      catchHandlers;
@@ -101,6 +133,12 @@ struct FunctionInfo {
     std::string            condition;      // active #if conditions
     ExceptionInfo          exceptions;
     std::vector<LocalVariable> locals;     // variables declared inside the body
+    std::vector<std::string>   bodyIdents; // identifiers used in the body (uses, not declarations)
+    std::vector<CallInfo>      calls;      // call sites in the body
+    std::vector<BodyNote>      notes;      // suspicious patterns seen in the body
+    std::vector<std::string>   localTypedefs; // names introduced by typedefs inside the body
+    int                        returnsValue; // "return expr;" statements
+    int                        returnsVoid;  // "return;" statements
 
     // filled by CodeBase::link()
     std::string   definedAt;    // "file:line" of the body when this is a declaration

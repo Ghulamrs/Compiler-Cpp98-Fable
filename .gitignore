@@ -3,3 +3,7 @@
 *.obj
 *.pdb
 *.ilk
+
+# cppparse build and test outputs
+sandbox/obj/
+sandbox/out/

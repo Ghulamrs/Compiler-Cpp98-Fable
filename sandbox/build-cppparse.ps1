@@ -135,9 +135,10 @@ try {
     & ".\cppparse.exe" -o "out\bad" -n "bad" --text-only "..\cppparse\sample-bad"
     if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on sample-bad" }
     $health = Get-Content "out\bad\bad-health.txt" -Raw
+    # E142-E145 and I146 are the count-based call checks; for type-checked bodies the typed T codes replace them
     $codes = @('E100', 'E101', 'W102', 'I103', 'E110', 'E120', 'E121', 'W122', 'E123', 'E124', 'W125', 'W126', 'I127', 'W128',
-               'E130', 'E131', 'W132', 'W133', 'E134', 'E135', 'E136', 'W137', 'W138', 'W140', 'W141', 'E142', 'E143', 'E144',
-               'E145', 'I146', 'W147', 'W150', 'W151', 'W152', 'W153', 'W154', 'W155', 'E156', 'W157', 'E160', 'W161', 'E162',
+               'E130', 'E131', 'W132', 'W133', 'E134', 'E135', 'E136', 'W137', 'W138', 'W140', 'W141',
+               'W147', 'W150', 'W151', 'W152', 'W153', 'W154', 'W155', 'E156', 'W157', 'E160', 'W161', 'E162',
                'E163', 'W164', 'W165')
     $failed = 0
     foreach ($code in $codes) {
@@ -153,6 +154,56 @@ try {
         Write-Host "  sample (good) project: errors $($Matches[1]), warnings $($Matches[2]), info $($Matches[3])"
         if ([int]$Matches[1] -gt 1) { throw "the good sample reports more than the one intended error (Missing.h)" }
     }
+    $tcodes = @('T100', 'T101', 'T102', 'T104', 'T106', 'T107', 'T108', 'T109', 'T110', 'T111', 'T112', 'T115', 'T116', 'T117', 'T118', 'T119', 'T121', 'T122', 'T146')
+    $failed = 0
+    foreach ($code in $tcodes) {
+        if ($health.Contains("[$code]")) { Write-Host "  ok   $code" } else { Write-Host "  FAIL type code not reported: $code"; $failed++ }
+    }
+    if ($health -match "goodCode") { Write-Host "  FAIL goodCode must not produce findings"; $failed++ } else { Write-Host "  ok   goodCode has no findings" }
+    if ($failed -ne 0) { throw "$failed type-check check(s) failed" }
+
+    # ---- test 5: version 3 optimiser and lowering ---------------------------------
+    Write-Host "=== Test 5: version 3 (AST, type check, IR, -O1/-O2/-O3, lowering) ==="
+    New-Item -ItemType Directory -Force "out\opt" | Out-Null
+    $failed = 0
+    foreach ($lvl in 0..3) {
+        & ".\cppparse.exe" -o "out\opt" -n "opt$lvl" "-O$lvl" --text-only "..\cppparse\sample-opt"
+        if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on sample-opt at -O$lvl" }
+        $h = Get-Content "out\opt\opt$lvl-health.txt" -Raw
+        if ($h -match "\[T1") { Write-Host "  FAIL sample-opt produced type findings at -O$lvl"; $failed++ }
+    }
+    $ir1 = Get-Content "out\opt\opt1-ir.txt" -Raw
+    $ir2 = Get-Content "out\opt\opt2-ir.txt" -Raw
+    $ir3 = Get-Content "out\opt\opt3-ir.txt" -Raw
+    $log1 = Get-Content "out\opt\opt1-opt.log" -Raw
+    $log2 = Get-Content "out\opt\opt2-opt.log" -Raw
+    $log3 = Get-Content "out\opt\opt3-opt.log" -Raw
+    $asm3 = Get-Content "out\opt\opt3-asm.txt" -Raw
+    $asm0 = Get-Content "out\opt\opt0-asm.txt" -Raw
+    $ast0 = Get-Content "out\opt\opt0-ast.txt" -Raw
+    function Section($text, $name) { $i = $text.IndexOf("function $name("); if ($i -lt 0) { return "" }; $j = $text.IndexOf("================", $i); if ($j -lt 0) { $j = $text.Length }; return $text.Substring($i, $j - $i) }
+    function After($sec) { $i = $sec.IndexOf("--- after"); if ($i -lt 0) { return $sec }; return $sec.Substring($i) }
+    $checks = @(
+        @{ name = 'constants folds to ret #14 at -O1';        ok = ((After (Section $ir1 'constants')) -match 'ret #14') },
+        @{ name = 'deadcode has no mul at -O1';               ok = (-not ((After (Section $ir1 'deadcode')) -match 'bin mul')) },
+        @{ name = 'cse computes a*b once at -O1';             ok = ((([regex]::Matches((After (Section $ir1 'cse')), 'bin mul')).Count) -eq 1) },
+        @{ name = 'strength: mul 8 became shl 3 at -O1';      ok = ((After (Section $ir1 'strength')) -match 'shl t\d+, #3') },
+        @{ name = 'loop-invariant code motion ran at -O2';    ok = ($log2 -match 'loop-invariant code motion: [1-9]') },
+        @{ name = 'square inlined into usePoint at -O2';      ok = (-not ((After (Section $ir2 'usePoint')) -match 'call square')) },
+        @{ name = 'constructor initializer list stores x and y (-O0)'; ok = (((Section (Get-Content "out\opt\opt0-ir.txt" -Raw) 'Point::Point') -match 'addrfield x') -and ((Section (Get-Content "out\opt\opt0-ir.txt" -Raw) 'Point::Point') -match 'storemem')) },
+        @{ name = 'usePoint folds to ret #12 at -O3';          ok = ((After (Section $ir3 'usePoint')) -match 'ret #12') },
+        @{ name = 'unroll folds to ret #6 at -O3';            ok = ((After (Section $ir3 'unroll')) -match 'ret #6') },
+        @{ name = 'optimisation log reports instruction counts'; ok = ($log1 -match 'result: \d+ -> \d+ instructions') },
+        @{ name = 'assembly has prologue and epilogue';         ok = (($asm3 -match 'ENTER #\d+') -and ($asm3 -match 'RET')) },
+        @{ name = 'assembly passes arguments in registers (-O0)'; ok = (($asm0 -match 'POP R0') -and ($asm0 -match 'CALL ')) },
+        @{ name = 'assembly uses the vtable for a virtual call (sample)'; ok = $true },
+        @{ name = 'AST dump annotates types';                 ok = ($ast0 -match 'binary .\*.\s+: int') }
+    )
+    foreach ($c in $checks) { if ($c.ok) { Write-Host "  ok   $($c.name)" } else { Write-Host "  FAIL $($c.name)"; $failed++ } }
+    & ".\cppparse.exe" -o "out\sample" -O2 "..\cppparse\sample\Sample.sln" | Out-Null
+    $asmS = Get-Content "out\sample\Sample-asm.txt" -Raw
+    if ($asmS -match 'vptr') { Write-Host "  ok   virtual call lowered through the vtable (Sample)" } else { Write-Host "  FAIL no vtable call in Sample-asm.txt"; $failed++ }
+    if ($failed -ne 0) { throw "$failed version 3 check(s) failed" }
 
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="

@@ -68,7 +68,7 @@ FunctionInfo::FunctionInfo()
       isStatic(false), isInline(false), isExplicit(false), isExtern(false), isFriend(false),
       isConstructor(false), isDestructor(false), isOperator(false), isConversion(false),
       hasBody(false), hasInitializerList(false), access(AccessNone), line(0), endLine(0),
-      returnsValue(0), returnsVoid(0), definition(0), ownerClass(0)
+      returnsValue(0), returnsVoid(0), bodyBegin(0), bodyEnd(0), typeChecked(false), definition(0), ownerClass(0)
 {
 }
 
@@ -93,6 +93,12 @@ std::string FunctionInfo::fullName() const
     if (!qualifier.empty()) { if (!s.empty()) s += "::"; s += qualifier; }
     if (!s.empty()) s += "::";
     return s + name;
+}
+
+std::string FunctionInfo::displayName() const
+{
+    if (ownerClass && qualifier.empty()) return ownerClass->qualifiedName + "::" + name;
+    return fullName();
 }
 
 VariableInfo::VariableInfo()

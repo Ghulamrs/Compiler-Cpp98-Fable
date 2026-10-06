@@ -115,25 +115,23 @@ bool isMacroLikeWord(const std::string& w)
 // no spaces, no specifiers, no "Scope::" prefixes, no attribute macros
 std::string simplifyType(const std::string& type)
 {
-    std::string out, word;
+    // tokens: words and punctuation; a word directly followed by "::" is a qualifier and is dropped
+    std::vector<std::string> toks;
+    std::string word;
     for (size_t i = 0; i <= type.size(); ++i) {
         char c = i < type.size() ? type[i] : ' ';
         if (isalnum(static_cast<unsigned char>(c)) || c == '_') { word += c; continue; }
-        if (!word.empty()) {
-            bool drop = word == "virtual" || word == "static" || word == "inline" || word == "explicit" ||
-                        word == "typename" || word == "extern" || isMacroLikeWord(word);
-            if (!drop) out += word;
-            word.clear();
-        }
-        if (c == ':' && i + 1 < type.size() && type[i + 1] == ':') {
-            // remove the qualifier just emitted
-            size_t k = out.size();
-            while (k > 0 && (isalnum(static_cast<unsigned char>(out[k - 1])) || out[k - 1] == '_')) --k;
-            out.erase(k);
-            ++i;
-            continue;
-        }
-        if (!isspace(static_cast<unsigned char>(c)) && i < type.size()) out += c;
+        if (!word.empty()) { toks.push_back(word); word.clear(); }
+        if (c == ':' && i + 1 < type.size() && type[i + 1] == ':') { toks.push_back("::"); ++i; continue; }
+        if (!isspace(static_cast<unsigned char>(c)) && i < type.size()) toks.push_back(std::string(1, c));
+    }
+    std::string out;
+    for (size_t i = 0; i < toks.size(); ++i) {
+        const std::string& t = toks[i];
+        if (t == "::") continue;
+        if (i + 1 < toks.size() && toks[i + 1] == "::") continue;   // qualifier
+        if (t == "virtual" || t == "static" || t == "inline" || t == "explicit" || t == "typename" || t == "extern" || isMacroLikeWord(t)) continue;
+        out += t;
     }
     return out;
 }
@@ -154,34 +152,7 @@ std::string argWord(int n) { return intToString(n) + (n == 1 ? " argument" : " a
 
 bool isStdName(const std::string& n)
 {
-    static const char* const names[] = {
-        // C library
-        "printf", "fprintf", "sprintf", "snprintf", "vprintf", "vsprintf", "scanf", "sscanf", "fscanf", "puts", "fputs", "putchar",
-        "getchar", "gets", "fgets", "fopen", "fclose", "fread", "fwrite", "fseek", "ftell", "rewind", "fflush", "feof", "ferror",
-        "remove", "rename", "tmpfile", "perror", "malloc", "calloc", "realloc", "free", "exit", "abort", "atexit", "system", "getenv",
-        "atoi", "atol", "atof", "strtol", "strtoul", "strtod", "rand", "srand", "abs", "labs", "div", "qsort", "bsearch",
-        "strlen", "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strchr", "strrchr", "strstr", "strtok", "strdup",
-        "strerror", "memcpy", "memmove", "memset", "memcmp", "memchr", "stricmp", "strcasecmp", "strncasecmp", "_stricmp", "_strnicmp",
-        "sqrt", "pow", "fabs", "floor", "ceil", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "exp", "log", "log10", "fmod",
-        "sinh", "cosh", "tanh", "ldexp", "frexp", "modf", "hypot", "round",
-        "isalpha", "isdigit", "isalnum", "isspace", "isupper", "islower", "ispunct", "isprint", "isxdigit", "toupper", "tolower",
-        "time", "clock", "difftime", "mktime", "localtime", "gmtime", "strftime", "asctime", "ctime", "sleep", "usleep",
-        "assert", "va_start", "va_end", "va_arg", "setlocale", "signal", "raise", "longjmp", "setjmp", "wcslen", "wcscpy", "wcscmp",
-        "stat", "fstat", "_stat", "opendir", "readdir", "closedir", "mkdir", "_mkdir", "rmdir", "chdir", "getcwd", "_getcwd",
-        "access", "_access", "unlink", "open", "close", "read", "write", "lseek", "_findfirst", "_findnext", "_findclose", "getpid",
-        // C++ library (usually used unqualified after "using namespace std")
-        "sort", "stable_sort", "find", "find_if", "count", "count_if", "copy", "fill", "swap", "min", "max", "reverse", "unique",
-        "remove_if", "transform", "for_each", "accumulate", "make_pair", "getline", "advance", "distance", "lower_bound", "upper_bound",
-        "equal", "binary_search", "partial_sort", "nth_element", "max_element", "min_element", "replace", "iter_swap", "to_string",
-        "terminate", "unexpected", "set_terminate", "set_unexpected", "set_new_handler", "uncaught_exception",
-        // Windows basics
-        "GetLastError", "Sleep", "GetTickCount", "MessageBox", "MessageBoxA", "MessageBoxW", "OutputDebugString", "CloseHandle",
-        "CreateFile", "CreateFileA", "CreateFileW", "ReadFile", "WriteFile", "GetModuleHandle", "LoadLibrary", "GetProcAddress",
-        "InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection", "CreateThread",
-        "WaitForSingleObject", "SetEvent", "CreateEvent", "ZeroMemory", "CopyMemory", "lstrlen", "lstrcpy", "wsprintf", "GetCurrentThreadId",
-        0 };
-    for (int i = 0; names[i]; ++i) if (n == names[i]) return true;
-    return false;
+    return isStandardLibraryName(n);
 }
 
 bool inAnonymousNamespace(const std::string& scope)
@@ -666,6 +637,7 @@ void checkCtorCall(Ctx& c, const FunctionInfo& fn, const CallInfo& call, const C
 
 void checkCalls(Ctx& c, const FunctionInfo& fn, std::map<std::string, std::pair<int, std::string> >& undeclared)
 {
+    if (fn.typeChecked) return;   // the version 3 type checker produced typed findings for this body
     std::string scope = fn.ownerClass ? fn.ownerClass->qualifiedName : fn.scope;
     const std::vector<SourceFile*>& files = c.cb.files();
 

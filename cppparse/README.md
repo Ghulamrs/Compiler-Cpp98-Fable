@@ -35,6 +35,10 @@ Written next to the first input, or into the `-o` directory:
 | `<name>-symbols.map`   | linker-style map: modules, symbols, cross reference, unreferenced |
 | `<name>-symbols.json`  | symbol table for tools (one object per symbol)                   |
 | `<name>-symbols.txt`   | symbol table, tab-separated                                      |
+| `<name>-ast.txt`       | version 3: annotated AST of every function body                  |
+| `<name>-ir.txt`        | version 3: class layouts, IR before/after `-On`                   |
+| `<name>-opt.log`       | version 3: optimisation passes and instruction counts            |
+| `<name>-asm.txt`       | version 3: lowered VM64 assembly                                  |
 | `<name>-report.html`   | the same report as one self-contained page with the diagram      |
 | `<name>-report.pdf`    | the same report as PDF: title page, diagram pages, text pages    |
 | `<name>-diagram.svg`   | the class diagram picture                                       |
@@ -64,6 +68,8 @@ dashed box = base class not defined in the parsed files.
 --stdout         print the text report, write nothing
 --health         print the health report, write nothing
 --strict         exit code 3 when the health check finds errors (for build scripts)
+-O0 .. -O3       version 3 optimisation level (default -O0)
+--no-compile     skip version 3
 -q               quiet
 ```
 
@@ -144,9 +150,59 @@ cannot classify are listed as diagnostics and skipped.
   taken as a declaration of `b`, as a compiler would.
 * Property sheets (`.props`) referenced by a `.vcxproj` are not evaluated.
 
-## Planned for version 3
+## Version 3: AST, type checking, IR, optimisation and lowering
 
-An expression and statement parser producing an AST, a type checker over
-the symbol table (type-based argument checks, conversions, const
-correctness), and lowering to a three-address IR with a control-flow graph
-as a starting point for optimisation work.
+Every function body (templates excepted) goes through a small compiler
+back half, all in C++98:
+
+```
+tokens -> AST (BodyParser) -> type check (TypeCheck) -> IR (Ir) -> passes (Optimizer) -> VM64 assembly (Lower)
+```
+
+Outputs: `<name>-ast.txt` (annotated syntax tree per function),
+`<name>-ir.txt` (class layouts with field offsets and vtables, then the IR
+before and after optimisation), `<name>-opt.log` (what each pass changed
+per function, with instruction counts) and `<name>-asm.txt` (the lowered
+assembly). Select the level with `-O0` (default), `-O1`, `-O2` or `-O3`;
+`--no-compile` skips version 3 entirely.
+
+**Type checker** findings (T codes, in the health report): T100
+undeclared identifier, T101 no such member, T102 no viable overload by
+argument types, T103 ambiguous call, T104 bad conversion, T105 invalid
+operands, T106 non-const method on const object, T107 assignment to const,
+T108 return type mismatch, T109 condition not convertible to bool, T110
+member access on non-class, T111 bad subscript, T112 bad dereference, T114
+unknown type, T115 signed/unsigned comparison, T116 narrowing, T117 `.`
+on pointer or `->` on object, T118 unused expression result, T119 private
+member access, T121 lvalue required, T122 break outside loop, T123 to
+T125 switch problems, T146 call to an undeclared (library) function, T190
+and T191 constructs outside the subset. For bodies the checker handles,
+the typed checks replace the count-based E142 to I146 of version 2.
+
+**IR**: temporaries assigned once, locals as memory slots with
+`loadlocal`/`storelocal`, `addrfield` with real offsets from the class
+layout, `vcall` through vtable slots, `br`/`condbr`/`ret`, `trybegin`,
+`throw`, `catchparam`. Objects are handled by address; `__copy`, `__new`
+and `__delete` are runtime calls.
+
+**Passes**: `-O1` constant propagation and folding, store-to-load
+forwarding, copy propagation, algebraic simplification and strength
+reduction (`x * 8` to `x << 3`), local common-subexpression elimination,
+dead code and dead store elimination, branch folding, unreachable block
+removal, block merging. `-O2` adds loop-invariant code motion (dominators,
+natural loops, preheaders) and inlining of small functions. `-O3` inlines
+larger functions and fully unrolls loops with a constant trip count of at
+most 8. The folder `sample-opt/` shows each transformation; the test
+checks, for example, that `constants()` folds to `ret #14` at `-O1`,
+`square` is inlined at `-O2` and `unroll()` becomes `ret #6` at `-O3`.
+
+**Lowering** targets a virtual 64-bit machine with eight integer and
+eight floating registers: linear-scan register allocation with spilling,
+frame layout for locals and spill slots, arguments in R0-R3/F0-F3 then on
+the stack, virtual calls through the vptr, `TRY`/`ENDTRY` pseudo
+instructions for exception regions.
+
+Subset limits: template bodies, function-try-blocks, brace initialisers,
+goto and local classes are reported and skipped; standard-library types
+are opaque and never produce findings; calls through unknown functions
+are emitted as opaque calls.

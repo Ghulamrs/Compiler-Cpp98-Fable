@@ -10,6 +10,8 @@
 #ifndef CPPPARSE_MODEL_HPP
 #define CPPPARSE_MODEL_HPP
 
+#include "Lexer.hpp"
+
 #include <string>
 #include <vector>
 
@@ -139,6 +141,9 @@ struct FunctionInfo {
     std::vector<std::string>   localTypedefs; // names introduced by typedefs inside the body
     int                        returnsValue; // "return expr;" statements
     int                        returnsVoid;  // "return;" statements
+    size_t                     bodyBegin;    // token index of the body's '{' in SourceFile::tokens
+    size_t                     bodyEnd;      // token index just past the body's '}'
+    bool                       typeChecked;  // version 3 type checker handled the body completely
 
     // filled by CodeBase::link()
     std::string   definedAt;    // "file:line" of the body when this is a declaration
@@ -150,6 +155,7 @@ struct FunctionInfo {
     FunctionInfo();
     std::string signature() const;   // "virtual double area() const = 0"
     std::string fullName() const;    // "geom::Circle::area"
+    std::string displayName() const; // fullName, with the owning class prefix for methods declared in class
     bool isDefinition() const { return hasBody; }
 };
 
@@ -251,6 +257,7 @@ struct SourceFile {
     std::vector<UsingInfo>    usings;
     std::vector<std::string>  namespaces;
     std::vector<std::string>  diagnostics;  // "L12: ..." notes about things the parser skipped
+    std::vector<Token>        tokens;       // kept for the version 3 body parser
 
     SourceFile();
     ~SourceFile();

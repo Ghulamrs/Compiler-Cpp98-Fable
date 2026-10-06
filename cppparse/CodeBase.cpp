@@ -6,6 +6,7 @@
 #include "PathUtil.hpp"
 #include "ProjectReader.hpp"
 
+#include <algorithm>
 #include <cctype>
 
 namespace cppparse {
@@ -161,6 +162,7 @@ SourceFile* CodeBase::loadFile(const std::string& absPath, const std::string& or
 
     Parser parser(*f, tokens);
     parser.parse();
+    f->tokens.swap(tokens);   // kept for the version 3 body parser
 
     resolveIncludes(f, includeDirs, project);
     return f;
@@ -429,6 +431,30 @@ void CodeBase::checkHealth()
 {
     m_findings.clear();
     runHealthChecks(*this, m_findings);
+}
+
+namespace {
+struct FindingLess {
+    bool operator()(const Finding& a, const Finding& b) const
+    {
+        if (a.severity != b.severity) return a.severity < b.severity;
+        if (a.file != b.file) return a.file < b.file;
+        if (a.line != b.line) return a.line < b.line;
+        return a.code < b.code;
+    }
+};
+}
+
+void CodeBase::addFindings(const std::vector<Finding>& more)
+{
+    m_findings.insert(m_findings.end(), more.begin(), more.end());
+    std::stable_sort(m_findings.begin(), m_findings.end(), FindingLess());
+}
+
+const SourceFile* CodeBase::fileByPath(const std::string& path) const
+{
+    std::map<std::string, SourceFile*>::const_iterator it = m_byPath.find(toLower(normalizePath(path)));
+    return it == m_byPath.end() ? 0 : it->second;
 }
 
 } // namespace cppparse

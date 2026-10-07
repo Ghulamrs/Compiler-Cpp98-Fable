@@ -9,10 +9,12 @@
 //   6. VM64 lowering and x86-64 code           per function; the module pools are locked
 // Results are merged in a fixed order, so the outputs do not depend on thread timing.
 #include "Compiler.hpp"
+#include "BackEnd.hpp"
 #include "BodyParser.hpp"
 #include "Instantiate.hpp"
 #include "Ir.hpp"
 #include "Lower.hpp"
+#include "Mangle.hpp"
 #include "Optimizer.hpp"
 #include "Parallel.hpp"
 #include "PathUtil.hpp"
@@ -60,6 +62,63 @@ struct UnitResult {
     bool                 parseFailed, typeFailed;
     UnitResult() : ir(0), parseFailed(false), typeFailed(false) {}
 };
+
+
+// one vtable per polymorphic class, with the IR names of the most derived implementations
+void collectVtable(const ClassInfo* c, Layouts& layouts, X86Module& x86)
+{
+    if (!c->isDefinition || c->tmpl.isTemplate || !layouts.hasVtable(c)) return;
+    std::string desc = layouts.describe(c);
+    size_t vt = desc.find("vtable:");
+    if (vt == std::string::npos) return;
+    std::vector<std::string> keys;
+    std::string rest = desc.substr(vt + 7);
+    size_t pos = 0;
+    while ((pos = rest.find('[', pos)) != std::string::npos) {
+        size_t close = rest.find(']', pos);
+        size_t next = rest.find('[', close);
+        keys.push_back(trim(rest.substr(close + 1, next == std::string::npos ? std::string::npos : next - close - 1)));
+        pos = close + 1;
+    }
+    IrVtable v;
+    v.className = c->qualifiedName;
+    for (size_t k = 0; k < keys.size(); ++k) {
+        const FunctionInfo* impl = 0;
+        std::string key = keys[k];
+        if (key.find("::") != std::string::npos) key = key.substr(key.find("::") + 2);
+        for (const ClassInfo* walk = c; walk && !impl; ) {
+            for (size_t m = 0; m < walk->methods.size(); ++m) {
+                const FunctionInfo& fn = walk->methods[m];
+                std::string mk = fn.isDestructor ? "~dtor" : fn.name + "(";
+                if (!fn.isDestructor) { for (size_t p = 0; p < fn.params.size(); ++p) { std::string t; for (size_t ch = 0; ch < fn.params[p].type.size(); ++ch) if (fn.params[p].type[ch] != ' ') t += fn.params[p].type[ch]; mk += t + ";"; } mk += ")"; if (fn.isConst) mk += "c"; }
+                if (mk == key && (fn.definition || fn.hasBody)) { impl = fn.definition ? fn.definition : &fn; break; }
+            }
+            walk = walk->bases.empty() ? 0 : walk->bases[0].resolved;
+        }
+        v.entries.push_back(impl ? irFunctionName(impl) : std::string(""));
+    }
+    x86.addVtable(v);
+}
+
+void collectGlobals(const CodeBase& cb, TypeTable& types, Layouts& layouts, X86Module& x86, bool msvc)
+{
+    const std::vector<SourceFile*>& files = cb.files();
+    for (size_t f = 0; f < files.size(); ++f)
+        for (size_t v = 0; v < files[f]->variables.size(); ++v) {
+            const VariableInfo& g = files[f]->variables[v];
+            if (msvc) x86.registerGlobalName(g.fullName(), msvcMangleVariable(g, types));
+            if (g.isExtern) continue;
+            const Type* t = types.parse(g.type, g.scope, 0);
+            IrGlobal ig;
+            ig.name = g.fullName();
+            ig.size = layouts.sizeOf(t);
+            ig.isFloat = t && t->isFloating();
+            std::string init = trim(g.initializer);
+            bool numeric = !init.empty() && (isdigit(static_cast<unsigned char>(init[0])) || init[0] == '-' || init[0] == '+') && init.find_first_of("(,") == std::string::npos;
+            if (numeric) ig.init = init;
+            x86.addGlobal(ig);
+        }
+}
 
 // parses, type checks and lowers one function body to IR (runs on a worker thread)
 void compileUnit(const CodeBase& cb, TypeTable& types, Layouts& layouts, const std::set<std::string>& macros, bool emitAst,
@@ -124,38 +183,6 @@ struct FrontJob : public ParallelJob {
     std::vector<Unit>             units;
     std::vector<UnitResult>       results;
     virtual void run(size_t i) { compileUnit(*cb, *types, *layouts, *macros, emitAst, *units[i].fn, *units[i].tokens, results[i]); }
-};
-
-// optimisation phases over the IR functions
-struct OptJob : public ParallelJob {
-    Optimizer*                             opt;
-    int                                    phase;      // 0 local, 1 interprocedural, 2 SSA
-    std::vector<IrFunction*>*              functions;
-    std::vector<std::vector<std::string> >* logs;
-    std::vector<std::string>*              ssaTexts;
-    virtual void run(size_t i)
-    {
-        IrFunction& f = *(*functions)[i];
-        if (phase == 0) opt->runLocal(f, (*logs)[i]);
-        else if (phase == 1) opt->runInterprocedural(f, (*logs)[i]);
-        else opt->runSsa(f, (*logs)[i], &(*ssaTexts)[i]);
-    }
-};
-
-// lowering to the VM64 listing and to x86-64 text
-struct LowerJob : public ParallelJob {
-    std::vector<IrFunction*>* functions;
-    Layouts*                  layouts;
-    X86Module*                x86;
-    std::vector<std::string>  vmText, x86Text, afterText;
-    std::vector<LowerStats>   vmStats;
-    virtual void run(size_t i)
-    {
-        IrFunction& f = *(*functions)[i];
-        afterText[i] = printIr(f);
-        vmText[i] = lowerFunction(f, *layouts, vmStats[i]);
-        if (x86) { LowerStats xs; x86Text[i] = x86->codeFor(f, xs); }
-    }
 };
 
 } // namespace
@@ -243,59 +270,35 @@ void Compiler::run()
         if (!d.empty()) layoutOut << d << "   (instantiated)\n";
     }
 
-    // phases 3 to 5: optimise
-    size_t n = irFunctions.size();
-    std::vector<int> before(n, 0);
-    std::vector<std::string> beforeText(n), ssaTexts(n);
-    std::vector<std::vector<std::string> > logs(n);
-    for (size_t i = 0; i < n; ++i) { before[i] = irFunctions[i]->instCount(); m_summary.irBefore += before[i]; beforeText[i] = printIr(*irFunctions[i]); }
-    Optimizer optimizer(m_opt.optLevel, byName);
-    long tLocal = 0, tInter = 0, tSsa = 0;
-    if (m_opt.optLevel > 0) {
-        OptJob oj;
-        oj.opt = &optimizer; oj.functions = &irFunctions; oj.logs = &logs; oj.ssaTexts = &ssaTexts;
-        long t0 = millisecondsNow();
-        oj.phase = 0; runParallel(oj, n, threads);
-        long t1 = millisecondsNow();
-        oj.phase = 1; runParallel(oj, n, 1);          // inlining reads other functions: one thread
-        long t2 = millisecondsNow();
-        oj.phase = 2; runParallel(oj, n, threads);
-        long t3 = millisecondsNow();
-        tLocal = t1 - t0; tInter = t2 - t1; tSsa = t3 - t2;
-    }
-
-    // phase 6: lower
-    X86Module x86(m_cb, types, layouts, m_opt.msvcNames);
-    for (size_t i = 0; i < n; ++i) x86.registerFunction(irFunctions[i]->fn);   // instantiated functions get their names too
-    LowerJob lj;
-    lj.functions = &irFunctions; lj.layouts = &layouts; lj.x86 = m_opt.x86 ? &x86 : 0;
-    lj.vmText.resize(n); lj.x86Text.resize(n); lj.afterText.resize(n); lj.vmStats.resize(n);
-    long tLower = millisecondsNow();
-    runParallel(lj, n, threads);
-    tLower = millisecondsNow() - tLower;
-
-    for (size_t i = 0; i < n; ++i) {
-        IrFunction& f = *irFunctions[i];
-        for (size_t l = 0; l < logs[i].size(); ++l) logOut << logs[i][l] << "\n";
-        m_summary.irAfter += f.instCount();
-        irOut << "================================================================================\n";
-        if (m_opt.optLevel > 0) {
-            irOut << "--- before optimisation (" << before[i] << " instructions) ---\n" << beforeText[i];
-            if (!ssaTexts[i].empty()) irOut << "--- SSA form after the SSA passes ---\n" << ssaTexts[i];
-            irOut << "--- after -O" << m_opt.optLevel << " (" << f.instCount() << " instructions) ---\n" << lj.afterText[i] << "\n";
-        } else {
-            irOut << beforeText[i] << "\n";
+    // x86 metadata: vtables, globals and decorated names come from the version 3 model
+    X86Module x86(m_opt.msvcNames);
+    for (size_t c = 0; c < classes.size(); ++c) collectVtable(classes[c], layouts, x86);
+    for (size_t c = 0; c < instantiator.classes().size(); ++c) collectVtable(instantiator.classes()[c], layouts, x86);
+    collectGlobals(m_cb, types, layouts, x86, m_opt.msvcNames);
+    if (m_opt.msvcNames) {
+        const std::vector<SourceFile*>& files = m_cb.files();
+        for (size_t f = 0; f < files.size(); ++f) {
+            const SourceFile* sf = files[f];
+            for (size_t k = 0; k < sf->functions.size(); ++k) x86.registerSymbolName(irFunctionName(&sf->functions[k]), msvcMangleFunction(sf->functions[k], types));
+            for (size_t c = 0; c < sf->allClasses.size(); ++c)
+                for (size_t m = 0; m < sf->allClasses[c]->methods.size(); ++m) x86.registerSymbolName(irFunctionName(&sf->allClasses[c]->methods[m]), msvcMangleFunction(sf->allClasses[c]->methods[m], types));
         }
-        asmOut << lj.vmText[i];
-        m_summary.asmInstructions += lj.vmStats[i].instructions;
-        m_summary.spills += lj.vmStats[i].spills;
-        if (m_opt.x86) x86.appendCode(lj.x86Text[i]);
+        for (size_t i = 0; i < irFunctions.size(); ++i) if (irFunctions[i]->fn) x86.registerSymbolName(irFunctions[i]->name, msvcMangleFunction(*irFunctions[i]->fn, types));
     }
-    if (m_opt.x86) m_x86 = x86.finish();
+
+    BackEndOptions bo;
+    bo.optLevel = m_opt.optLevel; bo.threads = threads; bo.x86 = m_opt.x86;
+    BackEndResult br;
+    runBackEnd(irFunctions, &x86, bo, br);
+    m_summary.irBefore = br.irBefore; m_summary.irAfter = br.irAfter; m_summary.asmInstructions = br.asmInstructions; m_summary.spills = br.spills;
+    logOut << br.log;
+    irOut << br.irText;
+    asmOut << br.asmText;
+    if (m_opt.x86) m_x86 = br.x86Text;
     if (m_opt.optLevel == 0) logOut << "(no optimisation requested: use -O1, -O2 or -O3)\n";
     logOut << "\ntotal IR instructions: " << m_summary.irBefore << " -> " << m_summary.irAfter << "\n";
-    logOut << "phase times (ms, " << threads << " thread(s)): front end " << tFront << ", local optimisation " << tLocal
-           << ", inlining/unrolling " << tInter << ", SSA " << tSsa << ", lowering " << tLower << "\n";
+    logOut << "phase times (ms, " << threads << " thread(s)): front end " << tFront << ", local optimisation " << br.tLocal
+           << ", inlining/unrolling " << br.tInter << ", SSA " << br.tSsa << ", lowering " << br.tLower << "\n";
 
     for (size_t i = 0; i < irFunctions.size(); ++i) delete irFunctions[i];
 

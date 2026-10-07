@@ -31,6 +31,11 @@ $env:LIB     = "$Msvc\lib\x64;$SdkRoot\Lib\$SdkVer\ucrt\x64;$SdkRoot\Lib\$SdkVer
 
 $cl = "$Msvc\bin\Hostx64\x64\cl.exe"
 
+# the compiler and linker write temporary files to TMP: keep them on this drive (C: may be full)
+New-Item -ItemType Directory -Force "$Sandbox\out\tmp" | Out-Null
+$env:TMP  = "$Sandbox\out\tmp"
+$env:TEMP = "$Sandbox\out\tmp"
+
 Write-Host "=== Toolset: MSVC $MsvcVer, Windows SDK $SdkVer ==="
 
 Push-Location $Sandbox

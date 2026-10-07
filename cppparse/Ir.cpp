@@ -713,6 +713,23 @@ namespace {
 
 } // namespace
 
+// "Derived;Base;GrandBase": the thrown class and every transitive base, matched by name by the
+// exception runtime against the catch clauses; scalars give their type text
+std::string throwDescriptor(const Type* t)
+{
+    if (!t) return "unknown";
+    if (t->kind != Type::Class || !t->cls) return t->str();
+    std::string d = t->cls->qualifiedName;
+    std::vector<const ClassInfo*> todo;
+    todo.push_back(t->cls);
+    for (size_t i = 0; i < todo.size() && i < 64; ++i)
+        for (size_t b = 0; b < todo[i]->bases.size(); ++b) {
+            const ClassInfo* base = todo[i]->bases[b].resolved;
+            if (base) { d += ";" + base->qualifiedName; todo.push_back(base); }
+        }
+    return d;
+}
+
 std::string irFunctionName(const FunctionInfo* f)
 {
     // extern "C" functions keep their plain name so that generated code links against C symbols
@@ -939,7 +956,13 @@ int IrBuilder::value(Expr* e)
     case Expr::Comma: value(e->kids[0]); return value(e->kids[1]);
     case Expr::Throw: {
         IrInst in = make(IrInst::Throw, m_types.voidType(), line);
-        if (!e->kids.empty()) { int v = value(e->kids[0]); in.args.push_back(IrOperand::temp(v, m_types.decay(e->kids[0]->type))); }
+        if (!e->kids.empty()) {
+            int v = value(e->kids[0]);
+            const Type* tt = m_types.decay(e->kids[0]->type);
+            in.args.push_back(IrOperand::temp(v, tt));
+            in.sub = throwDescriptor(tt);
+            in.extra = tt && tt->kind == Type::Class ? m_layouts.sizeOf(tt) : 8;
+        }
         emit(in);
         return constant(0, m_types.intType(), line);
     }

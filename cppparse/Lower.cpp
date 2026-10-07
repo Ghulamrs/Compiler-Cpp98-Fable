@@ -55,8 +55,8 @@ struct ByStart { bool operator()(const Interval* a, const Interval* b) const { r
 
 class FunctionLowerer {
 public:
-    FunctionLowerer(const IrFunction& f, Layouts& layouts, LowerStats& stats)
-        : m_f(f), m_layouts(layouts), m_stats(stats), m_frameSize(0), m_instIndex(0) {}
+    FunctionLowerer(const IrFunction& f, LowerStats& stats)
+        : m_f(f), m_stats(stats), m_frameSize(0), m_instIndex(0) {}
 
     std::string run();
 
@@ -82,7 +82,6 @@ private:
     void        comment(const std::string& s) { m_out << "        ; " << s << "\n"; }
 
     const IrFunction&      m_f;
-    Layouts&               m_layouts;
     LowerStats&            m_stats;
     std::ostringstream     m_out;
     std::string            m_fnLabel;
@@ -444,9 +443,9 @@ std::string FunctionLowerer::run()
 
 } // namespace
 
-std::string lowerFunction(const IrFunction& f, Layouts& layouts, LowerStats& stats)
+std::string lowerFunction(const IrFunction& f, LowerStats& stats)
 {
-    FunctionLowerer L(f, layouts, stats);
+    FunctionLowerer L(f, stats);
     return L.run();
 }
 

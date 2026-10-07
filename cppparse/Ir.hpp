@@ -40,6 +40,8 @@ namespace cppparse {
 
 // the name the IR uses for a function: "geom::Circle::area() const"; extern "C" functions keep their plain name
 std::string irFunctionName(const FunctionInfo* f);
+// the type descriptor a throw instruction carries in its 'sub' field (see the exception runtime)
+std::string throwDescriptor(const Type* t);
 
 struct IrOperand {
     enum Kind { None, Temp, Imm, FImm, Local, Global, Block, Str };

@@ -18,25 +18,6 @@ const int kFloatRegBase = 6;     // xmm6 .. xmm13
 const int kFloatRegCount = 8;
 const int kTryFrameSize = 272;   // sizeof(jmp_buf) on x64 (256) plus the frame link
 
-// "Derived;Base;GrandBase" for a class (every transitive base), or the scalar type text; the
-// runtime matches a catch clause against each entry
-void collectBases(const ClassInfo* c, std::string& out, int depth)
-{
-    if (!c || depth > 16) return;
-    for (size_t i = 0; i < c->bases.size(); ++i) {
-        const ClassInfo* b = c->bases[i].resolved;
-        if (!b) continue;
-        out += ";" + b->qualifiedName;
-        collectBases(b, out, depth + 1);
-    }
-}
-
-std::string typeDescriptor(const Type* t)
-{
-    if (!t) return "unknown";
-    if (t->kind == Type::Class && t->cls) { std::string d = t->cls->qualifiedName; collectBases(t->cls, d, 0); return d; }
-    return t->str();
-}
 
 std::string reg32(const std::string& r)
 {
@@ -110,12 +91,14 @@ std::string X86Module::globalSymbol(const std::string& name)
     return "g_" + mangle(name);
 }
 
-void X86Module::registerFunction(const FunctionInfo* fn)
+void X86Module::registerSymbolName(const std::string& irName, const std::string& decorated)
 {
-    if (!m_msvc || !fn) return;
-    std::string key = irFunctionName(fn);
-    if (m_functionNames.count(key)) return;
-    m_functionNames[key] = msvcMangleFunction(*fn, m_types);
+    if (!m_functionNames.count(irName)) m_functionNames[irName] = decorated;
+}
+
+void X86Module::registerGlobalName(const std::string& irGlobalName, const std::string& decorated)
+{
+    if (!m_globalNames.count(irGlobalName)) m_globalNames[irGlobalName] = decorated;
 }
 
 namespace {
@@ -611,8 +594,8 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         if (cls) { std::string r = use(in.args[0], "rcx"); if (r != "rcx") line("mov rcx, " + r); }
         else if (opIsFloat(in.args[0])) { std::string r = use(in.args[0], "xmm0"); line("movsd real8 ptr " + slot + ", " + r); line("lea rcx, " + slot); }
         else { std::string r = use(in.args[0], "rax"); line("mov qword ptr " + slot + ", " + r); line("lea rcx, " + slot); }
-        line("lea rdx, " + m_m.stringLabel("\"" + typeDescriptor(t) + "\""));
-        line("mov r8, " + intToString(cls ? m_m.m_layouts.sizeOf(t) : 8));
+        line("lea rdx, " + m_m.stringLabel("\"" + in.sub + "\""));
+        line("mov r8, " + intToString(static_cast<int>(in.extra > 0 ? in.extra : 8)));
         m_m.useExtern("cppparse_throw");
         line("call cppparse_throw");
         break;
@@ -730,24 +713,7 @@ std::string X86Function::run()
 
 // ---- module ---------------------------------------------------------------------------------
 
-X86Module::X86Module(const CodeBase& cb, TypeTable& types, Layouts& layouts, bool msvcNames)
-    : m_cb(cb), m_types(types), m_layouts(layouts), m_msvc(msvcNames)
-{
-    if (!m_msvc) return;
-    // decorated names of everything declared in the sources; functions compiled from template
-    // instantiations are added by registerFunction
-    const std::vector<SourceFile*>& files = m_cb.files();
-    for (size_t f = 0; f < files.size(); ++f) {
-        const SourceFile* sf = files[f];
-        for (size_t k = 0; k < sf->functions.size(); ++k) registerFunction(&sf->functions[k]);
-        for (size_t c = 0; c < sf->allClasses.size(); ++c)
-            for (size_t m = 0; m < sf->allClasses[c]->methods.size(); ++m) registerFunction(&sf->allClasses[c]->methods[m]);
-        for (size_t v = 0; v < sf->variables.size(); ++v) {
-            const VariableInfo& g = sf->variables[v];
-            if (!m_globalNames.count(g.fullName())) m_globalNames[g.fullName()] = msvcMangleVariable(g, m_types);
-        }
-    }
-}
+X86Module::X86Module(bool msvcNames) : m_msvc(msvcNames) {}
 
 void X86Module::addFunction(const IrFunction& f, LowerStats& stats) { appendCode(codeFor(f, stats)); }
 
@@ -762,44 +728,15 @@ void X86Module::appendCode(const std::string& code) { Lock l(m_mutex); m_code +=
 
 void X86Module::emitVtables()
 {
-    const std::vector<ClassInfo*>& classes = m_cb.classes();
-    for (size_t i = 0; i < classes.size(); ++i) {
-        const ClassInfo* c = classes[i];
-        if (!c->isDefinition || c->tmpl.isTemplate || !m_layouts.hasVtable(c)) continue;
-        std::string desc = m_layouts.describe(c);
-        size_t vt = desc.find("vtable:");
-        if (vt == std::string::npos) continue;
-        // slot order from the layout description: "[n] key"
-        std::vector<std::string> keys;
-        std::string rest = desc.substr(vt + 7);
-        size_t pos = 0;
-        while ((pos = rest.find('[', pos)) != std::string::npos) {
-            size_t close = rest.find(']', pos);
-            size_t next = rest.find('[', close);
-            std::string key = trim(rest.substr(close + 1, next == std::string::npos ? std::string::npos : next - close - 1));
-            keys.push_back(key);
-            pos = close + 1;
-        }
-        std::string tableSym = globalSymbol("vtable@" + c->qualifiedName);
+    for (size_t i = 0; i < m_vtables.size(); ++i) {
+        const IrVtable& v = m_vtables[i];
+        std::string tableSym = globalSymbol("vtable@" + v.className);
         m_dataSymbols.insert(tableSym);
         std::string table = tableSym + " LABEL QWORD\n";
-        for (size_t k = 0; k < keys.size(); ++k) {
-            // find the most derived implementation among c and its bases
-            const FunctionInfo* impl = 0;
-            std::string key = keys[k];
-            if (key.find("::") != std::string::npos) key = key.substr(key.find("::") + 2);
-            for (const ClassInfo* walk = c; walk && !impl; ) {
-                for (size_t m = 0; m < walk->methods.size(); ++m) {
-                    const FunctionInfo& fn = walk->methods[m];
-                    std::string mk = fn.isDestructor ? "~dtor" : fn.name + "(";
-                    if (!fn.isDestructor) { for (size_t p = 0; p < fn.params.size(); ++p) { std::string t; for (size_t ch = 0; ch < fn.params[p].type.size(); ++ch) if (fn.params[p].type[ch] != ' ') t += fn.params[p].type[ch]; mk += t + ";"; } mk += ")"; if (fn.isConst) mk += "c"; }
-                    if (mk == key && (fn.definition || fn.hasBody)) { impl = fn.definition ? fn.definition : &fn; break; }
-                }
-                walk = walk->bases.empty() ? 0 : walk->bases[0].resolved;
-            }
-            std::string sym = impl ? symbol(irFunctionName(impl)) : "";
+        for (size_t k = 0; k < v.entries.size(); ++k) {
+            std::string sym = v.entries[k].empty() ? std::string("") : symbol(v.entries[k]);
             if (!sym.empty() && !m_defined.count(sym)) m_externs.insert(sym);
-            table += "        DQ " + (sym.empty() ? std::string("0") : "OFFSET " + sym) + "        ; [" + intToString(static_cast<int>(k)) + "] " + keys[k] + "\n";
+            table += "        DQ " + (sym.empty() ? std::string("0") : "OFFSET " + sym) + "        ; [" + intToString(static_cast<int>(k)) + "] " + v.entries[k] + "\n";
         }
         m_data += table;
     }
@@ -807,29 +744,23 @@ void X86Module::emitVtables()
 
 void X86Module::emitGlobals()
 {
-    const std::vector<SourceFile*>& files = m_cb.files();
     std::set<std::string> done;
-    for (size_t f = 0; f < files.size(); ++f)
-        for (size_t v = 0; v < files[f]->variables.size(); ++v) {
-            const VariableInfo& g = files[f]->variables[v];
-            std::string name = g.qualifier.empty() ? g.fullName() : g.fullName();
-            if (g.isExtern || !done.insert(name).second) continue;
-            const Type* t = m_types.parse(g.type, g.scope, 0);
-            int size = m_layouts.sizeOf(t);
-            std::string sym = globalSymbol(name);
-            std::string init = trim(g.initializer);
-            bool numeric = !init.empty() && (isdigit(static_cast<unsigned char>(init[0])) || init[0] == '-' || init[0] == '+') && init.find_first_of("(,") == std::string::npos;
-            std::string def;
-            if (t && t->isFloating()) def = sym + " REAL8 " + (numeric ? init : std::string("0.0"));
-            else if (size == 1) def = sym + " DB " + (numeric ? init : std::string("0"));
-            else if (size == 2) def = sym + " DW " + (numeric ? init : std::string("0"));
-            else if (size == 4) def = sym + " DD " + (numeric ? init : std::string("0"));
-            else if (size == 8) def = sym + " DQ " + (numeric ? init : std::string("0"));
-            else def = sym + " DB " + intToString(size) + " DUP (0)";
-            m_data += "        PUBLIC " + sym + "\n" + def + "\n";
-            m_defined.insert(sym);
-            m_dataSymbols.insert(sym);
-        }
+    for (size_t i = 0; i < m_globals.size(); ++i) {
+        const IrGlobal& g = m_globals[i];
+        if (!done.insert(g.name).second) continue;
+        std::string sym = globalSymbol(g.name);
+        bool numeric = !g.init.empty();
+        std::string def;
+        if (g.isFloat) def = sym + " REAL8 " + (numeric ? g.init : std::string("0.0"));
+        else if (g.size == 1) def = sym + " DB " + (numeric ? g.init : std::string("0"));
+        else if (g.size == 2) def = sym + " DW " + (numeric ? g.init : std::string("0"));
+        else if (g.size == 4) def = sym + " DD " + (numeric ? g.init : std::string("0"));
+        else if (g.size == 8) def = sym + " DQ " + (numeric ? g.init : std::string("0"));
+        else def = sym + " DB " + intToString(g.size) + " DUP (0)";
+        m_data += "        PUBLIC " + sym + "\n" + def + "\n";
+        m_defined.insert(sym);
+        m_dataSymbols.insert(sym);
+    }
 }
 
 std::string X86Module::finish()

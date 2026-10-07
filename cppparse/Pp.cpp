@@ -30,7 +30,6 @@ PpToken makeTok(PpToken::Kind k, const std::string& text, int file, int line)
 
 } // namespace
 
-// ---- lexer ---------------------------------------------------------------------------------
 
 void ppLex(const std::string& source, int fileIndex, std::vector<PpToken>& out)
 {
@@ -112,7 +111,6 @@ void ppLex(const std::string& source, int fileIndex, std::vector<PpToken>& out)
     if (out.empty() || out.back().kind != PpToken::Newline) out.push_back(makeTok(PpToken::Newline, "\n", fileIndex, lineOf[n]));
 }
 
-// ---- macros ----------------------------------------------------------------------------------
 
 std::string PpMacro::bodyText() const
 {
@@ -370,7 +368,6 @@ void Preprocessor::includeDirective(std::vector<PpToken>& line, size_t at, int f
     processFile(f, c->second, depth + 1);
 }
 
-// ---- #if expressions -------------------------------------------------------------------------
 
 namespace {
 
@@ -486,7 +483,6 @@ bool Preprocessor::evalCondition(std::vector<PpToken>& line, size_t at, int file
     return v != 0;
 }
 
-// ---- macro expansion --------------------------------------------------------------------------
 
 void Preprocessor::expandChunk(std::vector<PpToken>& chunk)
 {
@@ -687,7 +683,6 @@ bool Preprocessor::substitute(const PpMacro& mac, const std::vector<std::vector<
     return true;
 }
 
-// ---- output ---------------------------------------------------------------------------------
 
 std::string Preprocessor::text() const
 {

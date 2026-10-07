@@ -33,6 +33,7 @@
 #include "Pdf.hpp"
 #include "Pp.hpp"
 #include "CxxParser.hpp"
+#include "Sema.hpp"
 #include "Report.hpp"
 #include "Symbols.hpp"
 
@@ -76,6 +77,8 @@ void usage()
         "  -E               version 6: preprocess the input files only and print the result (like cl /EP)\n"
         "  --parse6         version 6: preprocess and parse with the new front end; print counts and syntax errors,\n"
         "                   and write <name>-ast6.txt when -o or -n is given\n"
+        "  --sema6          version 6: --parse6 plus semantic analysis; prints counts and S-coded diagnostics,\n"
+        "                   and writes <name>-sym6.txt (symbols, layouts, vtables, instantiations)\n"
         "  -I <dir>         version 6: include directory for the preprocessor (also -Idir)\n"
         "  -D NAME[=value]  version 6: predefine a macro (also -DNAME=value); -U NAME undefines one\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
@@ -113,7 +116,7 @@ int main(int argc, char* argv[])
     int threads = hardwareThreads();
     bool threadsGiven = false;
     bool ok0 = true;
-    bool preprocessOnly = false, parse6 = false;
+    bool preprocessOnly = false, parse6 = false, sema6 = false;
     PpOptions ppOpt;
     CompileOptions copt;
     ReportOptions opt;
@@ -149,6 +152,7 @@ int main(int argc, char* argv[])
         else if (a == "--msvc-mangling") copt.msvcNames = true;
         else if (a == "-E" || a == "--preprocess") preprocessOnly = true;
         else if (a == "--parse6") parse6 = true;
+        else if (a == "--sema6") { parse6 = true; sema6 = true; }
         else if (a == "-I" && i + 1 < args.size()) ppOpt.includeDirs.push_back(args[++i]);
         else if (a.size() > 2 && a[0] == '-' && a[1] == 'I') ppOpt.includeDirs.push_back(a.substr(2));
         else if (a == "-D" && i + 1 < args.size()) ppOpt.defines.push_back(args[++i]);
@@ -200,6 +204,26 @@ int main(int argc, char* argv[])
             const std::vector<cxx::ParseDiag>& d = parser.diagnostics();
             for (size_t k = 0; k < d.size() && k < 20; ++k)
                 std::cout << "  " << (d[k].file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(d[k].file)] : "?") << "(" << d[k].line << "): error: " << d[k].message << "\n";
+            if (sema6) {
+                sema::TypeTable types;
+                sema::Program program;
+                sema::Sema sema(types, program);
+                sema.analyze(tu, pp.files());
+                const sema::SemaStats& st = sema.stats();
+                std::cout << "  sema: " << sema.errorCount() << " error(s); classes " << st.classes << ", functions analysed " << st.functionsDefined << ", variables " << st.variables
+                          << ", expressions " << st.expressionsTyped << ", names resolved " << st.namesResolved << ", unresolved " << st.namesUnresolved
+                          << ", calls resolved " << st.callsResolved << ", ambiguous " << st.callsAmbiguous << ", instantiations " << st.classInstantiations << " classes / " << st.functionInstantiations << " functions\n";
+                const std::vector<sema::Diag>& sd = sema.diagnostics();
+                for (size_t k = 0; k < sd.size() && k < 30; ++k)
+                    std::cout << "  " << (sd[k].loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(sd[k].loc.file)] : "?") << "(" << sd[k].loc.line << "): "
+                              << (sd[k].severity == sema::Diag::Error ? "error" : "warning") << " " << sd[k].code << ": " << sd[k].message << "\n";
+                totalErrors += sema.errorCount();
+                if (!outDir.empty() || !outName.empty()) {
+                    std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
+                    std::vector<std::string> written;
+                    writeOut(base + "-sym6.txt", sema.dumpSymbols(), quiet, written);
+                }
+            }
             if (!outDir.empty() || !outName.empty()) {
                 std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
                 std::vector<std::string> written;

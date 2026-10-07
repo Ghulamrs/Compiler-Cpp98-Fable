@@ -6,7 +6,6 @@
 namespace cppparse {
 namespace cxx {
 
-// ---- names and types as text ------------------------------------------------------------------
 
 std::string QualifiedName::text() const
 {
@@ -115,7 +114,6 @@ std::string TypeId::text() const
     return s;
 }
 
-// ---- arena ----------------------------------------------------------------------------------------
 
 CxxArena::~CxxArena()
 {
@@ -130,7 +128,6 @@ CxxArena::~CxxArena()
     for (size_t i = 0; i < m_tparams.size(); ++i) delete m_tparams[i];
 }
 
-// ---- dump -------------------------------------------------------------------------------------------
 
 namespace {
 

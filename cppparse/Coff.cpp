@@ -23,7 +23,6 @@ namespace cppparse {
 
 namespace {
 
-// ---- text helpers ------------------------------------------------------------------
 
 std::string trimWs(const std::string& s)
 {
@@ -138,7 +137,6 @@ bool isNumberText(const std::string& t)
     return !t.empty() && (isdigit(static_cast<unsigned char>(t[0])) || t[0] == '-' || t[0] == '+') && parseU64(t, v);
 }
 
-// ---- registers and operands --------------------------------------------------------
 
 struct RegInfo { const char* name; int num; int size; };
 
@@ -261,7 +259,6 @@ bool parseOperand(const std::string& text, Operand& op, std::string& err)
     return false;
 }
 
-// ---- relocations, fixups, chunks ---------------------------------------------------
 
 enum { RelAddr64 = 0x0001, RelRel32 = 0x0004 };
 
@@ -292,7 +289,6 @@ struct Chunk {
     Chunk() : instructions(0) {}
 };
 
-// ---- the instruction encoder ---------------------------------------------------------
 
 class Encoder {
 public:
@@ -508,7 +504,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
     bool forceRex = byteRegsNeedRex(ops);
     unsigned char op[3];
 
-    // ---- no operands
     if (n == 0) {
         if (mn == "ret") { byte(0xC3); return true; }
         if (mn == "leave") { byte(0xC9); return true; }
@@ -526,7 +521,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
     bool mixed = false;
     for (size_t i = 0; i < n; ++i) if (ops[i].kind == Operand::Xmm) mixed = true;
 
-    // ---- SSE2 scalar / packed
     for (size_t k = 0; k < sizeof(kSse) / sizeof(kSse[0]); ++k) {
         if (mn != kSse[k].name) continue;
         if (n != 2) return fail(mn + " needs two operands", line);
@@ -568,7 +562,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
     }
     if (mixed) return fail(mn + ": float register used with an integer operand", line);
 
-    // ---- mov
     if (mn == "mov") {
         if (n != 2) return fail("mov needs two operands", line);
         if (a.isReg() && b->isReg()) {
@@ -608,7 +601,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         return fail("mov: bad operands", line);
     }
 
-    // ---- lea
     if (mn == "lea") {
         if (n != 2 || !a.isReg()) return fail("lea: bad operands", line);
         Operand m = *b;
@@ -619,7 +611,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         return true;
     }
 
-    // ---- ALU: add or adc sbb and sub xor cmp
     {
         static const char* const names[] = { "add", "or", "adc", "sbb", "and", "sub", "xor", "cmp" };
         int digit = -1;
@@ -649,7 +640,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         }
     }
 
-    // ---- test
     if (mn == "test") {
         if (n != 2) return fail("test needs two operands", line);
         if (a.isRm() && b->isReg()) {
@@ -669,7 +659,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         return fail("test: bad operands", line);
     }
 
-    // ---- imul
     if (mn == "imul") {
         if (n == 2 && a.isReg() && b->isRm()) { op[0] = 0x0F; op[1] = 0xAF; emitRm(a.size == 2 ? 0x66 : 0, op, 2, a.reg, *b, a.size == 8, 0, false); return true; }
         if (n == 3 && a.isReg() && b->isRm() && ops[2].kind == Operand::Imm) {
@@ -682,7 +671,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         // one-operand form falls through to the F7 group
     }
 
-    // ---- F7 group: not neg mul imul div idiv
     {
         static const char* const names[] = { "", "", "not", "neg", "mul", "imul", "div", "idiv" };
         int digit = -1;
@@ -696,7 +684,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         }
     }
 
-    // ---- inc dec
     if (mn == "inc" || mn == "dec") {
         if (n != 1 || !a.isRm()) return fail(mn + ": bad operand", line);
         int sz = a.size ? a.size : 8;
@@ -705,7 +692,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         return true;
     }
 
-    // ---- shifts and rotates
     {
         static const char* const names[] = { "rol", "ror", "rcl", "rcr", "shl", "shr", "sal", "sar" };
         int digit = -1;
@@ -723,7 +709,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         }
     }
 
-    // ---- setcc
     if (mn.size() > 3 && mn.compare(0, 3, "set") == 0) {
         int cc = condCode(mn.substr(3));
         if (cc < 0) return fail("unknown instruction " + mn, line);
@@ -733,7 +718,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         return true;
     }
 
-    // ---- movzx movsx movsxd
     if (mn == "movzx" || mn == "movsx" || mn == "movsxd") {
         if (n != 2 || !a.isReg() || !b->isRm()) return fail(mn + ": bad operands", line);
         int srcSize = b->isReg() ? b->size : b->size;
@@ -747,7 +731,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         return true;
     }
 
-    // ---- jumps and calls
     if (mn == "jmp") {
         if (n != 1) return fail("jmp: bad operand", line);
         if (a.kind == Operand::Sym) { jump(0xE9, a.symbol, line); return true; }
@@ -765,7 +748,6 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         return fail("call: bad operand", line);
     }
 
-    // ---- push pop
     if (mn == "push" || mn == "pop") {
         if (n != 1) return fail(mn + ": bad operand", line);
         if (a.isReg() && a.size == 8) { if (a.reg >= 8) byte(0x41); byte((mn == "push" ? 0x50 : 0x58) + (a.reg & 7)); return true; }
@@ -852,7 +834,6 @@ bool Encoder::dataLine(const std::string& raw, int line)
     return true;
 }
 
-// ---- parallel encoding of the PROC blocks -----------------------------------------------
 
 struct CodeBlock {
     std::string name;
@@ -872,7 +853,6 @@ struct EncodeJob : public ParallelJob {
     }
 };
 
-// ---- object file layout ------------------------------------------------------------------
 
 struct Section {
     std::string                name;
@@ -898,7 +878,6 @@ void put32(std::string& o, unsigned long v) { for (int i = 0; i < 4; ++i) put8(o
 
 bool assembleCoff(const std::string& masmText, int threads, std::string& objectBytes, CoffResult& result)
 {
-    // ---- pass 1: split the text into the data sections and the PROC blocks
     std::vector<CodeBlock> blocks;
     Chunk dataChunk, rdataChunk;
     Encoder dataEnc(dataChunk), rdataEnc(rdataChunk);
@@ -953,12 +932,10 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         }
     }
 
-    // ---- pass 2: encode every function on the pool
     EncodeJob job;
     job.blocks = &blocks;
     runParallel(job, blocks.size(), threads);
 
-    // ---- pass 3: lay out the sections
     Section text, data, rdata;
     text.name = ".text";  text.characteristics  = 0x60500020UL;   // code | execute | read | align 16
     data.name = ".data";  data.characteristics  = 0xC0500040UL;   // initialized | read | write | align 16
@@ -1030,7 +1007,6 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     for (size_t i = 0; i < symbols.size(); ++i) { tableIndex[i] = idx; idx += symbols[i].isSection ? 2 : 1; }
     unsigned long symbolCount = idx;
 
-    // ---- pass 4: write the file
     std::string o;
     unsigned long headerSize = 20 + 3 * 40;
     unsigned long offset = headerSize;

@@ -353,8 +353,9 @@ as the acceptance bar:
 2. **Grammar parser** (`CxxAst.*`, `CxxParser.*`, done): one parser for
    declarations and statements, producing a single AST for whole
    translation units.
-3. **Semantic analysis**: real types, scopes, name lookup, overload
-   resolution and template instantiation on the AST.
+3. **Semantic analysis** (`Sema.*`, `SemaExpr.*`, first version done):
+   real types, scopes, name lookup, overload resolution and template
+   instantiation on the AST.
 4. **IR generation** from the new AST, then the existing back end.
 5. **Reports** rebuilt on the new AST.
 
@@ -421,6 +422,38 @@ diagnostics. `cppparse -E -I inc pp.cpp` prints the preprocessed text
 like `cl /EP`; test 10 compares the two on `sample-pp/` (identical apart
 from whitespace) and checks that `#error` and a missing include are
 diagnosed.
+
+**Semantic analysis** (`Sema.cpp`, `SemaExpr.cpp`, `--sema6`): types
+are interned objects (fundamental, pointer, reference, array, function,
+class, enum, member pointer, dependent) with cv-qualifiers; symbols are
+the named entities (namespaces, classes, enums, typedefs, variables,
+functions, enumerators, template parameters, class and function
+templates) in scopes with overload sets and using-directives. The
+analysis declares a translation unit in order, analyses member function
+bodies once their class is complete, and for every expression records
+its type, value category, constant value and the entity it refers to.
+Name lookup is unqualified through enclosing scopes and base classes,
+qualified through namespaces and classes, and for members with
+inheritance. Calls, constructors, conversions and operators on class
+operands go through overload resolution with the C++98 implicit
+conversion sequences (exact, promotion, standard, user-defined through
+converting constructors and conversion operators, reference binding,
+derived-to-base). Classes get their layout (bases, vptr, fields,
+alignment) and vtable (slots, overrides, abstractness) and implicit
+special members. Class templates are instantiated from the syntax tree
+with the parameters bound in an instantiation scope (defaults, partial
+specialisations, out-of-line members); function templates are
+instantiated by deduction from the argument types. Diagnostics carry
+S codes (S100 unknown type, S101 undeclared identifier, S102 no such
+member, S103 undeclared function, S104 const assignment, S105
+conversion, S106 ambiguity, S107 no matching function, ...). The
+`--sema6` mode prints the counts and writes `<name>-sym6.txt` with the
+symbols, layouts, vtable slots and instantiations. Test 12 checks
+`sample-opt` (no errors, every name and call resolved, `Buffer<int,4>`
+and `maxOf<int>` instantiated with the right layouts) and the VS2010
+sample. On cppparse's own sources every remaining diagnostic names a
+type or function from a header that is not available (`std::`, the C
+library, the Windows API): the next stage supplies those headers.
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

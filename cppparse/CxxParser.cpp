@@ -60,7 +60,6 @@ Parser::Parser(const std::vector<PpToken>& tokens, CxxArena& arena)
     pushScope("", false);
 }
 
-// ---- diagnostics and recovery --------------------------------------------------------------------------
 
 void Parser::error(const std::string& msg)
 {
@@ -105,7 +104,6 @@ void Parser::skipBalanced()
     } while (depth > 0 && !atEnd());
 }
 
-// ---- scopes --------------------------------------------------------------------------------------------
 
 void Parser::pushScope(const std::string& name, bool isClass)
 {
@@ -181,14 +179,14 @@ bool Parser::isTypeName(const QualifiedName& n) const
     if (n.parts.size() == 1 && !n.global) {
         for (size_t i = m_scopes.size(); i > 0; --i) {
             const Scope& s = m_scopes[i - 1];
-            if (s.types.count(last.ident) || s.templates.count(last.ident)) return true;
+            if (s.types.count(last.ident)) return true;      // class templates are in 'types' too; function templates only in 'templates'
         }
         return false;
     }
     // a constructor / destructor name is never a type: "Point::Point"
     if (n.parts.size() >= 2 && n.parts[n.parts.size() - 2].ident == last.ident) return false;
     const NamedScope* ns = findNamedScope(n, n.parts.size() - 1);
-    if (ns) return ns->types.count(last.ident) || ns->templates.count(last.ident);
+    if (ns) return ns->types.count(last.ident) != 0;
     // the qualifier is unknown (another translation unit, a library header, a dependent name): say yes
     // when the syntax calls for a type - the callers only ask in that situation
     return true;
@@ -265,7 +263,6 @@ bool Parser::looksLikeTypeStart() const
     return isTypeName(n);
 }
 
-// ---- names -----------------------------------------------------------------------------------------
 
 bool Parser::templateArguments(std::vector<TemplateArg>& args)
 {
@@ -358,7 +355,6 @@ bool Parser::qualifiedName(QualifiedName& n, bool allowTemplateArgs, bool typeCo
 
 bool Parser::lessIsTemplate(const QualifiedName& n) const { return isTemplateName(n); }
 
-// ---- declaration specifiers ------------------------------------------------------------------------------
 
 bool Parser::declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef)
 {
@@ -450,7 +446,6 @@ bool Parser::declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef)
     return any;
 }
 
-// ---- declarators --------------------------------------------------------------------------------------------
 
 bool Parser::parameterList(DeclaratorPart& fn)
 {
@@ -626,7 +621,6 @@ bool Parser::tryTypeId(TypeId*& out)
     return true;
 }
 
-// ---- declarations -------------------------------------------------------------------------------------------
 
 void Parser::registerDeclaredNames(const DeclSpec& spec, const Declarator& d)
 {
@@ -1054,7 +1048,6 @@ int Parser::parse(TranslationUnit& tu)
     return m_errors;
 }
 
-// ---- statements ----------------------------------------------------------------------------------------------
 
 Stmt* Parser::compound()
 {
@@ -1238,7 +1231,6 @@ Stmt* Parser::statement()
     return s;
 }
 
-// ---- expressions -----------------------------------------------------------------------------------------------
 
 int Parser::precedence(const std::string& op, bool& rightAssoc) const
 {

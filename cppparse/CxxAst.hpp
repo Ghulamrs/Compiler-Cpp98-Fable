@@ -14,6 +14,7 @@
 #include <vector>
 
 namespace cppparse {
+namespace sema { struct Type; struct Symbol; struct Scope; }
 namespace cxx {
 
 struct Expr;
@@ -29,7 +30,6 @@ struct Loc {
     Loc() : file(0), line(0) {}
 };
 
-// ---- names ------------------------------------------------------------------------------
 
 struct TemplateArg {               // a type-id or an expression (decided syntactically where possible)
     TypeId* type;
@@ -54,7 +54,6 @@ struct QualifiedName {              // [::] c1 :: c2 :: ... :: cn
     QualifiedName() : global(false) {}
 };
 
-// ---- types as written ------------------------------------------------------------------------
 
 struct DeclSpec {                   // decl-specifier-seq
     // storage class and function specifiers
@@ -98,10 +97,11 @@ struct DeclaratorPart {
 
 struct Declarator {                 // declarator or abstract-declarator
     QualifiedName               name;           // empty for abstract declarators
-    std::vector<DeclaratorPart> parts;          // applied to the base type in order: int (*p)[3] -> Array then Pointer? see parser
+    std::vector<DeclaratorPart> parts;          // applied to the base type in this order: "int *a[3]" is Pointer, Array
     Expr*                       bitfield;       // member bit-field width
     Loc                         loc;
-    Declarator() : bitfield(0) {}
+    sema::Symbol*               semaSym;        // the entity this declarator declares (stage 3)
+    Declarator() : bitfield(0), semaSym(0) {}
     bool isFunction() const;                    // the outermost part is a function
     const DeclaratorPart* functionPart() const;
     std::string text() const;                   // "*p[3]"
@@ -114,7 +114,6 @@ struct TypeId {                     // type-specifier-seq abstract-declarator (c
     std::string text() const;
 };
 
-// ---- expressions -------------------------------------------------------------------------------
 
 struct Expr {
     enum Kind {
@@ -150,10 +149,15 @@ struct Expr {
     bool               hasInit;     // New: parentheses present
     bool               arrowMember; // Member: ->
     Loc                loc;
-    Expr() : kind(Error), type(0), arrayDelete(false), hasInit(false), arrowMember(false) {}
+    // filled by semantic analysis (version 6 stage 3)
+    const sema::Type*  semaType;    // the expression's type after lvalue-to-rvalue etc. is NOT applied (see semaLvalue)
+    sema::Symbol*      semaSym;     // the entity a Name/Member/Call refers to (variable, function chosen by overload resolution, ...)
+    bool               semaLvalue;
+    bool               semaConst;   // a constant expression
+    long               semaValue;   // its value when semaConst
+    Expr() : kind(Error), type(0), arrayDelete(false), hasInit(false), arrowMember(false), semaType(0), semaSym(0), semaLvalue(false), semaConst(false), semaValue(0) {}
 };
 
-// ---- statements ------------------------------------------------------------------------------
 
 struct Stmt {
     enum Kind { Compound, ExprStmt, DeclStmt, If, Switch, While, DoWhile, For, Break, Continue, Return, Goto, Label, Case, Default, Try, Handler, Empty, Asm, Error };
@@ -169,7 +173,6 @@ struct Stmt {
     Stmt() : kind(Empty), expr(0), decl(0), expr2(0), init(0), catchAll(false) {}
 };
 
-// ---- declarations ---------------------------------------------------------------------------
 
 enum Access { AccessDefault, AccessPublic, AccessProtected, AccessPrivate };
 
@@ -254,7 +257,8 @@ struct Decl {
     std::vector<Decl*>          decls;         // Namespace / LinkageSpec members; Template: the one declaration
     std::vector<TemplateParam*> templateParams;
     bool                        explicitSpecialization;   // template <>
-    Decl() : kind(Empty), access(AccessDefault), declarator(0), body(0), classDef(0), enumDef(0), explicitSpecialization(false) {}
+    sema::Symbol*               semaSym;        // Function / Class / Enum / Namespace / Template: the symbol (stage 3)
+    Decl() : kind(Empty), access(AccessDefault), declarator(0), body(0), classDef(0), enumDef(0), explicitSpecialization(false), semaSym(0) {}
 };
 
 struct ClassDecl {
@@ -280,7 +284,6 @@ struct TranslationUnit {
     std::vector<Decl*> decls;
 };
 
-// ---- arena ------------------------------------------------------------------------------------
 
 class CxxArena {
 public:

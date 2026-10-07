@@ -371,6 +371,23 @@ try {
     if ($rc -ne 0 -and $bad -match 'syntax error' -and $bad -match 'functions defined') { Write-Host "  ok   broken sample: errors reported, parsing continued" } else { Write-Host "  FAIL broken sample handling"; $failed++ }
     if ($failed -ne 0) { throw "$failed parser check(s) failed" }
 
+    Write-Host "=== Test 12: version 6 semantic analysis (--sema6 on sample-opt and the samples) ==="
+    $failed = 0
+    $s6 = .\cppparse.exe --sema6 -o out\par -n opt6 "..\cppparse\sample-opt\opt.cpp" 2>&1 | Out-String
+    if ($s6 -match 'sema: 0 error\(s\)' -and $s6 -match 'functions analysed 26' -and $s6 -match 'unresolved 0' -and $s6 -match 'instantiations 1 classes / 1 functions') { Write-Host "  ok   sample-opt: no semantic errors, 26 functions, all names resolved, templates instantiated" }
+    else { Write-Host "  FAIL sample-opt sema:"; Write-Host $s6; $failed++ }
+    $sym = Get-Content "out\par\opt6-sym6.txt" -Raw
+    $checks = @('struct Point  size 8 align 4', 'int y  @4', 'void\(int, int\) Point  \{body\}', 'int\(\) const sum', 'instantiation Buffer<int, 4>  size 20', 'int\[4\] items  @0', 'void\(const int&\) add', 'instantiation maxOf<int> int\(const int&, const int&\)', 'struct BadIndex : Failure@0  size 8', 'int index  @4')
+    $missing = @($checks | Where-Object { $sym -notmatch $_ })
+    if ($missing.Count -eq 0) { Write-Host "  ok   symbol dump: layouts, member functions, instantiated class and function template" }
+    else { Write-Host "  FAIL symbol dump misses: $($missing -join ' | ')"; $failed++ }
+    $s6 = .\cppparse.exe --sema6 -I ..\cppparse\sample\include "..\cppparse\sample\src\Shape.cpp" 2>&1 | Out-String
+    if ($s6 -match 'sema: \d+ error' -and $s6 -match 'calls resolved \d+' -and $s6 -notmatch 'ambiguous [1-9]') { Write-Host "  ok   the VS2010 sample analyses (errors only from missing std headers)" }
+    else { Write-Host "  FAIL sample sema:"; Write-Host $s6; $failed++ }
+    $bad = $s6 | Select-String '\): error S' | Where-Object { $_.Line -notmatch "std::|'size_t'|iterator" }
+    if ($bad.Count -eq 0) { Write-Host "  ok   no semantic errors outside std:: uses" } else { Write-Host "  FAIL unexpected semantic errors:"; $bad | ForEach-Object { Write-Host "    $($_.Line.Trim())" }; $failed++ }
+    if ($failed -ne 0) { throw "$failed sema check(s) failed" }
+
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"

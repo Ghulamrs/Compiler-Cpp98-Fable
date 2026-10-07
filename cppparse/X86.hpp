@@ -30,7 +30,10 @@ namespace cppparse {
 
 class X86Module {
 public:
-    X86Module(const CodeBase& cb, TypeTable& types, Layouts& layouts);
+    X86Module(const CodeBase& cb, TypeTable& types, Layouts& layouts, bool msvcNames = false);
+    void        registerFunction(const FunctionInfo* fn);   // version 5: give a compiled function its MSVC name (before codeFor)
+    std::string symbol(const std::string& irName);          // symbol of an IR function or callee name
+    std::string globalSymbol(const std::string& irName);    // symbol of a variable, vtable or function address
     void        addFunction(const IrFunction& f, LowerStats& stats);     // codeFor + appendCode
     std::string codeFor(const IrFunction& f, LowerStats& stats);         // safe to call from several threads
     void        appendCode(const std::string& code);
@@ -52,6 +55,10 @@ private:
     std::set<std::string>    m_vtablesNeeded;   // qualified class names
     std::set<std::string>    m_globalsUsed;     // mangled global names referenced
     Mutex                    m_mutex;           // guards the pools above while functions are generated in parallel
+    bool                               m_msvc;            // version 5: MSVC-compatible names
+    std::map<std::string, std::string> m_functionNames;   // IR function name -> decorated name (read-only while generating)
+    std::map<std::string, std::string> m_globalNames;     // qualified variable name -> decorated name
+    std::set<std::string>              m_dataSymbols;     // symbols already made PUBLIC in .data
     std::string floatLabel(double v);
     std::string stringLabel(const std::string& text);
     void        useGlobal(const std::string& name) { Lock l(m_mutex); m_globalsUsed.insert(name); }

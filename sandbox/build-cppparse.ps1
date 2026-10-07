@@ -287,6 +287,32 @@ try {
     }
     if ($failed -ne 0) { throw "$failed COFF check(s) failed" }
 
+    Write-Host "=== Test 9: version 5 MSVC-compatible mangling (--msvc-mangling, native C++ driver) ==="
+    $failed = 0
+    $clObj = & $cl /nologo /c /EHsc "/Foout\x64\opt_cl.obj" "..\cppparse\sample-opt\opt.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clObj; throw "cl could not compile sample-opt\opt.cpp" }
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $out = .\cppparse.exe -O2 --obj --msvc-mangling -q -o out\x64 -n msvc "..\cppparse\sample-opt" 2>&1 | Out-String
+    $ErrorActionPreference = $eap
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "out\x64\msvc.obj")) { Write-Host "  FAIL --msvc-mangling --obj:"; Write-Host $out; $failed++ }
+    else {
+        Write-Host "  ok   msvc.obj written with decorated names"
+        # every function cl defined must exist, spelled identically, in cppparse's object
+        $clSyms = & $dumpbin /nologo /symbols "out\x64\opt_cl.obj" | Select-String 'SECT.*\| \?' | ForEach-Object { ($_.Line -replace '^.*\| ', '') -replace ' \(.*$', '' } | Where-Object { $_ -notmatch '^\?catch\$|^\?\?_R|^\?\?_7type_info' } | Sort-Object -Unique
+        $ourSyms = & $dumpbin /nologo /symbols "out\x64\msvc.obj" | Select-String '\| \?' | ForEach-Object { ($_.Line -replace '^.*\| ', '') -replace ' \(.*$', '' } | Sort-Object -Unique
+        $missing = @($clSyms | Where-Object { $ourSyms -notcontains $_ })
+        if ($missing.Count -eq 0) { Write-Host "  ok   all $($clSyms.Count) function names cl produced are spelled identically by cppparse" }
+        else { Write-Host "  FAIL $($missing.Count) of $($clSyms.Count) decorated names differ:"; $missing | ForEach-Object { Write-Host "    cl: $_" }; $ourSyms | Select-Object -First 40 | ForEach-Object { Write-Host "    ours: $_" }; $failed++ }
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\nativedriver.exe" "..\cppparse\sample-opt-driver\driver-native.cpp" "out\x64\msvc.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the native-declaration driver:"; Write-Host $clOut; $failed++ }
+        else {
+            Write-Host "  ok   linked driver-native.cpp (plain C++ declarations) with msvc.obj"
+            $run = & ".\out\x64\nativedriver.exe" 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   nativedriver.exe: all results correct" } else { Write-Host "  FAIL nativedriver.exe:"; Write-Host $run; $failed++ }
+        }
+    }
+    if ($failed -ne 0) { throw "$failed mangling check(s) failed" }
+
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"

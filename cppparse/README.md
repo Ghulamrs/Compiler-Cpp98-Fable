@@ -75,6 +75,7 @@ dashed box = base class not defined in the parsed files.
 --no-x86         do not write the x86-64 .asm file
 --assemble       run ml64 on the .asm to produce the .obj (ml64 on PATH)
 --obj            write the .obj with cppparse's own COFF writer (version 5)
+--msvc-mangling  MSVC-compatible decorated names, so MSVC code links with plain C++ declarations
 -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)
 src\*.cpp        wildcard patterns are expanded by cppparse itself (more than 50 files is fine)
 @list.txt        response file: one path, pattern or option per line; '#' starts a comment
@@ -322,6 +323,21 @@ no destructors run during unwinding, thrown objects are copied bytewise
 try-blocks are still skipped. The runtime is linked with the driver in
 tests 6 and 8, which check all of the above and that no frame or handler
 is left registered.
+
+**MSVC-compatible names** (`Mangle.cpp`, `--msvc-mangling`): the x86-64
+output (and so the `.obj`) uses the decorated names cl.exe gives the
+same declarations: `?square@@YAHH@Z`, `?sum@Point@@QEBAHXZ`,
+`??0Point@@QEAA@HH@Z`, `?add@?$Buffer@H$03@@QEAAXAEBH@Z`,
+`??$maxOf@H@@YAHAEBH0@Z`, `?g_shapeVersion@@3HA`, `??_7Circle@geom@@6B@`.
+Covered: namespaces and nested classes, access and static/virtual kinds,
+const methods, constructors, destructors and operators, the fundamental
+types, pointers and references with cv-qualifiers, class/struct/union
+and enum types, template instances with type and integer arguments, and
+the name and parameter-type back-references. `extern "C"` functions and
+`main` keep their names. Test 9 compiles the sample with cl, checks that
+every function symbol cl defines is spelled identically in cppparse's
+object, then links `sample-opt-driver/driver-native.cpp`, which declares
+the functions as plain C++, against cppparse's object and runs it.
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

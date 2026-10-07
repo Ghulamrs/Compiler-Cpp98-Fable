@@ -825,6 +825,17 @@ bool Encoder::dataLine(const std::string& raw, int line)
             continue;
         }
         if (val == "?") { for (int i = 0; i < size; ++i) byte(0); continue; }
+        size_t dup = lv.find(" dup");
+        if (dup != std::string::npos) {                      // "N DUP (v)"
+            long count = 0;
+            std::string inner = trimWs(val.substr(dup + 4));
+            if (!parseLong(val.substr(0, dup), count) || count < 0 || inner.size() < 2 || inner[0] != '(' || inner[inner.size() - 1] != ')') return fail("bad DUP: " + val, line);
+            U64 u;
+            std::string v2 = trimWs(inner.substr(1, inner.size() - 2));
+            if (v2 != "?" && !parseU64(v2, u)) return fail("bad DUP value: " + val, line);
+            for (long k = 0; k < count; ++k) { if (size == 8) qword(u); else imm(static_cast<long>(u.lo), size); }
+            continue;
+        }
         if (lv.compare(0, 7, "offset ") == 0 || (!val.empty() && isIdentStart(val[0]) && !isNumberText(val))) {
             std::string sym = trimWs(lv.compare(0, 7, "offset ") == 0 ? val.substr(7) : val);
             if (size != 8) return fail("an address needs DQ: " + val, line);

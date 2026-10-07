@@ -69,6 +69,7 @@ void usage()
         "  --no-x86         version 4: do not write the x86-64 MASM file (<name>.asm)\n"
         "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
         "  --obj            version 5: write <name>.obj with cppparse's own COFF writer (no ml64 needed)\n"
+        "  --msvc-mangling  version 5: MSVC-compatible decorated names (?square@@YAHH@Z) so MSVC code links with plain C++ declarations\n"
         "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
         "  @list.txt        response file: one path, pattern or option per line\n"
@@ -136,6 +137,7 @@ int main(int argc, char* argv[])
         else if (a == "--no-x86") copt.x86 = false;
         else if (a == "--assemble") assemble = true;
         else if (a == "--obj") obj = true;
+        else if (a == "--msvc-mangling") copt.msvcNames = true;
         else if (a.size() == 3 && a[0] == '-' && a[1] == 'O' && a[2] >= '0' && a[2] <= '3') copt.optLevel = a[2] - '0';
         else if (a == "-q") quiet = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "unknown option: " << a << "\n"; usage(); return 2; }

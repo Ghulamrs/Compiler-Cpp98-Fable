@@ -265,7 +265,8 @@ void Compiler::run()
     }
 
     // phase 6: lower
-    X86Module x86(m_cb, types, layouts);
+    X86Module x86(m_cb, types, layouts, m_opt.msvcNames);
+    for (size_t i = 0; i < n; ++i) x86.registerFunction(irFunctions[i]->fn);   // instantiated functions get their names too
     LowerJob lj;
     lj.functions = &irFunctions; lj.layouts = &layouts; lj.x86 = m_opt.x86 ? &x86 : 0;
     lj.vmText.resize(n); lj.x86Text.resize(n); lj.afterText.resize(n); lj.vmStats.resize(n);

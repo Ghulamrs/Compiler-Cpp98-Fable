@@ -711,12 +711,18 @@ void IrBuilder::condition(Expr* e, int trueBlock, int falseBlock)
 
 namespace {
 
-std::string funcName(const FunctionInfo* f)
+} // namespace
+
+std::string irFunctionName(const FunctionInfo* f)
 {
     // extern "C" functions keep their plain name so that generated code links against C symbols
     if (f->isExtern && !f->ownerClass && f->qualifier.empty() && f->scope.empty()) return f->name;
     return f->displayName() + "(" + f->paramText + ")" + (f->isConst ? " const" : "");
 }
+
+namespace {
+
+std::string funcName(const FunctionInfo* f) { return irFunctionName(f); }
 
 } // namespace
 

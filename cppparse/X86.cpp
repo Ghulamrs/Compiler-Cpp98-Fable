@@ -1,5 +1,6 @@
 // X86.cpp - x86-64 MASM code generation.
 #include "X86.hpp"
+#include "Mangle.hpp"
 #include "PathUtil.hpp"
 
 #include <algorithm>
@@ -81,16 +82,43 @@ std::string runtimeName(const std::string& sub)
     if (sub == "__delete" || sub == "__delete_array") return "free";
     if (sub == "__copy") return "memcpy";
     if (sub == "__throw") return "cppparse_throw";
-    if (endsWith(sub, "?")) return lastComponent(sub.substr(0, sub.size() - 1));   // unknown library function: its C name
-    if (sub.find('(') == std::string::npos) return sub;                            // extern "C": plain name
-    return mangle(sub);
+    return sub;
 }
 
-std::string mangleGlobal(const std::string& name)
+} // namespace
+
+std::string X86Module::symbol(const std::string& irName)
 {
-    if (startsWith(name, "vtable@")) return "vtable_" + mangle(name.substr(7));
+    if (startsWith(irName, "__")) return runtimeName(irName);                                  // __new, __throw, ...
+    if (endsWith(irName, "?")) return lastComponent(irName.substr(0, irName.size() - 1));       // unknown library function: its C name
+    if (irName.find('(') == std::string::npos) return irName;                                  // extern "C": plain name
+    if (m_msvc) {
+        std::map<std::string, std::string>::const_iterator it = m_functionNames.find(irName);
+        if (it != m_functionNames.end()) return it->second;
+    }
+    return mangle(irName);
+}
+
+std::string X86Module::globalSymbol(const std::string& name)
+{
+    if (name.find('(') != std::string::npos) return symbol(name);                              // address of a function
+    if (startsWith(name, "vtable@")) return m_msvc ? msvcMangleVtable(name.substr(7)) : "vtable_" + mangle(name.substr(7));
+    if (m_msvc) {
+        std::map<std::string, std::string>::const_iterator it = m_globalNames.find(name);
+        if (it != m_globalNames.end()) return it->second;
+    }
     return "g_" + mangle(name);
 }
+
+void X86Module::registerFunction(const FunctionInfo* fn)
+{
+    if (!m_msvc || !fn) return;
+    std::string key = irFunctionName(fn);
+    if (m_functionNames.count(key)) return;
+    m_functionNames[key] = msvcMangleFunction(*fn, m_types);
+}
+
+namespace {
 
 } // namespace
 
@@ -317,7 +345,7 @@ std::string X86Function::use(const IrOperand& o, const std::string& scratch)
     case IrOperand::Imm: line("mov " + scratch + ", " + intToString(static_cast<int>(o.ival))); return scratch;
     case IrOperand::FImm: { std::string c = floatConst(o.fval); line("movsd " + scratch + ", real8 ptr [" + c + "]"); return scratch; }
     case IrOperand::Local: line("lea " + scratch + ", " + localRef(o.id)); return scratch;
-    case IrOperand::Global: { std::string g = mangleGlobal(o.name); m_m.useGlobal(o.name); line("lea " + scratch + ", " + g); return scratch; }
+    case IrOperand::Global: { std::string g = m_m.globalSymbol(o.name); m_m.useGlobal(o.name); line("lea " + scratch + ", " + g); return scratch; }
     case IrOperand::Str: { line("lea " + scratch + ", " + m_m.stringLabel(o.name)); return scratch; }
     default: return scratch;
     }
@@ -366,7 +394,7 @@ void X86Function::emitCall(const IrInst& in)
     } else if (in.sub == "(indirect)") {
         line("call rcx");
     } else {
-        std::string callee = runtimeName(in.sub);
+        std::string callee = m_m.symbol(in.sub);
         m_m.useExtern(callee);
         line("call " + callee);
     }
@@ -400,7 +428,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         int size = typeSize(in.type);
         std::string mem;
         if (in.op == IrInst::LoadLocal) mem = localRef(in.args[0].id);
-        else if (in.op == IrInst::LoadGlobal) { mem = "[" + mangleGlobal(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
+        else if (in.op == IrInst::LoadGlobal) { mem = "[" + m_m.globalSymbol(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
         else mem = "[" + use(in.args[0], "rdx") + "]";
         std::string rd = def(in.dst, dstFloat, dstFloat ? "xmm0" : "rax", spill);
         if (dstFloat) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + rd + ", " + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem);
@@ -415,7 +443,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         bool fl = opIsFloat(in.args[1]);
         std::string mem;
         if (in.op == IrInst::StoreLocal) mem = localRef(in.args[0].id);
-        else if (in.op == IrInst::StoreGlobal) { mem = "[" + mangleGlobal(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
+        else if (in.op == IrInst::StoreGlobal) { mem = "[" + m_m.globalSymbol(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
         else mem = "[" + use(in.args[0], "rdx") + "]";
         std::string rv = use(in.args[1], fl ? "xmm0" : "rax");
         if (fl) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem + ", " + rv);
@@ -423,7 +451,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         break;
     }
     case IrInst::AddrLocal: { std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", " + localRef(in.args[0].id)); finish(in.dst, spill, false, rd); break; }
-    case IrInst::AddrGlobal: { std::string rd = def(in.dst, false, "rax", spill); m_m.useGlobal(in.args[0].name); line("lea " + rd + ", " + mangleGlobal(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
+    case IrInst::AddrGlobal: { std::string rd = def(in.dst, false, "rax", spill); m_m.useGlobal(in.args[0].name); line("lea " + rd + ", " + m_m.globalSymbol(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
     case IrInst::AddrField: { std::string rb = use(in.args[0], "rdx"); std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", [" + rb + "+" + intToString(static_cast<int>(in.extra)) + "]      ; " + in.sub); finish(in.dst, spill, false, rd); break; }
     case IrInst::AddrIndex: {
         std::string rb = use(in.args[0], "rdx");
@@ -692,7 +720,7 @@ void X86Function::emitBody()
 
 std::string X86Function::run()
 {
-    m_label = mangle(m_f.name);
+    m_label = m_m.symbol(m_f.name);
     computeIntervals();
     allocate();
     layoutFrame();
@@ -702,13 +730,30 @@ std::string X86Function::run()
 
 // ---- module ---------------------------------------------------------------------------------
 
-X86Module::X86Module(const CodeBase& cb, TypeTable& types, Layouts& layouts) : m_cb(cb), m_types(types), m_layouts(layouts) {}
+X86Module::X86Module(const CodeBase& cb, TypeTable& types, Layouts& layouts, bool msvcNames)
+    : m_cb(cb), m_types(types), m_layouts(layouts), m_msvc(msvcNames)
+{
+    if (!m_msvc) return;
+    // decorated names of everything declared in the sources; functions compiled from template
+    // instantiations are added by registerFunction
+    const std::vector<SourceFile*>& files = m_cb.files();
+    for (size_t f = 0; f < files.size(); ++f) {
+        const SourceFile* sf = files[f];
+        for (size_t k = 0; k < sf->functions.size(); ++k) registerFunction(&sf->functions[k]);
+        for (size_t c = 0; c < sf->allClasses.size(); ++c)
+            for (size_t m = 0; m < sf->allClasses[c]->methods.size(); ++m) registerFunction(&sf->allClasses[c]->methods[m]);
+        for (size_t v = 0; v < sf->variables.size(); ++v) {
+            const VariableInfo& g = sf->variables[v];
+            if (!m_globalNames.count(g.fullName())) m_globalNames[g.fullName()] = msvcMangleVariable(g, m_types);
+        }
+    }
+}
 
 void X86Module::addFunction(const IrFunction& f, LowerStats& stats) { appendCode(codeFor(f, stats)); }
 
 std::string X86Module::codeFor(const IrFunction& f, LowerStats& stats)
 {
-    { Lock l(m_mutex); m_defined.insert(mangle(f.name)); }
+    { Lock l(m_mutex); m_defined.insert(symbol(f.name)); }
     X86Function fn(*this, f, stats);
     return fn.run();
 }
@@ -735,7 +780,9 @@ void X86Module::emitVtables()
             keys.push_back(key);
             pos = close + 1;
         }
-        std::string table = "vtable_" + mangle(c->qualifiedName) + " LABEL QWORD\n";
+        std::string tableSym = globalSymbol("vtable@" + c->qualifiedName);
+        m_dataSymbols.insert(tableSym);
+        std::string table = tableSym + " LABEL QWORD\n";
         for (size_t k = 0; k < keys.size(); ++k) {
             // find the most derived implementation among c and its bases
             const FunctionInfo* impl = 0;
@@ -750,7 +797,7 @@ void X86Module::emitVtables()
                 }
                 walk = walk->bases.empty() ? 0 : walk->bases[0].resolved;
             }
-            std::string sym = impl ? mangle(impl->displayName() + "(" + impl->paramText + ")" + (impl->isConst ? " const" : "")) : "";
+            std::string sym = impl ? symbol(irFunctionName(impl)) : "";
             if (!sym.empty() && !m_defined.count(sym)) m_externs.insert(sym);
             table += "        DQ " + (sym.empty() ? std::string("0") : "OFFSET " + sym) + "        ; [" + intToString(static_cast<int>(k)) + "] " + keys[k] + "\n";
         }
@@ -769,7 +816,7 @@ void X86Module::emitGlobals()
             if (g.isExtern || !done.insert(name).second) continue;
             const Type* t = m_types.parse(g.type, g.scope, 0);
             int size = m_layouts.sizeOf(t);
-            std::string sym = mangleGlobal(name);
+            std::string sym = globalSymbol(name);
             std::string init = trim(g.initializer);
             bool numeric = !init.empty() && (isdigit(static_cast<unsigned char>(init[0])) || init[0] == '-' || init[0] == '+') && init.find_first_of("(,") == std::string::npos;
             std::string def;
@@ -781,6 +828,7 @@ void X86Module::emitGlobals()
             else def = sym + " DB " + intToString(size) + " DUP (0)";
             m_data += "        PUBLIC " + sym + "\n" + def + "\n";
             m_defined.insert(sym);
+            m_dataSymbols.insert(sym);
         }
 }
 
@@ -795,7 +843,7 @@ std::string X86Module::finish()
     for (std::set<std::string>::iterator e = m_externs.begin(); e != m_externs.end(); ++e)
         if (!m_defined.count(*e)) s << "EXTERN " << *e << ":PROC\n";
     for (std::set<std::string>::iterator g = m_globalsUsed.begin(); g != m_globalsUsed.end(); ++g) {
-        std::string sym = mangleGlobal(*g);
+        std::string sym = globalSymbol(*g);
         if (!m_defined.count(sym) && !startsWith(*g, "vtable@")) { s << "EXTERN " << sym << ":QWORD\n"; m_defined.insert(sym); }
     }
     s << "\n.data\n" << m_data;
@@ -829,7 +877,7 @@ std::string X86Module::finish()
     }
     s << "\n.code\n";
     for (std::set<std::string>::iterator d = m_defined.begin(); d != m_defined.end(); ++d)
-        if (!startsWith(*d, "g_") && !startsWith(*d, "vtable_")) s << "PUBLIC " << *d << "\n";
+        if (!m_dataSymbols.count(*d)) s << "PUBLIC " << *d << "\n";
     s << "\n" << m_code << "END\n";
     return s.str();
 }

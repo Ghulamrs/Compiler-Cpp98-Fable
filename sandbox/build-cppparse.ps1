@@ -255,6 +255,34 @@ try {
     if ($rc -ne 0) { Write-Host "  ok   unmatched pattern is an error" } else { Write-Host "  FAIL unmatched pattern accepted"; $failed++ }
     if ($failed -ne 0) { throw "$failed version 5 check(s) failed" }
 
+    Write-Host "=== Test 8: version 5 COFF writer (--obj, link with the driver, run) ==="
+    $failed = 0
+    foreach ($lvl in @(0, 3)) {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $out = .\cppparse.exe "-O$lvl" --obj -q -o out\x64 -n "own$lvl" "..\cppparse\sample-opt" 2>&1 | Out-String
+        $ErrorActionPreference = $eap
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path "out\x64\own$lvl.obj")) { Write-Host "  FAIL --obj at -O$lvl :"; Write-Host $out; $failed++; continue }
+        Write-Host "  ok   own COFF writer produced own$lvl.obj (-O$lvl)"
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\owndriver$lvl.exe" "..\cppparse\sample-opt-driver\driver.cpp" "out\x64\own$lvl.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with own$lvl.obj:"; Write-Host $clOut; $failed++; continue }
+        Write-Host "  ok   linked own$lvl.obj with the MSVC-compiled driver"
+        $run = & ".\out\x64\owndriver$lvl.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   owndriver$lvl.exe: all results correct (-O$lvl, cppparse .obj)" }
+        else { Write-Host "  FAIL owndriver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
+    }
+    # the encoder must agree with ml64: compare the instruction bytes of both objects
+    $dumpbin = "$Msvc\bin\Hostx64\x64\dumpbin.exe"
+    if (Test-Path $dumpbin) {
+        $a = (& $dumpbin /nologo /disasm:nobytes "out\x64\opt3.obj" | Select-String '^\s+[0-9A-F]{16}:\s' | ForEach-Object { ($_.Line -replace '^\s+[0-9A-F]{16}:\s+', '') -replace '\s+', ' ' })
+        $b = (& $dumpbin /nologo /disasm:nobytes "out\x64\own3.obj" | Select-String '^\s+[0-9A-F]{16}:\s' | ForEach-Object { ($_.Line -replace '^\s+[0-9A-F]{16}:\s+', '') -replace '\s+', ' ' })
+        $a = $a | Where-Object { $_ -ne 'int 3' }; $b = $b | Where-Object { $_ -ne 'int 3' }
+        $same = 0; $diff = 0
+        for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) { if ($i -lt $a.Count -and $i -lt $b.Count -and $a[$i] -eq $b[$i]) { $same++ } else { $diff++ } }
+        if ($diff -eq 0 -and $same -gt 100) { Write-Host "  ok   dumpbin disassembly of own3.obj matches ml64's opt3.obj ($same instructions)" }
+        else { Write-Host "  FAIL disassembly differs: $same same, $diff different (first differences follow)"; $shown = 0; for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count) -and $shown -lt 8; $i++) { if ($i -ge $a.Count -or $i -ge $b.Count -or $a[$i] -ne $b[$i]) { Write-Host "    [$i] ml64: $($a[$i])   own: $($b[$i])"; $shown++ } }; $failed++ }
+    }
+    if ($failed -ne 0) { throw "$failed COFF check(s) failed" }
+
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"

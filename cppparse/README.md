@@ -39,7 +39,8 @@ Written next to the first input, or into the `-o` directory:
 | `<name>-ir.txt`        | version 3: class layouts, IR before/after `-On`                   |
 | `<name>-opt.log`       | version 3: optimisation passes and instruction counts            |
 | `<name>-asm.txt`       | version 3: lowered VM64 assembly                                  |
-| `<name>.asm`           | version 4: x86-64 MASM (Windows x64 ABI); `--assemble` adds `.obj` |
+| `<name>.asm`           | version 4: x86-64 MASM (Windows x64 ABI); `--assemble` adds `.obj` via ml64 |
+| `<name>.obj`           | version 5: COFF object written by cppparse itself (`--obj`) |
 | `<name>-report.html`   | the same report as one self-contained page with the diagram      |
 | `<name>-report.pdf`    | the same report as PDF: title page, diagram pages, text pages    |
 | `<name>-diagram.svg`   | the class diagram picture                                       |
@@ -73,6 +74,7 @@ dashed box = base class not defined in the parsed files.
 --no-compile     skip version 3 and 4
 --no-x86         do not write the x86-64 .asm file
 --assemble       run ml64 on the .asm to produce the .obj (ml64 on PATH)
+--obj            write the .obj with cppparse's own COFF writer (version 5)
 -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)
 src\*.cpp        wildcard patterns are expanded by cppparse itself (more than 50 files is fine)
 @list.txt        response file: one path, pattern or option per line; '#' starts a comment
@@ -281,3 +283,27 @@ text is on the version 6 list.
 (no shell globbing is needed on Windows), and `@list.txt` reads paths,
 patterns and options from a file, one per line, so a command line is
 never too long. All plain files are parsed together as one project.
+
+**COFF object writer** (`Coff.cpp`, `--obj`): `<name>.obj` is written by
+cppparse itself, so ml64 is no longer needed to get an object file. The
+writer is a small assembler for exactly the MASM subset that `X86.cpp`
+emits: it parses the text, encodes every PROC on the worker pool (REX,
+ModRM, SIB, RIP-relative operands, the SSE2 scalar instructions, and
+jump relaxation to the 2-byte form where the target is near), then lays
+out `.text`, `.data` and `.rdata`, the relocations (`REL32` for calls,
+`lea` and RIP-relative loads, `ADDR64` for vtable entries), the symbol
+table (functions, globals, vtables, string and float constants, externs)
+and the string table. Lines it cannot encode are reported with their
+line number and the file is not written. Test 8 links the object with
+the MSVC-compiled driver at `-O0` and `-O3`, runs it (all 19 checks
+pass) and compares `dumpbin /disasm` of cppparse's object with ml64's:
+the instruction streams are identical.
+
+Known limit: when cppparse compiles its own 51 sources, 23 of about
+290,000 generated lines mix an XMM register with an integer operand.
+They come from calls to library functions that the front end has no
+declaration for (`strtod`, `std::string::size`, ...): their results carry
+no type, so the register allocator and the instruction emitter disagree
+about the register class. ml64 rejects those lines as well; the COFF
+writer reports them by line number. Real declarations for library
+functions are part of the version 6 front end.

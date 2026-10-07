@@ -23,6 +23,7 @@
 //
 // Strict C++98.
 #include "CodeBase.hpp"
+#include "Coff.hpp"
 #include "Compiler.hpp"
 #include "Diagram.hpp"
 #include "Health.hpp"
@@ -67,6 +68,7 @@ void usage()
         "  --no-compile     skip version 3 (AST, type check, IR, lowering)\n"
         "  --no-x86         version 4: do not write the x86-64 MASM file (<name>.asm)\n"
         "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
+        "  --obj            version 5: write <name>.obj with cppparse's own COFF writer (no ml64 needed)\n"
         "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
         "  @list.txt        response file: one path, pattern or option per line\n"
@@ -99,7 +101,7 @@ int main(int argc, char* argv[])
 {
     std::vector<std::string> inputs;
     std::string outDir, outName;
-    bool follow = true, textOnly = false, toStdout = false, quiet = false, healthOnly = false, strict = false, compile = true, assemble = false;
+    bool follow = true, textOnly = false, toStdout = false, quiet = false, healthOnly = false, strict = false, compile = true, assemble = false, obj = false;
     int threads = hardwareThreads();
     bool threadsGiven = false;
     bool ok0 = true;
@@ -133,6 +135,7 @@ int main(int argc, char* argv[])
         else if (a == "--no-compile") compile = false;
         else if (a == "--no-x86") copt.x86 = false;
         else if (a == "--assemble") assemble = true;
+        else if (a == "--obj") obj = true;
         else if (a.size() == 3 && a[0] == '-' && a[1] == 'O' && a[2] >= '0' && a[2] <= '3') copt.optLevel = a[2] - '0';
         else if (a == "-q") quiet = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "unknown option: " << a << "\n"; usage(); return 2; }
@@ -201,6 +204,19 @@ int main(int argc, char* argv[])
         if (!writeOut(base + "-asm.txt", compiler.asmText(), quiet, written)) ok = false;
         if (copt.x86) {
             if (!writeOut(base + ".asm", compiler.x86Text(), quiet, written)) ok = false;
+            if (obj) {
+                CoffResult cr;
+                std::string objPath = base + (assemble ? "-cppparse.obj" : ".obj");   // --assemble keeps <name>.obj for ml64
+                if (writeCoffObject(compiler.x86Text(), objPath, copt.threads, cr)) {
+                    if (!quiet) std::cout << "  wrote " << objPath << "  (" << cr.functions << " functions, " << cr.instructions << " instructions, .text "
+                                          << cr.textBytes << " bytes, .data " << cr.dataBytes << ", .rdata " << cr.rdataBytes << ", "
+                                          << cr.relocations << " relocations, " << cr.symbols << " symbols)\n";
+                } else {
+                    std::cerr << "error: " << objPath << " not written, " << cr.errors.size() << " line(s) could not be encoded:\n";
+                    for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n";
+                    ok = false;
+                }
+            }
             if (assemble) {
                 std::string cmd = "ml64 /nologo /c \"/Fo" + base + ".obj\" \"" + base + ".asm\"";
                 if (!quiet) std::cout << "  running " << cmd << "\n";

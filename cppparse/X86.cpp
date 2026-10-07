@@ -15,6 +15,27 @@ const char* const kIntRegs[] = { "rbx", "rsi", "rdi", "r12", "r13", "r14", "r15"
 const int kIntRegCount = 7;
 const int kFloatRegBase = 6;     // xmm6 .. xmm13
 const int kFloatRegCount = 8;
+const int kTryFrameSize = 272;   // sizeof(jmp_buf) on x64 (256) plus the frame link
+
+// "Derived;Base;GrandBase" for a class (every transitive base), or the scalar type text; the
+// runtime matches a catch clause against each entry
+void collectBases(const ClassInfo* c, std::string& out, int depth)
+{
+    if (!c || depth > 16) return;
+    for (size_t i = 0; i < c->bases.size(); ++i) {
+        const ClassInfo* b = c->bases[i].resolved;
+        if (!b) continue;
+        out += ";" + b->qualifiedName;
+        collectBases(b, out, depth + 1);
+    }
+}
+
+std::string typeDescriptor(const Type* t)
+{
+    if (!t) return "unknown";
+    if (t->kind == Type::Class && t->cls) { std::string d = t->cls->qualifiedName; collectBases(t->cls, d, 0); return d; }
+    return t->str();
+}
 
 std::string reg32(const std::string& r)
 {
@@ -77,7 +98,7 @@ std::string mangleGlobal(const std::string& name)
 
 class X86Function {
 public:
-    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0) {}
+    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0) {}
     std::string run();
 
 private:
@@ -117,6 +138,8 @@ private:
     std::vector<int>    m_calls;
     std::vector<int>    m_localOffset;
     int                 m_frameSize;
+    std::map<long, int> m_tryOffset;      // version 5: try region id -> [rbp-offset] of its setjmp frame
+    int                 m_throwSlot;      // [rbp-offset] where a thrown scalar is stored before the call
     std::set<int>       m_usedIntRegs, m_usedFloatRegs;
     std::map<int, int>  m_savedIntOffset, m_savedFloatOffset;
     int                 m_outgoingArgs;
@@ -213,6 +236,14 @@ void X86Function::layoutFrame()
         if (it->second.reg < 0) { off = (off + 8 + 7) / 8 * 8; it->second.slot = off; }
     for (std::set<int>::iterator r = m_usedIntRegs.begin(); r != m_usedIntRegs.end(); ++r) { off = (off + 8 + 7) / 8 * 8; m_savedIntOffset[*r] = off; }
     for (std::set<int>::iterator r = m_usedFloatRegs.begin(); r != m_usedFloatRegs.end(); ++r) { off = (off + 16 + 15) / 16 * 16; m_savedFloatOffset[*r] = off; }
+    // version 5: one setjmp frame (jmp_buf plus link, 272 bytes, 16-byte aligned) per try region,
+    // and a 16-byte slot for thrown scalars
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            if (in.op == IrInst::TryBegin) { off = (off + kTryFrameSize + 15) / 16 * 16; m_tryOffset[in.extra] = off; }
+            else if (in.op == IrInst::Throw && !in.args.empty() && m_throwSlot == 0) { off = (off + 16 + 15) / 16 * 16; m_throwSlot = off; }
+        }
     int outgoing = 32 + 8 * m_outgoingArgs;       // shadow space plus stack arguments
     m_frameSize = (off + outgoing + 15) / 16 * 16;
     m_stats.frameSize = m_frameSize;
@@ -544,14 +575,49 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         break;
     }
     case IrInst::Throw: {
-        if (!in.args.empty()) { std::string r = use(in.args[0], "rcx"); if (r != "rcx") line("mov rcx, " + r); } else line("xor ecx, ecx");
+        // cppparse_throw(object address, type descriptor, size): copies the object and longjmps to the innermost frame
+        if (in.args.empty()) { m_m.useExtern("cppparse_rethrow"); line("call cppparse_rethrow            ; throw;"); break; }
+        const Type* t = in.args[0].type;
+        bool cls = t && t->kind == Type::Class;
+        std::string slot = "[rbp-" + intToString(m_throwSlot) + "]";
+        if (cls) { std::string r = use(in.args[0], "rcx"); if (r != "rcx") line("mov rcx, " + r); }
+        else if (opIsFloat(in.args[0])) { std::string r = use(in.args[0], "xmm0"); line("movsd real8 ptr " + slot + ", " + r); line("lea rcx, " + slot); }
+        else { std::string r = use(in.args[0], "rax"); line("mov qword ptr " + slot + ", " + r); line("lea rcx, " + slot); }
+        line("lea rdx, " + m_m.stringLabel("\"" + typeDescriptor(t) + "\""));
+        line("mov r8, " + intToString(cls ? m_m.m_layouts.sizeOf(t) : 8));
         m_m.useExtern("cppparse_throw");
         line("call cppparse_throw");
         break;
     }
-    case IrInst::TryBegin: comment("try region (exceptions are not implemented on x86-64: throw aborts)"); break;
-    case IrInst::TryEnd: comment("end of try region"); break;
-    case IrInst::CatchParam: { std::string rd = def(in.dst, false, "rax", spill); line("xor " + reg32(rd) + ", " + reg32(rd) + "        ; catch (" + in.sub + ") never entered"); finish(in.dst, spill, false, rd); break; }
+    case IrInst::TryBegin: {
+        // register the frame, then _setjmp(frame, NULL): 0 now, 1 when a throw lands here
+        std::string fr = "[rbp-" + intToString(m_tryOffset[in.extra]) + "]";
+        m_m.useExtern("cppparse_push_frame");
+        m_m.useExtern("_setjmp");
+        line("lea rcx, " + fr);
+        line("call cppparse_push_frame");
+        line("lea rcx, " + fr);
+        line("xor edx, edx");
+        line("call _setjmp");
+        line("test eax, eax");
+        line("jne " + m_label + "_T" + intToString(static_cast<int>(in.extra)) + "        ; exception: dispatch to the handlers");
+        break;
+    }
+    case IrInst::TryEnd: {
+        m_m.useExtern("cppparse_pop_frame");
+        line("lea rcx, [rbp-" + intToString(m_tryOffset[in.extra]) + "]");
+        line("call cppparse_pop_frame");
+        break;
+    }
+    case IrInst::CatchParam: {
+        std::string rd = def(in.dst, false, "rax", spill);
+        m_m.useExtern("cppparse_catch_begin");
+        line("call cppparse_catch_begin       ; catch (" + in.sub + "): rax = object");
+        if (rd != "rax") line("mov " + rd + ", rax");
+        finish(in.dst, spill, false, rd);
+        break;
+    }
+    case IrInst::CatchEnd: { m_m.useExtern("cppparse_catch_end"); line("call cppparse_catch_end"); break; }
     case IrInst::Unreachable: line("ud2                 ; " + in.sub); break;
     default: break;
     }
@@ -596,6 +662,31 @@ void X86Function::emitBody()
     for (std::map<int, int>::iterator r = m_savedFloatOffset.begin(); r != m_savedFloatOffset.end(); ++r) line("movdqu xmm" + intToString(kFloatRegBase + r->first) + ", xmmword ptr [rbp-" + intToString(r->second) + "]");
     line("leave");
     line("ret");
+    // version 5: one dispatch stub per try region: pop the frame, try the catch clauses in order, else rethrow
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            if (in.op != IrInst::TryBegin) continue;
+            m_out << m_label << "_T" << in.extra << ":        ; handlers of try region " << in.extra << "\n";
+            m_m.useExtern("cppparse_pop_frame");
+            m_m.useExtern("cppparse_match");
+            m_m.useExtern("cppparse_rethrow");
+            line("lea rcx, [rbp-" + intToString(m_tryOffset[in.extra]) + "]");
+            line("call cppparse_pop_frame");
+            bool catchAll = false;
+            for (size_t h = 0; h < in.args.size() && !catchAll; ++h) {
+                int hb = in.args[h].id;
+                std::string ctype = "...";
+                const IrBlock& blk = m_f.blocks[static_cast<size_t>(hb)];
+                for (size_t k = 0; k < blk.insts.size(); ++k) if (blk.insts[k].op == IrInst::CatchParam) { ctype = blk.insts[k].sub; break; }
+                if (ctype == "...") { line("jmp " + label(hb) + "        ; catch (...)"); catchAll = true; break; }
+                line("lea rcx, " + m_m.stringLabel("\"" + ctype + "\""));
+                line("call cppparse_match");
+                line("test eax, eax");
+                line("jne " + label(hb) + "        ; catch (" + ctype + ")");
+            }
+            if (!catchAll) line("call cppparse_rethrow            ; no clause matched: outer frame");
+        }
     m_out << m_label << " ENDP\n\n";
 }
 

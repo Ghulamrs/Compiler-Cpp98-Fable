@@ -18,13 +18,14 @@ extern "C" {
     int      branches_int_v(int v);
     unsigned pick_unsigned_flags(unsigned flags);
     int      useTemplates();
-
-    // runtime hook used by generated code for "throw"
-    void cppparse_throw(void* object)
-    {
-        std::printf("cppparse_throw(%p): exceptions are not implemented on the x86-64 target\n", object);
-        std::abort();
-    }
+    // version 5: exceptions (the runtime cppparse/runtime/cppparse_rt.cpp is linked as well)
+    int      throwCatchInt_int_v(int v);
+    int      catchAll_int_v(int v);
+    int      throwThrough_int_v(int v);
+    int      rethrown_int_v(int v);
+    int      leaveTry_int_n(int n);
+    int      cppparse_frame_depth();
+    int      cppparse_caught_depth();
 }
 
 static int g_failures = 0;
@@ -56,6 +57,19 @@ int main()
     check("pick(6)", pick_unsigned_flags(6), 30);
     check("pick(4)", pick_unsigned_flags(4), 10);
     check("useTemplates()", useTemplates(), 14);
+    check("throwCatchInt(4)", throwCatchInt_int_v(4), 8);
+    check("throwCatchInt(-6)", throwCatchInt_int_v(-6), 6);
+    check("catchAll(0)", catchAll_int_v(0), 1);
+    check("catchAll(1)", catchAll_int_v(1), 2);
+    check("throwThrough(5)", throwThrough_int_v(5), 1);
+    check("throwThrough(12)", throwThrough_int_v(12), 1012);
+    check("throwThrough(-3)", throwThrough_int_v(-3), -3);
+    check("rethrown(0)", rethrown_int_v(0), 0);
+    check("rethrown(7)", rethrown_int_v(7), 14);
+    check("leaveTry(10)", leaveTry_int_n(10), 103);
+    check("leaveTry(2)", leaveTry_int_n(2), 101);
+    check("frames left open", cppparse_frame_depth(), 0);
+    check("handlers left open", cppparse_caught_depth(), 0);
     if (g_failures) { std::printf("FAILED: %d check(s)\n", g_failures); return 1; }
     std::printf("ALL OK\n");
     return 0;

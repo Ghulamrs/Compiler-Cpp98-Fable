@@ -21,7 +21,10 @@
 //   cmp  (sub: eq ne slt sle sgt sge ult ule ugt uge feq fne flt fle fgt fge)
 //   conv (sub: sext zext trunc sitofp uitofp fptosi fpext fptrunc ptrtoint inttoptr bitcast)
 //   call (sub: callee name)   vcall (sub: method, args[0] = this, last arg = slot)
-//   br / condbr / ret / throw / trybegin (handler block) / tryend / catchparam / unreachable
+//   br / condbr / ret / throw / unreachable
+//   trybegin (args: handler blocks, extra: region id) / tryend (extra: region id, also emitted
+//   before return/break/continue that leave the region) / catchparam (sub: catch type, t = object
+//   address) / catchend (end of a handler body)
 //
 // Strict C++98.
 #ifndef CPPPARSE_IR_HPP
@@ -59,7 +62,7 @@ struct IrOperand {
 struct IrInst {
     enum Op { Const, FConst, StrConst, Copy, LoadLocal, StoreLocal, AddrLocal, LoadGlobal, StoreGlobal, AddrGlobal,
               LoadMem, StoreMem, AddrField, AddrIndex, Bin, Un, Cmp, Conv, Call, VCall, Br, CondBr, Ret, Throw,
-              TryBegin, TryEnd, CatchParam, Unreachable, Nop, Phi };
+              TryBegin, TryEnd, CatchParam, CatchEnd, Unreachable, Nop, Phi };
     Op                     op;
     std::string            sub;    // sub-operation, callee name, field name
     int                    dst;    // result temp or -1
@@ -159,9 +162,10 @@ private:
         const Type* type;      // type of the object
         LValue() : kind(None), local(-1), addr(-1), type(0) {}
     };
-    struct LoopTargets { int breakBlock, continueBlock; };
+    struct LoopTargets { int breakBlock, continueBlock; size_t tryDepth; };   // tryDepth: try regions open at loop entry
 
     int    emit(IrInst inst);                       // returns dst
+    void   leaveTryRegions(size_t depth, int line); // tryend for every region deeper than depth
     IrInst make(IrInst::Op op, const Type* type, int line);
     int    cur() const { return m_block; }
     void   setBlock(int b) { m_block = b; }
@@ -193,6 +197,8 @@ private:
     std::vector<int>    m_switchBreaks;
     std::vector<int>    m_localMap;                  // ast local index -> ir local index
     int                 m_catchDepth;
+    std::vector<int>    m_tryStack;                  // cleanup stack: try region id (>= 0) or -1 for a catch handler body
+    int                 m_tryCount;                  // try regions in this function (ids 0..n-1, IrInst::extra)
 };
 
 std::string printIr(const IrFunction& f);

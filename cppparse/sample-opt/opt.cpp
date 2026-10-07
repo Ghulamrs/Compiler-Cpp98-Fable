@@ -114,3 +114,82 @@ int useTemplates()                         // Buffer<int, 4> and maxOf<int>: 3 +
     b.add(4);
     return b.total() + maxOf(7, 2);
 }
+
+// version 5: exceptions (setjmp/longjmp runtime in runtime/cppparse_rt.cpp)
+struct Failure {
+    int code;
+    Failure(int c) : code(c) {}
+};
+
+struct BadIndex : public Failure {
+    int index;
+    BadIndex(int i) : Failure(100), index(i) {}
+};
+
+int throwCatchInt(int v)                   // v < 0 throws v, the handler returns -v
+{
+    try {
+        if (v < 0) throw v;
+        return v * 2;
+    } catch (int e) {
+        return -e;
+    }
+}
+
+int catchAll(int v)                        // 1 when nothing is thrown, 2 after a double was thrown
+{
+    try {
+        if (v) throw 2.5;
+        return 1;
+    } catch (...) {
+        return 2;
+    }
+}
+
+void mayFail(int v)                        // throws through a function without a handler
+{
+    if (v > 10) throw BadIndex(v);
+    if (v < 0) throw Failure(v);
+}
+
+int throwThrough(int v)                    // class by reference, the base clause comes second
+{
+    int result = 0;
+    try {
+        mayFail(v);
+        result = 1;
+    } catch (const BadIndex& b) {
+        result = 1000 + b.index;
+    } catch (const Failure& f) {
+        result = f.code;
+    }
+    return result;
+}
+
+int rethrown(int v)                        // the inner handler matches through the base and rethrows
+{
+    try {
+        try {
+            if (v) throw BadIndex(v);
+            return 0;
+        } catch (const Failure&) {
+            throw;
+        }
+    } catch (const BadIndex& b) {
+        return b.index * 2;
+    }
+}
+
+int leaveTry(int n)                        // break leaves a try inside a loop: its frame must be popped
+{
+    int sum = 0;
+    for (int i = 0; i < n; ++i) {
+        try {
+            if (i == 3) break;
+            sum += i;
+        } catch (...) {
+            sum = -1;
+        }
+    }
+    try { throw sum; } catch (int s) { return s + 100; }
+}

@@ -73,6 +73,7 @@ const char* opName(IrInst::Op op)
     case IrInst::TryBegin: return "trybegin";
     case IrInst::TryEnd: return "tryend";
     case IrInst::CatchParam: return "catchparam";
+    case IrInst::CatchEnd: return "catchend";
     case IrInst::Unreachable: return "unreachable";
     case IrInst::Phi: return "phi";
     default: return "nop";
@@ -339,7 +340,7 @@ std::string Layouts::describe(const ClassInfo* cls)
 // ---- builder --------------------------------------------------------------------------------
 
 IrBuilder::IrBuilder(const CodeBase& cb, TypeTable& types, Layouts& layouts)
-    : m_cb(cb), m_types(types), m_layouts(layouts), m_ast(0), m_out(0), m_block(0), m_catchDepth(0)
+    : m_cb(cb), m_types(types), m_layouts(layouts), m_ast(0), m_out(0), m_block(0), m_catchDepth(0), m_tryCount(0)
 {
 }
 
@@ -1127,7 +1128,7 @@ void IrBuilder::stmt(Stmt* s)
         int cb = m_out->newBlock("while.cond"), bb = m_out->newBlock("while.body"), xb = m_out->newBlock("while.end");
         br(cb, line);
         setBlock(cb); condition(s->cond, bb, xb);
-        LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = cb; m_loops.push_back(lt);
+        LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = cb; lt.tryDepth = m_tryStack.size(); m_loops.push_back(lt);
         setBlock(bb); stmt(s->kids[0]); br(cb, line);
         m_loops.pop_back();
         setBlock(xb);
@@ -1136,7 +1137,7 @@ void IrBuilder::stmt(Stmt* s)
     case Stmt::DoWhile: {
         int bb = m_out->newBlock("do.body"), cb = m_out->newBlock("do.cond"), xb = m_out->newBlock("do.end");
         br(bb, line);
-        LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = cb; m_loops.push_back(lt);
+        LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = cb; lt.tryDepth = m_tryStack.size(); m_loops.push_back(lt);
         setBlock(bb); stmt(s->kids[0]); br(cb, line);
         m_loops.pop_back();
         setBlock(cb); condition(s->cond, bb, xb);
@@ -1149,7 +1150,7 @@ void IrBuilder::stmt(Stmt* s)
         br(cb, line);
         setBlock(cb);
         if (s->cond) condition(s->cond, bb, xb); else br(bb, line);
-        LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = sb; m_loops.push_back(lt);
+        LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = sb; lt.tryDepth = m_tryStack.size(); m_loops.push_back(lt);
         setBlock(bb); stmt(s->kids[0]); br(sb, line);
         m_loops.pop_back();
         setBlock(sb); if (s->step) value(s->step); br(cb, line);
@@ -1182,7 +1183,7 @@ void IrBuilder::stmt(Stmt* s)
             setBlock(next);
         }
         br(defaultBlock >= 0 ? defaultBlock : xb, line);
-        LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = -1; m_loops.push_back(lt);
+        LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = -1; lt.tryDepth = m_tryStack.size(); m_loops.push_back(lt);
         bool inLabel = false;
         for (size_t i = 0; i < items.size(); ++i) {
             if (items[i]->kind == Stmt::Case || items[i]->kind == Stmt::Default) {
@@ -1202,11 +1203,11 @@ void IrBuilder::stmt(Stmt* s)
     }
     case Stmt::Case: case Stmt::Default: return;
     case Stmt::Break: {
-        for (size_t i = m_loops.size(); i > 0; --i) { br(m_loops[i - 1].breakBlock, line); return; }
+        for (size_t i = m_loops.size(); i > 0; --i) { leaveTryRegions(m_loops[i - 1].tryDepth, line); br(m_loops[i - 1].breakBlock, line); return; }
         return;
     }
     case Stmt::Continue: {
-        for (size_t i = m_loops.size(); i > 0; --i) if (m_loops[i - 1].continueBlock >= 0) { br(m_loops[i - 1].continueBlock, line); return; }
+        for (size_t i = m_loops.size(); i > 0; --i) if (m_loops[i - 1].continueBlock >= 0) { leaveTryRegions(m_loops[i - 1].tryDepth, line); br(m_loops[i - 1].continueBlock, line); return; }
         return;
     }
     case Stmt::Return: {
@@ -1225,42 +1226,78 @@ void IrBuilder::stmt(Stmt* s)
                 in.args.push_back(IrOperand::temp(v, rt ? m_types.decay(rt) : s->expr->type));
             }
         }
+        leaveTryRegions(0, line);          // a return inside try regions pops their frames first
         emit(in);
         return;
     }
     case Stmt::Try: {
         m_out->hasTry = true;
+        int id = m_tryCount++;
         std::vector<int> handlers;
         for (size_t i = 1; i < s->kids.size(); ++i) handlers.push_back(m_out->newBlock("catch"));
         int join = m_out->newBlock("try.end");
+        int body = m_out->newBlock("try.body");
         IrInst tb = make(IrInst::TryBegin, 0, line);
+        tb.extra = id;
         for (size_t i = 0; i < handlers.size(); ++i) tb.args.push_back(IrOperand::block(handlers[i]));
         emit(tb);
+        // the body is its own block, so nothing defined inside the region dominates the handlers
+        // (after a longjmp the registers hold the values they had when the region was entered)
+        br(body, line);
+        setBlock(body);
+        m_tryStack.push_back(id);
         ++m_catchDepth;
         stmt(s->kids[0]);
         --m_catchDepth;
-        emit(make(IrInst::TryEnd, 0, line));
+        m_tryStack.pop_back();
+        if (!terminated()) { IrInst te = make(IrInst::TryEnd, 0, line); te.extra = id; emit(te); }
         br(join, line);
         for (size_t i = 1; i < s->kids.size(); ++i) {
             Stmt* c = s->kids[i];
             setBlock(handlers[i - 1]);
             IrInst cp = make(IrInst::CatchParam, m_types.pointer(m_types.voidType()), c->line);
+            // the catch type in canonical form: the qualified class name, or the scalar type text
             cp.sub = c->typeText;
-            int ev = emit(cp);
+            if (c->typeText != "...") {
+                const Type* ct0 = m_types.unref(m_types.parse(c->typeText, m_ast->fn->ownerClass ? m_ast->fn->ownerClass->qualifiedName : m_ast->fn->scope, m_ast->fn->ownerClass));
+                if (ct0 && ct0->kind == Type::Class && ct0->cls) cp.sub = ct0->cls->qualifiedName;
+                else if (ct0 && !ct0->isUnknown()) cp.sub = ct0->str();
+            }
+            int ev = emit(cp);                                   // address of the thrown object (runtime copy)
             if (c->localIndex >= 0) {
                 int idx = m_localMap[static_cast<size_t>(c->localIndex)];
                 const Type* ct = m_out->locals[static_cast<size_t>(idx)].type;
-                LValue lv; lv.kind = LValue::Local; lv.local = idx; lv.type = ct;
-                if (ct && ct->kind != Type::Class) { IrInst st = make(IrInst::StoreLocal, ct, c->line); st.args.push_back(IrOperand::local(idx, ct)); st.args.push_back(IrOperand::temp(ev, ct)); emit(st); }
-                else { IrInst st = make(IrInst::StoreLocal, m_types.pointer(ct), c->line); st.args.push_back(IrOperand::local(idx, ct)); st.args.push_back(IrOperand::temp(ev, m_types.pointer(ct))); emit(st); m_out->locals[static_cast<size_t>(idx)].type = m_types.reference(ct); }
+                if (ct && ct->kind != Type::Class) {
+                    IrInst ld = make(IrInst::LoadMem, ct, c->line); ld.args.push_back(IrOperand::temp(ev, m_types.pointer(ct)));
+                    int v = emit(ld);
+                    IrInst st = make(IrInst::StoreLocal, ct, c->line); st.args.push_back(IrOperand::local(idx, ct)); st.args.push_back(IrOperand::temp(v, ct)); emit(st);
+                } else {
+                    IrInst st = make(IrInst::StoreLocal, m_types.pointer(ct), c->line); st.args.push_back(IrOperand::local(idx, ct)); st.args.push_back(IrOperand::temp(ev, m_types.pointer(ct))); emit(st);
+                    m_out->locals[static_cast<size_t>(idx)].type = m_types.reference(ct);
+                }
             }
+            m_tryStack.push_back(-1);                            // a return/break/continue inside the handler ends it
             stmt(c->kids[0]);
+            m_tryStack.pop_back();
+            if (!terminated()) emit(make(IrInst::CatchEnd, 0, c->line));
             br(join, c->line);
         }
         setBlock(join);
         return;
     }
     case Stmt::Catch: return;
+    }
+}
+
+// pops the try frames and ends the catch handlers deeper than 'depth' (innermost first): used
+// before a return, break or continue that leaves them
+void IrBuilder::leaveTryRegions(size_t depth, int line)
+{
+    for (size_t k = m_tryStack.size(); k > depth; --k) {
+        if (m_tryStack[k - 1] < 0) { emit(make(IrInst::CatchEnd, 0, line)); continue; }
+        IrInst te = make(IrInst::TryEnd, 0, line);
+        te.extra = m_tryStack[k - 1];
+        emit(te);
     }
 }
 
@@ -1271,6 +1308,8 @@ bool IrBuilder::build(const FunctionAst& ast, IrFunction& out)
     m_loops.clear();
     m_localMap.clear();
     m_catchDepth = 0;
+    m_tryStack.clear();
+    m_tryCount = 0;
     const FunctionInfo* fn = ast.fn;
     out.fn = fn;
     out.name = funcName(fn);

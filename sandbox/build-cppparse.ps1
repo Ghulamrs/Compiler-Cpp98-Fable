@@ -215,13 +215,17 @@ try {
     $ml64 = "$Msvc\bin\Hostx64\x64\ml64.exe"
     New-Item -ItemType Directory -Force "out\x64" | Out-Null
     $failed = 0
+    # version 5: the exception runtime, linked with every driver
+    $rtOut = & $cl /nologo /c /EHsc /W3 "/Foout\x64\cppparse_rt.obj" "..\cppparse\runtime\cppparse_rt.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $rtOut; throw "cppparse_rt.cpp failed to compile" }
+    Write-Host "  ok   runtime cppparse_rt.cpp compiled"
     foreach ($lvl in @(0, 2, 3)) {
         $asmPath = "out\opt\opt$lvl.asm"
         if (-not (Test-Path $asmPath)) { Write-Host "  FAIL missing $asmPath"; $failed++; continue }
         $mlOut = & $ml64 /nologo /c "/Foout\x64\opt$lvl.obj" $asmPath 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL ml64 rejected opt$lvl.asm:"; Write-Host $mlOut; $failed++; continue }
         Write-Host "  ok   ml64 assembled opt$lvl.asm"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\driver$lvl.exe" "..\cppparse\sample-opt-driver\driver.cpp" "out\x64\opt$lvl.obj" 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\driver$lvl.exe" "..\cppparse\sample-opt-driver\driver.cpp" "out\x64\opt$lvl.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with opt$lvl.obj:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\driver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   driver$lvl.exe: all results correct (-O$lvl)" }
@@ -263,7 +267,7 @@ try {
         $ErrorActionPreference = $eap
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path "out\x64\own$lvl.obj")) { Write-Host "  FAIL --obj at -O$lvl :"; Write-Host $out; $failed++; continue }
         Write-Host "  ok   own COFF writer produced own$lvl.obj (-O$lvl)"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\owndriver$lvl.exe" "..\cppparse\sample-opt-driver\driver.cpp" "out\x64\own$lvl.obj" 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\owndriver$lvl.exe" "..\cppparse\sample-opt-driver\driver.cpp" "out\x64\own$lvl.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with own$lvl.obj:"; Write-Host $clOut; $failed++; continue }
         Write-Host "  ok   linked own$lvl.obj with the MSVC-compiled driver"
         $run = & ".\out\x64\owndriver$lvl.exe" 2>&1 | Out-String

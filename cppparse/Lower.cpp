@@ -392,6 +392,7 @@ void FunctionLowerer::emitInst(const IrInst& in, int blockIndex, size_t instInde
     }
     case IrInst::TryBegin: { std::string hs; for (size_t a = 0; a < in.args.size(); ++a) hs += (a ? ", " : "") + label(in.args[a].id); line("TRY " + hs); break; }
     case IrInst::TryEnd: line("ENDTRY"); break;
+    case IrInst::CatchEnd: line("ENDCATCH"); break;
     case IrInst::CatchParam: { std::string rd = def(in.dst, false, spill); line("MOV " + rd + ", R0            ; exception object (" + in.sub + ")"); finish(in.dst, spill, false, rd); break; }
     case IrInst::Unreachable: line("TRAP                  ; " + in.sub); break;
     default: break;

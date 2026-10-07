@@ -76,6 +76,9 @@ dashed box = base class not defined in the parsed files.
 --assemble       run ml64 on the .asm to produce the .obj (ml64 on PATH)
 --obj            write the .obj with cppparse's own COFF writer (version 5)
 --msvc-mangling  MSVC-compatible decorated names, so MSVC code links with plain C++ declarations
+-E               version 6: preprocess only and print the result (like cl /EP)
+-I <dir>         include directory for the preprocessor
+-D NAME[=value]  predefine a macro; -U NAME undefines one
 -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)
 src\*.cpp        wildcard patterns are expanded by cppparse itself (more than 50 files is fine)
 @list.txt        response file: one path, pattern or option per line; '#' starts a comment
@@ -338,6 +341,40 @@ the name and parameter-type back-references. `extern "C"` functions and
 every function symbol cl defines is spelled identically in cppparse's
 object, then links `sample-opt-driver/driver-native.cpp`, which declares
 the functions as plain C++, against cppparse's object and runs it.
+
+## Version 6: a clean front end (in progress)
+
+Versions 1 to 5 grew a compiler out of a declaration reader. Version 6
+rebuilds the front end the way a compiler is built, keeping the back
+end (IR, optimiser, SSA, x86-64, COFF, runtime) and the execution tests
+as the acceptance bar:
+
+1. **Preprocessor** (`Pp.cpp`, done): translation phases 1 to 4.
+2. **Lexer and grammar parser**: one parser for declarations and
+   statements, producing a single AST for whole translation units.
+3. **Semantic analysis**: real types, scopes, name lookup, overload
+   resolution and template instantiation on the AST.
+4. **IR generation** from the new AST, then the existing back end.
+5. **Reports** rebuilt on the new AST.
+
+Every stage works per translation unit and runs on the worker pool.
+
+**Preprocessor** (`Pp.cpp`, `-E`, `-I`, `-D`, `-U`): line splices,
+comments, pp-tokens, `#include` (quoted form searched next to the
+including file, then `-I` directories; `#pragma once`; a macro as the
+file name), `#define` of object-like and function-like macros with `#`
+and `##`, argument prescan, rescanning and hide sets (a macro never
+expands inside its own expansion, as in `#define f(x) x + f`),
+`#undef`, `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` with full
+constant expressions (`defined`, arithmetic, comparisons, `?:`,
+character constants, octal and hex), `#error`, `#warning`, `#line`,
+and `__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__cplusplus`
+(`199711L`). The result is a token stream with file and line positions,
+the list of included and missing files, all macro definitions and the
+diagnostics. `cppparse -E -I inc pp.cpp` prints the preprocessed text
+like `cl /EP`; test 10 compares the two on `sample-pp/` (identical apart
+from whitespace) and checks that `#error` and a missing include are
+diagnosed.
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

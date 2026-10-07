@@ -31,6 +31,7 @@
 #include "Parallel.hpp"
 #include "PathUtil.hpp"
 #include "Pdf.hpp"
+#include "Pp.hpp"
 #include "Report.hpp"
 #include "Symbols.hpp"
 
@@ -71,6 +72,9 @@ void usage()
         "  --obj            version 5: write <name>.obj with cppparse's own COFF writer (no ml64 needed)\n"
         "  --msvc-mangling  version 5: MSVC-compatible decorated names (?square@@YAHH@Z) so MSVC code links with plain C++ declarations\n"
         "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)\n"
+        "  -E               version 6: preprocess the input files only and print the result (like cl /EP)\n"
+        "  -I <dir>         version 6: include directory for the preprocessor (also -Idir)\n"
+        "  -D NAME[=value]  version 6: predefine a macro (also -DNAME=value); -U NAME undefines one\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
         "  @list.txt        response file: one path, pattern or option per line\n"
         "  -q               quiet: print only errors\n"
@@ -106,6 +110,8 @@ int main(int argc, char* argv[])
     int threads = hardwareThreads();
     bool threadsGiven = false;
     bool ok0 = true;
+    bool preprocessOnly = false;
+    PpOptions ppOpt;
     CompileOptions copt;
     ReportOptions opt;
 
@@ -138,6 +144,12 @@ int main(int argc, char* argv[])
         else if (a == "--assemble") assemble = true;
         else if (a == "--obj") obj = true;
         else if (a == "--msvc-mangling") copt.msvcNames = true;
+        else if (a == "-E" || a == "--preprocess") preprocessOnly = true;
+        else if (a == "-I" && i + 1 < args.size()) ppOpt.includeDirs.push_back(args[++i]);
+        else if (a.size() > 2 && a[0] == '-' && a[1] == 'I') ppOpt.includeDirs.push_back(a.substr(2));
+        else if (a == "-D" && i + 1 < args.size()) ppOpt.defines.push_back(args[++i]);
+        else if (a.size() > 2 && a[0] == '-' && a[1] == 'D') ppOpt.defines.push_back(a.substr(2));
+        else if (a == "-U" && i + 1 < args.size()) ppOpt.undefines.push_back(args[++i]);
         else if (a.size() == 3 && a[0] == '-' && a[1] == 'O' && a[2] >= '0' && a[2] <= '3') copt.optLevel = a[2] - '0';
         else if (a == "-q") quiet = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "unknown option: " << a << "\n"; usage(); return 2; }
@@ -148,6 +160,20 @@ int main(int argc, char* argv[])
         }
     }
     if (inputs.empty()) { usage(); return 2; }
+
+    if (preprocessOnly) {
+        // version 6: run the preprocessor alone and print the result like cl /EP
+        int rc = 0;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            Preprocessor pp(ppOpt);
+            if (!pp.run(inputs[i])) rc = 1;
+            std::cout << pp.text();
+            const std::vector<PpDiag>& d = pp.diagnostics();
+            for (size_t k = 0; k < d.size(); ++k)
+                std::cerr << d[k].file << "(" << d[k].line << "): " << (d[k].severity == PpDiag::Error ? "error" : "warning") << ": " << d[k].message << "\n";
+        }
+        return rc;
+    }
 
     CodeBase cb;
     cb.setFollowIncludes(follow);

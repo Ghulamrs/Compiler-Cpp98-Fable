@@ -313,6 +313,42 @@ try {
     }
     if ($failed -ne 0) { throw "$failed mangling check(s) failed" }
 
+    Write-Host "=== Test 10: version 6 preprocessor (-E against cl /EP) ==="
+    $failed = 0
+    Push-Location "..\cppparse\sample-pp"
+    try {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"   # cl prints the file name on stderr
+        $clPp = & $cl /nologo /EP /Iinc pp.cpp 2>$null | Out-String
+        $ErrorActionPreference = $eap
+        # Start-Process captures stderr reliably (a plain 2> redirection loses it under SilentlyContinue)
+        $p = Start-Process -FilePath "$Sandbox\cppparse.exe" -ArgumentList '-E','-I','inc','pp.cpp' -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$Sandbox\out\par\pp-out.txt" -RedirectStandardError "$Sandbox\out\par\pp-diag.txt"
+        $rc = $p.ExitCode
+    } finally { Pop-Location }
+    $ourPp = Get-Content "$Sandbox\out\par\pp-out.txt" -Raw
+    # cl /EP passes #pragma lines through; cppparse consumes them
+    $norm = { param($s) ($s -split "`r?`n") | ForEach-Object { $_ -replace '\s', '' } | Where-Object { $_ -ne '' -and $_ -notmatch '^#pragma' } }
+    $a = @(& $norm $clPp); $b = @(& $norm $ourPp)
+    $same = 0; $diff = 0
+    for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) { if ($i -lt $a.Count -and $i -lt $b.Count -and $a[$i] -eq $b[$i]) { $same++ } else { $diff++ } }
+    if ($rc -eq 0 -and $diff -eq 0 -and $same -gt 20) { Write-Host "  ok   cppparse -E matches cl /EP on sample-pp ($same lines)" }
+    else {
+        Write-Host "  FAIL preprocessor output differs from cl /EP (exit $rc, $same same, $diff different):"
+        $shown = 0
+        for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count) -and $shown -lt 10; $i++) { if ($i -ge $a.Count -or $i -ge $b.Count -or $a[$i] -ne $b[$i]) { Write-Host "    [$i] cl: $($a[$i])"; Write-Host "    [$i] us: $($b[$i])"; $shown++ } }
+        Get-Content "$Sandbox\out\par\pp-diag.txt" | Select-Object -First 10 | ForEach-Object { Write-Host "    diag: $_" }
+        $failed++
+    }
+    $diagText = Get-Content "$Sandbox\out\par\pp-diag.txt" -Raw -ErrorAction SilentlyContinue
+    if ($diagText -match 'error') { Write-Host "  FAIL preprocessor reported errors:"; Write-Host $diagText; $failed++ } else { Write-Host "  ok   no preprocessor errors" }
+    # #error and a missing include are reported
+    "#include ""nothere.h""`n#if 1`n#error stop here`n#endif`n" | Out-File -Encoding ascii "out\par\bad.cpp"
+    $p = Start-Process -FilePath "$Sandbox\cppparse.exe" -ArgumentList '-E',('"' + "$Sandbox\out\par\bad.cpp" + '"') -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$Sandbox\out\par\bad-out.txt" -RedirectStandardError "$Sandbox\out\par\bad-diag.txt"
+    $rc = $p.ExitCode
+    $bad = Get-Content "$Sandbox\out\par\bad-diag.txt" -Raw
+    if ($rc -ne 0 -and $bad -match 'error: #error stop here' -and $bad -match 'include file not found: "nothere.h"') { Write-Host "  ok   #error and missing include diagnosed" }
+    else { Write-Host "  FAIL diagnostics (exit $rc):"; Write-Host $bad; $failed++ }
+    if ($failed -ne 0) { throw "$failed preprocessor check(s) failed" }
+
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"

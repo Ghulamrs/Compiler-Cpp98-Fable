@@ -394,6 +394,23 @@ try {
     if ($bad.Count -eq 0) { Write-Host "  ok   no semantic errors outside std:: uses" } else { Write-Host "  FAIL unexpected semantic errors:"; $bad | ForEach-Object { Write-Host "    $($_.Line.Trim())" }; $failed++ }
     if ($failed -ne 0) { throw "$failed sema check(s) failed" }
 
+    Write-Host "=== Test 13: version 6 compile (--compile6 --obj --msvc-mangling, native driver) ==="
+    $failed = 0
+    foreach ($lvl in @(0, 2)) {
+        $obj = "out\x64\v6o${lvl}6.obj"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = .\cppparse.exe --compile6 "-O$lvl" --obj --msvc-mangling -o out\x64 -n "v6o$lvl" "..\cppparse\sample-opt\opt.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        Write-Host "  ok   version 6 pipeline produced $obj (-O$lvl)"
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\v6driver$lvl.exe" "..\cppparse\sample-opt-driver\driver-native.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the native driver with the version 6 object:"; Write-Host $clOut; $failed++; continue }
+        $run = & ".\out\x64\v6driver$lvl.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   v6driver$lvl.exe: all results correct (-O$lvl, version 6 front end)" }
+        else { Write-Host "  FAIL v6driver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
+    }
+    if ($failed -ne 0) { throw "$failed version 6 compile check(s) failed" }
+
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"

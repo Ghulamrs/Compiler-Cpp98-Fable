@@ -28,10 +28,16 @@
 #include <string>
 
 namespace cppparse {
+namespace sema { struct Symbol; }
 
 std::string msvcMangleFunction(const FunctionInfo& f, TypeTable& types);
 std::string msvcMangleVariable(const VariableInfo& v, TypeTable& types);   // globals and static data members
 std::string msvcMangleVtable(const std::string& qualifiedClassName);
+
+// the same decoration from the version 6 symbols (MangleSema.cpp)
+std::string msvcMangleSymbol(const sema::Symbol& fn);
+std::string msvcMangleVariableSymbol(const sema::Symbol& v);
+std::string msvcMangleVtableSymbol(const sema::Symbol& c);
 
 } // namespace cppparse
 

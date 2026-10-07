@@ -34,6 +34,8 @@
 #include "Pp.hpp"
 #include "CxxParser.hpp"
 #include "Sema.hpp"
+#include "IrGen.hpp"
+#include "BackEnd.hpp"
 #include "Report.hpp"
 #include "Symbols.hpp"
 
@@ -79,6 +81,8 @@ void usage()
         "                   and write <name>-ast6.txt when -o or -n is given\n"
         "  --sema6          version 6: --parse6 plus semantic analysis; prints counts and S-coded diagnostics,\n"
         "                   and writes <name>-sym6.txt (symbols, layouts, vtables, instantiations)\n"
+        "  --compile6       version 6: --sema6 plus IR generation and the back end: <name>-ir6.txt, -opt6.log,\n"
+        "                   -asm6.txt, <name>6.asm (and <name>6.obj with --obj); -O, --msvc-mangling apply\n"
         "  -I <dir>         version 6: include directory for the preprocessor (also -Idir)\n"
         "  -D NAME[=value]  version 6: predefine a macro (also -DNAME=value); -U NAME undefines one\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
@@ -116,7 +120,7 @@ int main(int argc, char* argv[])
     int threads = hardwareThreads();
     bool threadsGiven = false;
     bool ok0 = true;
-    bool preprocessOnly = false, parse6 = false, sema6 = false;
+    bool preprocessOnly = false, parse6 = false, sema6 = false, compile6 = false;
     PpOptions ppOpt;
     CompileOptions copt;
     ReportOptions opt;
@@ -153,6 +157,7 @@ int main(int argc, char* argv[])
         else if (a == "-E" || a == "--preprocess") preprocessOnly = true;
         else if (a == "--parse6") parse6 = true;
         else if (a == "--sema6") { parse6 = true; sema6 = true; }
+        else if (a == "--compile6") { parse6 = true; sema6 = true; compile6 = true; }
         else if (a == "-I" && i + 1 < args.size()) ppOpt.includeDirs.push_back(args[++i]);
         else if (a.size() > 2 && a[0] == '-' && a[1] == 'I') ppOpt.includeDirs.push_back(a.substr(2));
         else if (a == "-D" && i + 1 < args.size()) ppOpt.defines.push_back(args[++i]);
@@ -218,10 +223,34 @@ int main(int argc, char* argv[])
                     std::cout << "  " << (sd[k].loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(sd[k].loc.file)] : "?") << "(" << sd[k].loc.line << "): "
                               << (sd[k].severity == sema::Diag::Error ? "error" : "warning") << " " << sd[k].code << ": " << sd[k].message << "\n";
                 totalErrors += sema.errorCount();
-                if (!outDir.empty() || !outName.empty()) {
-                    std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
-                    std::vector<std::string> written;
-                    writeOut(base + "-sym6.txt", sema.dumpSymbols(), quiet, written);
+                std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
+                std::vector<std::string> written;
+                if (!outDir.empty() || !outName.empty()) writeOut(base + "-sym6.txt", sema.dumpSymbols(), quiet, written);
+                if (compile6) {
+                    // version 6 stage 4: IR from the analysed tree, then the shared back end
+                    IrGen gen(program, types);
+                    std::vector<IrFunction*> functions;
+                    gen.generate(functions);
+                    X86Module x86(copt.msvcNames);
+                    gen.registerMetadata(x86, copt.msvcNames);
+                    BackEndOptions bo;
+                    bo.optLevel = copt.optLevel; bo.threads = copt.threads; bo.x86 = copt.x86;
+                    BackEndResult br;
+                    runBackEnd(functions, &x86, bo, br);
+                    std::cout << "  compile6: " << gen.functionsGenerated() << " function(s), IR " << br.irBefore << " -> " << br.irAfter << " instructions, assembly " << br.asmInstructions << ", spills " << br.spills << "\n";
+                    for (size_t k = 0; k < gen.notes().size() && k < 10; ++k) std::cout << "  note: " << gen.notes()[k] << "\n";
+                    writeOut(base + "-ir6.txt", br.irText, quiet, written);
+                    writeOut(base + "-opt6.log", br.log, quiet, written);
+                    writeOut(base + "-asm6.txt", br.asmText, quiet, written);
+                    if (copt.x86) {
+                        writeOut(base + "6.asm", br.x86Text, quiet, written);
+                        if (obj) {
+                            CoffResult cr;
+                            if (writeCoffObject(br.x86Text, base + "6.obj", copt.threads, cr)) { if (!quiet) std::cout << "  wrote " << base << "6.obj\n"; }
+                            else { std::cerr << "error: " << base << "6.obj not written:\n"; for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n"; totalErrors += 1; }
+                        }
+                    }
+                    for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
                 }
             }
             if (!outDir.empty() || !outName.empty()) {

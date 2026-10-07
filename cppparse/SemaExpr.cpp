@@ -351,6 +351,11 @@ Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::E
     fn->instantiatedFrom = tmpl;
     fn->ownerClass = tmpl->ownerClass;
     fn->isDependentContext = false;
+    for (size_t i = 0; i < tmpl->templateParams.size(); ++i) {
+        const std::string& pn = tmpl->templateParams[i]->name;
+        fn->templateArgs.push_back(bind.count(pn) ? bind[pn] : 0);
+        fn->templateIntArgs.push_back(ints.count(pn) ? ints[pn] : 0);
+    }
     tmpl->instantiations[key] = fn;
     ++m_stats.functionInstantiations;
     if (copy->kind == cxx::Decl::Function) {

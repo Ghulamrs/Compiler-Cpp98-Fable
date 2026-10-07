@@ -77,6 +77,9 @@ dashed box = base class not defined in the parsed files.
 --obj            write the .obj with cppparse's own COFF writer (version 5)
 --msvc-mangling  MSVC-compatible decorated names, so MSVC code links with plain C++ declarations
 -E               version 6: preprocess only and print the result (like cl /EP)
+--parse6         version 6: parse with the new front end (counts, syntax errors, <name>-ast6.txt)
+--sema6          version 6: --parse6 plus semantic analysis (<name>-sym6.txt)
+--compile6       version 6: --sema6 plus IR generation and the back end (<name>6.asm, <name>6.obj with --obj)
 -I <dir>         include directory for the preprocessor
 -D NAME[=value]  predefine a macro; -U NAME undefines one
 -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)
@@ -372,8 +375,10 @@ as the acceptance bar:
 3. **Semantic analysis** (`Sema.*`, `SemaExpr.*`, first version done):
    real types, scopes, name lookup, overload resolution and template
    instantiation on the AST.
-4. **IR generation** from the new AST, then the existing back end.
-5. **Reports** rebuilt on the new AST.
+4. **IR generation** (`IrGen.*`, `--compile6`, done): from the analysed
+   tree into the shared back end.
+5. **Library headers**: cppparse's own C++98 `std` and C headers.
+6. **Reports** rebuilt on the new AST, and the version 4 and 5 gaps.
 
 Every stage works per translation unit and runs on the worker pool.
 The long-term target is a complete C++98 compiler that compiles
@@ -470,6 +475,27 @@ and `maxOf<int>` instantiated with the right layouts) and the VS2010
 sample. On cppparse's own sources every remaining diagnostic names a
 type or function from a header that is not available (`std::`, the C
 library, the Windows API): the next stage supplies those headers.
+
+**IR generation** (`IrGen.cpp`, `--compile6`): walks every function
+with a body, template instantiations and the implicit special members
+that are used, and produces the same IR the old builder did, but with
+every fact taken from the sema annotations: resolved symbols, field
+offsets (with base-class adjustment), vtable slots for virtual calls,
+chosen constructors and conversions, class layouts, throw descriptors.
+Functions returning a class by value take a hidden result pointer;
+reference parameters and results are addresses; class objects are
+copied bytewise where C++ would call a copy constructor (a listed gap).
+The IR still carries the old front end's `Type` objects through an
+adapter, so the optimiser, SSA, lowering, x86-64 and COFF stages run
+unchanged. `--compile6` runs the whole version 6 pipeline and writes
+`<name>-ir6.txt`, `-opt6.log`, `-asm6.txt`, `<name>6.asm` and, with
+`--obj`, `<name>6.obj`; `--msvc-mangling` uses a second mangler
+(`MangleSema.cpp`) driven by the sema symbols, so template instances
+and nested scopes get their decorated names from structure rather than
+text. Test 13 compiles `sample-opt` through the version 6 pipeline at
+`-O0` and `-O2`, links the object with the native-declaration driver
+and the exception runtime, and runs it: all 19 checks pass, including
+templates and exceptions.
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

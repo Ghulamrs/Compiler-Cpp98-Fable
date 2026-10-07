@@ -342,6 +342,22 @@ every function symbol cl defines is spelled identically in cppparse's
 object, then links `sample-opt-driver/driver-native.cpp`, which declares
 the functions as plain C++, against cppparse's object and runs it.
 
+## Source layout
+
+- `cppparse/`: the version 6 pipeline and the shared back end:
+  `Pp` (preprocessor), `CxxAst`/`CxxParser` (syntax tree and parser),
+  `Sema`/`SemaExpr` (semantic analysis), `Ir` (the intermediate
+  representation), `Optimizer`, `Ssa`, `Lower` (VM64), `X86`, `Coff`,
+  `Mangle`, `BackEnd` (the shared driver), `Parallel`, `PathUtil`,
+  `main`, and `runtime/` (the exception runtime).
+- `cppparse/legacy/`: the version 1 to 5 front end and the reports,
+  kept until the version 6 pipeline replaces them: `Lexer`, `Parser`,
+  `Model`, `CodeBase`, `ProjectReader`, `Report`, `Html`, `Pdf`,
+  `Diagram`, `Symbols`, `Health`, `Ast`, `BodyParser`, `TypeCheck`,
+  `Types`, `Instantiate`, `IrBuilder` (old IR generation and class
+  layouts) and `Compiler` (the old driver). They compile with the rest
+  (`/I legacy`) and are exercised by tests 1 to 9.
+
 ## Version 6: a clean front end (in progress)
 
 Versions 1 to 5 grew a compiler out of a declaration reader. Version 6

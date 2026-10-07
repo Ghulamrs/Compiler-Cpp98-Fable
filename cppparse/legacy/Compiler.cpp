@@ -12,7 +12,7 @@
 #include "BackEnd.hpp"
 #include "BodyParser.hpp"
 #include "Instantiate.hpp"
-#include "Ir.hpp"
+#include "IrBuilder.hpp"
 #include "Lower.hpp"
 #include "Mangle.hpp"
 #include "Optimizer.hpp"

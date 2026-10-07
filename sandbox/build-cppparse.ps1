@@ -46,8 +46,8 @@ try {
     New-Item -ItemType Directory -Force "out\files"    | Out-Null
 
     Write-Host "=== Building cppparse.exe ==="
-    $sources = Get-ChildItem "..\cppparse\*.cpp" | ForEach-Object { "..\cppparse\" + $_.Name }
-    $output = & $cl /nologo /EHsc /W4 /permissive- /O2 /I..\cppparse "/Foobj\cppparse\" "/Fecppparse.exe" @sources 2>&1 | Out-String
+    $sources = @(Get-ChildItem "..\cppparse\*.cpp" | ForEach-Object { "..\cppparse\" + $_.Name }) + @(Get-ChildItem "..\cppparse\legacy\*.cpp" | ForEach-Object { "..\cppparse\legacy\" + $_.Name })
+    $output = & $cl /nologo /EHsc /W4 /permissive- /O2 /I..\cppparse /I..\cppparse\legacy "/Foobj\cppparse\" "/Fecppparse.exe" @sources 2>&1 | Out-String
     Write-Host $output
     if ($LASTEXITCODE -ne 0) { throw "cppparse failed to compile (exit code $LASTEXITCODE)" }
     if ($output -match "warning C") { throw "cppparse compiled with warnings (W4 must be clean)" }
@@ -241,7 +241,7 @@ try {
     Write-Host "=== Test 7: version 5 parallel pipeline (wildcards, @response file, -j determinism) ==="
     New-Item -ItemType Directory -Force "out\par" | Out-Null
     $failed = 0
-    @("# response file written by the test", "..\cppparse\*.cpp", "..\cppparse\*.hpp", "-O3", "-q") | Out-File -Encoding ascii "out\par\list.rsp"
+    @("# response file written by the test", "..\cppparse\*.cpp", "..\cppparse\*.hpp", "..\cppparse\legacy\*.cpp", "..\cppparse\legacy\*.hpp", "-O3", "-q") | Out-File -Encoding ascii "out\par\list.rsp"
     $null = .\cppparse.exe -j 1 -o out\par -n j1 "@out\par\list.rsp"
     if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL -j 1 run exited with $LASTEXITCODE"; $failed++ }
     $null = .\cppparse.exe -j 12 -o out\par -n j12 "@out\par\list.rsp"
@@ -365,7 +365,8 @@ try {
     $p6 = .\cppparse.exe --parse6 -I ..\cppparse\sample\include "..\cppparse\sample\src\main.cpp" "..\cppparse\sample\src\Shape.cpp" 2>&1 | Out-String
     if (($p6 | Select-String ' 0 syntax error' -AllMatches).Matches.Count -eq 2) { Write-Host "  ok   the VS2010 sample (namespaces, templates, operators, virtual bases) parses without errors" }
     else { Write-Host "  FAIL sample:"; Write-Host $p6; $failed++ }
-    $own = .\cppparse.exe --parse6 (Get-ChildItem "..\cppparse\*.cpp" | ForEach-Object { $_.FullName }) 2>&1 | Out-String
+    $ownList = @(Get-ChildItem "..\cppparse\*.cpp" | ForEach-Object { $_.FullName }) + @(Get-ChildItem "..\cppparse\legacy\*.cpp" | ForEach-Object { $_.FullName })
+    $own = .\cppparse.exe --parse6 -I ..\cppparse -I ..\cppparse\legacy $ownList 2>&1 | Out-String
     $ownErrors = ($own | Select-String '\): error' -AllMatches).Matches.Count
     $ownFiles = ($own | Select-String ' 0 syntax error' -AllMatches).Matches.Count
     if ($ownErrors -eq 0 -and $ownFiles -ge 30) { Write-Host "  ok   all $ownFiles of cppparse's own sources parse without syntax errors (self-hosting step 1)" }

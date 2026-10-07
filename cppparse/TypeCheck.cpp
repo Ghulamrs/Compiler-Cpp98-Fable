@@ -1,5 +1,6 @@
 // TypeCheck.cpp - version 3 type checker.
 #include "TypeCheck.hpp"
+#include "Instantiate.hpp"
 #include "PathUtil.hpp"
 
 #include <cstdlib>
@@ -8,7 +9,7 @@ namespace cppparse {
 
 TypeChecker::TypeChecker(const CodeBase& cb, TypeTable& types, std::vector<Finding>& findings)
     : m_cb(cb), m_types(types), m_findings(findings), m_ast(0), m_fn(0), m_owner(0), m_loopDepth(0), m_switchDepth(0), m_errors(0),
-      m_calleeContext(false)
+      m_calleeContext(false), m_receiverConst(false)
 {
     const std::vector<SourceFile*>& files = cb.files();
     for (size_t f = 0; f < files.size(); ++f)
@@ -68,6 +69,10 @@ bool TypeChecker::derivesFrom(const ClassInfo* cls, const ClassInfo* base, int d
 {
     if (!cls || !base || depth > 32) return false;
     if (cls == base) return true;
+    // an instantiation and its template are the same class seen from inside the template
+    // (injected class name), and so are two instantiations of the same template written differently
+    if (!cls->tmpl.specializationArgs.empty() && base->tmpl.isTemplate && startsWith(cls->qualifiedName, base->qualifiedName + "<")) return true;
+    if (!base->tmpl.specializationArgs.empty() && cls->tmpl.isTemplate && startsWith(base->qualifiedName, cls->qualifiedName + "<")) return true;
     for (size_t b = 0; b < cls->bases.size(); ++b) if (derivesFrom(cls->bases[b].resolved, base, depth + 1)) return true;
     return false;
 }
@@ -525,6 +530,9 @@ const Type* TypeChecker::checkName(Expr* e)
                 return m_types.unref(m_ast->paramTypes[p]);
             }
         if (m_owner) {
+            // the injected class name: "Vector(a, b)" inside Vector<double, 3> is a construction
+            for (const ClassInfo* c = m_owner; c; c = c->owner)
+                if (name == c->name || name == stripTemplateArgs(c->name)) { e->sym = Expr::SymType; e->cls = c; return m_types.classType(c); }
             const ClassInfo* owner = 0; int idx = -1;
             if (findField(m_owner, name, owner, idx)) {
                 const VariableInfo& v = owner->fields[static_cast<size_t>(idx)];
@@ -712,9 +720,12 @@ const Type* TypeChecker::callFunction(Expr* e, const std::vector<const FunctionI
         if (!ok) continue;
         if (score < bestScore) { bestScore = score; best = f; bestCount = 1; }
         else if (score == bestScore) {
-            // same signature declared twice (declaration + definition) is not ambiguous
-            bool same = best && best->paramText == f->paramText && best->fullName() == f->fullName();
-            if (!same) ++bestCount;
+            // same signature declared twice (declaration + definition) is not ambiguous; a const and a
+            // non-const overload with the same parameters are chosen by the receiver's constness
+            bool sameParams = best && best->paramText == f->paramText && best->fullName() == f->fullName();
+            if (sameParams && best->isConst != f->isConst) {
+                if (f->isConst == m_receiverConst) best = f;
+            } else if (!sameParams) ++bestCount;
         }
     }
     if (!best) {
@@ -732,6 +743,41 @@ const Type* TypeChecker::callFunction(Expr* e, const std::vector<const FunctionI
     for (size_t c = 0; c < cands.size(); ++c) if (cands[c]->tmpl.isTemplate) templateCandidates = true;
     if (bestCount > 1 && !templateCandidates) add(Finding::Error, "T103", e->line, "call to " + what + " is ambiguous between " + intToString(bestCount) + " overloads");
     e->func = best;
+    // function template: deduce the parameters from the argument types and instantiate
+    if (best->tmpl.isTemplate && !best->ownerClass && m_types.instantiator()) {
+        std::vector<std::string> names, defaults;
+        Instantiator::parameterNames(best->tmpl, names, defaults);
+        Substitution subst;
+        for (size_t a = 0; a < args.size() && a < best->params.size(); ++a) {
+            // the core of "const T&" / "T*" / "T" is the first word that is not const
+            std::string pt = best->params[a].type;
+            int ptrDepth = 0;
+            for (size_t k = 0; k < pt.size(); ++k) if (pt[k] == '*') ++ptrDepth;
+            std::string core, word;
+            for (size_t k = 0; k <= pt.size() && core.empty(); ++k) {
+                char c = k < pt.size() ? pt[k] : ' ';
+                if (isalnum(static_cast<unsigned char>(c)) || c == '_') { word += c; continue; }
+                if (!word.empty() && word != "const" && word != "volatile") core = word;
+                word.clear();
+            }
+            bool isParam = false;
+            for (size_t n = 0; n < names.size(); ++n) if (names[n] == core) isParam = true;
+            if (!isParam || !args[a]->type) continue;
+            const Type* at = m_types.decay(args[a]->type);
+            for (int d = 0; d < ptrDepth && at && at->kind == Type::Pointer; ++d) at = at->inner;
+            if (!at || at->isUnknown()) continue;
+            std::string deduced = m_types.withConst(at, false)->str();
+            if (deduced.compare(0, 5, "enum ") == 0) deduced = deduced.substr(5);
+            if (!subst.count(core)) subst[core] = deduced;
+        }
+        for (size_t n = 0; n < names.size(); ++n) if (!subst.count(names[n]) && !defaults[n].empty()) subst[names[n]] = defaults[n];
+        bool complete = true;
+        for (size_t n = 0; n < names.size(); ++n) if (!subst.count(names[n])) complete = false;
+        if (complete) {
+            FunctionInfo* inst = m_types.instantiator()->instantiateFunction(best, subst, m_types);
+            if (inst) { e->func = inst; best = inst; }
+        }
+    }
     // typed argument conversions (narrowing warnings)
     const ClassInfo* owner = best->ownerClass;
     for (size_t a = 0; a < args.size() && a < best->params.size(); ++a) {
@@ -759,7 +805,9 @@ const Type* TypeChecker::checkCall(Expr* e)
             std::vector<const FunctionInfo*> methods;
             findMethods(cls, callee->text, methods);
             if (methods.empty()) findMethods(callee->cls, callee->text, methods);
+            m_receiverConst = objT->isConst;
             const Type* r = callFunction(e, methods, 1, cls->qualifiedName + "::" + callee->text);
+            m_receiverConst = false;
             if (e->func) {
                 accessible(e->func->ownerClass, e->func->access, callee->text, e->line);
                 if (objT->isConst && !e->func->isConst && !e->func->isStatic)
@@ -798,7 +846,9 @@ const Type* TypeChecker::checkCall(Expr* e)
             std::string simple = lastComponent(callee->text);
             findMethods(cls, simple, methods);
             if (methods.empty() && m_owner) findMethods(m_owner, simple, methods);
+            m_receiverConst = m_fn && m_fn->isConst && callee->text.find("::") == std::string::npos;
             const Type* r = callFunction(e, methods, 1, cls->qualifiedName + "::" + simple);
+            m_receiverConst = false;
             if (e->func) {
                 accessible(e->func->ownerClass, e->func->access, simple, e->line);
                 if (m_fn && m_fn->isConst && !e->func->isConst && !e->func->isStatic && m_owner && callee->text.find("::") == std::string::npos)
@@ -841,7 +891,9 @@ const Type* TypeChecker::classOperator(Expr* e, const char* opName, const std::v
             tmp.line = e->line;
             tmp.kids.push_back(operands[0]);
             for (size_t i = 1; i < operands.size(); ++i) tmp.kids.push_back(operands[i]);
+            m_receiverConst = lt->isConst;
             const Type* r = callFunction(&tmp, methods, 1, lt->cls->qualifiedName + "::" + opName);
+            m_receiverConst = false;
             e->func = tmp.func;
             e->cls = lt->cls;
             if (tmp.func && lt->isConst && !tmp.func->isConst)

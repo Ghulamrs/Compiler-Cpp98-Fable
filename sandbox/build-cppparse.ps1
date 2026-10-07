@@ -204,6 +204,9 @@ try {
     $asmS = Get-Content "out\sample\Sample-asm.txt" -Raw
     if ($asmS -match 'vptr') { Write-Host "  ok   virtual call lowered through the vtable (Sample)" } else { Write-Host "  FAIL no vtable call in Sample-asm.txt"; $failed++ }
     if ($ir2 -match '= phi ') { Write-Host "  ok   SSA form with phi nodes in the IR dump" } else { Write-Host "  FAIL no phi nodes in the -O2 IR dump"; $failed++ }
+    $irS = Get-Content "out\sample\Sample-ir.txt" -Raw
+    if ($irS -match 'function util::FixedStack<double, 32>::push') { Write-Host "  ok   class template instantiated and compiled (FixedStack<double, 32>::push)" } else { Write-Host "  FAIL FixedStack<double, 32>::push not instantiated"; $failed++ }
+    if ($ir2 -match 'function maxOf<int>' -and $ir2 -match 'Buffer<int, 4>::add') { Write-Host "  ok   function template deduced and instantiated (maxOf<int>, Buffer<int, 4>)" } else { Write-Host "  FAIL template instantiation in sample-opt"; $failed++ }
     if ($log2 -match 'global value numbering|SSA construction') { Write-Host "  ok   SSA passes logged" } else { Write-Host "  FAIL SSA passes missing from the log"; $failed++ }
     if ($failed -ne 0) { throw "$failed version 3 check(s) failed" }
 

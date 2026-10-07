@@ -20,8 +20,9 @@ struct CompileOptions {
 struct CompileSummary {
     int functionsSeen, functionsCompiled, functionsSkipped, parseFailures, typeFailures;
     int irBefore, irAfter, asmInstructions, spills;
+    int classInstantiations, functionInstantiations;
     CompileSummary() : functionsSeen(0), functionsCompiled(0), functionsSkipped(0), parseFailures(0), typeFailures(0),
-                       irBefore(0), irAfter(0), asmInstructions(0), spills(0) {}
+                       irBefore(0), irAfter(0), asmInstructions(0), spills(0), classInstantiations(0), functionInstantiations(0) {}
 };
 
 class Compiler {

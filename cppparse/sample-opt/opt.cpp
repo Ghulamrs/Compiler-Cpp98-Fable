@@ -85,3 +85,32 @@ unsigned pick(unsigned flags)              // switch dispatch
     default: return 30u;
     }
 }
+
+// version 4: templates are instantiated and compiled per use
+template <typename T>
+T maxOf(const T& a, const T& b)
+{
+    return a < b ? b : a;
+}
+
+template <typename T, int N>
+struct Buffer {
+    T   items[N];
+    int count;
+    Buffer() : count(0) {}
+    void add(const T& v) { items[count] = v; ++count; }
+    T total() const
+    {
+        T s = 0;
+        for (int i = 0; i < count; ++i) s += items[i];
+        return s;
+    }
+};
+
+int useTemplates()                         // Buffer<int, 4> and maxOf<int>: 3 + 4 + 7 = 14
+{
+    Buffer<int, 4> b;
+    b.add(3);
+    b.add(4);
+    return b.total() + maxOf(7, 2);
+}

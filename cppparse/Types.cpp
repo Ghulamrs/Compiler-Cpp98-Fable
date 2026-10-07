@@ -1,5 +1,6 @@
 // Types.cpp - interned types and declaration-text parsing.
 #include "Types.hpp"
+#include "Instantiate.hpp"
 #include "PathUtil.hpp"
 
 #include <cctype>
@@ -73,7 +74,7 @@ std::string Type::key() const
 
 // ---- table --------------------------------------------------------------------
 
-TypeTable::TypeTable(const CodeBase& cb) : m_cb(cb), m_depth(0)
+TypeTable::TypeTable(const CodeBase& cb) : m_cb(cb), m_depth(0), m_instantiator(0)
 {
     indexTypedefsAndEnums();
 }
@@ -270,6 +271,19 @@ const Type* TypeTable::parse(const std::string& text, const std::string& scope, 
 {
     if (m_depth > 16) return unknown(text);
     ++m_depth;
+    // template arguments of the base type, taken from the raw text so that expressions
+    // such as "R - 1" survive
+    std::string rawArgs;
+    {
+        size_t lt = text.find('<');
+        if (lt != std::string::npos) {
+            int d = 0;
+            for (size_t k = lt; k < text.size(); ++k) {
+                if (text[k] == '<') ++d;
+                else if (text[k] == '>') { --d; if (d == 0) { rawArgs = text.substr(lt + 1, k - lt - 1); break; } }
+            }
+        }
+    }
     std::vector<Word> words;
     splitType(text, words);
 
@@ -277,6 +291,7 @@ const Type* TypeTable::parse(const std::string& text, const std::string& scope, 
     int longs = 0;
     Type::Kind kind = Type::Unknown;
     std::string name;
+    std::string templateArgs;
     size_t i = 0;
     bool haveBase = false;
 
@@ -312,13 +327,17 @@ const Type* TypeTable::parse(const std::string& text, const std::string& scope, 
         if (haveBase && kind != Type::Unknown) break;   // "int x" style trailing identifiers are not part of the type
         name = t;
         haveBase = true;
-        // skip template arguments
+        // template arguments: kept as text for instantiation
         if (i + 1 < words.size() && words[i + 1].text == "<") {
             int d = 0;
             for (++i; i < words.size(); ++i) {
-                if (words[i].text == "<") ++d;
-                else if (words[i].text == ">") { --d; if (d == 0) break; }
+                if (words[i].text == "<") { ++d; if (d > 1) templateArgs += "<"; continue; }
+                if (words[i].text == ">") { --d; if (d == 0) break; templateArgs += ">"; continue; }
+                if (!templateArgs.empty() && !words[i].punct && templateArgs[templateArgs.size() - 1] != '<' && templateArgs[templateArgs.size() - 1] != ' ') templateArgs += " ";
+                templateArgs += words[i].text;
+                if (words[i].text == ",") templateArgs += " ";
             }
+            if (!rawArgs.empty()) templateArgs = rawArgs;
         }
         ++i;
         break;
@@ -352,7 +371,20 @@ const Type* TypeTable::parse(const std::string& text, const std::string& scope, 
             base = enumType(lastComponent(name));
         } else {
             const ClassInfo* cls = m_cb.findClass(lookupScope, name);
-            if (cls) base = classType(cls);
+            if (cls && cls->tmpl.isTemplate && cls->isDefinition && cls->tmpl.specializationArgs.empty()) {
+                // a class template: instantiate with the written arguments, or, inside the
+                // template's own instantiation, refer to the current instantiation
+                const ClassInfo* inst = 0;
+                bool insideTemplate = false;   // the injected class name inside the template itself
+                for (const ClassInfo* o = owner; o; o = o->owner) if (o == cls) insideTemplate = true;
+                if (!templateArgs.empty() && m_instantiator) inst = m_instantiator->instantiateClass(cls, templateArgs, *this);
+                if (!inst && templateArgs.empty())
+                    for (const ClassInfo* o = owner; o; o = o->owner)
+                        if (startsWith(o->name, cls->name + "<")) { inst = o; break; }
+                if (!inst && templateArgs.empty() && !insideTemplate && m_instantiator) inst = m_instantiator->instantiateClass(cls, "", *this);   // all defaulted?
+                base = inst ? classType(inst) : classType(cls);
+            }
+            else if (cls) base = classType(cls);
             else base = unknown(stripTemplateArgs(name));
         }
         base = withConst(base, isConst);

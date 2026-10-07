@@ -20,6 +20,8 @@
 
 namespace cppparse {
 
+class Instantiator;
+
 struct Type {
     enum Kind { Void, Bool, Char, Short, Int, Long, LongLong, Float, Double,
                 Pointer, Reference, Array, Class, Enum, Function, Unknown, Null };
@@ -73,6 +75,8 @@ public:
     const Type* parse(const std::string& text, const std::string& scope, const ClassInfo* owner);
     bool        isTypeName(const std::string& name, const std::string& scope, const ClassInfo* owner);
     void        addTypedef(const std::string& name, const std::string& target) { m_typedefs[name] = target; }
+    void        setInstantiator(Instantiator* inst) { m_instantiator = inst; }
+    Instantiator* instantiator() const { return m_instantiator; }
     void        addEnumerator(const std::string& name, const std::string& enumName, long value) { m_enumerators[name] = std::make_pair(enumName, value); }
     bool        isEnumName(const std::string& name) const { return m_enums.count(name) != 0; }
 
@@ -89,6 +93,7 @@ private:
     std::map<std::string, std::string>  m_enums;        // enum name -> scope
     std::map<std::string, std::pair<std::string, long> > m_enumerators; // name -> (enum, value)
     int                                 m_depth;
+    Instantiator*                       m_instantiator;
 };
 
 } // namespace cppparse

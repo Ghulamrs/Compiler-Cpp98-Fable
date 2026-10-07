@@ -17,6 +17,7 @@ extern "C" {
     int      usePoint();
     int      branches_int_v(int v);
     unsigned pick_unsigned_flags(unsigned flags);
+    int      useTemplates();
 
     // runtime hook used by generated code for "throw"
     void cppparse_throw(void* object)
@@ -54,6 +55,7 @@ int main()
     check("pick(1)", pick_unsigned_flags(1), 20);
     check("pick(6)", pick_unsigned_flags(6), 30);
     check("pick(4)", pick_unsigned_flags(4), 10);
+    check("useTemplates()", useTemplates(), 14);
     if (g_failures) { std::printf("FAILED: %d check(s)\n", g_failures); return 1; }
     std::printf("ALL OK\n");
     return 0;

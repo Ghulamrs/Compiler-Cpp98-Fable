@@ -350,14 +350,60 @@ end (IR, optimiser, SSA, x86-64, COFF, runtime) and the execution tests
 as the acceptance bar:
 
 1. **Preprocessor** (`Pp.cpp`, done): translation phases 1 to 4.
-2. **Lexer and grammar parser**: one parser for declarations and
-   statements, producing a single AST for whole translation units.
+2. **Grammar parser** (`CxxAst.*`, `CxxParser.*`, done): one parser for
+   declarations and statements, producing a single AST for whole
+   translation units.
 3. **Semantic analysis**: real types, scopes, name lookup, overload
    resolution and template instantiation on the AST.
 4. **IR generation** from the new AST, then the existing back end.
 5. **Reports** rebuilt on the new AST.
 
 Every stage works per translation unit and runs on the worker pool.
+The long-term target is a complete C++98 compiler that compiles
+itself, so every stage is measured against cppparse's own sources.
+
+Version 6 is finished only when every compilation gap left by versions
+4 and 5 is closed:
+
+- templates: member templates and partial specialisations, and
+  instantiation on the AST instead of by token substitution;
+- function-try-blocks and friend functions defined inside a class,
+  which the old front end skips;
+- real declarations for the standard library (cppparse's own C++98
+  headers: `vector`, `string`, `map`, `set`, `cstdio`, ...), which also
+  removes the untyped library-call results of the old front end;
+- exceptions: destructors run during unwinding, thrown objects copied
+  with their copy constructors, a per-thread frame stack;
+- COFF: `.pdata`/`.xdata` unwind tables and line information;
+- mangling: function-pointer parameter lists, member pointers, varargs;
+- the type checker replaced by real semantic analysis (scopes, lookup,
+  overload resolution, conversions, templates).
+
+**Parser** (`CxxParser.cpp`, `--parse6`): a recursive-descent parser for
+the C++98 grammar over the preprocessor's tokens, producing the
+`cxx::TranslationUnit` tree of `CxxAst.hpp`: declarations with
+decl-specifiers and declarators (pointers, references, arrays,
+functions, member pointers, nested declarators, bit-fields, exception
+specifications), classes with bases and access, enums, namespaces,
+using declarations and directives, templates (type, non-type and
+template template parameters, specialisations, instantiations),
+linkage specifications, all statements, and all expressions including
+casts, `new`/`delete`, `sizeof`, `typeid` and `throw`. The parser keeps
+a scope stack of the type names it has seen (typedefs, classes, enums,
+template parameters, injected class names, names brought in by using
+directives and anonymous namespaces) and the members of every named
+class or namespace, so `T * x` is a declaration only when `T` is a type,
+constructors are recognised by their name, out-of-line members see
+their class's nested types, and reopened namespaces remember their
+earlier parts. Unknown qualified names such as `std::vector<int>` are
+accepted as types where the syntax demands one, so sources parse without
+the standard headers; the C library typedefs (`size_t`, `FILE`, ...) are
+assumed. Ambiguous statements, casts, `sizeof` and `new` placements use
+tentative parsing. After a syntax error the parser skips to the next
+`;` or `}` and continues. `--parse6` prints token and node counts with
+the syntax errors and writes `<name>-ast6.txt`. Test 11 parses
+`sample-opt`, the VS2010 sample and all 30 of cppparse's own sources
+with zero syntax errors, and checks error recovery on `sample-bad`.
 
 **Preprocessor** (`Pp.cpp`, `-E`, `-I`, `-D`, `-U`): line splices,
 comments, pp-tokens, `#include` (quoted form searched next to the

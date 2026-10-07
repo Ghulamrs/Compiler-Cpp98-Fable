@@ -32,6 +32,7 @@
 #include "PathUtil.hpp"
 #include "Pdf.hpp"
 #include "Pp.hpp"
+#include "CxxParser.hpp"
 #include "Report.hpp"
 #include "Symbols.hpp"
 
@@ -73,6 +74,8 @@ void usage()
         "  --msvc-mangling  version 5: MSVC-compatible decorated names (?square@@YAHH@Z) so MSVC code links with plain C++ declarations\n"
         "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)\n"
         "  -E               version 6: preprocess the input files only and print the result (like cl /EP)\n"
+        "  --parse6         version 6: preprocess and parse with the new front end; print counts and syntax errors,\n"
+        "                   and write <name>-ast6.txt when -o or -n is given\n"
         "  -I <dir>         version 6: include directory for the preprocessor (also -Idir)\n"
         "  -D NAME[=value]  version 6: predefine a macro (also -DNAME=value); -U NAME undefines one\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
@@ -110,7 +113,7 @@ int main(int argc, char* argv[])
     int threads = hardwareThreads();
     bool threadsGiven = false;
     bool ok0 = true;
-    bool preprocessOnly = false;
+    bool preprocessOnly = false, parse6 = false;
     PpOptions ppOpt;
     CompileOptions copt;
     ReportOptions opt;
@@ -145,6 +148,7 @@ int main(int argc, char* argv[])
         else if (a == "--obj") obj = true;
         else if (a == "--msvc-mangling") copt.msvcNames = true;
         else if (a == "-E" || a == "--preprocess") preprocessOnly = true;
+        else if (a == "--parse6") parse6 = true;
         else if (a == "-I" && i + 1 < args.size()) ppOpt.includeDirs.push_back(args[++i]);
         else if (a.size() > 2 && a[0] == '-' && a[1] == 'I') ppOpt.includeDirs.push_back(a.substr(2));
         else if (a == "-D" && i + 1 < args.size()) ppOpt.defines.push_back(args[++i]);
@@ -160,6 +164,50 @@ int main(int argc, char* argv[])
         }
     }
     if (inputs.empty()) { usage(); return 2; }
+
+    if (parse6) {
+        // version 6: preprocess and parse every input with the new front end; print counts and syntax errors
+        int totalErrors = 0;
+        // calling-convention macros of windows.h, empty when the header is not available
+        ppOpt.defines.push_back("WINAPI=");
+        ppOpt.defines.push_back("CALLBACK=");
+        ppOpt.defines.push_back("APIENTRY=");
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            Preprocessor pp(ppOpt);
+            pp.run(inputs[i]);
+            cxx::CxxArena arena;
+            cxx::TranslationUnit tu;
+            tu.path = inputs[i];
+            cxx::Parser parser(pp.tokens(), arena);
+            // typedefs of the C library (and of windows.h when it was not found) that sources use without
+            // the headers being available: until cppparse ships its own library headers they are assumed
+            static const char* const kCTypes[] = { "size_t", "ptrdiff_t", "FILE", "time_t", "clock_t", "va_list", "jmp_buf", "fpos_t", "div_t", "ldiv_t",
+                                                   "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "intptr_t", "uintptr_t", 0 };
+            static const char* const kWinTypes[] = { "DWORD", "LONG", "ULONG", "LPVOID", "HANDLE", "BOOL", "BYTE", "WORD", "UINT", "INT", "LPCSTR", "LPSTR",
+                                                     "SYSTEM_INFO", "CRITICAL_SECTION", "LPCRITICAL_SECTION", "LPTHREAD_START_ROUTINE", "SIZE_T", "HMODULE", "HWND", "LPARAM", "WPARAM", "LRESULT", 0 };
+            for (int k = 0; kCTypes[k]; ++k) parser.assumeType(kCTypes[k]);
+            bool winMissing = false;
+            for (size_t k = 0; k < pp.missingIncludes().size(); ++k) if (toLower(pp.missingIncludes()[k]) == "windows.h") winMissing = true;
+            if (winMissing) for (int k = 0; kWinTypes[k]; ++k) parser.assumeType(kWinTypes[k]);
+            int errors = parser.parse(tu);
+            totalErrors += errors;
+            cxx::Counts c;
+            cxx::countTranslationUnit(tu, c);
+            std::cout << inputs[i] << ": " << pp.tokens().size() << " tokens, " << errors << " syntax error(s); namespaces " << c.namespaces
+                      << ", classes " << c.classes << ", enums " << c.enums << ", functions defined " << c.functionsDefined << ", declared " << c.functionsDeclared
+                      << ", variables " << c.variables << ", typedefs " << c.typedefs << ", templates " << c.templates << ", statements " << c.statements
+                      << ", expressions " << c.expressions << "\n";
+            const std::vector<cxx::ParseDiag>& d = parser.diagnostics();
+            for (size_t k = 0; k < d.size() && k < 20; ++k)
+                std::cout << "  " << (d[k].file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(d[k].file)] : "?") << "(" << d[k].line << "): error: " << d[k].message << "\n";
+            if (!outDir.empty() || !outName.empty()) {
+                std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
+                std::vector<std::string> written;
+                writeOut(base + "-ast6.txt", cxx::dumpTranslationUnit(tu), quiet, written);
+            }
+        }
+        return totalErrors == 0 ? 0 : 1;
+    }
 
     if (preprocessOnly) {
         // version 6: run the preprocessor alone and print the result like cl /EP

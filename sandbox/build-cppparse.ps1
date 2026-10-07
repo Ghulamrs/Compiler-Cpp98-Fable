@@ -349,6 +349,28 @@ try {
     else { Write-Host "  FAIL diagnostics (exit $rc):"; Write-Host $bad; $failed++ }
     if ($failed -ne 0) { throw "$failed preprocessor check(s) failed" }
 
+    Write-Host "=== Test 11: version 6 parser (--parse6 on the samples and on cppparse's own sources) ==="
+    $failed = 0
+    $p6 = .\cppparse.exe --parse6 -o out\par -n opt6 "..\cppparse\sample-opt\opt.cpp" 2>&1 | Out-String
+    if ($p6 -match ' 0 syntax error\(s\)' -and $p6 -match 'classes 4, enums 0, functions defined 26' -and $p6 -match 'templates 2') { Write-Host "  ok   sample-opt parses without errors (4 classes, 26 functions, 2 templates)" }
+    else { Write-Host "  FAIL sample-opt:"; Write-Host $p6; $failed++ }
+    $ast = Get-Content "out\par\opt6-ast6.txt" -Raw
+    if ($ast -match 'function int square\(int x\)' -and $ast -match 'struct BadIndex : public Failure' -and $ast -match 'template <typename T, int N>' -and $ast -match 'catch \(decl\)' -and $ast -match 'return x \* x') { Write-Host "  ok   AST dump shows functions, bases, templates, handlers and expressions" }
+    else { Write-Host "  FAIL AST dump contents"; $failed++ }
+    $p6 = .\cppparse.exe --parse6 -I ..\cppparse\sample\include "..\cppparse\sample\src\main.cpp" "..\cppparse\sample\src\Shape.cpp" 2>&1 | Out-String
+    if (($p6 | Select-String ' 0 syntax error' -AllMatches).Matches.Count -eq 2) { Write-Host "  ok   the VS2010 sample (namespaces, templates, operators, virtual bases) parses without errors" }
+    else { Write-Host "  FAIL sample:"; Write-Host $p6; $failed++ }
+    $own = .\cppparse.exe --parse6 (Get-ChildItem "..\cppparse\*.cpp" | ForEach-Object { $_.FullName }) 2>&1 | Out-String
+    $ownErrors = ($own | Select-String '\): error' -AllMatches).Matches.Count
+    $ownFiles = ($own | Select-String ' 0 syntax error' -AllMatches).Matches.Count
+    if ($ownErrors -eq 0 -and $ownFiles -ge 30) { Write-Host "  ok   all $ownFiles of cppparse's own sources parse without syntax errors (self-hosting step 1)" }
+    else { Write-Host "  FAIL own sources: $ownErrors error(s):"; ($own | Select-String '\): error') | Select-Object -First 10 | ForEach-Object { Write-Host "    $($_.Line.Trim())" }; $failed++ }
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $bad = .\cppparse.exe --parse6 (Get-ChildItem "..\cppparse\sample-bad\*.cpp" | ForEach-Object { $_.FullName }) 2>&1 | Out-String
+    $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+    if ($rc -ne 0 -and $bad -match 'syntax error' -and $bad -match 'functions defined') { Write-Host "  ok   broken sample: errors reported, parsing continued" } else { Write-Host "  FAIL broken sample handling"; $failed++ }
+    if ($failed -ne 0) { throw "$failed parser check(s) failed" }
+
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"

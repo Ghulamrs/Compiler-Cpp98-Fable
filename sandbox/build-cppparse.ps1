@@ -428,6 +428,27 @@ try {
     if ($failed -ne 0) { throw "$failed version 6 compile check(s) failed" }
 
     Write-Host ""
+    Write-Host "=== Test 14: version 6 object lifetimes (sample-life: destructors, copies, temporaries, unwinding) ==="
+    $failed = 0
+    foreach ($lvl in @(0, 2, 3)) {
+        $obj = "out\x64\life${lvl}6.obj"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -o out\x64 -n "life$lvl" "..\cppparse\sample-life\life.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 of sample-life at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        if ($c6 -match 'sema: 0 error') { Write-Host "  ok   sample-life analysed without errors (-O$lvl)" } else { Write-Host "  FAIL sample-life has semantic errors:"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\lifedriver$lvl.exe" "..\cppparse\sample-life-driver\driver-life.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the lifetime driver:"; Write-Host $clOut; $failed++; continue }
+        $run = & ".\out\x64\lifedriver$lvl.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   lifedriver$lvl.exe: all 24 lifetime checks correct (-O$lvl)" }
+        else { Write-Host "  FAIL lifedriver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
+    }
+    $ir = Get-Content "out\x64\life0-ir6.txt" -Raw
+    if ($ir -match 'call Tracker::~Tracker\(\)' -and $ir -match 'call Text::Text\(const Text&\)' -and $ir -match 'catchparam \.\.\.') { Write-Host "  ok   IR shows destructor calls, copy-constructor calls and the unwind handlers" }
+    else { Write-Host "  FAIL IR lacks destructor / copy-constructor calls or unwind handlers"; $failed++ }
+    if ($failed -ne 0) { throw "$failed object lifetime check(s) failed" }
+
+    Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"
     $global:LASTEXITCODE = 0

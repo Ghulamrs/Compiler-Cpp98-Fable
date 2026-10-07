@@ -596,6 +596,14 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         else { std::string r = use(in.args[0], "rax"); line("mov qword ptr " + slot + ", " + r); line("lea rcx, " + slot); }
         line("lea rdx, " + m_m.stringLabel("\"" + in.sub + "\""));
         line("mov r8, " + intToString(static_cast<int>(in.extra > 0 ? in.extra : 8)));
+        if (in.args.size() > 1) {
+            // version 6: the object was copy-constructed into malloc storage, args[1] is its destructor or 0
+            std::string d = use(in.args[1], "r9");
+            if (d != "r9") line("mov r9, " + d);
+            m_m.useExtern("cppparse_throw_owned");
+            line("call cppparse_throw_owned");
+            break;
+        }
         m_m.useExtern("cppparse_throw");
         line("call cppparse_throw");
         break;

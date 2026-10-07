@@ -575,8 +575,20 @@ const Type* Sema::exprNew(cxx::Expr* e, Scope* in)
 {
     for (size_t p = 0; p < e->placement.size(); ++p) expr(e->placement[p], in);
     const Type* t = typeOf(e->type->spec, in);
-    const Type* full = e->type->decl ? applyDeclarator(t, *e->type->decl, in, 0) : t;
+    const Type* full = t;
+    bool newArray = false;
+    if (e->type->decl) {
+        cxx::Declarator d = *e->type->decl;
+        if (!d.parts.empty() && d.parts.back().kind == cxx::DeclaratorPart::Array) {
+            // new T[n]: the bound is a run-time value and the result points at an element
+            newArray = true;
+            if (d.parts.back().arraySize) expr(d.parts.back().arraySize, in);
+            d.parts.pop_back();
+        }
+        full = applyDeclarator(t, d, in, 0);
+    }
     for (size_t k = 0; k < e->kids.size(); ++k) expr(e->kids[k], in);
+    if (newArray) { e->semaSym = 0; return m_types.pointer(full); }
     if (full->kind == Type::Array) { e->semaSym = 0; return m_types.pointer(full->inner); }
     const Type* cu = m_types.unqualified(full);
     if (cu->kind == Type::Class && cu->decl) {

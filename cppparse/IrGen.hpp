@@ -10,6 +10,15 @@
 // exceptions use the try-region ids. Functions returning a class by value take a
 // hidden result pointer as their first parameter after 'this'.
 //
+// Object lifetimes: every constructed local, by-value parameter (destroyed by
+// the callee, as MSVC does) and class temporary is recorded as a Cleanup with a
+// "constructed" flag byte. Block scopes destroy their objects in reverse order
+// on normal exit, break/continue/return unwind the scopes they leave, and
+// temporaries die at the end of the full expression. A function that owns such
+// objects gets a catch-all try region around its body whose handler destroys the
+// objects whose flag is still set and rethrows, so destructors also run while an
+// exception unwinds through the function.
+//
 // Strict C++98.
 #ifndef CPPPARSE_IRGEN_HPP
 #define CPPPARSE_IRGEN_HPP
@@ -49,7 +58,16 @@ private:
         const sema::Type* type;      // the object's sema type (unreferenced)
         LValue() : kind(None), local(-1), addr(-1), type(0) {}
     };
-    struct LoopTargets { int breakBlock, continueBlock; size_t tryDepth; };
+    struct LoopTargets { int breakBlock, continueBlock; size_t tryDepth, cleanupDepth; };
+    struct Cleanup {
+        int               slot;        // the object's local, or the local holding its address when viaPointer
+        const sema::Type* type;
+        bool              viaPointer;
+        int               flag;        // local byte: 1 while the object is constructed
+        bool              guarded;     // the normal-path destruction must test the flag (temporary of a conditional arm)
+        bool              unwindOnly;  // a member built by a constructor: destroyed only when the body throws
+        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false) {}
+    };
 
     // types
     const Type* oldType(const sema::Type* t);
@@ -60,6 +78,34 @@ private:
     bool baseOffset(sema::Symbol* derived, sema::Symbol* base, int& offset, int depth = 0) const;
     std::string throwDescriptorFor(const sema::Type* t) const;
 
+    // special members
+    sema::Symbol* findSpecial(sema::Symbol* cls, char which) const;   // 'd' default ctor, 'c' copy ctor, 'a' copy assignment, '~' destructor
+    bool needsDtor(const sema::Type* t, int depth = 0) const;
+    bool needsCopyCtor(const sema::Type* t, int depth = 0) const;
+    bool needsCopyAssign(const sema::Type* t, int depth = 0) const;
+    bool needsDefaultCtor(const sema::Type* t, int depth = 0) const;
+    void callSpecial(sema::Symbol* fn, int thisPtr, int argPtr, int line);
+    void copyBytes(int dst, int src, int size, int line);
+    void copyConstruct(const sema::Type* t, int dst, int src, int line);
+    void copyAssign(const sema::Type* t, int dst, int src, int line);
+    void constructDefault(const sema::Type* t, int addr, int line);
+    void forEachElement(const sema::Type* elem, int base, int count, bool construct, int line);
+    int  materialize(cxx::Expr* e, const sema::Type* t, int dst, int line);
+    void destroy(const sema::Type* t, int objAddr, int line, bool viaVtable);
+
+    // lifetimes
+    int  registerCleanup(int slot, const sema::Type* t, bool viaPointer, int mode, int line);
+    void runCleanup(const Cleanup& c, bool guarded, int line);
+    void openScope();
+    void closeScope(int line);
+    void leaveScopes(size_t depth, int line);
+    void endFullExpr(int line, size_t from = 0);
+    void keepTemporaries(size_t from);
+    void handlerCleanups(size_t mark, int line);
+    void returnSequence(int line);
+    void finishFunction(int line);
+    void scopedStmt(cxx::Stmt* s, int line);
+
     // functions
     void genFunction(sema::Symbol* fn);
     void genImplicit(sema::Symbol* fn);
@@ -69,6 +115,7 @@ private:
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
     void need(sema::Symbol* fn);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
+    int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);
 
     // IR emission
     int    emit(IrInst inst);
@@ -91,11 +138,10 @@ private:
     LValue lvalue(cxx::Expr* e);
     void   condition(cxx::Expr* e, int trueBlock, int falseBlock);
     int    conditional(cxx::Expr* e, bool byAddr);
-    int    call(cxx::Expr* e);
+    int    call(cxx::Expr* e, int sretAddr = -1);
     int    callFunction(sema::Symbol* fn, int thisPtr, int sretAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, bool virtualCall, int line);
     int    construct(sema::Symbol* ctor, int objAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, int line);
     int    argument(cxx::Expr* a, const sema::Type* paramType, int line);
-    void   destroy(const sema::Type* t, int objAddr, int line, bool viaVtable);
     void   stmt(cxx::Stmt* s);
     void   localDecl(cxx::Decl* d);
     void   initVariable(int slot, const sema::Type* t, sema::Symbol* var, cxx::InitDeclarator& id, int line);
@@ -121,8 +167,14 @@ private:
     int                        m_sretSlot;
     std::map<sema::Symbol*, int> m_slots;
     std::vector<LoopTargets>   m_loops;
-    std::vector<int>           m_tryStack;
+    std::vector<int>           m_tryStack;      // region ids, -1 inside a handler body
     int                        m_tryCount;
+    std::vector<Cleanup>       m_cleanups;      // constructed objects of the open scopes, in construction order
+    std::vector<size_t>        m_scopes;        // m_cleanups.size() at each open block scope
+    std::vector<Cleanup>       m_temps;         // temporaries of the current full expression
+    std::vector<Cleanup>       m_flagged;       // every cleanup of the function, for the unwind handlers
+    int                        m_unwindId;      // the function's catch-all region
+    int                        m_bodyBlock;
 };
 
 } // namespace cppparse

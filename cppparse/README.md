@@ -133,7 +133,7 @@ Compiles every `cppparse/*.cpp` and `cppparse/legacy/*.cpp` with MSVC at
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
-`obj/debug`. `-NoTests` stops after the build. The test groups (13 as of
+`obj/debug`. `-NoTests` stops after the build. The test groups (14 as of
 version 6) run against whichever configuration was built. The first four: the Visual Studio 2010 solution in
 `sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
@@ -381,7 +381,8 @@ as the acceptance bar:
    real types, scopes, name lookup, overload resolution and template
    instantiation on the AST.
 4. **IR generation** (`IrGen.*`, `--compile6`, done): from the analysed
-   tree into the shared back end.
+   tree into the shared back end, with object lifetimes (destructors,
+   copy constructors, temporaries, unwinding; done).
 5. **Library headers**: cppparse's own C++98 `std` and C headers.
 6. **Reports** rebuilt on the new AST, and the version 4 and 5 gaps.
 
@@ -399,8 +400,9 @@ Version 6 is finished only when every compilation gap left by versions
 - real declarations for the standard library (cppparse's own C++98
   headers: `vector`, `string`, `map`, `set`, `cstdio`, ...), which also
   removes the untyped library-call results of the old front end;
-- exceptions: destructors run during unwinding, thrown objects copied
-  with their copy constructors, a per-thread frame stack;
+- exceptions: destructors run during unwinding and thrown objects
+  copied with their copy constructors (both done in the version 6 IR
+  generator), a per-thread frame stack;
 - COFF: `.pdata`/`.xdata` unwind tables and line information;
 - mangling: function-pointer parameter lists, member pointers, varargs;
 - the type checker replaced by real semantic analysis (scopes, lookup,
@@ -488,8 +490,7 @@ every fact taken from the sema annotations: resolved symbols, field
 offsets (with base-class adjustment), vtable slots for virtual calls,
 chosen constructors and conversions, class layouts, throw descriptors.
 Functions returning a class by value take a hidden result pointer;
-reference parameters and results are addresses; class objects are
-copied bytewise where C++ would call a copy constructor (a listed gap).
+reference parameters and results are addresses.
 The IR still carries the old front end's `Type` objects through an
 adapter, so the optimiser, SSA, lowering, x86-64 and COFF stages run
 unchanged. `--compile6` runs the whole version 6 pipeline and writes
@@ -501,6 +502,35 @@ text. Test 13 compiles `sample-opt` through the version 6 pipeline at
 `-O0` and `-O2`, links the object with the native-declaration driver
 and the exception runtime, and runs it: all 19 checks pass, including
 templates and exceptions.
+
+**Object lifetimes** (`IrGen.cpp`, `sample-life/`, test 14): every
+constructed local, by-value parameter and class temporary is recorded
+with a "constructed" flag byte. Block scopes destroy their objects in
+reverse order on normal exit; `break`, `continue` and `return` unwind
+the scopes they leave; temporaries die at the end of their full
+expression (a temporary bound to a reference lives as long as the
+reference; one that a `?:` result refers to is destroyed under its
+flag). Copies go through the class's own members: the copy constructor
+for initialisation, by-value arguments (the callee owns and destroys
+its copy, as MSVC does) and return values (constructor calls and calls
+returning the class build the result in place), the copy assignment
+operator for `a = b`; implicit copy constructors, assignments and
+destructors are generated memberwise (bases first). Arrays of objects
+are constructed and destroyed element by element; `new T[n]` keeps the
+element count in front of the elements when `T` has a destructor so
+`delete[]` can run them. A function that owns objects with destructors
+gets a catch-all try region around its body whose handler destroys the
+objects whose flag is still set and rethrows, so destructors run while
+an exception unwinds through the function; a user `try` destroys the
+objects built inside it at a handler entry; a constructor whose body
+throws destroys the members and bases it already built. `throw obj`
+copy-constructs the exception object into heap storage that the
+runtime owns (`cppparse_throw_owned`) and destroys with the class's
+destructor when the handler ends. The driver `sample-life-driver/
+driver-life.cpp` counts constructions, destructions, copies and live
+buffers across 24 checks at `-O0`, `-O2` and `-O3`. Functions with
+such objects contain a try region, so the SSA phase skips them; the
+block-local passes still run.
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

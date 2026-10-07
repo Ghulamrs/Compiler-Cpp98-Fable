@@ -40,10 +40,19 @@ struct cppparse_exception {
     void*         object;
     const char*   type;
     unsigned long size;
+    void        (*dtor)(void*);   /* destructor of a class object thrown with cppparse_throw_owned, or 0 */
 };
 
 static struct cppparse_frame*    g_top = 0;
-static struct cppparse_exception g_inflight = { 0, 0, 0 };
+static struct cppparse_exception g_inflight = { 0, 0, 0, 0 };
+
+static void dropException(struct cppparse_exception* e)
+{
+    if (e->object && e->dtor) e->dtor(e->object);
+    free(e->object);
+    e->object = 0;
+    e->dtor = 0;
+}
 static struct cppparse_exception g_caught[32];
 static int                       g_caughtCount = 0;
 
@@ -76,6 +85,18 @@ void cppparse_throw(const void* object, const char* type, unsigned long size)
     g_inflight.object = copy;
     g_inflight.type = type;
     g_inflight.size = size;
+    g_inflight.dtor = 0;
+    dispatch();
+}
+
+/* a class object already copy-constructed into malloc storage by the generated code; the runtime
+   owns it and runs dtor (the class destructor, this in rcx) before freeing it */
+void cppparse_throw_owned(void* object, const char* type, unsigned long size, void (*dtor)(void*))
+{
+    g_inflight.object = object;
+    g_inflight.type = type;
+    g_inflight.size = size;
+    g_inflight.dtor = dtor;
     dispatch();
 }
 
@@ -131,10 +152,11 @@ void* cppparse_catch_begin(void)
 {
     void* obj = g_inflight.object;
     if (g_caughtCount < 32) g_caught[g_caughtCount++] = g_inflight;
-    else free(obj);                               /* too deeply nested: the object is dropped */
+    else { dropException(&g_inflight); obj = 0; }  /* too deeply nested: the object is dropped */
     g_inflight.object = 0;
     g_inflight.type = 0;
     g_inflight.size = 0;
+    g_inflight.dtor = 0;
     return obj;
 }
 
@@ -142,7 +164,7 @@ void cppparse_catch_end(void)
 {
     if (g_caughtCount > 0) {
         --g_caughtCount;
-        free(g_caught[g_caughtCount].object);
+        dropException(&g_caught[g_caughtCount]);
     }
 }
 

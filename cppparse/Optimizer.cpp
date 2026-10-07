@@ -1,6 +1,7 @@
 // Optimizer.cpp - IR optimisation passes.
 #include "Optimizer.hpp"
 #include "PathUtil.hpp"
+#include "Ssa.hpp"
 
 #include <algorithm>
 #include <set>
@@ -17,6 +18,14 @@ void collectDefs(const IrFunction& f, std::map<int, Def>& defs)
     for (size_t b = 0; b < f.blocks.size(); ++b)
         for (size_t i = 0; i < f.blocks[b].insts.size(); ++i)
             if (f.blocks[b].insts[i].dst >= 0) { Def d; d.block = static_cast<int>(b); d.index = static_cast<int>(i); defs[f.blocks[b].insts[i].dst] = d; }
+}
+
+void countDefs(const IrFunction& f, std::map<int, int>& defs)
+{
+    defs.clear();
+    for (size_t b = 0; b < f.blocks.size(); ++b)
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i)
+            if (f.blocks[b].insts[i].dst >= 0) defs[f.blocks[b].insts[i].dst]++;
 }
 
 void countUses(const IrFunction& f, std::map<int, int>& uses)
@@ -200,13 +209,16 @@ int Optimizer::constantFold(IrFunction& f)
     int changes = 0;
     std::map<int, Def> defs;
     collectDefs(f, defs);
-    // constant propagation: temp operands defined by const -> immediates
+    std::map<int, int> defCount;
+    countDefs(f, defCount);
+    // constant propagation: temp operands defined by const -> immediates (single-definition temps only)
     for (size_t b = 0; b < f.blocks.size(); ++b)
         for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
             IrInst& in = f.blocks[b].insts[i];
             for (size_t a = 0; a < in.args.size(); ++a) {
                 IrOperand& o = in.args[a];
                 if (o.kind != IrOperand::Temp) continue;
+                if (defCount[o.id] != 1) continue;
                 std::map<int, Def>::iterator d = defs.find(o.id);
                 if (d == defs.end()) continue;
                 const IrInst& di = f.blocks[static_cast<size_t>(d->second.block)].insts[static_cast<size_t>(d->second.index)];
@@ -272,11 +284,14 @@ int Optimizer::constantFold(IrFunction& f)
 int Optimizer::copyPropagation(IrFunction& f)
 {
     int changes = 0;
-    // copy t = t2  ->  uses of t become t2
+    std::map<int, int> defCount;
+    countDefs(f, defCount);
+    // copy t = t2  ->  uses of t become t2  (only when t and t2 each have a single definition)
     for (size_t b = 0; b < f.blocks.size(); ++b)
         for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
             IrInst& in = f.blocks[b].insts[i];
-            if (in.op == IrInst::Copy && in.args.size() == 1 && in.args[0].kind == IrOperand::Temp && in.dst >= 0) {
+            if (in.op == IrInst::Copy && in.args.size() == 1 && in.args[0].kind == IrOperand::Temp && in.dst >= 0 &&
+                defCount[in.dst] == 1 && defCount[in.args[0].id] == 1) {
                 replaceTempUses(f, in.dst, in.args[0]);
                 in.op = IrInst::Nop; in.dst = -1; in.args.clear();
                 ++changes;
@@ -507,12 +522,15 @@ int Optimizer::simplifyCfg(IrFunction& f)
             ++changes;
         }
     }
-    // jump threading: a block holding only "br X" is bypassed
+    // jump threading: a block holding only "br X" is bypassed (not when X starts with phis: the
+    // incoming-edge bookkeeping would change)
     for (size_t b = 1; b < f.blocks.size(); ++b) {
         const IrBlock& blk = f.blocks[b];
         if (blk.insts.size() != 1 || blk.insts[0].op != IrInst::Br) continue;
         int target = blk.insts[0].args[0].id;
         if (target == static_cast<int>(b)) continue;
+        const IrBlock& tb = f.blocks[static_cast<size_t>(target)];
+        if (!tb.insts.empty() && tb.insts[0].op == IrInst::Phi) continue;
         for (size_t p = 0; p < f.blocks.size(); ++p)
             for (size_t i = 0; i < f.blocks[p].insts.size(); ++i) {
                 IrInst& in = f.blocks[p].insts[i];
@@ -544,9 +562,20 @@ int Optimizer::simplifyCfg(IrFunction& f)
         if (bb.preds.size() != 1 || bb.preds[0] != static_cast<int>(a)) continue;
         bool hasCatch = !bb.insts.empty() && bb.insts[0].op == IrInst::CatchParam;
         if (hasCatch) continue;
+        bool hasPhi = !bb.insts.empty() && bb.insts[0].op == IrInst::Phi;
+        if (hasPhi) continue;   // simplifyPhis turns the single-operand phi into a copy first
         f.blocks[a].insts.pop_back();
         f.blocks[a].insts.insert(f.blocks[a].insts.end(), bb.insts.begin(), bb.insts.end());
         bb.insts.clear();
+        // phis in the successors of B now receive their value from A
+        for (size_t s = 0; s < bb.succs.size(); ++s) {
+            IrBlock& sb = f.blocks[static_cast<size_t>(bb.succs[s])];
+            for (size_t i = 0; i < sb.insts.size(); ++i) {
+                IrInst& phi = sb.insts[i];
+                if (phi.op != IrInst::Phi) break;
+                for (size_t x = 1; x < phi.args.size(); x += 2) if (phi.args[x].kind == IrOperand::Block && phi.args[x].id == bId) phi.args[x].id = static_cast<int>(a);
+            }
+        }
         reach[static_cast<size_t>(bId)] = false;
         ++changes;
         f.computeCfg();
@@ -879,11 +908,12 @@ int Optimizer::level1(IrFunction& f, std::vector<std::string>& log)
     return total;
 }
 
-void Optimizer::run(IrFunction& f, std::vector<std::string>& log)
+void Optimizer::run(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm)
 {
     if (m_level <= 0) return;
     int before = f.instCount();
     log.push_back("  " + f.name + "  (" + intToString(before) + " instructions, -O" + intToString(m_level) + ")");
+
     level1(f, log);
     if (m_level >= 2) {
         int n = licm(f); if (n) log.push_back("    loop-invariant code motion: " + intToString(n));
@@ -897,6 +927,30 @@ void Optimizer::run(IrFunction& f, std::vector<std::string>& log)
         n = licm(f); if (n) log.push_back("    loop-invariant code motion: " + intToString(n));
         level1(f, log);
     }
+
+    // SSA phase last: promote scalars, value-number over the dominator tree, fold, leave SSA, clean up
+    if (!f.hasTry) {
+        SsaStats ss;
+        toSsa(f, ss);
+        log.push_back("    SSA construction: " + intToString(ss.promotedLocals) + " locals promoted, " + intToString(ss.phisInserted) + " phis");
+        for (int round = 0; round < 6; ++round) {
+            int c = 0, n;
+            n = constantFold(f);   c += n; if (n) log.push_back("    [ssa] constant-fold: " + intToString(n));
+            n = copyPropagation(f); c += n; if (n) log.push_back("    [ssa] copy-propagation: " + intToString(n));
+            n = algebraic(f);      c += n; if (n) log.push_back("    [ssa] algebraic simplification: " + intToString(n));
+            n = gvn(f);            c += n; if (n) log.push_back("    [ssa] global value numbering: " + intToString(n));
+            n = simplifyPhis(f);   c += n; if (n) log.push_back("    [ssa] phi simplification: " + intToString(n));
+            n = deadCode(f);       c += n; if (n) log.push_back("    [ssa] dead code elimination: " + intToString(n));
+            n = simplifyCfg(f);    c += n; if (n) log.push_back("    [ssa] branch folding / block merging: " + intToString(n));
+            if (!c) break;
+        }
+        if (ssaForm) *ssaForm = printIr(f);
+        fromSsa(f, ss);
+        log.push_back("    SSA destruction: " + intToString(ss.phisRemoved) + " phis replaced by " + intToString(ss.copiesInserted) + " copies, " + intToString(ss.edgesSplit) + " critical edges split");
+    } else {
+        log.push_back("    SSA skipped: function has try/catch regions");
+    }
+    level1(f, log);
     int after = f.instCount();
     log.push_back("    result: " + intToString(before) + " -> " + intToString(after) + " instructions, " + intToString(static_cast<int>(f.blocks.size())) + " blocks");
 }

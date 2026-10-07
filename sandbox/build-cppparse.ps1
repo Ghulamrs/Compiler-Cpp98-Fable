@@ -203,7 +203,28 @@ try {
     & ".\cppparse.exe" -o "out\sample" -O2 "..\cppparse\sample\Sample.sln" | Out-Null
     $asmS = Get-Content "out\sample\Sample-asm.txt" -Raw
     if ($asmS -match 'vptr') { Write-Host "  ok   virtual call lowered through the vtable (Sample)" } else { Write-Host "  FAIL no vtable call in Sample-asm.txt"; $failed++ }
+    if ($ir2 -match '= phi ') { Write-Host "  ok   SSA form with phi nodes in the IR dump" } else { Write-Host "  FAIL no phi nodes in the -O2 IR dump"; $failed++ }
+    if ($log2 -match 'global value numbering|SSA construction') { Write-Host "  ok   SSA passes logged" } else { Write-Host "  FAIL SSA passes missing from the log"; $failed++ }
     if ($failed -ne 0) { throw "$failed version 3 check(s) failed" }
+
+    # ---- test 6: version 4 x86-64 code, assembled with ml64, linked with an MSVC driver, executed ----
+    Write-Host "=== Test 6: version 4 x86-64 (ml64 + link + run) ==="
+    $ml64 = "$Msvc\bin\Hostx64\x64\ml64.exe"
+    New-Item -ItemType Directory -Force "out\x64" | Out-Null
+    $failed = 0
+    foreach ($lvl in @(0, 2, 3)) {
+        $asmPath = "out\opt\opt$lvl.asm"
+        if (-not (Test-Path $asmPath)) { Write-Host "  FAIL missing $asmPath"; $failed++; continue }
+        $mlOut = & $ml64 /nologo /c "/Foout\x64\opt$lvl.obj" $asmPath 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL ml64 rejected opt$lvl.asm:"; Write-Host $mlOut; $failed++; continue }
+        Write-Host "  ok   ml64 assembled opt$lvl.asm"
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\driver$lvl.exe" "..\cppparse\sample-opt-driver\driver.cpp" "out\x64\opt$lvl.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with opt$lvl.obj:"; Write-Host $clOut; $failed++; continue }
+        $run = & ".\out\x64\driver$lvl.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   driver$lvl.exe: all results correct (-O$lvl)" }
+        else { Write-Host "  FAIL driver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
+    }
+    if ($failed -ne 0) { throw "$failed version 4 check(s) failed" }
 
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="

@@ -28,7 +28,7 @@ bool IrInst::pure() const
 {
     switch (op) {
     case Const: case FConst: case StrConst: case Copy: case AddrLocal: case AddrGlobal: case AddrField: case AddrIndex:
-    case Bin: case Un: case Cmp: case Conv:
+    case Bin: case Un: case Cmp: case Conv: case Phi:
         return true;
     default:
         return false;
@@ -73,6 +73,7 @@ const char* opName(IrInst::Op op)
     case IrInst::TryEnd: return "tryend";
     case IrInst::CatchParam: return "catchparam";
     case IrInst::Unreachable: return "unreachable";
+    case IrInst::Phi: return "phi";
     default: return "nop";
     }
 }
@@ -86,7 +87,11 @@ std::string IrInst::str() const
     s += opName(op);
     if (!sub.empty()) s += " " + sub;
     if (op == AddrField || op == AddrIndex || op == VCall) s += " +" + intToString(static_cast<int>(extra));
-    for (size_t i = 0; i < args.size(); ++i) s += (i ? ", " : " ") + args[i].str();
+    if (op == Phi) {
+        for (size_t i = 0; i + 1 < args.size(); i += 2) s += (i ? ", [" : " [") + args[i].str() + ", " + args[i + 1].str() + "]";
+    } else {
+        for (size_t i = 0; i < args.size(); ++i) s += (i ? ", " : " ") + args[i].str();
+    }
     if (type && dst >= 0) s += "   : " + type->str();
     return s;
 }
@@ -698,6 +703,8 @@ namespace {
 
 std::string funcName(const FunctionInfo* f)
 {
+    // extern "C" functions keep their plain name so that generated code links against C symbols
+    if (f->isExtern && !f->ownerClass && f->qualifier.empty() && f->scope.empty()) return f->name;
     return f->displayName() + "(" + f->paramText + ")" + (f->isConst ? " const" : "");
 }
 
@@ -1292,6 +1299,18 @@ bool IrBuilder::build(const FunctionAst& ast, IrFunction& out)
     // constructor initializer list: base constructors and member initialisation
     if (fn->isConstructor && out.hasThis && fn->ownerClass) {
         const ClassInfo* cls = fn->ownerClass;
+        // base constructors first (from the initializer list), then the vptr, then members
+        if (m_layouts.hasVtable(cls)) {
+            int self = thisTemp(fn->line);
+            IrInst vt = make(IrInst::AddrGlobal, m_types.pointer(m_types.voidType()), fn->line);
+            vt.args.push_back(IrOperand::global("vtable@" + cls->qualifiedName, m_types.voidType()));
+            int vtp = emit(vt);
+            IrInst st = make(IrInst::StoreMem, m_types.pointer(m_types.voidType()), fn->line);
+            st.sub = "vptr";
+            st.args.push_back(IrOperand::temp(self, out.locals[0].type));
+            st.args.push_back(IrOperand::temp(vtp, m_types.pointer(m_types.voidType())));
+            emit(st);
+        }
         for (size_t i = 0; i < ast.inits.size(); ++i) {
             const InitEntry& in = ast.inits[i];
             const int line = in.line;

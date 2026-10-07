@@ -7,6 +7,7 @@
 #include "PathUtil.hpp"
 #include "TypeCheck.hpp"
 #include "Types.hpp"
+#include "X86.hpp"
 
 #include <cstdlib>
 #include <map>
@@ -132,18 +133,21 @@ void Compiler::run()
 
     // optimise and lower
     Optimizer optimizer(m_opt.optLevel, byName);
+    X86Module x86(m_cb, types, layouts);
     for (size_t i = 0; i < irFunctions.size(); ++i) {
         IrFunction& f = *irFunctions[i];
         int before = f.instCount();
         m_summary.irBefore += before;
         std::string beforeText = printIr(f);
         std::vector<std::string> log;
-        optimizer.run(f, log);
+        std::string ssaText;
+        optimizer.run(f, log, &ssaText);
         for (size_t l = 0; l < log.size(); ++l) logOut << log[l] << "\n";
         m_summary.irAfter += f.instCount();
         irOut << "================================================================================\n";
         if (m_opt.optLevel > 0) {
             irOut << "--- before optimisation (" << before << " instructions) ---\n" << beforeText;
+            if (!ssaText.empty()) irOut << "--- SSA form after the SSA passes ---\n" << ssaText;
             irOut << "--- after -O" << m_opt.optLevel << " (" << f.instCount() << " instructions) ---\n" << printIr(f) << "\n";
         } else {
             irOut << beforeText << "\n";
@@ -152,7 +156,9 @@ void Compiler::run()
         asmOut << lowerFunction(f, layouts, st);
         m_summary.asmInstructions += st.instructions;
         m_summary.spills += st.spills;
+        if (m_opt.x86) { LowerStats xs; x86.addFunction(f, xs); }
     }
+    if (m_opt.x86) m_x86 = x86.finish();
     if (m_opt.optLevel == 0) logOut << "(no optimisation requested: use -O1, -O2 or -O3)\n";
     logOut << "\ntotal IR instructions: " << m_summary.irBefore << " -> " << m_summary.irAfter << "\n";
 

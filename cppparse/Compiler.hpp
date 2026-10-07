@@ -13,7 +13,8 @@ namespace cppparse {
 struct CompileOptions {
     int  optLevel;       // 0..3
     bool emitAst;
-    CompileOptions() : optLevel(0), emitAst(true) {}
+    bool x86;            // version 4: also generate x86-64 MASM
+    CompileOptions() : optLevel(0), emitAst(true), x86(true) {}
 };
 
 struct CompileSummary {
@@ -35,6 +36,7 @@ public:
     const std::string& irText()     const { return m_ir; }
     const std::string& optLog()     const { return m_log; }
     const std::string& asmText()    const { return m_asm; }
+    const std::string& x86Text()    const { return m_x86; }
     const std::string& layoutText() const { return m_layouts; }
     void summaryLines(std::vector<std::string>& out) const;
 
@@ -46,7 +48,7 @@ private:
     CompileOptions       m_opt;
     std::vector<Finding> m_findings;
     CompileSummary       m_summary;
-    std::string          m_ast, m_ir, m_log, m_asm, m_layouts;
+    std::string          m_ast, m_ir, m_log, m_asm, m_x86, m_layouts;
 };
 
 } // namespace cppparse

@@ -32,7 +32,8 @@ struct LoopInfo {
 class Optimizer {
 public:
     Optimizer(int level, const std::map<std::string, IrFunction*>& functions);
-    void run(IrFunction& f, std::vector<std::string>& log);
+    // ssaForm, when given, receives the IR in SSA form after the SSA passes (before phi removal)
+    void run(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm = 0);
 
     // analyses (also used by lowering)
     static void dominators(const IrFunction& f, std::vector<int>& idom);

@@ -59,7 +59,7 @@ struct IrOperand {
 struct IrInst {
     enum Op { Const, FConst, StrConst, Copy, LoadLocal, StoreLocal, AddrLocal, LoadGlobal, StoreGlobal, AddrGlobal,
               LoadMem, StoreMem, AddrField, AddrIndex, Bin, Un, Cmp, Conv, Call, VCall, Br, CondBr, Ret, Throw,
-              TryBegin, TryEnd, CatchParam, Unreachable, Nop };
+              TryBegin, TryEnd, CatchParam, Unreachable, Nop, Phi };
     Op                     op;
     std::string            sub;    // sub-operation, callee name, field name
     int                    dst;    // result temp or -1

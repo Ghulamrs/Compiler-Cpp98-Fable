@@ -27,11 +27,13 @@
 #include "Diagram.hpp"
 #include "Health.hpp"
 #include "Html.hpp"
+#include "Parallel.hpp"
 #include "PathUtil.hpp"
 #include "Pdf.hpp"
 #include "Report.hpp"
 #include "Symbols.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -65,6 +67,9 @@ void usage()
         "  --no-compile     skip version 3 (AST, type check, IR, lowering)\n"
         "  --no-x86         version 4: do not write the x86-64 MASM file (<name>.asm)\n"
         "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
+        "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)\n"
+        "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
+        "  @list.txt        response file: one path, pattern or option per line\n"
         "  -q               quiet: print only errors\n"
         "  -h, --help       this text\n";
 }
@@ -95,14 +100,29 @@ int main(int argc, char* argv[])
     std::vector<std::string> inputs;
     std::string outDir, outName;
     bool follow = true, textOnly = false, toStdout = false, quiet = false, healthOnly = false, strict = false, compile = true, assemble = false;
+    int threads = hardwareThreads();
+    bool threadsGiven = false;
+    bool ok0 = true;
     CompileOptions copt;
     ReportOptions opt;
 
+    // response files (@list.txt) are expanded into the argument list first
+    std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
+        if (a.size() > 1 && a[0] == '@') {
+            std::vector<std::string> more;
+            if (!readResponseFile(a.substr(1), more)) { std::cerr << "error: cannot read response file " << a.substr(1) << "\n"; return 2; }
+            args.insert(args.end(), more.begin(), more.end());
+        } else args.push_back(a);
+    }
+    for (size_t i = 0; i < args.size(); ++i) {
+        std::string a = args[i];
         if (a == "-h" || a == "--help" || a == "/?") { usage(); return 0; }
-        else if (a == "-o" && i + 1 < argc) outDir = argv[++i];
-        else if (a == "-n" && i + 1 < argc) outName = argv[++i];
+        else if (a == "-j" && i + 1 < args.size()) { threads = atoi(args[++i].c_str()); threadsGiven = true; }
+        else if (a.size() > 2 && a[0] == '-' && a[1] == 'j' && isdigit(static_cast<unsigned char>(a[2]))) { threads = atoi(a.c_str() + 2); threadsGiven = true; }
+        else if (a == "-o" && i + 1 < args.size()) outDir = args[++i];
+        else if (a == "-n" && i + 1 < args.size()) outName = args[++i];
         else if (a == "--no-follow") follow = false;
         else if (a == "--no-directives") opt.directives = false;
         else if (a == "--no-locals") opt.locals = false;
@@ -116,16 +136,34 @@ int main(int argc, char* argv[])
         else if (a.size() == 3 && a[0] == '-' && a[1] == 'O' && a[2] >= '0' && a[2] <= '3') copt.optLevel = a[2] - '0';
         else if (a == "-q") quiet = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "unknown option: " << a << "\n"; usage(); return 2; }
-        else inputs.push_back(a);
+        else {
+            std::vector<std::string> expanded;
+            if (expandWildcards(a, expanded) == 0) { std::cerr << "error: no file matches " << a << "\n"; ok0 = false; }
+            inputs.insert(inputs.end(), expanded.begin(), expanded.end());
+        }
     }
     if (inputs.empty()) { usage(); return 2; }
 
     CodeBase cb;
     cb.setFollowIncludes(follow);
-    bool ok = true;
+    if (threads < 1) threads = 1;
+    cb.setThreads(threads);
+    // the per-function compile phases allocate heavily and share one heap: beyond four threads
+    // they slow down on the measured machines, so the default stops there unless -j says otherwise
+    copt.threads = threadsGiven ? threads : (threads > 4 ? 4 : threads);
+    bool ok = ok0;
+    // plain files are parsed together in parallel; projects, solutions and folders handle their own lists
+    std::vector<std::string> plainFiles;
     for (size_t i = 0; i < inputs.size(); ++i) {
+        std::string ext = extension(inputs[i]);
+        bool structured = ext == ".sln" || ext == ".vcxproj" || ext == ".vcproj" || isDirectory(inputs[i]);
+        if (!structured) { plainFiles.push_back(inputs[i]); continue; }
         if (!quiet && !toStdout) std::cout << "reading " << inputs[i] << "\n";
         if (!cb.addInput(inputs[i])) ok = false;
+    }
+    if (!plainFiles.empty()) {
+        if (!quiet && !toStdout) std::cout << "reading " << plainFiles.size() << " file(s) with " << threads << " thread(s)\n";
+        if (!cb.addFiles(plainFiles)) ok = false;
     }
     if (cb.files().empty()) {
         std::cerr << "error: no source files were read\n";
@@ -192,6 +230,8 @@ int main(int argc, char* argv[])
             compiler.summaryLines(lines);
             for (size_t i = 0; i < lines.size(); ++i) std::cout << lines[i] << "\n";
         }
+        std::cout << "timing: parse " << cb.parseMilliseconds() << " ms" << (compile ? ", compile " + intToString(static_cast<int>(compiler.summary().compileMs)) + " ms" : std::string(""))
+                  << " (parse threads " << threads << ", compile threads " << copt.threads << ")\n";
         for (size_t i = 0; i < cb.messages().size(); ++i) std::cout << "  note: " << cb.messages()[i] << "\n";
     }
     if (strictExit) return strictExit;

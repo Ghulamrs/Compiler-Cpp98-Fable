@@ -14,15 +14,17 @@ struct CompileOptions {
     int  optLevel;       // 0..3
     bool emitAst;
     bool x86;            // version 4: also generate x86-64 MASM
-    CompileOptions() : optLevel(0), emitAst(true), x86(true) {}
+    int  threads;        // worker threads for the per-function phases
+    CompileOptions() : optLevel(0), emitAst(true), x86(true), threads(1) {}
 };
 
 struct CompileSummary {
     int functionsSeen, functionsCompiled, functionsSkipped, parseFailures, typeFailures;
     int irBefore, irAfter, asmInstructions, spills;
     int classInstantiations, functionInstantiations;
+    long compileMs;
     CompileSummary() : functionsSeen(0), functionsCompiled(0), functionsSkipped(0), parseFailures(0), typeFailures(0),
-                       irBefore(0), irAfter(0), asmInstructions(0), spills(0), classInstantiations(0), functionInstantiations(0) {}
+                       irBefore(0), irAfter(0), asmInstructions(0), spills(0), classInstantiations(0), functionInstantiations(0), compileMs(0) {}
 };
 
 class Compiler {

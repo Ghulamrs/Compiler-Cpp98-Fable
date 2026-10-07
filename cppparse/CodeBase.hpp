@@ -19,9 +19,14 @@ public:
     ~CodeBase();
 
     void setFollowIncludes(bool follow) { m_followIncludes = follow; }
+    void setThreads(int threads) { m_threads = threads < 1 ? 1 : threads; }
+    int  threads() const { return m_threads; }
+    long parseMilliseconds() const { return m_parseMs; }   // time spent reading, lexing and parsing
 
-    // Accepts a .sln, .vcxproj, .vcproj or a single header/source file.
+    // Accepts a .sln, .vcxproj, .vcproj, a folder or a single header/source file.
     bool addInput(const std::string& path);
+    // Several plain files at once (wildcard expansions, response files): parsed in parallel.
+    bool addFiles(const std::vector<std::string>& paths);
 
     // Resolves base classes, matches out-of-line definitions to declarations,
     // computes derived-class lists and field associations. Call once.
@@ -55,7 +60,12 @@ private:
     bool        loadProject(const std::string& path, const std::string& solutionDir);
     SourceFile* loadFile(const std::string& absPath, const std::string& origin, const std::string& project,
                          const std::vector<std::string>& includeDirs);
-    void        resolveIncludes(SourceFile* f, const std::vector<std::string>& includeDirs, const std::string& project);
+    // parses many files on the worker pool, then registers them and follows their includes in rounds
+    void        loadFiles(const std::vector<std::string>& absPaths, const std::string& origin, const std::string& project,
+                          const std::vector<std::string>& includeDirs);
+    SourceFile* registerFile(SourceFile* f, const std::string& absPath, const std::string& origin, const std::string& project);
+    void        resolveIncludes(SourceFile* f, const std::vector<std::string>& includeDirs, const std::string& project,
+                                std::vector<std::string>* discovered);
     void        indexClasses();
     void        linkBases();
     void        linkFunctions();
@@ -64,6 +74,8 @@ private:
     void        collectTypeNames(const std::string& type, std::vector<std::string>& out) const;
 
     bool                                m_followIncludes;
+    int                                 m_threads;
+    long                                m_parseMs;
     std::vector<std::string>            m_inputs;
     std::vector<SourceFile*>            m_files;
     std::vector<ProjectInfo>            m_projects;

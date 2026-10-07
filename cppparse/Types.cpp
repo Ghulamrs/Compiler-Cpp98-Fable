@@ -86,6 +86,7 @@ TypeTable::~TypeTable()
 
 const Type* TypeTable::intern(const Type& t)
 {
+    Lock l(semanticMutex());
     std::string k = t.key();
     std::map<std::string, Type*>::iterator it = m_types.find(k);
     if (it != m_types.end()) return it->second;
@@ -215,6 +216,7 @@ void TypeTable::indexTypedefsAndEnums()
 
 bool TypeTable::findEnumerator(const std::string& name, const ClassInfo* owner, std::string& enumName, long& value) const
 {
+    Lock l(semanticMutex());
     for (const ClassInfo* c = owner; c; c = c->owner) {
         std::map<std::string, std::pair<std::string, long> >::const_iterator it = m_enumerators.find(c->qualifiedName + "::" + name);
         if (it != m_enumerators.end()) { enumName = it->second.first; value = it->second.second; return true; }
@@ -230,6 +232,7 @@ bool TypeTable::findEnumerator(const std::string& name, const ClassInfo* owner, 
 
 bool TypeTable::isTypeName(const std::string& name, const std::string& scope, const ClassInfo* owner)
 {
+    Lock l(semanticMutex());
     static const char* const builtins[] = { "void", "bool", "char", "short", "int", "long", "float", "double", "unsigned", "signed",
                                             "wchar_t", "size_t", "ptrdiff_t", "__int64", "__int32", "intptr_t", "uintptr_t", "ssize_t",
                                             "time_t", "clock_t", "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t",
@@ -269,6 +272,8 @@ void splitType(const std::string& text, std::vector<Word>& out)
 
 const Type* TypeTable::parse(const std::string& text, const std::string& scope, const ClassInfo* owner)
 {
+    // parse reads the typedef/enum maps and may instantiate templates: serialised (the lock is recursive)
+    Lock l(semanticMutex());
     if (m_depth > 16) return unknown(text);
     ++m_depth;
     // template arguments of the base type, taken from the raw text so that expressions

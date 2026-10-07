@@ -1,6 +1,7 @@
 // Instantiate.cpp - template instantiation by substitution.
 #include "Instantiate.hpp"
 #include "Parser.hpp"
+#include "Parallel.hpp"
 #include "PathUtil.hpp"
 
 #include <cctype>
@@ -246,12 +247,14 @@ void Instantiator::substituteFunction(FunctionInfo& fn, const Substitution& subs
 
 const std::vector<Token>* Instantiator::tokensFor(const FunctionInfo* fn) const
 {
+    Lock l(semanticMutex());
     std::map<const FunctionInfo*, std::vector<Token>*>::const_iterator it = m_bodies.find(fn);
     return it == m_bodies.end() ? 0 : it->second;
 }
 
 void Instantiator::takePending(std::vector<FunctionInfo*>& out)
 {
+    Lock l(semanticMutex());
     out = m_pending;
     m_pending.clear();
 }
@@ -260,6 +263,7 @@ void Instantiator::takePending(std::vector<FunctionInfo*>& out)
 
 ClassInfo* Instantiator::instantiateClass(const ClassInfo* tmpl, const std::string& argsText, TypeTable& types)
 {
+    Lock l(semanticMutex());
     if (!tmpl || !tmpl->tmpl.isTemplate || !tmpl->isDefinition) return 0;
     if (argumentsDependent(argsText, types)) return 0;          // Vector<T, N> inside another template
     if (m_ownedClasses.size() > 400) return 0;                    // runaway guard
@@ -374,6 +378,7 @@ ClassInfo* Instantiator::instantiateClass(const ClassInfo* tmpl, const std::stri
 FunctionInfo* Instantiator::instantiateFunction(const FunctionInfo* tmpl, const Substitution& subst, TypeTable& types)
 {
     (void)types;
+    Lock l(semanticMutex());
     if (!tmpl || !tmpl->tmpl.isTemplate) return 0;
     const FunctionInfo* def = tmpl->hasBody ? tmpl : tmpl->definition;
     std::string args;

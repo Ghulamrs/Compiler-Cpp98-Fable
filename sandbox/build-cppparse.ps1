@@ -229,6 +229,32 @@ try {
     }
     if ($failed -ne 0) { throw "$failed version 4 check(s) failed" }
 
+    Write-Host "=== Test 7: version 5 parallel pipeline (wildcards, @response file, -j determinism) ==="
+    New-Item -ItemType Directory -Force "out\par" | Out-Null
+    $failed = 0
+    @("# response file written by the test", "..\cppparse\*.cpp", "..\cppparse\*.hpp", "-O3", "-q") | Out-File -Encoding ascii "out\par\list.rsp"
+    $null = .\cppparse.exe -j 1 -o out\par -n j1 "@out\par\list.rsp"
+    if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL -j 1 run exited with $LASTEXITCODE"; $failed++ }
+    $null = .\cppparse.exe -j 12 -o out\par -n j12 "@out\par\list.rsp"
+    if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL -j 12 run exited with $LASTEXITCODE"; $failed++ }
+    $rep = Get-Content "out\par\j1-report.txt" -Raw
+    if ($rep -match 'Files parsed: (\d+)' -and [int]$Matches[1] -ge 40) { Write-Host "  ok   @response file with *.cpp / *.hpp patterns: $($Matches[1]) files" }
+    else { Write-Host "  FAIL response file / wildcard expansion"; $failed++ }
+    foreach ($suffix in @("-ir.txt", "-asm.txt", ".asm", "-health.txt", "-ast.txt")) {
+        $a = (Get-Content "out\par\j1$suffix" -Raw) -replace 'j1([-.])', 'X$1' -replace '\d+ thread', 'T thread'
+        $b = (Get-Content "out\par\j12$suffix" -Raw) -replace 'j12([-.])', 'X$1' -replace '\d+ thread', 'T thread'
+        if ($a -eq $b) { Write-Host "  ok   $suffix identical with -j 1 and -j 12" } else { Write-Host "  FAIL $suffix differs between -j 1 and -j 12"; $failed++ }
+    }
+    $log = Get-Content "out\par\j12-opt.log" -Raw
+    if ($log -match 'phase times \(ms, 12 thread') { Write-Host "  ok   phase times logged" } else { Write-Host "  FAIL phase times missing from the log"; $failed++ }
+    $wild = .\cppparse.exe -j 4 --no-compile -o out\par -n wild "..\cppparse\sample-opt\*.cpp" "..\Vect*.hpp" | Out-String
+    if ($LASTEXITCODE -eq 0 -and $wild -match '2 files \(1 headers, 1 sources\)') { Write-Host "  ok   wildcards on the command line" } else { Write-Host "  FAIL command-line wildcards:"; Write-Host $wild; $failed++ }
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"   # the expected stderr line must not stop the script
+    $null = .\cppparse.exe -q --no-compile -o out\par -n none "..\cppparse\nothing*.cpp" 2>&1
+    $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+    if ($rc -ne 0) { Write-Host "  ok   unmatched pattern is an error" } else { Write-Host "  FAIL unmatched pattern accepted"; $failed++ }
+    if ($failed -ne 0) { throw "$failed version 5 check(s) failed" }
+
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"

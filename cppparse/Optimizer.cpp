@@ -908,26 +908,40 @@ int Optimizer::level1(IrFunction& f, std::vector<std::string>& log)
     return total;
 }
 
-void Optimizer::run(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm)
+void Optimizer::runLocal(IrFunction& f, std::vector<std::string>& log)
 {
     if (m_level <= 0) return;
-    int before = f.instCount();
-    log.push_back("  " + f.name + "  (" + intToString(before) + " instructions, -O" + intToString(m_level) + ")");
-
+    log.push_back("  " + f.name + "  (" + intToString(f.instCount()) + " instructions, -O" + intToString(m_level) + ")");
     level1(f, log);
-    if (m_level >= 2) {
-        int n = licm(f); if (n) log.push_back("    loop-invariant code motion: " + intToString(n));
-        n = inlineCalls(f, 12); if (n) log.push_back("    inlining (small functions): " + intToString(n));
-        level1(f, log);
-    }
+    if (m_level >= 2) { int n = licm(f); if (n) log.push_back("    loop-invariant code motion: " + intToString(n)); }
+}
+
+void Optimizer::runInterprocedural(IrFunction& f, std::vector<std::string>& log)
+{
+    if (m_level < 2) return;
+    int n = inlineCalls(f, 12); if (n) log.push_back("    inlining (small functions): " + intToString(n));
+    level1(f, log);
     if (m_level >= 3) {
-        int n = inlineCalls(f, 40); if (n) log.push_back("    inlining (larger functions): " + intToString(n));
+        n = inlineCalls(f, 40); if (n) log.push_back("    inlining (larger functions): " + intToString(n));
         n = unrollLoops(f, 8, 40); if (n) log.push_back("    loop unrolling: " + intToString(n));
         level1(f, log);
         n = licm(f); if (n) log.push_back("    loop-invariant code motion: " + intToString(n));
         level1(f, log);
     }
+}
 
+void Optimizer::run(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm)
+{
+    if (m_level <= 0) return;
+    runLocal(f, log);
+    runInterprocedural(f, log);
+    runSsa(f, log, ssaForm);
+}
+
+void Optimizer::runSsa(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm)
+{
+    if (m_level <= 0) return;
+    int before = f.instCount();
     // SSA phase last: promote scalars, value-number over the dominator tree, fold, leave SSA, clean up
     if (!f.hasTry) {
         SsaStats ss;
@@ -952,7 +966,7 @@ void Optimizer::run(IrFunction& f, std::vector<std::string>& log, std::string* s
     }
     level1(f, log);
     int after = f.instCount();
-    log.push_back("    result: " + intToString(before) + " -> " + intToString(after) + " instructions, " + intToString(static_cast<int>(f.blocks.size())) + " blocks");
+    log.push_back("    result: " + intToString(before) + " -> " + intToString(after) + " instructions in the final phase, " + intToString(static_cast<int>(f.blocks.size())) + " blocks");
 }
 
 } // namespace cppparse

@@ -7,14 +7,18 @@
 
 namespace cppparse {
 
-TypeChecker::TypeChecker(const CodeBase& cb, TypeTable& types, std::vector<Finding>& findings)
+TypeChecker::TypeChecker(const CodeBase& cb, TypeTable& types, std::vector<Finding>& findings, const std::set<std::string>& macros)
     : m_cb(cb), m_types(types), m_findings(findings), m_ast(0), m_fn(0), m_owner(0), m_loopDepth(0), m_switchDepth(0), m_errors(0),
-      m_calleeContext(false), m_receiverConst(false)
+      m_macroNames(macros), m_calleeContext(false), m_receiverConst(false)
+{
+}
+
+void TypeChecker::collectMacroNames(const CodeBase& cb, std::set<std::string>& out)
 {
     const std::vector<SourceFile*>& files = cb.files();
     for (size_t f = 0; f < files.size(); ++f)
         for (size_t d = 0; d < files[f]->directives.size(); ++d)
-            if (files[f]->directives[d].kind == Directive::Define) m_macroNames.insert(files[f]->directives[d].argument);
+            if (files[f]->directives[d].kind == Directive::Define) out.insert(files[f]->directives[d].argument);
 }
 
 void TypeChecker::add(Finding::Severity s, const char* code, int line, const std::string& msg, const std::string& detail)

@@ -3,6 +3,7 @@
 #include "PathUtil.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <sstream>
 
@@ -217,10 +218,53 @@ void X86Function::layoutFrame()
     m_stats.frameSize = m_frameSize;
 }
 
-std::string X86Function::floatConst(double v)
+std::string X86Function::floatConst(double v) { return m_m.floatLabel(v); }
+
+namespace {
+
+std::string hex32(unsigned long v)
 {
-    m_m.m_floats.push_back(v);
-    return "fconst_" + intToString(static_cast<int>(m_m.m_floats.size() - 1));
+    std::string r;
+    for (int i = 7; i >= 0; --i) r += "0123456789abcdef"[(v >> (i * 4)) & 15];
+    return r;
+}
+
+// label for a double from its IEEE bits (two 32-bit halves: C++98 has no 64-bit integer)
+std::string floatName(double v)
+{
+    unsigned long half[2];
+    std::memcpy(half, &v, sizeof half);
+    return "fconst_" + hex32(half[1]) + hex32(half[0]);
+}
+
+// label for a string literal from two independent 32-bit hashes of its contents
+std::string stringName(const std::string& text)
+{
+    unsigned long fnv = 2166136261UL, djb = 5381UL;
+    for (size_t i = 0; i < text.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        fnv = (fnv ^ c) * 16777619UL;
+        djb = djb * 33UL + c;
+    }
+    return "str_" + hex32(fnv) + "_" + hex32(djb);
+}
+
+} // namespace
+
+std::string X86Module::floatLabel(double v)
+{
+    std::string name = floatName(v);
+    Lock l(m_mutex);
+    m_floats[name] = v;
+    return name;
+}
+
+std::string X86Module::stringLabel(const std::string& text)
+{
+    std::string name = stringName(text);
+    Lock l(m_mutex);
+    m_strings[name] = text;
+    return name;
 }
 
 std::string X86Function::use(const IrOperand& o, const std::string& scratch)
@@ -242,8 +286,8 @@ std::string X86Function::use(const IrOperand& o, const std::string& scratch)
     case IrOperand::Imm: line("mov " + scratch + ", " + intToString(static_cast<int>(o.ival))); return scratch;
     case IrOperand::FImm: { std::string c = floatConst(o.fval); line("movsd " + scratch + ", real8 ptr [" + c + "]"); return scratch; }
     case IrOperand::Local: line("lea " + scratch + ", " + localRef(o.id)); return scratch;
-    case IrOperand::Global: { std::string g = mangleGlobal(o.name); m_m.m_globalsUsed.insert(o.name); line("lea " + scratch + ", " + g); return scratch; }
-    case IrOperand::Str: { m_m.m_strings.push_back(o.name); line("lea " + scratch + ", str_" + intToString(static_cast<int>(m_m.m_strings.size() - 1))); return scratch; }
+    case IrOperand::Global: { std::string g = mangleGlobal(o.name); m_m.useGlobal(o.name); line("lea " + scratch + ", " + g); return scratch; }
+    case IrOperand::Str: { line("lea " + scratch + ", " + m_m.stringLabel(o.name)); return scratch; }
     default: return scratch;
     }
 }
@@ -292,7 +336,7 @@ void X86Function::emitCall(const IrInst& in)
         line("call rcx");
     } else {
         std::string callee = runtimeName(in.sub);
-        if (!m_m.m_defined.count(callee)) m_m.m_externs.insert(callee);
+        m_m.useExtern(callee);
         line("call " + callee);
     }
     if (in.dst >= 0) {
@@ -313,7 +357,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     switch (in.op) {
     case IrInst::Const: { std::string rd = def(in.dst, false, "rax", spill); line("mov " + rd + ", " + intToString(static_cast<int>(in.args[0].ival))); finish(in.dst, spill, false, rd); break; }
     case IrInst::FConst: { std::string rd = def(in.dst, true, "xmm0", spill); line("movsd " + rd + ", real8 ptr [" + floatConst(in.args[0].fval) + "]"); finish(in.dst, spill, true, rd); break; }
-    case IrInst::StrConst: { std::string rd = def(in.dst, false, "rax", spill); m_m.m_strings.push_back(in.args[0].name); line("lea " + rd + ", str_" + intToString(static_cast<int>(m_m.m_strings.size() - 1))); finish(in.dst, spill, false, rd); break; }
+    case IrInst::StrConst: { std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", " + m_m.stringLabel(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
     case IrInst::Copy: {
         std::string rs = use(in.args[0], dstFloat ? "xmm1" : "rdx");
         std::string rd = def(in.dst, dstFloat, dstFloat ? "xmm0" : "rax", spill);
@@ -325,7 +369,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         int size = typeSize(in.type);
         std::string mem;
         if (in.op == IrInst::LoadLocal) mem = localRef(in.args[0].id);
-        else if (in.op == IrInst::LoadGlobal) { mem = "[" + mangleGlobal(in.args[0].name) + "]"; m_m.m_globalsUsed.insert(in.args[0].name); }
+        else if (in.op == IrInst::LoadGlobal) { mem = "[" + mangleGlobal(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
         else mem = "[" + use(in.args[0], "rdx") + "]";
         std::string rd = def(in.dst, dstFloat, dstFloat ? "xmm0" : "rax", spill);
         if (dstFloat) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + rd + ", " + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem);
@@ -340,7 +384,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         bool fl = opIsFloat(in.args[1]);
         std::string mem;
         if (in.op == IrInst::StoreLocal) mem = localRef(in.args[0].id);
-        else if (in.op == IrInst::StoreGlobal) { mem = "[" + mangleGlobal(in.args[0].name) + "]"; m_m.m_globalsUsed.insert(in.args[0].name); }
+        else if (in.op == IrInst::StoreGlobal) { mem = "[" + mangleGlobal(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
         else mem = "[" + use(in.args[0], "rdx") + "]";
         std::string rv = use(in.args[1], fl ? "xmm0" : "rax");
         if (fl) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem + ", " + rv);
@@ -348,7 +392,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         break;
     }
     case IrInst::AddrLocal: { std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", " + localRef(in.args[0].id)); finish(in.dst, spill, false, rd); break; }
-    case IrInst::AddrGlobal: { std::string rd = def(in.dst, false, "rax", spill); m_m.m_globalsUsed.insert(in.args[0].name); line("lea " + rd + ", " + mangleGlobal(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
+    case IrInst::AddrGlobal: { std::string rd = def(in.dst, false, "rax", spill); m_m.useGlobal(in.args[0].name); line("lea " + rd + ", " + mangleGlobal(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
     case IrInst::AddrField: { std::string rb = use(in.args[0], "rdx"); std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", [" + rb + "+" + intToString(static_cast<int>(in.extra)) + "]      ; " + in.sub); finish(in.dst, spill, false, rd); break; }
     case IrInst::AddrIndex: {
         std::string rb = use(in.args[0], "rdx");
@@ -501,7 +545,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     }
     case IrInst::Throw: {
         if (!in.args.empty()) { std::string r = use(in.args[0], "rcx"); if (r != "rcx") line("mov rcx, " + r); } else line("xor ecx, ecx");
-        m_m.m_externs.insert("cppparse_throw");
+        m_m.useExtern("cppparse_throw");
         line("call cppparse_throw");
         break;
     }
@@ -569,12 +613,16 @@ std::string X86Function::run()
 
 X86Module::X86Module(const CodeBase& cb, TypeTable& types, Layouts& layouts) : m_cb(cb), m_types(types), m_layouts(layouts) {}
 
-void X86Module::addFunction(const IrFunction& f, LowerStats& stats)
+void X86Module::addFunction(const IrFunction& f, LowerStats& stats) { appendCode(codeFor(f, stats)); }
+
+std::string X86Module::codeFor(const IrFunction& f, LowerStats& stats)
 {
-    m_defined.insert(mangle(f.name));
+    { Lock l(m_mutex); m_defined.insert(mangle(f.name)); }
     X86Function fn(*this, f, stats);
-    m_code += fn.run();
+    return fn.run();
 }
+
+void X86Module::appendCode(const std::string& code) { Lock l(m_mutex); m_code += code; }
 
 void X86Module::emitVtables()
 {
@@ -662,10 +710,13 @@ std::string X86Module::finish()
     s << "\n.data\n" << m_data;
     s << "\n.const\n";
     s << "sign_mask DQ 8000000000000000h, 8000000000000000h\n";
-    for (size_t i = 0; i < m_floats.size(); ++i) { std::ostringstream v; v.setf(std::ios::fixed); v.precision(17); v << m_floats[i]; s << "fconst_" << i << " REAL8 " << v.str() << "\n"; }
-    for (size_t i = 0; i < m_strings.size(); ++i) {
+    for (std::map<std::string, double>::const_iterator fi = m_floats.begin(); fi != m_floats.end(); ++fi) {
+        std::ostringstream v; v.setf(std::ios::fixed); v.precision(17); v << fi->second;
+        s << fi->first << " REAL8 " << v.str() << "\n";
+    }
+    for (std::map<std::string, std::string>::const_iterator si = m_strings.begin(); si != m_strings.end(); ++si) {
         // the literal is stored with quotes and escapes: emit raw bytes
-        std::string lit = m_strings[i];
+        std::string lit = si->second;
         if (lit.size() >= 2 && lit[0] == '"') lit = lit.substr(1, lit.size() - 2);
         // MASM limits a line to 512 characters: emit at most 24 bytes per DB line
         std::vector<int> bytes;
@@ -678,7 +729,7 @@ std::string X86Module::finish()
             bytes.push_back(static_cast<int>(ch));
         }
         bytes.push_back(0);
-        s << "str_" << i << " LABEL BYTE\n";
+        s << si->first << " LABEL BYTE\n";
         for (size_t c = 0; c < bytes.size(); c += 24) {
             s << "        DB ";
             for (size_t k = c; k < bytes.size() && k < c + 24; ++k) s << (k == c ? "" : ", ") << bytes[k];

@@ -37,7 +37,9 @@ namespace cppparse {
 
 class TypeChecker {
 public:
-    TypeChecker(const CodeBase& cb, TypeTable& types, std::vector<Finding>& findings);
+    // 'macros' is the set of macro names defined in the parsed files (computed once, shared read-only)
+    TypeChecker(const CodeBase& cb, TypeTable& types, std::vector<Finding>& findings, const std::set<std::string>& macros);
+    static void collectMacroNames(const CodeBase& cb, std::set<std::string>& out);
     bool check(FunctionAst& ast);
 
     // shared with the IR builder
@@ -97,7 +99,7 @@ private:
     int                     m_switchDepth;
     int                     m_errors;
     std::vector<std::string> m_usingNamespaces;
-    std::set<std::string>   m_macroNames;
+    const std::set<std::string>& m_macroNames;
     bool                    m_calleeContext;      // resolving the callee of a call
     std::set<std::string>   m_undeclaredCalls;    // reported once per function
     bool                    m_receiverConst;      // the object a member call is made on is const

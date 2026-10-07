@@ -73,6 +73,9 @@ dashed box = base class not defined in the parsed files.
 --no-compile     skip version 3 and 4
 --no-x86         do not write the x86-64 .asm file
 --assemble       run ml64 on the .asm to produce the .obj (ml64 on PATH)
+-j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)
+src\*.cpp        wildcard patterns are expanded by cppparse itself (more than 50 files is fine)
+@list.txt        response file: one path, pattern or option per line; '#' starts a comment
 -q               quiet
 ```
 
@@ -241,3 +244,40 @@ implemented on this target). `--assemble` runs `ml64 /c` to produce
 Test 6 assembles the `sample-opt` output with `ml64`, links it with the
 MSVC-compiled `sample-opt-driver/driver.cpp` and runs it at `-O0`, `-O2`
 and `-O3`: all 19 result checks pass, templates included.
+
+## Version 5: parallel pipeline, many input files
+
+**Worker pool** (`Parallel.cpp`): C++98 has no threads, so the pool uses
+`CreateThread` on Windows (a sequential fallback elsewhere). A job is a
+`ParallelJob` with `run(index)`; `runParallel(job, count, threads)` hands
+the indices to the threads through an interlocked counter.
+
+**Parallel loading** (`CodeBase::loadFiles`): every input list (project,
+solution, folder, or the files on the command line) is read, lexed and
+parsed on the pool, one file per job, writing only into its own
+`SourceFile`. Files are registered in list order, then the `#include`s
+they discovered form the next round, until nothing new appears. On the
+49 files of cppparse itself parsing takes 32 ms on 12 threads instead
+of 125 ms.
+
+**Parallel compiling** (`Compiler.cpp`): the per-function phases run on
+the pool: body parse + type check + IR build (and the template
+instantiation rounds), the local optimisation passes, the SSA passes, and
+VM64 plus x86-64 lowering. Inlining and unrolling read the IR of other
+functions, so that phase runs on one thread. The shared structures (type
+table, template instantiator, class layouts, the x86 constant pools) are
+guarded by one recursive lock; results are merged in function order and
+x86 constant labels are derived from their contents (`fconst_<bits>`,
+`str_<hash>`), so every output file is byte-identical whatever `-j` is.
+The optimisation log ends with the time of each phase.
+
+The compile phases allocate heavily and all threads share the C runtime
+heap: on a 12-processor machine they are fastest at 2 to 4 threads and
+get slower beyond, which is why the default compile thread count stops
+at 4 (`-j` overrides it). Arena allocation for the IR and the generated
+text is on the version 6 list.
+
+**Many files**: `src\*.cpp` and `include\*.hpp` are expanded by cppparse
+(no shell globbing is needed on Windows), and `@list.txt` reads paths,
+patterns and options from a file, one per line, so a command line is
+never too long. All plain files are parsed together as one project.

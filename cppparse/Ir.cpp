@@ -1,5 +1,6 @@
 // Ir.cpp - IR printing, class layouts and the AST -> IR builder.
 #include "Ir.hpp"
+#include "Parallel.hpp"
 #include "PathUtil.hpp"
 #include "TypeCheck.hpp"
 
@@ -185,12 +186,15 @@ int Layouts::alignOf(const Type* t)
 int Layouts::classSize(const ClassInfo* cls)
 {
     if (!cls || !cls->isDefinition) return 8;
+    Lock l(semanticMutex());
     return layout(cls).size;
 }
 
 bool Layouts::hasVtable(const ClassInfo* cls)
 {
-    return cls && cls->isDefinition && !layout(cls).vtable.empty();
+    if (!cls || !cls->isDefinition) return false;
+    Lock l(semanticMutex());
+    return !layout(cls).vtable.empty();
 }
 
 namespace {
@@ -213,6 +217,7 @@ std::string methodKey(const FunctionInfo& fn)
 
 const Layouts::Layout& Layouts::layout(const ClassInfo* cls)
 {
+    Lock l(semanticMutex());
     std::map<const ClassInfo*, Layout>::iterator it = m_cache.find(cls);
     if (it != m_cache.end()) return it->second;
     Layout& L = m_cache[cls];   // inserted first: recursion through pointers to self terminates
@@ -280,6 +285,7 @@ const Layouts::Layout& Layouts::layout(const ClassInfo* cls)
 bool Layouts::field(const ClassInfo* cls, const std::string& name, Field& out)
 {
     if (!cls || !cls->isDefinition) return false;
+    Lock l(semanticMutex());
     const Layout& L = layout(cls);
     std::map<std::string, Field>::const_iterator it = L.fields.find(name);
     if (it != L.fields.end()) { out = it->second; return true; }
@@ -295,6 +301,7 @@ int Layouts::baseOffset(const ClassInfo* cls, const ClassInfo* base)
     if (!cls || !base) return -1;
     if (cls == base) return 0;
     if (!cls->isDefinition) return -1;
+    Lock l(semanticMutex());
     const Layout& L = layout(cls);
     for (std::map<const ClassInfo*, int>::const_iterator b = L.bases.begin(); b != L.bases.end(); ++b) {
         int off = baseOffset(b->first, base);
@@ -306,6 +313,7 @@ int Layouts::baseOffset(const ClassInfo* cls, const ClassInfo* base)
 int Layouts::vtableSlot(const ClassInfo* cls, const FunctionInfo* method)
 {
     if (!cls || !method) return -1;
+    Lock l(semanticMutex());
     const Layout& L = layout(cls);
     std::string key = methodKey(*method);
     for (size_t v = 0; v < L.vtable.size(); ++v) if (L.vtable[v] == key) return static_cast<int>(v);
@@ -316,6 +324,7 @@ int Layouts::vtableSlot(const ClassInfo* cls, const FunctionInfo* method)
 std::string Layouts::describe(const ClassInfo* cls)
 {
     if (!cls || !cls->isDefinition) return "";
+    Lock l(semanticMutex());
     const Layout& L = layout(cls);
     std::string s = std::string(ClassInfo::kindName(cls->kind)) + " " + cls->qualifiedName + ": size " + intToString(L.size) + ", align " + intToString(L.align) + " {";
     for (size_t o = 0; o < L.order.size(); ++o) s += (o ? "; " : " ") + L.order[o];

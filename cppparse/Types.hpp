@@ -13,6 +13,7 @@
 #define CPPPARSE_TYPES_HPP
 
 #include "CodeBase.hpp"
+#include "Parallel.hpp"
 
 #include <map>
 #include <string>
@@ -74,10 +75,10 @@ public:
     // Parses declaration text. 'scope' and 'owner' direct the class lookup.
     const Type* parse(const std::string& text, const std::string& scope, const ClassInfo* owner);
     bool        isTypeName(const std::string& name, const std::string& scope, const ClassInfo* owner);
-    void        addTypedef(const std::string& name, const std::string& target) { m_typedefs[name] = target; }
+    void        addTypedef(const std::string& name, const std::string& target) { Lock l(semanticMutex()); m_typedefs[name] = target; }
     void        setInstantiator(Instantiator* inst) { m_instantiator = inst; }
     Instantiator* instantiator() const { return m_instantiator; }
-    void        addEnumerator(const std::string& name, const std::string& enumName, long value) { m_enumerators[name] = std::make_pair(enumName, value); }
+    void        addEnumerator(const std::string& name, const std::string& enumName, long value) { Lock l(semanticMutex()); m_enumerators[name] = std::make_pair(enumName, value); }
     bool        isEnumName(const std::string& name) const { return m_enums.count(name) != 0; }
 
     // enumerator lookup: "Red" -> enum name, value index

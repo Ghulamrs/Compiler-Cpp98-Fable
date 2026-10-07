@@ -19,7 +19,9 @@
 
 #include "Ir.hpp"
 #include "Lower.hpp"
+#include "Parallel.hpp"
 
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -29,7 +31,9 @@ namespace cppparse {
 class X86Module {
 public:
     X86Module(const CodeBase& cb, TypeTable& types, Layouts& layouts);
-    void        addFunction(const IrFunction& f, LowerStats& stats);
+    void        addFunction(const IrFunction& f, LowerStats& stats);     // codeFor + appendCode
+    std::string codeFor(const IrFunction& f, LowerStats& stats);         // safe to call from several threads
+    void        appendCode(const std::string& code);
     std::string finish();                       // the complete .asm text
 
 private:
@@ -41,12 +45,17 @@ private:
     Layouts&                 m_layouts;
     std::string              m_code;
     std::string              m_data;
-    std::vector<std::string> m_strings;
-    std::vector<double>      m_floats;
+    std::map<std::string, std::string> m_strings;   // label -> literal; labels are derived from the contents so
+    std::map<std::string, double>      m_floats;    // that the output is the same whatever the thread timing
     std::set<std::string>    m_externs;
     std::set<std::string>    m_defined;         // PUBLIC symbols defined in this module
     std::set<std::string>    m_vtablesNeeded;   // qualified class names
     std::set<std::string>    m_globalsUsed;     // mangled global names referenced
+    Mutex                    m_mutex;           // guards the pools above while functions are generated in parallel
+    std::string floatLabel(double v);
+    std::string stringLabel(const std::string& text);
+    void        useGlobal(const std::string& name) { Lock l(m_mutex); m_globalsUsed.insert(name); }
+    void        useExtern(const std::string& name) { Lock l(m_mutex); if (!m_defined.count(name)) m_externs.insert(name); }
     friend class X86Function;
 };
 

@@ -2,6 +2,7 @@
 #include "CodeBase.hpp"
 #include "Health.hpp"
 #include "Lexer.hpp"
+#include "Parallel.hpp"
 #include "Parser.hpp"
 #include "PathUtil.hpp"
 #include "ProjectReader.hpp"
@@ -11,7 +12,7 @@
 
 namespace cppparse {
 
-CodeBase::CodeBase() : m_followIncludes(true) {}
+CodeBase::CodeBase() : m_followIncludes(true), m_threads(hardwareThreads()), m_parseMs(0) {}
 
 CodeBase::~CodeBase()
 {
@@ -49,22 +50,35 @@ bool CodeBase::addInput(const std::string& path)
     if (ext == ".sln") return loadSolution(path);
     if (ext == ".vcxproj" || ext == ".vcproj") return loadProject(path, "");
 
-    std::string abs = absolutePath(path);
-    if (!fileExists(abs)) { m_messages.push_back("error: cannot open " + path); return false; }
-    if (m_projects.empty() || m_projects.back().kind != "files") {
-        ProjectInfo p;
-        p.kind = "files";
-        p.name = "(files given on the command line)";
-        p.path = abs;
-        p.version = "n/a";
-        m_projects.push_back(p);
-    }
-    ProjectInfo& p = m_projects.back();
-    if (isHeaderExtension(ext)) addUnique(p.headerFiles, abs);
-    else addUnique(p.sourceFiles, abs);
+    std::vector<std::string> one;
+    one.push_back(path);
+    return addFiles(one);
+}
+
+bool CodeBase::addFiles(const std::vector<std::string>& paths)
+{
+    std::vector<std::string> abs;
     std::vector<std::string> inc;
-    inc.push_back(dirName(abs));
-    return loadFile(abs, "command line", p.name, inc) != 0;
+    bool ok = true;
+    for (size_t i = 0; i < paths.size(); ++i) {
+        std::string a = absolutePath(paths[i]);
+        if (!fileExists(a)) { m_messages.push_back("error: cannot open " + paths[i]); ok = false; continue; }
+        if (m_projects.empty() || m_projects.back().kind != "files") {
+            ProjectInfo p;
+            p.kind = "files";
+            p.name = "(files given on the command line)";
+            p.path = a;
+            p.version = "n/a";
+            m_projects.push_back(p);
+        }
+        ProjectInfo& p = m_projects.back();
+        if (isHeaderExtension(extension(a))) addUnique(p.headerFiles, a); else addUnique(p.sourceFiles, a);
+        addUnique(inc, dirName(a));
+        abs.push_back(a);
+    }
+    if (abs.empty()) return ok;
+    loadFiles(abs, "command line", m_projects.back().name, inc);
+    return ok;
 }
 
 bool CodeBase::loadSolution(const std::string& path)
@@ -102,8 +116,9 @@ bool CodeBase::loadFolder(const std::string& path)
         m_projects.push_back(p);
         return false;
     }
-    for (size_t i = 0; i < p.headerFiles.size(); ++i) loadFile(p.headerFiles[i], "folder", p.name, p.includeDirs);
-    for (size_t i = 0; i < p.sourceFiles.size(); ++i) loadFile(p.sourceFiles[i], "folder", p.name, p.includeDirs);
+    std::vector<std::string> all(p.headerFiles);
+    all.insert(all.end(), p.sourceFiles.begin(), p.sourceFiles.end());
+    loadFiles(all, "folder", p.name, p.includeDirs);
     m_projects.push_back(p);
     return true;
 }
@@ -120,56 +135,122 @@ bool CodeBase::loadProject(const std::string& path, const std::string& solutionD
     std::vector<std::string> inc = p.includeDirs;
     inc.insert(inc.begin(), dirName(p.path));
 
+    std::vector<std::string> present;
     for (size_t i = 0; i < p.headerFiles.size(); ++i) {
         if (!fileExists(p.headerFiles[i])) { m_messages.push_back("project " + p.name + ": missing header " + p.headerFiles[i]); continue; }
-        loadFile(p.headerFiles[i], "project", p.name, inc);
+        present.push_back(p.headerFiles[i]);
     }
     for (size_t i = 0; i < p.sourceFiles.size(); ++i) {
         if (!fileExists(p.sourceFiles[i])) { m_messages.push_back("project " + p.name + ": missing source " + p.sourceFiles[i]); continue; }
-        loadFile(p.sourceFiles[i], "project", p.name, inc);
+        present.push_back(p.sourceFiles[i]);
     }
+    loadFiles(present, "project", p.name, inc);
     m_projects.push_back(p);
     return true;
 }
 
-SourceFile* CodeBase::loadFile(const std::string& absPath, const std::string& origin, const std::string& project,
-                               const std::vector<std::string>& includeDirs)
+namespace {
+
+// reads, lexes and parses one file; touches nothing shared (runs on the worker pool)
+SourceFile* parseOne(const std::string& absPath, std::string& error)
+{
+    std::string text;
+    if (!readFile(absPath, text)) { error = "error: cannot read " + absPath; return 0; }
+    SourceFile* f = new SourceFile;
+    f->path = normalizePath(absPath);
+    f->isHeader = isHeaderExtension(extension(absPath));
+    std::vector<Token> tokens;
+    Lexer lexer(text);
+    lexer.run(tokens);
+    f->lineCount = lexer.lineCount();
+    f->tokenCount = static_cast<int>(tokens.size()) - 1;
+    Parser parser(*f, tokens);
+    parser.parse();
+    f->tokens.swap(tokens);   // kept for the version 3 body parser
+    return f;
+}
+
+struct ParseJob : public ParallelJob {
+    std::vector<std::string> paths;
+    std::vector<SourceFile*> results;
+    std::vector<std::string> errors;
+    virtual void run(size_t i) { results[i] = parseOne(paths[i], errors[i]); }
+};
+
+} // namespace
+
+SourceFile* CodeBase::registerFile(SourceFile* f, const std::string& absPath, const std::string& origin, const std::string& project)
 {
     std::string key = toLower(normalizePath(absPath));
     std::map<std::string, SourceFile*>::iterator it = m_byPath.find(key);
     if (it != m_byPath.end()) {
         // a file first seen through an #include may later turn out to be listed in the project
         if (origin == "project" && it->second->origin != "project") { it->second->origin = origin; it->second->project = project; }
+        delete f;
         return it->second;
     }
-
-    std::string text;
-    if (!readFile(absPath, text)) { m_messages.push_back("error: cannot read " + absPath); return 0; }
-
-    SourceFile* f = new SourceFile;
-    f->path = normalizePath(absPath);
     f->origin = origin;
     f->project = project;
-    f->isHeader = isHeaderExtension(extension(absPath));
     m_files.push_back(f);
     m_byPath[key] = f;
-
-    std::vector<Token> tokens;
-    Lexer lexer(text);
-    lexer.run(tokens);
-    f->lineCount = lexer.lineCount();
-    f->tokenCount = static_cast<int>(tokens.size()) - 1;
-
-    Parser parser(*f, tokens);
-    parser.parse();
-    f->tokens.swap(tokens);   // kept for the version 3 body parser
-
-    resolveIncludes(f, includeDirs, project);
     return f;
 }
 
-void CodeBase::resolveIncludes(SourceFile* f, const std::vector<std::string>& includeDirs, const std::string& project)
+void CodeBase::loadFiles(const std::vector<std::string>& absPaths, const std::string& origin, const std::string& project,
+                         const std::vector<std::string>& includeDirs)
 {
+    long start = millisecondsNow();
+    std::vector<std::string> round;
+    std::vector<std::string> origins;
+    for (size_t i = 0; i < absPaths.size(); ++i) {
+        std::string key = toLower(normalizePath(absPaths[i]));
+        if (m_byPath.count(key)) { registerFile(new SourceFile, absPaths[i], origin, project); continue; }   // already loaded: refresh its origin only
+        bool dup = false;
+        for (size_t k = 0; k < round.size(); ++k) if (toLower(normalizePath(round[k])) == key) { dup = true; break; }
+        if (!dup) { round.push_back(absPaths[i]); origins.push_back(origin); }
+    }
+    // rounds: parse the current list in parallel, register in order, collect the includes
+    // discovered by these files for the next round
+    for (int depth = 0; depth < 64 && !round.empty(); ++depth) {
+        ParseJob job;
+        job.paths = round;
+        job.results.assign(round.size(), static_cast<SourceFile*>(0));
+        job.errors.assign(round.size(), std::string());
+        runParallel(job, round.size(), m_threads);
+        std::vector<std::string> next;
+        std::vector<std::string> nextOrigins;
+        for (size_t i = 0; i < round.size(); ++i) {
+            if (!job.results[i]) { if (!job.errors[i].empty()) m_messages.push_back(job.errors[i]); continue; }
+            SourceFile* f = registerFile(job.results[i], round[i], origins[i], project);
+            std::vector<std::string> discovered;
+            resolveIncludes(f, includeDirs, project, m_followIncludes ? &discovered : 0);
+            for (size_t d = 0; d < discovered.size(); ++d) {
+                std::string key = toLower(normalizePath(discovered[d]));
+                if (m_byPath.count(key)) continue;
+                bool dup = false;
+                for (size_t k = 0; k < next.size(); ++k) if (toLower(normalizePath(next[k])) == key) { dup = true; break; }
+                if (!dup) { next.push_back(discovered[d]); nextOrigins.push_back("included by " + baseName(f->path)); }
+            }
+        }
+        round.swap(next);
+        origins.swap(nextOrigins);
+    }
+    m_parseMs += millisecondsNow() - start;
+}
+
+SourceFile* CodeBase::loadFile(const std::string& absPath, const std::string& origin, const std::string& project,
+                               const std::vector<std::string>& includeDirs)
+{
+    std::vector<std::string> one;
+    one.push_back(absPath);
+    loadFiles(one, origin, project, includeDirs);
+    return fileByPath(absPath) ? const_cast<SourceFile*>(fileByPath(absPath)) : 0;
+}
+
+void CodeBase::resolveIncludes(SourceFile* f, const std::vector<std::string>& includeDirs, const std::string& project,
+                               std::vector<std::string>* discovered)
+{
+    (void)project;
     std::string here = dirName(f->path);
     for (size_t i = 0; i < f->directives.size(); ++i) {
         Directive& d = f->directives[i];
@@ -187,8 +268,7 @@ void CodeBase::resolveIncludes(SourceFile* f, const std::vector<std::string>& in
         }
         if (found.empty()) continue;
         d.resolvedPath = normalizePath(found);
-        if (m_followIncludes)
-            loadFile(d.resolvedPath, "included by " + baseName(f->path), project, includeDirs);
+        if (discovered) discovered->push_back(d.resolvedPath);
     }
 }
 

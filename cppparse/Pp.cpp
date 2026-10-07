@@ -411,7 +411,15 @@ struct CondParser {
         ++i;
         if (k.kind == PpToken::Number) return number(k.text);
         if (k.kind == PpToken::Char) return charValue(k.text);
-        if (k.kind == PpToken::Ident) return k.text == "true" ? 1 : 0;       // unknown identifiers are 0
+        if (k.kind == PpToken::Ident) {
+            // feature-test operators of newer compilers (__has_include, __has_cpp_attribute, __has_builtin, ...): 0
+            if (k.text.compare(0, 6, "__has_") == 0 && at("(")) {
+                int depth = 0;
+                for (; i < t.size(); ++i) { if (t[i].is("(")) ++depth; else if (t[i].is(")") && --depth == 0) { ++i; break; } }
+                return 0;
+            }
+            return k.text == "true" ? 1 : 0;                                  // unknown identifiers are 0
+        }
         bad = true;
         return 0;
     }
@@ -561,6 +569,19 @@ void Preprocessor::expandTokens(std::vector<PpToken>& in, std::vector<PpToken>& 
         if (!closed) { diag(PpDiag::Error, t.file, t.line, "unterminated call of macro " + t.text); out.push_back(t); ++i; continue; }
         args.push_back(cur);
         if (mac.params.empty() && args.size() == 1 && args[0].empty()) args.clear();
+        // variadic macro (C99 / C++11, used by the MSVC headers): the extra arguments become __VA_ARGS__
+        bool variadic = !mac.params.empty() && mac.params.back() == "...";
+        if (variadic) {
+            size_t fixed = mac.params.size() - 1;
+            if (args.size() < fixed) args.resize(fixed);
+            std::vector<PpToken> rest;
+            for (size_t a = fixed; a < args.size(); ++a) {
+                if (a > fixed) { PpToken comma = makeTok(PpToken::Punct, ",", t.file, t.line); rest.push_back(comma); }
+                rest.insert(rest.end(), args[a].begin(), args[a].end());
+            }
+            args.resize(fixed);
+            args.push_back(rest);
+        }
         if (args.size() != mac.params.size()) {
             diag(PpDiag::Error, t.file, t.line, "macro " + t.text + " takes " + numText(static_cast<long>(mac.params.size())) + " argument(s), " + numText(static_cast<long>(args.size())) + " given");
             out.push_back(t); ++i; continue;
@@ -614,10 +635,13 @@ bool Preprocessor::substitute(const PpMacro& mac, const std::vector<std::vector<
     for (size_t i = 0; i < body.size(); ++i) {
         const PpToken& b = body[i];
         int param = -1;
-        if (b.kind == PpToken::Ident) for (size_t p = 0; p < mac.params.size(); ++p) if (mac.params[p] == b.text) param = static_cast<int>(p);
+        if (b.kind == PpToken::Ident)
+            for (size_t p = 0; p < mac.params.size(); ++p)
+                if (mac.params[p] == b.text || (mac.params[p] == "..." && b.text == "__VA_ARGS__")) param = static_cast<int>(p);
         if (b.is("#") && i + 1 < body.size()) {
             int p2 = -1;
-            for (size_t p = 0; p < mac.params.size(); ++p) if (mac.params[p] == body[i + 1].text) p2 = static_cast<int>(p);
+            for (size_t p = 0; p < mac.params.size(); ++p)
+                if (mac.params[p] == body[i + 1].text || (mac.params[p] == "..." && body[i + 1].text == "__VA_ARGS__")) p2 = static_cast<int>(p);
             if (p2 >= 0) {
                 PpToken s;
                 stringize(args[static_cast<size_t>(p2)], s);

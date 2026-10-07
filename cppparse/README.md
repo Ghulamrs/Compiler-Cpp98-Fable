@@ -125,11 +125,16 @@ the functions and globals never referenced anywhere, and the entry point.
 ## Building and testing
 
 ```
-powershell -ExecutionPolicy Bypass -File cpp\sandbox\build-cppparse.ps1
+powershell -ExecutionPolicy Bypass -File cpp\sandbox\build-cppparse.ps1 [-Config Release|Debug] [-NoTests]
 ```
 
-Compiles every `cppparse/*.cpp` with MSVC at `/W4 /permissive-` (warnings
-fail the build), then runs four tests: the Visual Studio 2010 solution in
+Compiles every `cppparse/*.cpp` and `cppparse/legacy/*.cpp` with MSVC at
+`/W4 /permissive-` (warnings fail the build). `-Config Release` (default)
+builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
+`/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
+`sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
+`obj/debug`. `-NoTests` stops after the build. The test groups (13 as of
+version 6) run against whichever configuration was built. The first four: the Visual Studio 2010 solution in
 `sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken

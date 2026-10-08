@@ -321,6 +321,10 @@ struct Counts {
 };
 void countTranslationUnit(const TranslationUnit& tu, Counts& out);
 
+// deep copies for template instantiation: fresh nodes without semantic annotations, owned by the arena
+Decl*      cloneDecl(const Decl* d, CxxArena& arena);
+ClassDecl* cloneClassDecl(const ClassDecl* c, CxxArena& arena);
+
 } // namespace cxx
 } // namespace cppparse
 

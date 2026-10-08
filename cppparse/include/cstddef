@@ -1,0 +1,22 @@
+// cstddef - cppparse's C++98 library: the C definitions header.
+// Targets x86-64 Windows: size_t is the 64-bit unsigned type (long long is the
+// MSVC extension that C++98 code on this platform relies on for it).
+#ifndef CPPPARSE_CSTDDEF
+#define CPPPARSE_CSTDDEF
+
+typedef unsigned long long size_t;
+typedef long long          ptrdiff_t;
+typedef long long          intptr_t;
+typedef unsigned long long uintptr_t;
+
+#ifndef NULL
+#define NULL 0
+#endif
+#define offsetof(type, member) ((size_t)&(((type*)0)->member))
+
+namespace std {
+    typedef ::size_t    size_t;
+    typedef ::ptrdiff_t ptrdiff_t;
+}
+
+#endif

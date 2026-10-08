@@ -109,6 +109,7 @@ private:
     // functions
     void genFunction(sema::Symbol* fn);
     void genImplicit(sema::Symbol* fn);
+    void genInitializer();
     void prologue(sema::Symbol* fn);
     void constructorInit(sema::Symbol* fn, cxx::Decl* def);
     void destructorCleanup(sema::Symbol* fn);
@@ -139,12 +140,15 @@ private:
     void   condition(cxx::Expr* e, int trueBlock, int falseBlock);
     int    conditional(cxx::Expr* e, bool byAddr);
     int    call(cxx::Expr* e, int sretAddr = -1);
+    int    operatorCall(cxx::Expr* e);
+    int    adjustThis(sema::Symbol* fn, int objAddr, const sema::Type* objType, int line);
+    int    rvalue(int r, cxx::Expr* e, int line);
     int    callFunction(sema::Symbol* fn, int thisPtr, int sretAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, bool virtualCall, int line);
     int    construct(sema::Symbol* ctor, int objAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, int line);
     int    argument(cxx::Expr* a, const sema::Type* paramType, int line);
     void   stmt(cxx::Stmt* s);
     void   localDecl(cxx::Decl* d);
-    void   initVariable(int slot, const sema::Type* t, sema::Symbol* var, cxx::InitDeclarator& id, int line);
+    void   initObject(const LValue& lv, const sema::Type* t, sema::Symbol* var, cxx::InitDeclarator& id, int line);
     const sema::Type* exprType(cxx::Expr* e) const;
 
     sema::Program&         m_prog;
@@ -160,6 +164,8 @@ private:
     std::vector<sema::Symbol*> m_queue;
     std::vector<std::string>   m_notes;
     int                        m_generated;
+    std::vector<sema::Symbol*> m_dynamicGlobals;   // globals built by the module's initialiser, in declaration order
+    sema::Symbol*              m_initSymbol;
 
     IrFunction*                m_out;
     sema::Symbol*              m_fn;

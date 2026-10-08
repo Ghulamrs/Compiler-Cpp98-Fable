@@ -1,0 +1,297 @@
+// string - cppparse's C++98 library: std::string as one class (no basic_string template),
+// a heap buffer that is always zero-terminated, pointer iterators.
+#ifndef CPPPARSE_STRING
+#define CPPPARSE_STRING
+
+#include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <iosfwd>
+
+namespace std {
+
+class string {
+public:
+    typedef char        value_type;
+    typedef size_t      size_type;
+    typedef char*       iterator;
+    typedef const char* const_iterator;
+    typedef char&       reference;
+    typedef const char& const_reference;
+    static const size_t npos = ~static_cast<size_t>(0);
+
+    string() : m_data(0), m_size(0), m_cap(0) { init(0, 0); }
+    string(const char* s) : m_data(0), m_size(0), m_cap(0) { init(s, strlen(s)); }
+    string(const char* s, size_t n) : m_data(0), m_size(0), m_cap(0) { init(s, n); }
+    string(const char* first, const char* last) : m_data(0), m_size(0), m_cap(0) { init(first, static_cast<size_t>(last - first)); }
+    string(size_t n, char c) : m_data(0), m_size(0), m_cap(0) { init(0, n); memset(m_data, c, n); }
+    string(const string& o) : m_data(0), m_size(0), m_cap(0) { init(o.m_data, o.m_size); }
+    string(const string& o, size_t pos, size_t n = npos) : m_data(0), m_size(0), m_cap(0)
+    {
+        if (pos > o.m_size) pos = o.m_size;
+        if (n == npos || pos + n > o.m_size) n = o.m_size - pos;
+        init(o.m_data + pos, n);
+    }
+    ~string() { free(m_data); }
+
+    string& operator=(const string& o) { if (this != &o) assign(o.m_data, o.m_size); return *this; }
+    string& operator=(const char* s) { return assign(s, strlen(s)); }
+    string& operator=(char c) { return assign(&c, 1); }
+
+    size_t size() const { return m_size; }
+    size_t length() const { return m_size; }
+    bool   empty() const { return m_size == 0; }
+    size_t capacity() const { return m_cap; }
+    size_t max_size() const { return npos / 2; }
+    void   clear() { m_size = 0; m_data[0] = 0; }
+    void   reserve(size_t n) { if (n > m_cap) grow(n); }
+    void   resize(size_t n) { resize(n, 0); }
+    void   resize(size_t n, char c)
+    {
+        if (n > m_cap) grow(n);
+        if (n > m_size) memset(m_data + m_size, c, n - m_size);
+        m_size = n;
+        m_data[n] = 0;
+    }
+
+    const char* c_str() const { return m_data; }
+    const char* data() const { return m_data; }
+    char&       operator[](size_t i) { return m_data[i]; }
+    const char& operator[](size_t i) const { return m_data[i]; }
+    char&       at(size_t i) { if (i >= m_size) abort(); return m_data[i]; }
+    const char& at(size_t i) const { if (i >= m_size) abort(); return m_data[i]; }
+    iterator       begin() { return m_data; }
+    iterator       end() { return m_data + m_size; }
+    const_iterator begin() const { return m_data; }
+    const_iterator end() const { return m_data + m_size; }
+
+    void    push_back(char c) { append(&c, 1); }
+    string& append(const char* s, size_t n)
+    {
+        if (m_size + n > m_cap) grow(m_size + n);
+        memcpy(m_data + m_size, s, n);
+        m_size += n;
+        m_data[m_size] = 0;
+        return *this;
+    }
+    string& append(const char* s) { return append(s, strlen(s)); }
+    string& append(const string& o) { return append(o.m_data, o.m_size); }
+    string& append(const string& o, size_t pos, size_t n) { return append(string(o, pos, n)); }
+    string& append(size_t n, char c)
+    {
+        if (m_size + n > m_cap) grow(m_size + n);
+        memset(m_data + m_size, c, n);
+        m_size += n;
+        m_data[m_size] = 0;
+        return *this;
+    }
+    string& operator+=(const string& o) { return append(o.m_data, o.m_size); }
+    string& operator+=(const char* s) { return append(s, strlen(s)); }
+    string& operator+=(char c) { return append(&c, 1); }
+
+    string& assign(const char* s, size_t n)
+    {
+        if (n > m_cap) grow(n);
+        memmove(m_data, s, n);
+        m_size = n;
+        m_data[n] = 0;
+        return *this;
+    }
+    string& assign(const char* s) { return assign(s, strlen(s)); }
+    string& assign(const string& o) { return assign(o.m_data, o.m_size); }
+    string& assign(size_t n, char c) { clear(); return append(n, c); }
+
+    string& insert(size_t pos, const char* s, size_t n)
+    {
+        if (pos > m_size) pos = m_size;
+        if (m_size + n > m_cap) grow(m_size + n);
+        memmove(m_data + pos + n, m_data + pos, m_size - pos);
+        memcpy(m_data + pos, s, n);
+        m_size += n;
+        m_data[m_size] = 0;
+        return *this;
+    }
+    string& insert(size_t pos, const char* s) { return insert(pos, s, strlen(s)); }
+    string& insert(size_t pos, const string& o) { return insert(pos, o.m_data, o.m_size); }
+    string& insert(size_t pos, size_t n, char c) { return insert(pos, string(n, c)); }
+
+    string& erase(size_t pos = 0, size_t n = npos)
+    {
+        if (pos > m_size) pos = m_size;
+        if (n == npos || pos + n > m_size) n = m_size - pos;
+        memmove(m_data + pos, m_data + pos + n, m_size - pos - n);
+        m_size -= n;
+        m_data[m_size] = 0;
+        return *this;
+    }
+    iterator erase(iterator at) { erase(static_cast<size_t>(at - m_data), 1); return at; }
+
+    string& replace(size_t pos, size_t n, const char* s, size_t sn)
+    {
+        string tail(*this, pos + n > m_size ? m_size : pos + n);
+        erase(pos);
+        append(s, sn);
+        return append(tail);
+    }
+    string& replace(size_t pos, size_t n, const char* s) { return replace(pos, n, s, strlen(s)); }
+    string& replace(size_t pos, size_t n, const string& o) { return replace(pos, n, o.m_data, o.m_size); }
+
+    string substr(size_t pos = 0, size_t n = npos) const { return string(*this, pos, n); }
+    void   swap(string& o)
+    {
+        char* d = m_data; m_data = o.m_data; o.m_data = d;
+        size_t s = m_size; m_size = o.m_size; o.m_size = s;
+        size_t c = m_cap; m_cap = o.m_cap; o.m_cap = c;
+    }
+
+    int compare(const char* s, size_t n) const
+    {
+        size_t m = m_size < n ? m_size : n;
+        int r = memcmp(m_data, s, m);
+        if (r != 0) return r;
+        if (m_size < n) return -1;
+        return m_size > n ? 1 : 0;
+    }
+    int compare(const string& o) const { return compare(o.m_data, o.m_size); }
+    int compare(const char* s) const { return compare(s, strlen(s)); }
+    int compare(size_t pos, size_t n, const string& o) const { return substr(pos, n).compare(o); }
+    int compare(size_t pos, size_t n, const char* s) const { return substr(pos, n).compare(s); }
+
+    size_t find(const char* s, size_t pos, size_t n) const
+    {
+        if (n == 0) return pos <= m_size ? pos : npos;
+        for (size_t i = pos; i + n <= m_size; ++i)
+            if (m_data[i] == s[0] && memcmp(m_data + i, s, n) == 0) return i;
+        return npos;
+    }
+    size_t find(const string& o, size_t pos = 0) const { return find(o.m_data, pos, o.m_size); }
+    size_t find(const char* s, size_t pos = 0) const { return find(s, pos, strlen(s)); }
+    size_t find(char c, size_t pos = 0) const
+    {
+        for (size_t i = pos; i < m_size; ++i) if (m_data[i] == c) return i;
+        return npos;
+    }
+    size_t rfind(const char* s, size_t pos, size_t n) const
+    {
+        if (n > m_size) return npos;
+        size_t i = m_size - n;
+        if (pos < i) i = pos;
+        for (;; --i) {
+            if (memcmp(m_data + i, s, n) == 0) return i;
+            if (i == 0) return npos;
+        }
+    }
+    size_t rfind(const string& o, size_t pos = npos) const { return rfind(o.m_data, pos, o.m_size); }
+    size_t rfind(const char* s, size_t pos = npos) const { return rfind(s, pos, strlen(s)); }
+    size_t rfind(char c, size_t pos = npos) const
+    {
+        if (m_size == 0) return npos;
+        size_t i = m_size - 1;
+        if (pos < i) i = pos;
+        for (;; --i) {
+            if (m_data[i] == c) return i;
+            if (i == 0) return npos;
+        }
+    }
+    size_t find_first_of(const char* set, size_t pos = 0) const
+    {
+        for (size_t i = pos; i < m_size; ++i) if (strchr(set, m_data[i]) && m_data[i]) return i;
+        return npos;
+    }
+    size_t find_first_of(const string& set, size_t pos = 0) const { return find_first_of(set.m_data, pos); }
+    size_t find_first_of(char c, size_t pos = 0) const { return find(c, pos); }
+    size_t find_last_of(const char* set, size_t pos = npos) const
+    {
+        if (m_size == 0) return npos;
+        size_t i = m_size - 1;
+        if (pos < i) i = pos;
+        for (;; --i) {
+            if (m_data[i] && strchr(set, m_data[i])) return i;
+            if (i == 0) return npos;
+        }
+    }
+    size_t find_last_of(const string& set, size_t pos = npos) const { return find_last_of(set.m_data, pos); }
+    size_t find_last_of(char c, size_t pos = npos) const { return rfind(c, pos); }
+    size_t find_first_not_of(const char* set, size_t pos = 0) const
+    {
+        for (size_t i = pos; i < m_size; ++i) if (!m_data[i] || !strchr(set, m_data[i])) return i;
+        return npos;
+    }
+    size_t find_first_not_of(const string& set, size_t pos = 0) const { return find_first_not_of(set.m_data, pos); }
+    size_t find_first_not_of(char c, size_t pos = 0) const
+    {
+        for (size_t i = pos; i < m_size; ++i) if (m_data[i] != c) return i;
+        return npos;
+    }
+    size_t find_last_not_of(const char* set, size_t pos = npos) const
+    {
+        if (m_size == 0) return npos;
+        size_t i = m_size - 1;
+        if (pos < i) i = pos;
+        for (;; --i) {
+            if (!m_data[i] || !strchr(set, m_data[i])) return i;
+            if (i == 0) return npos;
+        }
+    }
+    size_t find_last_not_of(const string& set, size_t pos = npos) const { return find_last_not_of(set.m_data, pos); }
+    size_t find_last_not_of(char c, size_t pos = npos) const
+    {
+        if (m_size == 0) return npos;
+        size_t i = m_size - 1;
+        if (pos < i) i = pos;
+        for (;; --i) {
+            if (m_data[i] != c) return i;
+            if (i == 0) return npos;
+        }
+    }
+
+private:
+    char*  m_data;
+    size_t m_size;
+    size_t m_cap;
+
+    void init(const char* s, size_t n)
+    {
+        m_cap = n < 15 ? 15 : n;
+        m_data = static_cast<char*>(malloc(m_cap + 1));
+        if (s && n) memcpy(m_data, s, n);
+        m_size = n;
+        m_data[n] = 0;
+    }
+    void grow(size_t need)
+    {
+        size_t cap = m_cap * 2;
+        if (cap < need) cap = need;
+        char* d = static_cast<char*>(malloc(cap + 1));
+        memcpy(d, m_data, m_size + 1);
+        free(m_data);
+        m_data = d;
+        m_cap = cap;
+    }
+};
+
+inline string operator+(const string& a, const string& b) { string r(a); r.append(b); return r; }
+inline string operator+(const string& a, const char* b) { string r(a); r.append(b); return r; }
+inline string operator+(const char* a, const string& b) { string r(a); r.append(b); return r; }
+inline string operator+(const string& a, char b) { string r(a); r.push_back(b); return r; }
+inline string operator+(char a, const string& b) { string r(1, a); r.append(b); return r; }
+
+inline bool operator==(const string& a, const string& b) { return a.size() == b.size() && a.compare(b) == 0; }
+inline bool operator==(const string& a, const char* b) { return a.compare(b) == 0; }
+inline bool operator==(const char* a, const string& b) { return b.compare(a) == 0; }
+inline bool operator!=(const string& a, const string& b) { return !(a == b); }
+inline bool operator!=(const string& a, const char* b) { return !(a == b); }
+inline bool operator!=(const char* a, const string& b) { return !(b == a); }
+inline bool operator<(const string& a, const string& b) { return a.compare(b) < 0; }
+inline bool operator<(const string& a, const char* b) { return a.compare(b) < 0; }
+inline bool operator<(const char* a, const string& b) { return b.compare(a) > 0; }
+inline bool operator>(const string& a, const string& b) { return a.compare(b) > 0; }
+inline bool operator>(const string& a, const char* b) { return a.compare(b) > 0; }
+inline bool operator<=(const string& a, const string& b) { return a.compare(b) <= 0; }
+inline bool operator>=(const string& a, const string& b) { return a.compare(b) >= 0; }
+
+inline void swap(string& a, string& b) { a.swap(b); }
+
+}
+
+#endif

@@ -3,6 +3,7 @@
 #include "Mangle.hpp"
 #include "PathUtil.hpp"
 
+#include <cctype>
 #include <cstdlib>
 
 namespace cppparse {
@@ -20,7 +21,7 @@ bool isReference(const sema::Type* t) { return t && t->kind == sema::Type::Refer
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
     : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_tryCount(0),
-      m_unwindId(-1), m_bodyBlock(-1) {}
+      m_initSymbol(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
 {
@@ -426,8 +427,6 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
         if (e->arrowMember) {
             base = value(obj);
             if (objT->kind == sema::Type::Pointer) objT = objT->inner;
-            else if (obj->semaSym && obj->semaSym->kind == Symbol::Function && obj->semaSym->type) objT = m_semaTypes.unref(obj->semaSym->type->inner);
-            if (objT->kind == sema::Type::Pointer) objT = objT->inner;
         } else {
             LValue ol = lvalue(obj);
             base = ol.kind == LValue::None ? value(obj) : load(ol, objT, line);
@@ -444,7 +443,7 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
         return lv;
     }
     case cxx::Expr::Index: {
-        if (e->semaSym) { lv.kind = LValue::Mem; lv.addr = value(e); return lv; }      // operator[] returning a reference
+        if (e->semaSym && e->semaSym->kind == Symbol::Function) { lv.kind = LValue::Mem; lv.addr = operatorCall(e); return lv; }      // operator[] returning a reference
         cxx::Expr* base = e->kids[0];
         cxx::Expr* index = e->kids[1];
         const sema::Type* bt = m_semaTypes.unref(exprType(base));
@@ -462,6 +461,7 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
         return lv;
     }
     case cxx::Expr::Unary:
+        if (e->semaSym && e->semaSym->kind == Symbol::Function) { if (e->semaLvalue || isClassType(exprType(e))) { lv.kind = LValue::Mem; lv.addr = operatorCall(e); return lv; } break; }
         if (e->text == "*" && !e->semaSym) { lv.kind = LValue::Mem; lv.addr = value(e->kids[0]); return lv; }
         if ((e->text == "++" || e->text == "--") && !e->semaSym) { value(e); return lvalue(e->kids[0]); }
         break;
@@ -470,9 +470,17 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
         if (!e->kids.empty() && e->semaLvalue) { LValue inner = lvalue(e->kids[0]); if (inner.kind != LValue::None) { lv.kind = LValue::Mem; lv.addr = convert(addressOf(inner, line), m_semaTypes.pointer(inner.type), m_semaTypes.pointer(lv.type), line); } return lv; }
         break;
     case cxx::Expr::Call: case cxx::Expr::FunctionalCast: case cxx::Expr::Binary: case cxx::Expr::PostIncDec:
-        if (e->semaLvalue || isClassType(exprType(e))) { lv.kind = LValue::Mem; lv.addr = value(e); return lv; }
+        if (e->semaLvalue || isClassType(exprType(e))) {
+            // the raw call result: an address for a reference, the temporary's address for a class
+            lv.kind = LValue::Mem;
+            if (e->kind == cxx::Expr::Call) lv.addr = call(e);
+            else if (e->kind != cxx::Expr::FunctionalCast && e->semaSym && e->semaSym->kind == Symbol::Function) lv.addr = operatorCall(e);
+            else lv.addr = value(e);
+            return lv;
+        }
         break;
     case cxx::Expr::Assign:
+        if (e->semaSym && e->semaSym->kind == Symbol::Function && !(e->semaSym->isImplicit && e->semaSym->name == "operator=")) { lv.kind = LValue::Mem; lv.addr = operatorCall(e); return lv; }
         if (e->semaSym) { lv.kind = LValue::Mem; lv.addr = value(e); return lv; }
         value(e);
         return lvalue(e->kids[0]);
@@ -546,8 +554,14 @@ int IrGen::argument(cxx::Expr* a, const sema::Type* pt, int line)
 {
     if (pt && isReference(pt)) {
         const sema::Type* target = m_semaTypes.unref(pt);
-        LValue al = lvalue(a);
-        if (al.kind == LValue::None || (a->semaSym && a->semaSym->kind == Symbol::Function && a->kind == cxx::Expr::Call && !a->semaLvalue && !isClassType(exprType(a)))) {
+        // a class reference bound to another type goes through a converted temporary, even for an lvalue ("pear")
+        const sema::Type* at = m_semaTypes.unqualified(m_semaTypes.unref(exprType(a)));
+        const sema::Type* tu = m_semaTypes.unqualified(target);
+        int off = 0;
+        bool converted = isClassType(target) && (at->kind != sema::Type::Class || (at != tu && !(at->decl && tu->decl && baseOffset(at->decl, tu->decl, off))));
+        LValue al;
+        if (!converted) al = lvalue(a);
+        if (converted || al.kind == LValue::None || (a->semaSym && a->semaSym->kind == Symbol::Function && a->kind == cxx::Expr::Call && !a->semaLvalue && !isClassType(exprType(a)))) {
             // bind a temporary
             if (isClassType(exprType(a)) && al.kind == LValue::None) return convert(value(a), m_semaTypes.pointer(m_semaTypes.unref(exprType(a))), m_semaTypes.pointer(target), line);
             int slot = newLocal("tmp.arg", m_semaTypes.unqualified(target), true);
@@ -982,12 +996,57 @@ void IrGen::finishFunction(int line)
     ++m_generated;
 }
 
+// a member declared in a base class is called with the address of that base subobject
+int IrGen::adjustThis(Symbol* fn, int objAddr, const sema::Type* objType, int line)
+{
+    const sema::Type* ot = m_semaTypes.unqualified(m_semaTypes.unref(objType));
+    if (ot->kind != sema::Type::Class || !ot->decl || !fn->ownerClass || ot->decl == fn->ownerClass) return objAddr;
+    return convert(objAddr, m_semaTypes.pointer(ot), m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass)), line);
+}
+
+// the call an operator expression resolved to (e->semaSym): the raw result, an address for a reference result
+int IrGen::operatorCall(cxx::Expr* e)
+{
+    const int line = e->loc.line;
+    Symbol* fn = e->semaSym;
+    std::vector<cxx::Expr*> args;
+    int thisPtr = -1;
+    switch (e->kind) {
+    case cxx::Expr::Unary: case cxx::Expr::PostIncDec:
+        if (fn->ownerClass) thisPtr = adjustThis(fn, addressOf(lvalue(e->kids[0]), line), exprType(e->kids[0]), line); else args.push_back(e->kids[0]);
+        break;
+    case cxx::Expr::Binary: case cxx::Expr::Assign: case cxx::Expr::Index:
+        if (fn->ownerClass) { thisPtr = adjustThis(fn, addressOf(lvalue(e->kids[0]), line), exprType(e->kids[0]), line); args.push_back(e->kids[1]); }
+        else { args.push_back(e->kids[0]); args.push_back(e->kids[1]); }
+        break;
+    default:
+        break;
+    }
+    return callFunction(fn, thisPtr, -1, args, 0, true, line);
+}
+
+// a call whose result is a scalar reference yields its address: loaded where a value is wanted
+int IrGen::rvalue(int r, cxx::Expr* e, int line)
+{
+    const sema::Type* rt = exprType(e);
+    if (!isReference(rt)) return r;
+    const sema::Type* u = m_semaTypes.unref(rt);
+    if (u->kind == sema::Type::Class || u->kind == sema::Type::Array) return r;
+    LValue m; m.kind = LValue::Mem; m.addr = r; m.type = u;
+    return load(m, u, line);
+}
+
 int IrGen::call(cxx::Expr* e, int sretAddr)
 {
     const int line = e->loc.line;
     cxx::Expr* callee = e->kids[0];
     Symbol* fn = e->semaSym;
     const sema::Type* rt = exprType(e);
+    if (!fn && callee->kind == cxx::Expr::Member && !callee->name.last().empty() && callee->name.last()[0] == '~') {
+        // pseudo-destructor call on a scalar: evaluate the object, do nothing
+        if (!callee->kids.empty()) value(callee->kids[0]);
+        return constant(0, m_semaTypes.basic(sema::Type::Int), line);
+    }
     if (!fn || fn->kind != Symbol::Function) {
         // function pointer or undeclared function
         IrInst in = make(IrInst::Call, rt, line);
@@ -1022,7 +1081,6 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
         const sema::Type* objT = m_semaTypes.unref(exprType(obj));
         if (callee->arrowMember) {
             thisPtr = value(obj);
-            if (objT->kind == sema::Type::Class && obj->semaSym && obj->semaSym->kind == Symbol::Function) objT = m_semaTypes.unref(obj->semaSym->type->inner);
             if (objT->kind == sema::Type::Pointer) objT = objT->inner;
         } else { LValue ol = lvalue(obj); thisPtr = ol.kind == LValue::None ? value(obj) : load(ol, objT, line); }
         objT = m_semaTypes.unqualified(objT);
@@ -1053,9 +1111,7 @@ int IrGen::value(cxx::Expr* e)
     case cxx::Expr::IntLit: case cxx::Expr::CharLit: case cxx::Expr::BoolLit: return constant(e->semaValue, t, line);
     case cxx::Expr::FloatLit: { IrInst in = make(IrInst::FConst, t, line); in.args.push_back(IrOperand::fimm(strtod(e->text.c_str(), 0), oldType(t))); return emit(in); }
     case cxx::Expr::StringLit: {
-        std::string text = e->text;
-        for (size_t p = text.find("\" \""); p != std::string::npos; p = text.find("\" \"")) text.erase(p, 3);   // adjacent literals
-        IrInst in = make(IrInst::StrConst, 0, line); in.type = m_types.charPtr(); in.args.push_back(IrOperand::str(text, m_types.charPtr())); return emit(in);
+        IrInst in = make(IrInst::StrConst, 0, line); in.type = m_types.charPtr(); in.args.push_back(IrOperand::str(e->text, m_types.charPtr())); return emit(in);
     }
     case cxx::Expr::This: return m_out->hasThis ? thisTemp(line) : constant(0, t, line);
     case cxx::Expr::Name: {
@@ -1074,20 +1130,12 @@ int IrGen::value(cxx::Expr* e)
         return load(lv, exprType(e), line);
     }
     case cxx::Expr::Index: {
-        if (e->semaSym && e->semaSym->kind == Symbol::Function) {
-            Symbol* fn = e->semaSym;
-            std::vector<cxx::Expr*> args; args.push_back(e->kids[1]);
-            int thisPtr = fn->ownerClass ? addressOf(lvalue(e->kids[0]), line) : -1;
-            if (!fn->ownerClass) args.insert(args.begin(), e->kids[0]);
-            int r = callFunction(fn, thisPtr, -1, args, 0, false, line);
-            if (isReference(fn->type->inner)) { LValue lv; lv.kind = LValue::Mem; lv.addr = r; lv.type = m_semaTypes.unref(fn->type->inner); return load(lv, lv.type, line); }
-            return r;
-        }
+        if (e->semaSym && e->semaSym->kind == Symbol::Function) return rvalue(operatorCall(e), e, line);
         LValue lv = lvalue(e);
         if (lv.kind == LValue::None) return constant(0, t, line);
         return load(lv, exprType(e), line);
     }
-    case cxx::Expr::Call: return call(e);
+    case cxx::Expr::Call: return rvalue(call(e), e, line);
     case cxx::Expr::FunctionalCast: {
         const sema::Type* to = exprType(e);
         if (isClassType(to) && e->semaSym && e->semaSym->isConstructor) {
@@ -1098,13 +1146,13 @@ int IrGen::value(cxx::Expr* e)
             if (needsDtor(tl.type)) registerCleanup(slot, tl.type, false, 1, line);
             return r;
         }
-        if (e->semaSym && e->semaSym->isConversion) { std::vector<cxx::Expr*> none; int obj = addressOf(lvalue(e->kids[0]), line); return callFunction(e->semaSym, obj, -1, none, 0, true, line); }
+        if (e->semaSym && e->semaSym->isConversion) { std::vector<cxx::Expr*> none; int obj = adjustThis(e->semaSym, addressOf(lvalue(e->kids[0]), line), exprType(e->kids[0]), line); return rvalue(callFunction(e->semaSym, obj, -1, none, 0, true, line), e, line); }
         if (e->kids.empty()) return constant(0, to, line);
         return convert(value(e->kids[0]), exprType(e->kids[0]), to, line);
     }
     case cxx::Expr::Cast: case cxx::Expr::NamedCast: {
         if (e->kids.empty()) return constant(0, t, line);
-        if (e->semaSym && e->semaSym->kind == Symbol::Function && e->semaSym->isConversion) { std::vector<cxx::Expr*> none; int obj = addressOf(lvalue(e->kids[0]), line); return callFunction(e->semaSym, obj, -1, none, 0, true, line); }
+        if (e->semaSym && e->semaSym->kind == Symbol::Function && e->semaSym->isConversion) { std::vector<cxx::Expr*> none; int obj = adjustThis(e->semaSym, addressOf(lvalue(e->kids[0]), line), exprType(e->kids[0]), line); return rvalue(callFunction(e->semaSym, obj, -1, none, 0, true, line), e, line); }
         if (e->semaSym && e->semaSym->kind == Symbol::Function && e->semaSym->isConstructor) {
             int slot = newLocal("tmp." + e->semaSym->ownerClass->name, m_semaTypes.unqualified(t), true);
             LValue tl; tl.kind = LValue::Local; tl.local = slot; tl.type = m_semaTypes.unqualified(t);
@@ -1118,13 +1166,7 @@ int IrGen::value(cxx::Expr* e)
     case cxx::Expr::Paren: return value(e->kids[0]);
     case cxx::Expr::Unary: {
         const std::string& op = e->text;
-        if (e->semaSym && e->semaSym->kind == Symbol::Function) {
-            Symbol* fn = e->semaSym;
-            std::vector<cxx::Expr*> args;
-            int thisPtr = -1;
-            if (fn->ownerClass) thisPtr = addressOf(lvalue(e->kids[0]), line); else args.push_back(e->kids[0]);
-            return callFunction(fn, thisPtr, -1, args, 0, true, line);
-        }
+        if (e->semaSym && e->semaSym->kind == Symbol::Function) return rvalue(operatorCall(e), e, line);
         if (op == "&") {
             cxx::Expr* o = e->kids[0];
             if (o->semaSym && (o->semaSym->kind == Symbol::Function || o->semaSym->kind == Symbol::FunctionTemplate)) return value(o);
@@ -1154,13 +1196,7 @@ int IrGen::value(cxx::Expr* e)
         return emit(in);
     }
     case cxx::Expr::PostIncDec: {
-        if (e->semaSym && e->semaSym->kind == Symbol::Function) {
-            Symbol* fn = e->semaSym;
-            std::vector<cxx::Expr*> args;
-            int thisPtr = fn->ownerClass ? addressOf(lvalue(e->kids[0]), line) : -1;
-            if (!fn->ownerClass) args.push_back(e->kids[0]);
-            return callFunction(fn, thisPtr, -1, args, 0, true, line);
-        }
+        if (e->semaSym && e->semaSym->kind == Symbol::Function) return rvalue(operatorCall(e), e, line);
         LValue lv = lvalue(e->kids[0]);
         if (lv.kind == LValue::None) return constant(0, t, line);
         const sema::Type* ot = lv.type;
@@ -1172,14 +1208,7 @@ int IrGen::value(cxx::Expr* e)
     }
     case cxx::Expr::Binary: {
         const std::string& op = e->text;
-        if (e->semaSym && e->semaSym->kind == Symbol::Function) {
-            Symbol* fn = e->semaSym;
-            std::vector<cxx::Expr*> args;
-            int thisPtr = -1;
-            if (fn->ownerClass) { thisPtr = addressOf(lvalue(e->kids[0]), line); args.push_back(e->kids[1]); }
-            else { args.push_back(e->kids[0]); args.push_back(e->kids[1]); }
-            return callFunction(fn, thisPtr, -1, args, 0, true, line);
-        }
+        if (e->semaSym && e->semaSym->kind == Symbol::Function) return rvalue(operatorCall(e), e, line);
         if (op == "&&" || op == "||") {
             int slot = newLocal("tmp.logic", m_semaTypes.basic(sema::Type::Bool), false);
             LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = m_semaTypes.basic(sema::Type::Bool);
@@ -1206,11 +1235,7 @@ int IrGen::value(cxx::Expr* e)
                 copyAssign(lv.type, dst, convert(src, m_semaTypes.pointer(m_semaTypes.unref(exprType(e->kids[1]))), m_semaTypes.pointer(lv.type), line), line);
                 return dst;
             }
-            std::vector<cxx::Expr*> args;
-            int thisPtr = -1;
-            if (fn->ownerClass) { thisPtr = addressOf(lvalue(e->kids[0]), line); args.push_back(e->kids[1]); }
-            else { args.push_back(e->kids[0]); args.push_back(e->kids[1]); }
-            return callFunction(fn, thisPtr, -1, args, 0, true, line);
+            return rvalue(operatorCall(e), e, line);
         }
         LValue lv = lvalue(e->kids[0]);
         if (lv.kind == LValue::None) { value(e->kids[1]); m_notes.push_back("L" + numText(line) + ": assignment to a non-lvalue dropped"); return constant(0, t, line); }
@@ -1257,11 +1282,20 @@ int IrGen::value(cxx::Expr* e)
             if (needsDefaultCtor(elem)) forEachElement(elem, p, count, true, line);
             return p;
         }
-        n.sub = "__new";
-        n.args.push_back(IrOperand::imm(sizeOf(elem) > 0 ? sizeOf(elem) : 1, m_types.intType()));
-        int p = emit(n);
+        int p;
+        if (!e->placement.empty()) {
+            // placement new: the object is built at the given address
+            p = convert(value(e->placement[0]), m_semaTypes.decay(exprType(e->placement[0])), pt, line);
+            for (size_t k = 1; k < e->placement.size(); ++k) value(e->placement[k]);
+        } else {
+            n.sub = "__new";
+            n.args.push_back(IrOperand::imm(sizeOf(elem) > 0 ? sizeOf(elem) : 1, m_types.intType()));
+            p = emit(n);
+        }
         if (e->semaSym && e->semaSym->isConstructor) construct(e->semaSym, p, e->kids, 0, line);
         else if (!e->kids.empty()) { LValue lv; lv.kind = LValue::Mem; lv.addr = p; lv.type = elem; store(lv, convert(value(e->kids[0]), exprType(e->kids[0]), elem, line), elem, line); }
+        else if (e->hasInit && !isClassType(elem)) { LValue lv; lv.kind = LValue::Mem; lv.addr = p; lv.type = elem; store(lv, constant(0, elem, line), elem, line); }   // new T(): value-initialised
+        else if (isClassType(elem)) constructDefault(elem, p, line);
         return p;
     }
     case cxx::Expr::Delete: {
@@ -1326,9 +1360,8 @@ int IrGen::value(cxx::Expr* e)
 
 // ---- statements -----------------------------------------------------------------------------------------
 
-void IrGen::initVariable(int slot, const sema::Type* t, Symbol* var, cxx::InitDeclarator& id, int line)
+void IrGen::initObject(const LValue& lv, const sema::Type* t, Symbol* var, cxx::InitDeclarator& id, int line)
 {
-    LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = m_semaTypes.unref(t);
     const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
     if (isReference(t)) {
         if (id.init.args.empty()) return;
@@ -1337,7 +1370,8 @@ void IrGen::initVariable(int slot, const sema::Type* t, Symbol* var, cxx::InitDe
         LValue src = lvalue(initE);
         int addr = src.kind == LValue::None ? value(initE) : addressOf(src, line);
         addr = convert(addr, m_semaTypes.pointer(src.kind == LValue::None ? m_semaTypes.unref(exprType(initE)) : src.type), m_semaTypes.pointer(u), line);
-        IrInst st = make(IrInst::StoreLocal, t, line); st.args.push_back(IrOperand::local(slot, oldType(t))); st.args.push_back(IrOperand::temp(addr, oldType(m_semaTypes.pointer(u)))); emit(st);
+        if (lv.kind == LValue::Local) { IrInst st = make(IrInst::StoreLocal, t, line); st.args.push_back(IrOperand::local(lv.local, oldType(t))); st.args.push_back(IrOperand::temp(addr, oldType(m_semaTypes.pointer(u)))); emit(st); }
+        else { IrInst st = make(IrInst::StoreGlobal, t, line); st.args.push_back(IrOperand::global(lv.global, oldType(t))); st.args.push_back(IrOperand::temp(addr, oldType(m_semaTypes.pointer(u)))); emit(st); }
         keepTemporaries(tempsBefore);   // a temporary bound to the reference lives as long as it
         return;
     }
@@ -1384,9 +1418,7 @@ void IrGen::initVariable(int slot, const sema::Type* t, Symbol* var, cxx::InitDe
     }
     if (id.init.args.empty()) return;
     cxx::Expr* src = id.init.args[0];
-    int v;
-    if (src->semaSym && src->semaSym->kind == Symbol::Function && src->semaSym->isConversion) { std::vector<cxx::Expr*> none; v = callFunction(src->semaSym, addressOf(lvalue(src), line), -1, none, 0, true, line); v = convert(v, src->semaSym->type->inner, u, line); }
-    else v = convert(value(src), exprType(src), u, line);
+    int v = convert(value(src), exprType(src), u, line);   // a conversion operator was wrapped around src by sema
     store(lv, v, u, line);
 }
 
@@ -1400,7 +1432,8 @@ void IrGen::localDecl(cxx::Decl* d)
         if (var->isStatic) { m_notes.push_back("L" + numText(d->loc.line) + ": static local '" + var->name + "' treated as an ordinary local"); }
         int slot = newLocal(var->name, var->type, false);
         m_slots[var] = slot;
-        initVariable(slot, var->type, var, id, id.decl->loc.line);
+        LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = m_semaTypes.unref(var->type);
+        initObject(lv, var->type, var, id, id.decl->loc.line);
         if (!isReference(var->type) && needsDtor(var->type)) registerCleanup(slot, var->type, false, 0, id.decl->loc.line);
         endFullExpr(id.decl->loc.line);
     }
@@ -1636,6 +1669,7 @@ void IrGen::prologue(Symbol* fn)
 {
     m_out->name = irName(fn);
     m_out->fn = 0;
+    m_out->linkOnce = fn->isInline || fn->isImplicit || fn->instantiatedFrom != 0 || (fn->ownerClass && fn->ownerClass->instantiatedFrom != 0);
     const sema::Type* rt = fn->type && fn->type->kind == sema::Type::Function ? fn->type->inner : m_semaTypes.basic(sema::Type::Void);
     bool sret = isClassType(rt) && !isReference(rt);
     m_out->retType = oldType(sret ? m_semaTypes.basic(sema::Type::Void) : (isReference(rt) ? m_semaTypes.pointer(rt->inner) : rt));
@@ -1745,9 +1779,10 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
             }
             continue;
         }
-        if (!mi || mi->args.empty()) continue;
+        if (!mi) continue;
         int faddr = emit(fa);
         LValue fl; fl.kind = LValue::Mem; fl.addr = faddr; fl.type = fu;
+        if (mi->args.empty()) { store(fl, constant(0, fu, mi->loc.line), fu, mi->loc.line); continue; }   // member(): value-initialised
         store(fl, convert(value(mi->args[0]), exprType(mi->args[0]), fu, mi->loc.line), fu, mi->loc.line);
         endFullExpr(mi->loc.line);
     }
@@ -1855,6 +1890,7 @@ void IrGen::generate(std::vector<IrFunction*>& out)
         if (fn->isImplicit) genImplicit(fn);
         else genFunction(fn);
     }
+    genInitializer();
 }
 
 void IrGen::registerMetadata(X86Module& x86, bool msvc)
@@ -1872,19 +1908,59 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             x86.addVtable(v);
             if (msvc) x86.registerGlobalName("vtable@" + v.className, msvcMangleVtableSymbol(*s));
         }
-        if (s->kind == Symbol::Variable && !s->isLocal && !s->isParam && !s->isExtern && (!s->isMember || s->isStatic) && s->scope && !s->isDependentContext) {
-            if (s->isMember && !s->isDefinition) continue;
+        if (s->kind == Symbol::Variable && !s->isLocal && !s->isParam && (!s->isMember || s->isStatic) && s->scope && !s->isDependentContext) {
+            // a static const member with a constant initializer is folded where it is used and not emitted
+            if (s->isMember && s->isStatic && s->hasConstValue && s->init && s->init->semaConst) continue;
+            std::string name = s->qualifiedName();
+            if (msvc) x86.registerGlobalName(name, msvcMangleVariableSymbol(*s));
+            if (!s->isDefinition) continue;   // "extern T x;" only, or a static member without its out-of-line definition
             IrGlobal g;
-            g.name = s->qualifiedName();
+            g.name = name;
             g.size = sizeOf(s->type) > 0 ? sizeOf(s->type) : 8;
             g.isFloat = s->type && s->type->isFloating();
-            if (s->init && s->init->semaConst) g.init = numText(s->init->semaValue);
-            else if (s->init && s->init->kind == cxx::Expr::FloatLit) g.init = s->init->text;
+            bool dynamic = false;
+            if (s->init && s->init->semaConst && !isClassType(s->type)) g.init = numText(s->init->semaValue);
+            else if (s->init && s->init->kind == cxx::Expr::FloatLit && !isClassType(s->type)) g.init = s->init->text;
+            else if (isClassType(s->type) && !isReference(s->type)) dynamic = s->initCtor != 0 || s->init != 0 || needsDefaultCtor(s->type);
+            else dynamic = s->init != 0;
+            if (dynamic) m_dynamicGlobals.push_back(s);
             x86.addGlobal(g);
-            if (msvc) x86.registerGlobalName(g.name, msvcMangleVariableSymbol(*s));
         }
         if (msvc && s->kind == Symbol::Function && !s->isExternC) x86.registerSymbolName(irName(s), msvcMangleSymbol(*s));
     }
+    if (!m_dynamicGlobals.empty()) {
+        // the module's initialiser, named after its first global so that modules do not clash
+        std::string base = m_dynamicGlobals[0]->qualifiedName();
+        for (size_t i = 0; i < base.size(); ++i) if (!isalnum(static_cast<unsigned char>(base[i]))) base[i] = '_';
+        m_initSymbol = m_prog.newSymbol(Symbol::Function, "__cppparse_init_" + base, m_prog.global);
+        m_initSymbol->type = m_semaTypes.function(m_semaTypes.basic(sema::Type::Void), std::vector<const sema::Type*>(), false, false);
+        m_initSymbol->isExternC = true;
+        m_initSymbol->hasBody = true;
+        x86.addInitializer(irName(m_initSymbol));
+    }
+}
+
+// the module initialiser: constructs the globals that need code, in declaration order
+void IrGen::genInitializer()
+{
+    if (!m_initSymbol) return;
+    m_out = new IrFunction;
+    m_fn = m_initSymbol;
+    m_slots.clear(); m_loops.clear(); m_tryStack.clear(); m_tryCount = 0;
+    prologue(m_initSymbol);
+    for (size_t i = 0; i < m_dynamicGlobals.size(); ++i) {
+        Symbol* g = m_dynamicGlobals[i];
+        const int line = g->loc.line;
+        LValue lv; lv.kind = LValue::Global; lv.global = g->qualifiedName(); lv.type = m_semaTypes.unref(g->type);
+        cxx::InitDeclarator* id = 0;
+        if (g->declAst) for (size_t k = 0; k < g->declAst->declarators.size(); ++k) if (g->declAst->declarators[k].decl && g->declAst->declarators[k].decl->semaSym == g) id = &g->declAst->declarators[k];
+        if (id) initObject(lv, g->type, g, *id, line);
+        else constructDefault(g->type, addressOf(lv, line), line);
+        endFullExpr(line);
+    }
+    returnSequence(m_initSymbol->loc.line);
+    emit(make(IrInst::Ret, 0, m_initSymbol->loc.line));
+    finishFunction(m_initSymbol->loc.line);
 }
 
 } // namespace cppparse

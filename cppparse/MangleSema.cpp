@@ -18,7 +18,7 @@ private:
     std::string number(long v);
     std::string name(const std::string& component);
     std::string symbolName(const sema::Symbol* s);
-    std::string templateName(const sema::Symbol* inst, const std::string& base);
+    std::string templateName(const sema::Symbol* inst, const std::string& base, bool baseIsOperatorCode = false);
     std::string scopesOf(const sema::Scope* s);
     std::string type(const sema::Type* t);
     std::string paramType(const sema::Type* t);
@@ -49,11 +49,11 @@ std::string SemaMangler::name(const std::string& component)
 }
 
 // "?$Buffer@H$03@": the arguments use their own back-reference tables, the whole name takes one slot
-std::string SemaMangler::templateName(const sema::Symbol* inst, const std::string& base)
+std::string SemaMangler::templateName(const sema::Symbol* inst, const std::string& base, bool baseIsOperatorCode)
 {
     std::vector<std::string> savedNames = m_names, savedArgs = m_argTypes;
     m_names.clear(); m_argTypes.clear();
-    std::string enc = "?$" + base + "@";
+    std::string enc = "?$" + base + (baseIsOperatorCode ? "" : "@");   // "?$?8HH@" for operator==<int, int>
     for (size_t i = 0; i < inst->templateArgs.size(); ++i) {
         if (inst->templateArgs[i]) enc += type(inst->templateArgs[i]);
         else enc += "$0" + number(i < inst->templateIntArgs.size() ? inst->templateIntArgs[i] : 0);
@@ -88,7 +88,10 @@ std::string SemaMangler::classType(const sema::Type* t)
     const sema::Symbol* c = t->decl;
     char letter = c && c->isUnion ? 'T' : c && c->isStruct ? 'U' : 'V';
     if (!c) return std::string(1, letter) + "unknown@@";
-    return letter + symbolName(c) + scopesOf(c->scope) + "@";
+    std::string out(1, letter);
+    out += symbolName(c);          // before the scopes: the back-reference table follows the call order
+    out += scopesOf(c->scope);
+    return out + "@";
 }
 
 std::string SemaMangler::type(const sema::Type* t)
@@ -177,8 +180,12 @@ std::string SemaMangler::function(const sema::Symbol& f)
     if (f.isConstructor) out += "?0";
     else if (f.isDestructor) out += "?1";
     else if (f.isConversion) out += "?B";
+    else if (f.instantiatedFrom && !f.templateArgs.empty()) {
+        bool ok = false;
+        std::string code = f.instantiatedFrom->name.compare(0, 8, "operator") == 0 ? operatorCode(f.instantiatedFrom->name, ok) : std::string();
+        out += templateName(&f, ok ? "?" + code : f.instantiatedFrom->name, ok);
+    }
     else if (f.isOperator) { bool ok; std::string code = operatorCode(f.name, ok); out += ok ? "?" + code : name(f.name); }
-    else if (f.instantiatedFrom && !f.templateArgs.empty()) out += templateName(&f, f.instantiatedFrom->name);
     else out += name(f.name);
     out += scopesOf(f.scope) + "@";
     const sema::Type* ft = f.type;
@@ -205,7 +212,11 @@ std::string SemaMangler::function(const sema::Symbol& f)
 
 std::string SemaMangler::variable(const sema::Symbol& v)
 {
-    std::string out = "?" + name(v.name) + scopesOf(v.scope) + "@";
+    // the back-reference table depends on the order of these calls: one statement each
+    std::string out = "?";
+    out += name(v.name);
+    out += scopesOf(v.scope);
+    out += "@";
     if (v.isMember) out += v.access == cxx::AccessPrivate ? "0" : v.access == cxx::AccessProtected ? "1" : "2";
     else out += "3";
     out += type(v.type);
@@ -215,7 +226,10 @@ std::string SemaMangler::variable(const sema::Symbol& v)
 
 std::string SemaMangler::vtable(const sema::Symbol& c)
 {
-    return "??_7" + symbolName(&c) + scopesOf(c.scope) + "@6B@";
+    std::string out = "??_7";
+    out += symbolName(&c);
+    out += scopesOf(c.scope);
+    return out + "@6B@";
 }
 
 } // namespace

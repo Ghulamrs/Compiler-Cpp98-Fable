@@ -167,10 +167,12 @@ void X86Function::computeIntervals()
         m_blockEnd[b] = k - 1;
     }
     m_outgoingArgs = 0;
+    std::map<int, int> firstDef;                       // temp -> linear position of its first definition
+    std::vector<std::pair<int, int> > uses;             // (temp, position)
     for (size_t p = 0; p < m_linear.size(); ++p) {
         const IrInst& in = m_f.blocks[static_cast<size_t>(m_linear[p].first)].insts[static_cast<size_t>(m_linear[p].second)];
         int pos = static_cast<int>(p);
-        if (in.dst >= 0) { Interval& iv = m_intervals[in.dst]; iv.temp = in.dst; iv.isFloat = isFloatType(in.type); if (pos < iv.start) iv.start = pos; if (pos > iv.end) iv.end = pos; }
+        if (in.dst >= 0) { Interval& iv = m_intervals[in.dst]; iv.temp = in.dst; iv.isFloat = isFloatType(in.type); if (pos < iv.start) iv.start = pos; if (pos > iv.end) iv.end = pos; if (!firstDef.count(in.dst)) firstDef[in.dst] = pos; }
         for (size_t a = 0; a < in.args.size(); ++a) {
             if (in.args[a].kind != IrOperand::Temp) continue;
             Interval& iv = m_intervals[in.args[a].id];
@@ -178,12 +180,22 @@ void X86Function::computeIntervals()
             if (iv.start > pos) iv.start = pos;
             if (pos > iv.end) iv.end = pos;
             if (in.args[a].type && isFloatType(in.args[a].type)) iv.isFloat = true;
+            uses.push_back(std::make_pair(in.args[a].id, pos));
         }
         if (in.op == IrInst::Call || in.op == IrInst::VCall) {
             m_calls.push_back(pos);
             int n = static_cast<int>(in.args.size());
             if (n - 4 > m_outgoingArgs) m_outgoingArgs = n - 4;
         }
+    }
+    // a use that precedes every definition in linear order is reached through a backward edge: the value is
+    // live from the start of the using block (after SSA, copies of a phi's operands create such uses)
+    for (size_t u = 0; u < uses.size(); ++u) {
+        std::map<int, int>::const_iterator d = firstDef.find(uses[u].first);
+        if (d == firstDef.end() || uses[u].second >= d->second) continue;
+        int blockStart = m_blockStart[static_cast<size_t>(m_linear[static_cast<size_t>(uses[u].second)].first)];
+        Interval& iv = m_intervals[uses[u].first];
+        if (blockStart < iv.start) iv.start = blockStart;
     }
     for (std::map<int, Interval>::iterator it = m_intervals.begin(); it != m_intervals.end(); ++it)
         if (!it->second.isFloat) it->second.isFloat = tempIsFloat(it->first);
@@ -360,14 +372,22 @@ void X86Function::emitCall(const IrInst& in)
     // (a >= 4) are already in place
     static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
     std::vector<bool> isFloatArg;
-    for (size_t a = 0; a < in.args.size(); ++a) {
+    size_t firstArg = 0;
+    if (in.sub == "(indirect)" && !in.args.empty()) {
+        // args[0] is the function pointer: kept in r10 (volatile, not an argument register)
+        std::string fp = use(in.args[0], "r10");
+        if (fp != "r10") line("mov r10, " + fp);
+        firstArg = 1;
+    }
+    for (size_t a = firstArg; a < in.args.size(); ++a) {
         const IrOperand& o = in.args[a];
         bool fl = opIsFloat(o);
-        if (fl) { std::string r = use(o, "xmm4"); line("movsd real8 ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "], " + r); }
-        else { std::string r = use(o, "rax"); line("mov qword ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "], " + r); }
+        int slot = 8 * static_cast<int>(a - firstArg);
+        if (fl) { std::string r = use(o, "xmm4"); line("movsd real8 ptr [rsp+" + intToString(slot) + "], " + r); }
+        else { std::string r = use(o, "rax"); line("mov qword ptr [rsp+" + intToString(slot) + "], " + r); }
         isFloatArg.push_back(fl);
     }
-    for (size_t a = 0; a < in.args.size() && a < 4; ++a) {
+    for (size_t a = 0; a < isFloatArg.size() && a < 4; ++a) {
         if (isFloatArg[a]) line("movsd xmm" + intToString(static_cast<int>(a)) + ", real8 ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "]");
         else line("mov " + std::string(argRegs[a]) + ", qword ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "]");
     }
@@ -375,7 +395,7 @@ void X86Function::emitCall(const IrInst& in)
         line("mov rax, qword ptr [rcx]              ; vptr");
         line("call qword ptr [rax+" + intToString(static_cast<int>(in.extra * 8)) + "]        ; slot " + intToString(static_cast<int>(in.extra)) + " " + in.sub);
     } else if (in.sub == "(indirect)") {
-        line("call rcx");
+        line("call r10");
     } else {
         std::string callee = m_m.symbol(in.sub);
         m_m.useExtern(callee);
@@ -644,6 +664,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
 
 void X86Function::emitBody()
 {
+    if (m_f.linkOnce) m_out << ";@comdat any\n";   // read by the COFF writer: the function gets its own COMDAT section
     m_out << m_label << " PROC\n";
     m_out << "        ; " << m_f.name << "\n";
     m_out << "        ; frame " << m_frameSize << " bytes";
@@ -740,7 +761,7 @@ void X86Module::emitVtables()
         const IrVtable& v = m_vtables[i];
         std::string tableSym = globalSymbol("vtable@" + v.className);
         m_dataSymbols.insert(tableSym);
-        std::string table = tableSym + " LABEL QWORD\n";
+        std::string table = ";@comdat any\n" + tableSym + " LABEL QWORD\n";   // every translation unit that needs the table emits it
         for (size_t k = 0; k < v.entries.size(); ++k) {
             std::string sym = v.entries[k].empty() ? std::string("") : symbol(v.entries[k]);
             if (!sym.empty() && !m_defined.count(sym)) m_externs.insert(sym);
@@ -813,6 +834,12 @@ std::string X86Module::finish()
             for (size_t k = c; k < bytes.size() && k < c + 24; ++k) s << (k == c ? "" : ", ") << bytes[k];
             s << "\n";
         }
+    }
+    if (!m_initializers.empty()) {
+        // pointers to the dynamic initialisers of this module's globals: the CRT calls them before main
+        s << "\nCRT$XCU SEGMENT ALIGN(8) ALIAS('.CRT$XCU') READ\n";
+        for (size_t i = 0; i < m_initializers.size(); ++i) s << "        DQ OFFSET " << symbol(m_initializers[i]) << "\n";
+        s << "CRT$XCU ENDS\n";
     }
     s << "\n.code\n";
     for (std::set<std::string>::iterator d = m_defined.begin(); d != m_defined.end(); ++d)

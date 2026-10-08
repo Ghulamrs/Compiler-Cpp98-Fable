@@ -1,0 +1,19 @@
+// iosfwd - cppparse's C++98 library: forward declarations of the stream classes.
+#ifndef CPPPARSE_IOSFWD
+#define CPPPARSE_IOSFWD
+
+namespace std {
+    class ios;
+    class ostream;
+    class istream;
+    class iostream;
+    class ostringstream;
+    class istringstream;
+    class stringstream;
+    class ofstream;
+    class ifstream;
+    typedef long long streamsize;
+    typedef long long streamoff;
+}
+
+#endif

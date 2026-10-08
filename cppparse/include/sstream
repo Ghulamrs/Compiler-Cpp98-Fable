@@ -1,0 +1,42 @@
+// sstream - cppparse's C++98 library: streams over a string.
+#ifndef CPPPARSE_SSTREAM
+#define CPPPARSE_SSTREAM
+
+#include <istream>
+#include <ostream>
+#include <string>
+
+namespace std {
+
+class ostringstream : public ostream {
+public:
+    ostringstream() {}
+    explicit ostringstream(const string& s) : m_buf(s) {}
+    string str() const { return m_buf; }
+    void   str(const string& s) { m_buf = s; }
+protected:
+    virtual void sink(const char* s, size_t n) { m_buf.append(s, n); }
+private:
+    string m_buf;
+};
+
+class istringstream : public istream {
+public:
+    istringstream() : m_pos(0) {}
+    explicit istringstream(const string& s) : m_buf(s), m_pos(0) {}
+    string str() const { return m_buf; }
+    void   str(const string& s) { m_buf = s; m_pos = 0; clear(); }
+protected:
+    virtual int underflow()
+    {
+        if (m_pos >= m_buf.size()) return -1;
+        return static_cast<unsigned char>(m_buf[m_pos++]);
+    }
+private:
+    string m_buf;
+    size_t m_pos;
+};
+
+}
+
+#endif

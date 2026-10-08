@@ -1,0 +1,196 @@
+// ostream - cppparse's C++98 library: formatted output. ostream formats into a virtual sink that
+// the string and file streams supply. Numbers are formatted here without the C library, so no
+// variadic call is needed.
+#ifndef CPPPARSE_OSTREAM
+#define CPPPARSE_OSTREAM
+
+#include <cstddef>
+#include <cstring>
+#include <ios>
+#include <string>
+
+namespace std {
+
+class ostream : public ios {
+public:
+    ostream() {}
+    virtual ~ostream() {}
+
+    ostream& put(char c) { return write(&c, 1); }
+    ostream& write(const char* s, streamsize n) { if (good()) sink(s, static_cast<size_t>(n)); return *this; }
+    ostream& flush() { sync(); return *this; }
+
+    ostream& operator<<(const char* s) { return padded(s, strlen(s)); }
+    ostream& operator<<(char c) { return padded(&c, 1); }
+    ostream& operator<<(signed char c) { char ch = static_cast<char>(c); return padded(&ch, 1); }
+    ostream& operator<<(unsigned char c) { char ch = static_cast<char>(c); return padded(&ch, 1); }
+    ostream& operator<<(bool v)
+    {
+        if (m_flags & boolalpha) return v ? padded("true", 4) : padded("false", 5);
+        return unsignedNumber(v ? 1 : 0, false);
+    }
+    ostream& operator<<(short v) { return signedNumber(v); }
+    ostream& operator<<(unsigned short v) { return unsignedNumber(v, false); }
+    ostream& operator<<(int v) { return signedNumber(v); }
+    ostream& operator<<(unsigned v) { return unsignedNumber(v, false); }
+    ostream& operator<<(long v) { return signedNumber(v); }
+    ostream& operator<<(unsigned long v) { return unsignedNumber(v, false); }
+    ostream& operator<<(long long v) { return signedNumber(v); }
+    ostream& operator<<(unsigned long long v) { return unsignedNumber(v, false); }
+    ostream& operator<<(float v) { return floating(v); }
+    ostream& operator<<(double v) { return floating(v); }
+    ostream& operator<<(long double v) { return floating(static_cast<double>(v)); }
+    ostream& operator<<(const void* p)
+    {
+        char buf[16];
+        unsigned long long u = reinterpret_cast<unsigned long long>(p);
+        for (int i = 15; i >= 0; --i) { int d = static_cast<int>(u & 15); buf[i] = static_cast<char>(d < 10 ? '0' + d : 'A' + d - 10); u >>= 4; }
+        return padded(buf, 16);
+    }
+    ostream& operator<<(const string& s) { return padded(s.data(), s.size()); }
+    ostream& operator<<(ostream& (*fn)(ostream&)) { return fn(*this); }
+    ostream& operator<<(ios_base& (*fn)(ios_base&)) { fn(*this); return *this; }
+
+protected:
+    virtual void sink(const char* s, size_t n) = 0;
+    virtual void sync() {}
+
+    ostream& padded(const char* s, size_t n)
+    {
+        if (!good()) return *this;
+        size_t w = m_width > 0 ? static_cast<size_t>(m_width) : 0;
+        m_width = 0;
+        bool leftAdjusted = (m_flags & left) != 0;
+        if (w > n && !leftAdjusted) fillChars(w - n);
+        sink(s, n);
+        if (w > n && leftAdjusted) fillChars(w - n);
+        return *this;
+    }
+    void fillChars(size_t n)
+    {
+        char buf[32];
+        memset(buf, m_fill, 32);
+        while (n > 0) { size_t k = n < 32 ? n : 32; sink(buf, k); n -= k; }
+    }
+    ostream& signedNumber(long long v)
+    {
+        if (v < 0) return unsignedNumber(static_cast<unsigned long long>(-(v + 1)) + 1, true);
+        return unsignedNumber(static_cast<unsigned long long>(v), false);
+    }
+    ostream& unsignedNumber(unsigned long long u, bool negative)
+    {
+        char buf[72];
+        size_t i = 72;
+        unsigned base = (m_flags & hex) ? 16 : (m_flags & oct) ? 8 : 10;
+        bool upper = (m_flags & uppercase) != 0;
+        if (u == 0) buf[--i] = '0';
+        while (u > 0) {
+            unsigned d = static_cast<unsigned>(u % base);
+            buf[--i] = static_cast<char>(d < 10 ? '0' + d : (upper ? 'A' : 'a') + d - 10);
+            u /= base;
+        }
+        if (m_flags & showbase) { if (base == 16) { buf[--i] = upper ? 'X' : 'x'; buf[--i] = '0'; } else if (base == 8) buf[--i] = '0'; }
+        if (negative) buf[--i] = '-';
+        else if (m_flags & showpos) buf[--i] = '+';
+        return padded(buf + i, 72 - i);
+    }
+    ostream& floating(double v)
+    {
+        char buf[400];
+        size_t n = formatDouble(v, buf);
+        return padded(buf, n);
+    }
+    static void digits(unsigned long long u, char* out, size_t& n)
+    {
+        char tmp[24];
+        size_t k = 0;
+        if (u == 0) tmp[k++] = '0';
+        while (u > 0) { tmp[k++] = static_cast<char>('0' + u % 10); u /= 10; }
+        while (k > 0) out[n++] = tmp[--k];
+    }
+    // fixed notation with p digits after the point; the integer part fits unsigned long long
+    static void fixedDigits(double v, int p, char* out, size_t& n)
+    {
+        double scale = 1.0;
+        for (int i = 0; i < p; ++i) scale *= 10.0;
+        v += 0.5 / scale;
+        unsigned long long ip = static_cast<unsigned long long>(v);
+        double frac = v - static_cast<double>(ip);
+        digits(ip, out, n);
+        if (p > 0) out[n++] = '.';
+        for (int i = 0; i < p; ++i) { frac *= 10.0; int d = static_cast<int>(frac); if (d > 9) d = 9; out[n++] = static_cast<char>('0' + d); frac -= d; }
+    }
+    static void scientificDigits(double v, int p, char* out, size_t& n, bool upper)
+    {
+        int e = 0;
+        if (v > 0) {
+            while (v >= 10.0) { v /= 10.0; ++e; }
+            while (v < 1.0) { v *= 10.0; --e; }
+        }
+        double scale = 1.0;
+        for (int i = 0; i < p; ++i) scale *= 10.0;
+        v += 0.5 / scale;
+        if (v >= 10.0) { v /= 10.0; ++e; }
+        int lead = static_cast<int>(v);
+        out[n++] = static_cast<char>('0' + lead);
+        v -= lead;
+        if (p > 0) out[n++] = '.';
+        for (int i = 0; i < p; ++i) { v *= 10.0; int d = static_cast<int>(v); if (d > 9) d = 9; out[n++] = static_cast<char>('0' + d); v -= d; }
+        out[n++] = upper ? 'E' : 'e';
+        out[n++] = e < 0 ? '-' : '+';
+        if (e < 0) e = -e;
+        if (e < 10) out[n++] = '0';
+        digits(static_cast<unsigned long long>(e), out, n);
+    }
+    static void stripZeros(char* out, size_t& n, size_t from)
+    {
+        // general notation: trailing zeros of the fraction and a bare point go
+        size_t end = n;
+        size_t expAt = n;
+        for (size_t i = from; i < n; ++i) if (out[i] == 'e' || out[i] == 'E') { expAt = i; break; }
+        bool hasPoint = false;
+        for (size_t i = from; i < expAt; ++i) if (out[i] == '.') hasPoint = true;
+        if (!hasPoint) return;
+        size_t cut = expAt;
+        while (cut > from && out[cut - 1] == '0') --cut;
+        if (cut > from && out[cut - 1] == '.') --cut;
+        if (cut < expAt) { for (size_t i = expAt; i < end; ++i) out[cut + i - expAt] = out[i]; n = cut + (end - expAt); }
+    }
+    size_t formatDouble(double v, char* out)
+    {
+        size_t n = 0;
+        if (v != v) { out[n++] = 'n'; out[n++] = 'a'; out[n++] = 'n'; return n; }
+        if (v < 0) { out[n++] = '-'; v = -v; }
+        else if (m_flags & showpos) out[n++] = '+';
+        if (v > 1.7976931348623157e308) { out[n++] = 'i'; out[n++] = 'n'; out[n++] = 'f'; return n; }
+        int p = static_cast<int>(m_precision);
+        if (p < 0) p = 6;
+        bool upper = (m_flags & uppercase) != 0;
+        size_t from = n;
+        if ((m_flags & floatfield) == fixed) { if (v < 1e19) fixedDigits(v, p, out, n); else scientificDigits(v, p, out, n, upper); return n; }
+        if ((m_flags & floatfield) == scientific) { scientificDigits(v, p, out, n, upper); return n; }
+        if (p == 0) p = 1;
+        int e = 0;
+        if (v > 0) { double t = v; while (t >= 10.0) { t /= 10.0; ++e; } while (t < 1.0) { t *= 10.0; --e; } }
+        if (e < -4 || e >= p) scientificDigits(v, p - 1, out, n, upper);
+        else fixedDigits(v, p - 1 - e, out, n);
+        if (!(m_flags & showpoint)) stripZeros(out, n, from);
+        return n;
+    }
+};
+
+inline ostream& endl(ostream& o) { o.put('\n'); return o.flush(); }
+inline ostream& ends(ostream& o) { return o.put('\0'); }
+inline ostream& flush(ostream& o) { return o.flush(); }
+inline ios_base& fixed(ios_base& b) { b.setf(ios_base::fixed, ios_base::floatfield); return b; }
+inline ios_base& scientific(ios_base& b) { b.setf(ios_base::scientific, ios_base::floatfield); return b; }
+inline ios_base& hex(ios_base& b) { b.setf(ios_base::hex, ios_base::basefield); return b; }
+inline ios_base& dec(ios_base& b) { b.setf(ios_base::dec, ios_base::basefield); return b; }
+inline ios_base& oct(ios_base& b) { b.setf(ios_base::oct, ios_base::basefield); return b; }
+inline ios_base& left(ios_base& b) { b.setf(ios_base::left, ios_base::adjustfield); return b; }
+inline ios_base& right(ios_base& b) { b.setf(ios_base::right, ios_base::adjustfield); return b; }
+inline ios_base& boolalpha(ios_base& b) { b.setf(ios_base::boolalpha); return b; }
+
+}
+
+#endif

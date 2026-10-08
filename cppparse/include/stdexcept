@@ -1,0 +1,40 @@
+// stdexcept - cppparse's C++98 library: the standard exception classes carrying a message.
+#ifndef CPPPARSE_STDEXCEPT
+#define CPPPARSE_STDEXCEPT
+
+#include <exception>
+#include <string>
+
+namespace std {
+
+class logic_error : public exception {
+public:
+    explicit logic_error(const string& message) : m_message(message) {}
+    virtual ~logic_error() {}
+    virtual const char* what() const { return m_message.c_str(); }
+private:
+    string m_message;
+};
+
+class runtime_error : public exception {
+public:
+    explicit runtime_error(const string& message) : m_message(message) {}
+    virtual ~runtime_error() {}
+    virtual const char* what() const { return m_message.c_str(); }
+private:
+    string m_message;
+};
+
+class out_of_range : public logic_error {
+public:
+    explicit out_of_range(const string& message) : logic_error(message) {}
+};
+
+class invalid_argument : public logic_error {
+public:
+    explicit invalid_argument(const string& message) : logic_error(message) {}
+};
+
+}
+
+#endif

@@ -557,21 +557,10 @@ bool Parser::declarator(Declarator& d, bool abstractAllowed, bool nameRequired, 
     }
     if (!nested) {
         if (atIdent() || at("::") || at("~") || at("operator")) {
-            // a declarator-id, unless the name is a type starting a parameter (abstract declarators in parameter lists)
-            bool takeName = true;
-            if (inParams && abstractAllowed) {
-                size_t e; bool ht;
-                if (qualifiedNameAhead(e, ht)) {
-                    // "int f(T)" where T is a type: no name here
-                    QualifiedName probe; size_t p = m_pos; if (m_toks[p].text == "::") { probe.global = true; ++p; }
-                    for (; p < e; ++p) if (m_toks[p].kind == PpToken::Ident) { NameComponent c; c.ident = m_toks[p].text; probe.parts.push_back(c); }
-                    if (!probe.parts.empty() && probe.parts.size() == 1 && isTypeName(probe) && (m_toks[e].text == ")" || m_toks[e].text == "," || m_toks[e].text == "*" || m_toks[e].text == "&")) takeName = false;
-                }
-            }
-            if (takeName) {
-                if (!qualifiedName(d.name, true, false)) return false;
-                haveName = true;
-            }
+            // the declarator-id: a parameter's type was consumed by its decl-specifiers, so a name here
+            // is a name even when it is also a type elsewhere ("const char* set")
+            if (!qualifiedName(d.name, true, false)) return false;
+            haveName = true;
         }
         if (!haveName && !abstractAllowed) { error(nameRequired ? "expected a declarator name" : "expected a declarator"); return false; }
     }
@@ -760,6 +749,16 @@ Decl* Parser::classSpecifier(DeclSpec& spec, Loc here)
     std::string scopeName = simple.empty() ? "(anonymous)" : simple;
     pushScope(scopeName, true);
     declareType(simple);
+    // the base classes' member type names are visible in the body, and through this class's name
+    for (size_t b = 0; b < c->bases.size(); ++b) {
+        const NamedScope* ns = findNamedScope(c->bases[b].name, c->bases[b].name.parts.size());
+        if (!ns) continue;
+        for (std::set<std::string>::const_iterator it = ns->types.begin(); it != ns->types.end(); ++it) declareType(*it);
+        for (std::set<std::string>::const_iterator it = ns->templates.begin(); it != ns->templates.end(); ++it) {
+            m_scopes.back().templates.insert(*it);
+            if (!m_qualifierStack.empty()) m_named[m_qualifierStack.back()].templates.insert(*it);
+        }
+    }
     Access access = c->key == "class" ? AccessPrivate : AccessPublic;
     while (!at("}") && !atEnd()) {
         if (accept(";")) continue;
@@ -844,7 +843,9 @@ Decl* Parser::usingDecl(Loc here)
     if (d->kind == Decl::UsingDecl && !d->target.parts.empty()) {
         // "using std::string;" brings a (possible) type name in: register it when the source scope says it is one
         const std::string& id = d->target.parts.back().ident;
-        if (isTypeName(d->target)) declareType(id);
+        // "using ::strlen;" names a global entity: a type only when the global scope declared it as one
+        bool isType = d->target.global && d->target.parts.size() == 1 ? (!m_scopes.empty() && m_scopes[0].types.count(id) > 0) : isTypeName(d->target);
+        if (isType) declareType(id);
     } else if (d->kind == Decl::UsingDirective && !d->target.parts.empty()) {
         // the types of the named namespace become visible
         std::map<std::string, NamedScope>::const_iterator it = m_named.find(d->target.text());
@@ -1518,7 +1519,8 @@ Expr* Parser::primary()
     case PpToken::Char: { Expr* e = m_arena.expr(Expr::CharLit, here); e->text = t.text; advance(); return e; }
     case PpToken::String: {
         Expr* e = m_arena.expr(Expr::StringLit, here); e->text = t.text; advance();
-        while (cur().kind == PpToken::String) { e->text += " " + cur().text; advance(); }   // adjacent literals concatenate
+        // adjacent literals concatenate: the closing quote of one and the opening quote of the next go
+        while (cur().kind == PpToken::String && e->text.size() >= 2 && cur().text.size() >= 2) { e->text = e->text.substr(0, e->text.size() - 1) + cur().text.substr(1); advance(); }
         return e;
     }
     case PpToken::Punct:

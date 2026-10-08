@@ -1,0 +1,61 @@
+// ios - cppparse's C++98 library: stream state and formatting flags (ios_base, ios).
+#ifndef CPPPARSE_IOS
+#define CPPPARSE_IOS
+
+#include <iosfwd>
+
+namespace std {
+
+class ios_base {
+public:
+    typedef int fmtflags;
+    typedef int iostate;
+    typedef int openmode;
+    typedef int seekdir;
+    static const fmtflags boolalpha = 0x0001, dec = 0x0002, fixed = 0x0004, hex = 0x0008, internal = 0x0010, left = 0x0020, oct = 0x0040,
+                          right = 0x0080, scientific = 0x0100, showbase = 0x0200, showpoint = 0x0400, showpos = 0x0800, skipws = 0x1000,
+                          unitbuf = 0x2000, uppercase = 0x4000, adjustfield = 0x00b0, basefield = 0x004a, floatfield = 0x0104;
+    static const iostate goodbit = 0, badbit = 1, failbit = 2, eofbit = 4;
+    static const openmode app = 1, ate = 2, binary = 4, in = 8, out = 16, trunc = 32;
+    static const seekdir beg = 0, cur = 1, end = 2;
+
+    ios_base() : m_flags(dec | skipws), m_precision(6), m_width(0) {}
+    fmtflags   flags() const { return m_flags; }
+    fmtflags   flags(fmtflags f) { fmtflags old = m_flags; m_flags = f; return old; }
+    fmtflags   setf(fmtflags f) { fmtflags old = m_flags; m_flags |= f; return old; }
+    fmtflags   setf(fmtflags f, fmtflags mask) { fmtflags old = m_flags; m_flags = (m_flags & ~mask) | (f & mask); return old; }
+    void       unsetf(fmtflags f) { m_flags &= ~f; }
+    streamsize precision() const { return m_precision; }
+    streamsize precision(streamsize p) { streamsize old = m_precision; m_precision = p; return old; }
+    streamsize width() const { return m_width; }
+    streamsize width(streamsize w) { streamsize old = m_width; m_width = w; return old; }
+
+protected:
+    fmtflags   m_flags;
+    streamsize m_precision;
+    streamsize m_width;
+};
+
+class ios : public ios_base {
+public:
+    ios() : m_state(0), m_fill(' ') {}
+    bool    good() const { return m_state == 0; }
+    bool    eof() const { return (m_state & eofbit) != 0; }
+    bool    fail() const { return (m_state & (failbit | badbit)) != 0; }
+    bool    bad() const { return (m_state & badbit) != 0; }
+    bool    operator!() const { return fail(); }
+    operator void*() const { return fail() ? 0 : const_cast<ios*>(this); }
+    iostate rdstate() const { return m_state; }
+    void    clear(iostate s = goodbit) { m_state = s; }
+    void    setstate(iostate s) { m_state |= s; }
+    char    fill() const { return m_fill; }
+    char    fill(char c) { char old = m_fill; m_fill = c; return old; }
+
+protected:
+    iostate m_state;
+    char    m_fill;
+};
+
+}
+
+#endif

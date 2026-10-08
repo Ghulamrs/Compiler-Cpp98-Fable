@@ -41,6 +41,7 @@ public:
     explicit X86Module(bool msvcNames = false);
     void        addVtable(const IrVtable& v) { m_vtables.push_back(v); }
     void        addGlobal(const IrGlobal& g) { m_globals.push_back(g); }
+    void        addInitializer(const std::string& irName) { m_initializers.push_back(irName); }   // run by the CRT before main
     void        registerSymbolName(const std::string& irName, const std::string& decorated);   // MSVC name of a function
     void        registerGlobalName(const std::string& irGlobalName, const std::string& decorated);
     std::string symbol(const std::string& irName);          // symbol of an IR function or callee name
@@ -68,6 +69,7 @@ private:
     std::set<std::string>              m_dataSymbols;     // symbols already made PUBLIC in .data
     std::vector<IrVtable>              m_vtables;
     std::vector<IrGlobal>              m_globals;
+    std::vector<std::string>           m_initializers;
     std::string floatLabel(double v);
     std::string stringLabel(const std::string& text);
     void        useGlobal(const std::string& name) { Lock l(m_mutex); m_globalsUsed.insert(name); }

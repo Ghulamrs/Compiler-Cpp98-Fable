@@ -1,4 +1,4 @@
-// driver-life.cpp - links against the object cppparse generated for sample-life/life.cpp
+// driver-life.cpp - links against the object cppparse generated for examples/sample-life/life.cpp
 // with --msvc-mangling and checks the object-lifetime results. Built with MSVC:
 //   cl /EHsc driver-life.cpp life.obj cppparse_rt.obj
 #include <cstdio>

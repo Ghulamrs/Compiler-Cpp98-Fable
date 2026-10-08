@@ -1,5 +1,5 @@
 // life.cpp - version 6 object lifetimes, compiled by cppparse --compile6 and driven by
-// sample-life-driver/driver-life.cpp (built with MSVC): destructors at scope exit and on
+// examples/sample-life-driver/driver-life.cpp (built with MSVC): destructors at scope exit and on
 // break/continue/return, copy construction and assignment through the class's own members,
 // temporaries, by-value parameters, arrays, new[]/delete[], and destructors that run while
 // an exception unwinds. No library headers: the counters are plain globals.

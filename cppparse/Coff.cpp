@@ -839,6 +839,8 @@ struct CodeBlock {
     std::string name;
     std::vector<std::pair<int, std::string> > lines;
     Chunk chunk;
+    bool  comdat;      // one COMDAT section of its own (inline functions, template instantiations)
+    CodeBlock() : comdat(false) {}
 };
 
 struct EncodeJob : public ParallelJob {
@@ -859,6 +861,9 @@ struct Section {
     unsigned long              characteristics;
     std::vector<unsigned char> bytes;
     std::vector<Reloc>         relocs;
+    int                        selection;     // IMAGE_COMDAT_SELECT_* of a COMDAT section, 0 otherwise
+    bool                       isCode;
+    Section() : characteristics(0), selection(0), isCode(false) {}
 };
 
 struct SymbolEntry {
@@ -868,24 +873,44 @@ struct SymbolEntry {
     int            type;          // 0x20 for functions
     int            storageClass;  // 2 external, 3 static
     bool           isSection;     // has one auxiliary record
+    int            selection;     // section symbols: the COMDAT selection
+};
+
+// data lines of one section, or of one COMDAT item (a vtable) that becomes a section of its own
+struct DataPiece {
+    Chunk    chunk;
+    Encoder* enc;
+    int      kind;       // 2 data, 3 rdata, 4 CRT initialisers
+    bool     comdat;
+    DataPiece(int k, bool c) : enc(0), kind(k), comdat(c) { enc = new Encoder(chunk); }
+    ~DataPiece() { delete enc; }
 };
 
 void put8(std::string& o, int v) { o += static_cast<char>(v & 0xFF); }
 void put16(std::string& o, unsigned long v) { put8(o, static_cast<int>(v)); put8(o, static_cast<int>(v >> 8)); }
 void put32(std::string& o, unsigned long v) { for (int i = 0; i < 4; ++i) put8(o, static_cast<int>(v >> (8 * i))); }
 
+const unsigned long kCodeFlags  = 0x60500020UL;   // code | execute | read | align 16
+const unsigned long kDataFlags  = 0xC0500040UL;   // initialized | read | write | align 16
+const unsigned long kRdataFlags = 0x40500040UL;   // initialized | read | align 16
+const unsigned long kCrtFlags   = 0x40400040UL;   // initialized | read | align 8
+const unsigned long kComdat     = 0x00001000UL;   // IMAGE_SCN_LNK_COMDAT
+const int           kSelectAny  = 2;              // IMAGE_COMDAT_SELECT_ANY
+
 } // namespace
 
 bool assembleCoff(const std::string& masmText, int threads, std::string& objectBytes, CoffResult& result)
 {
     std::vector<CodeBlock> blocks;
-    Chunk dataChunk, rdataChunk;
-    Encoder dataEnc(dataChunk), rdataEnc(rdataChunk);
+    std::vector<DataPiece*> pieces;
+    DataPiece* plain[5] = { 0, 0, 0, 0, 0 };     // the non-COMDAT piece of each data section kind
+    DataPiece* currentPiece = 0;
     std::set<std::string> publics;
     std::vector<std::string> externs;
     std::set<std::string> externSet;
-    int section = 0;            // 0 none, 1 text, 2 data, 3 rdata
+    int section = 0;            // 0 none, 1 text, 2 data, 3 rdata, 4 CRT initialisers
     CodeBlock* current = 0;
+    bool comdatNext = false;    // ";@comdat any" was seen: the next PROC or data item is a COMDAT
     std::vector<std::string> globalErrors;
 
     size_t lineStart = 0;
@@ -895,6 +920,8 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         std::string raw = masmText.substr(lineStart, nl == std::string::npos ? std::string::npos : nl - lineStart);
         lineStart = nl == std::string::npos ? masmText.size() + 1 : nl + 1;
         ++lineNo;
+        std::string marker = trimWs(raw);
+        if (marker.compare(0, 8, ";@comdat") == 0) { comdatNext = true; continue; }
         size_t sc = raw.find(';');
         if (sc != std::string::npos) raw = raw.substr(0, sc);
         std::string text = trimWs(raw);
@@ -903,11 +930,13 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         std::string w0, w1;
         in >> w0 >> w1;
         std::string u0 = upperText(w0), u1 = upperText(w1);
-        if (u0 == ".CODE") { section = 1; continue; }
-        if (u0 == ".DATA") { section = 2; continue; }
-        if (u0 == ".CONST" || u0 == ".RDATA") { section = 3; continue; }
+        if (u0 == ".CODE") { section = 1; currentPiece = 0; continue; }
+        if (u0 == ".DATA") { section = 2; currentPiece = 0; continue; }
+        if (u0 == ".CONST" || u0 == ".RDATA") { section = 3; currentPiece = 0; continue; }
+        if (u1 == "SEGMENT") { section = u0 == "CRT$XCU" ? 4 : 0; currentPiece = 0; if (section == 0) globalErrors.push_back("line " + numText(lineNo) + ": unknown segment " + w0); continue; }
+        if (u1 == "ENDS") { section = 0; currentPiece = 0; continue; }
         if (u0[0] == '.' || u0 == "OPTION" || u0 == "END" || u0 == "INCLUDE" || u0 == "INCLUDELIB") continue;
-        if (u0 == "PUBLIC") { publics.insert(w1); continue; }
+        if (u0 == "PUBLIC") { publics.insert(w1); if (currentPiece && currentPiece->comdat) currentPiece = 0; continue; }
         if (u0 == "EXTERN" || u0 == "EXTRN") {
             std::string name = w1.substr(0, w1.find(':'));
             if (externSet.insert(name).second) externs.push_back(name);
@@ -916,6 +945,8 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         if (u1 == "PROC") {
             blocks.push_back(CodeBlock());
             blocks.back().name = w0;
+            blocks.back().comdat = comdatNext;
+            comdatNext = false;
             current = &blocks.back();
             continue;
         }
@@ -923,10 +954,13 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         if (section == 1) {
             if (!current) { globalErrors.push_back("line " + numText(lineNo) + ": code outside PROC: " + text); continue; }
             current->lines.push_back(std::make_pair(lineNo, text));
-        } else if (section == 2) {
-            dataEnc.dataLine(text, lineNo);
-        } else if (section == 3) {
-            rdataEnc.dataLine(text, lineNo);
+        } else if (section >= 2 && section <= 4) {
+            if (comdatNext) { pieces.push_back(new DataPiece(section, true)); currentPiece = pieces.back(); comdatNext = false; }
+            if (!currentPiece) {
+                if (!plain[section]) { pieces.push_back(new DataPiece(section, false)); plain[section] = pieces.back(); }
+                currentPiece = plain[section];
+            }
+            currentPiece->enc->dataLine(text, lineNo);
         } else {
             globalErrors.push_back("line " + numText(lineNo) + ": statement before any section: " + text);
         }
@@ -936,67 +970,100 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     job.blocks = &blocks;
     runParallel(job, blocks.size(), threads);
 
-    Section text, data, rdata;
-    text.name = ".text";  text.characteristics  = 0x60500020UL;   // code | execute | read | align 16
-    data.name = ".data";  data.characteristics  = 0xC0500040UL;   // initialized | read | write | align 16
-    rdata.name = ".rdata"; rdata.characteristics = 0x40500040UL;  // initialized | read | align 16
+    // sections: .text, .data, .rdata, [.CRT$XCU], then one per COMDAT function and per COMDAT data item
+    std::vector<Section> secs(3);
+    secs[0].name = ".text";  secs[0].characteristics = kCodeFlags;  secs[0].isCode = true;
+    secs[1].name = ".data";  secs[1].characteristics = kDataFlags;
+    secs[2].name = ".rdata"; secs[2].characteristics = kRdataFlags;
+    if (plain[4]) { Section s; s.name = ".CRT$XCU"; s.characteristics = kCrtFlags; secs.push_back(s); }
+    const size_t crtIndex = plain[4] ? 3 : 0;
     std::vector<SymbolEntry> symbols;
     std::map<std::string, size_t> symbolIndex;   // name -> index in 'symbols'
-
-    SymbolEntry se;
-    se.value = 0; se.type = 0; se.storageClass = 3; se.isSection = true;
-    se.name = ".text"; se.section = 1; symbols.push_back(se);
-    se.name = ".data"; se.section = 2; symbols.push_back(se);
-    se.name = ".rdata"; se.section = 3; symbols.push_back(se);
+    // symbols of a COMDAT section follow its section symbol: collected per section, appended at the end
+    std::vector<std::vector<SymbolEntry> > comdatSymbols;
 
     result.errors = globalErrors;
+    std::vector<SymbolEntry> plainSymbols;
+    unsigned long textBytes = 0;
     for (size_t i = 0; i < blocks.size(); ++i) {
         Chunk& c = blocks[i].chunk;
         result.errors.insert(result.errors.end(), c.errors.begin(), c.errors.end());
         result.instructions += c.instructions;
-        unsigned long base = static_cast<unsigned long>(text.bytes.size());
-        text.bytes.insert(text.bytes.end(), c.bytes.begin(), c.bytes.end());   // no padding between functions, like ml64
-        for (size_t r = 0; r < c.relocs.size(); ++r) { Reloc rl = c.relocs[r]; rl.offset += base; text.relocs.push_back(rl); }
+        textBytes += static_cast<unsigned long>(c.bytes.size());
+        Section* target;
+        unsigned long base;
+        int sectionNumber;
+        if (blocks[i].comdat) {
+            Section s; s.name = ".text$mn"; s.characteristics = kCodeFlags | kComdat; s.selection = kSelectAny; s.isCode = true;
+            secs.push_back(s);
+            comdatSymbols.push_back(std::vector<SymbolEntry>());
+            target = &secs.back(); base = 0; sectionNumber = static_cast<int>(secs.size());
+        } else { target = &secs[0]; base = static_cast<unsigned long>(secs[0].bytes.size()); sectionNumber = 1; }
+        target->bytes.insert(target->bytes.end(), c.bytes.begin(), c.bytes.end());   // no padding between functions, like ml64
+        for (size_t r = 0; r < c.relocs.size(); ++r) { Reloc rl = c.relocs[r]; rl.offset += base; target->relocs.push_back(rl); }
         for (size_t s = 0; s < c.symbols.size(); ++s) {
             SymbolEntry f;
-            f.name = c.symbols[s].first; f.value = base + c.symbols[s].second; f.section = 1; f.type = 0x20;
-            f.storageClass = publics.count(f.name) ? 2 : 3; f.isSection = false;
+            f.name = c.symbols[s].first; f.value = base + c.symbols[s].second; f.section = sectionNumber; f.type = 0x20;
+            f.storageClass = publics.count(f.name) ? 2 : 3; f.isSection = false; f.selection = 0;
             if (symbolIndex.count(f.name)) { result.errors.push_back("duplicate symbol " + f.name); continue; }
-            symbolIndex[f.name] = symbols.size();
-            symbols.push_back(f);
+            symbolIndex[f.name] = 0;   // defined; the index is assigned when the table is laid out
+            if (blocks[i].comdat) comdatSymbols.back().push_back(f); else plainSymbols.push_back(f);
         }
     }
     result.functions = static_cast<int>(blocks.size());
-    Chunk* dataChunks[2] = { &dataChunk, &rdataChunk };
-    Section* dataSections[2] = { &data, &rdata };
-    for (int d = 0; d < 2; ++d) {
-        Chunk& c = *dataChunks[d];
-        Section& s = *dataSections[d];
+    for (size_t p = 0; p < pieces.size(); ++p) {
+        DataPiece& dp = *pieces[p];
+        Chunk& c = dp.chunk;
         result.errors.insert(result.errors.end(), c.errors.begin(), c.errors.end());
-        s.bytes = c.bytes;
-        s.relocs = c.relocs;
+        Section* target;
+        int sectionNumber;
+        if (dp.comdat) {
+            Section s; s.name = dp.kind == 2 ? ".data" : ".rdata"; s.characteristics = (dp.kind == 2 ? kDataFlags : kRdataFlags) | kComdat; s.selection = kSelectAny;
+            secs.push_back(s);
+            comdatSymbols.push_back(std::vector<SymbolEntry>());
+            target = &secs.back(); sectionNumber = static_cast<int>(secs.size());
+        } else if (dp.kind == 4) { target = &secs[crtIndex]; sectionNumber = static_cast<int>(crtIndex + 1); }
+        else { target = &secs[static_cast<size_t>(dp.kind - 1)]; sectionNumber = dp.kind; }
+        unsigned long base = static_cast<unsigned long>(target->bytes.size());
+        target->bytes.insert(target->bytes.end(), c.bytes.begin(), c.bytes.end());
+        for (size_t r = 0; r < c.relocs.size(); ++r) { Reloc rl = c.relocs[r]; rl.offset += base; target->relocs.push_back(rl); }
         for (size_t k = 0; k < c.symbols.size(); ++k) {
             SymbolEntry f;
-            f.name = c.symbols[k].first; f.value = c.symbols[k].second; f.section = d + 2; f.type = 0;
-            f.storageClass = publics.count(f.name) ? 2 : 3; f.isSection = false;
+            f.name = c.symbols[k].first; f.value = base + c.symbols[k].second; f.section = sectionNumber; f.type = 0;
+            f.storageClass = publics.count(f.name) ? 2 : 3; f.isSection = false; f.selection = 0;
             if (symbolIndex.count(f.name)) { result.errors.push_back("duplicate symbol " + f.name); continue; }
-            symbolIndex[f.name] = symbols.size();
-            symbols.push_back(f);
+            symbolIndex[f.name] = 0;
+            if (dp.comdat) comdatSymbols.back().push_back(f); else plainSymbols.push_back(f);
         }
+    }
+    for (size_t p = 0; p < pieces.size(); ++p) delete pieces[p];
+    pieces.clear();
+
+    // symbol table: the plain section symbols, the plain symbols, each COMDAT section symbol with its symbols, the externals
+    const size_t plainSections = crtIndex ? 4 : 3;
+    for (size_t s = 0; s < plainSections; ++s) {
+        SymbolEntry se; se.name = secs[s].name; se.value = 0; se.section = static_cast<int>(s + 1); se.type = 0; se.storageClass = 3; se.isSection = true; se.selection = 0;
+        symbols.push_back(se);
+    }
+    for (size_t i = 0; i < plainSymbols.size(); ++i) { symbolIndex[plainSymbols[i].name] = symbols.size(); symbols.push_back(plainSymbols[i]); }
+    for (size_t k = 0; k < comdatSymbols.size(); ++k) {
+        size_t s = plainSections + k;
+        SymbolEntry se; se.name = secs[s].name; se.value = 0; se.section = static_cast<int>(s + 1); se.type = 0; se.storageClass = 3; se.isSection = true; se.selection = secs[s].selection;
+        symbols.push_back(se);
+        for (size_t i = 0; i < comdatSymbols[k].size(); ++i) { symbolIndex[comdatSymbols[k][i].name] = symbols.size(); symbols.push_back(comdatSymbols[k][i]); }
     }
     // externals: the declared ones first, then anything referenced but never defined (sorted, for determinism)
     std::set<std::string> undefined;
-    Section* all[3] = { &text, &data, &rdata };
-    for (int s = 0; s < 3; ++s)
-        for (size_t r = 0; r < all[s]->relocs.size(); ++r)
-            if (!symbolIndex.count(all[s]->relocs[r].symbol) && !externSet.count(all[s]->relocs[r].symbol)) undefined.insert(all[s]->relocs[r].symbol);
+    for (size_t s = 0; s < secs.size(); ++s)
+        for (size_t r = 0; r < secs[s].relocs.size(); ++r)
+            if (!symbolIndex.count(secs[s].relocs[r].symbol) && !externSet.count(secs[s].relocs[r].symbol)) undefined.insert(secs[s].relocs[r].symbol);
     for (size_t e = 0; e < externs.size(); ++e) {
         if (symbolIndex.count(externs[e])) continue;    // declared EXTERN but defined here as well
-        SymbolEntry f; f.name = externs[e]; f.value = 0; f.section = 0; f.type = 0; f.storageClass = 2; f.isSection = false;
+        SymbolEntry f; f.name = externs[e]; f.value = 0; f.section = 0; f.type = 0; f.storageClass = 2; f.isSection = false; f.selection = 0;
         symbolIndex[f.name] = symbols.size(); symbols.push_back(f);
     }
     for (std::set<std::string>::const_iterator u = undefined.begin(); u != undefined.end(); ++u) {
-        SymbolEntry f; f.name = *u; f.value = 0; f.section = 0; f.type = 0; f.storageClass = 2; f.isSection = false;
+        SymbolEntry f; f.name = *u; f.value = 0; f.section = 0; f.type = 0; f.storageClass = 2; f.isSection = false; f.selection = 0;
         symbolIndex[f.name] = symbols.size(); symbols.push_back(f);
     }
     if (!result.errors.empty()) return false;
@@ -1008,32 +1075,33 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     unsigned long symbolCount = idx;
 
     std::string o;
-    unsigned long headerSize = 20 + 3 * 40;
+    const size_t n = secs.size();
+    unsigned long headerSize = 20 + static_cast<unsigned long>(n) * 40;
     unsigned long offset = headerSize;
-    unsigned long rawOffset[3], relocOffset[3], relocCount[3];
-    for (int s = 0; s < 3; ++s) {
-        rawOffset[s] = all[s]->bytes.empty() ? 0 : offset;
-        offset += static_cast<unsigned long>(all[s]->bytes.size());
-        relocCount[s] = static_cast<unsigned long>(all[s]->relocs.size());
+    std::vector<unsigned long> rawOffset(n), relocOffset(n), relocCount(n);
+    for (size_t s = 0; s < n; ++s) {
+        rawOffset[s] = secs[s].bytes.empty() ? 0 : offset;
+        offset += static_cast<unsigned long>(secs[s].bytes.size());
+        relocCount[s] = static_cast<unsigned long>(secs[s].relocs.size());
         relocOffset[s] = relocCount[s] ? offset : 0;
         offset += (relocCount[s] + (relocCount[s] >= 0xFFFF ? 1 : 0)) * 10;
     }
     unsigned long symbolTableOffset = offset;
 
-    put16(o, 0x8664); put16(o, 3); put32(o, 0); put32(o, symbolTableOffset); put32(o, symbolCount); put16(o, 0); put16(o, 0);
-    for (int s = 0; s < 3; ++s) {
-        std::string n = all[s]->name; n.resize(8, '\0'); o += n;
+    put16(o, 0x8664); put16(o, static_cast<unsigned long>(n)); put32(o, 0); put32(o, symbolTableOffset); put32(o, symbolCount); put16(o, 0); put16(o, 0);
+    for (size_t s = 0; s < n; ++s) {
+        std::string nm = secs[s].name; nm.resize(8, '\0'); o += nm;
         put32(o, 0); put32(o, 0);                                   // VirtualSize, VirtualAddress
-        put32(o, static_cast<unsigned long>(all[s]->bytes.size()));
+        put32(o, static_cast<unsigned long>(secs[s].bytes.size()));
         put32(o, rawOffset[s]); put32(o, relocOffset[s]); put32(o, 0);
         put16(o, relocCount[s] >= 0xFFFF ? 0xFFFF : relocCount[s]); put16(o, 0);
-        put32(o, all[s]->characteristics | (relocCount[s] >= 0xFFFF ? 0x01000000UL : 0));   // LNK_NRELOC_OVFL
+        put32(o, secs[s].characteristics | (relocCount[s] >= 0xFFFF ? 0x01000000UL : 0));   // LNK_NRELOC_OVFL
     }
-    for (int s = 0; s < 3; ++s) {
-        o.append(reinterpret_cast<const char*>(all[s]->bytes.empty() ? 0 : &all[s]->bytes[0]), all[s]->bytes.size());
+    for (size_t s = 0; s < n; ++s) {
+        o.append(reinterpret_cast<const char*>(secs[s].bytes.empty() ? 0 : &secs[s].bytes[0]), secs[s].bytes.size());
         if (relocCount[s] >= 0xFFFF) { put32(o, relocCount[s] + 1); put32(o, 0); put16(o, 0); }
-        for (size_t r = 0; r < all[s]->relocs.size(); ++r) {
-            const Reloc& rl = all[s]->relocs[r];
+        for (size_t r = 0; r < secs[s].relocs.size(); ++r) {
+            const Reloc& rl = secs[s].relocs[r];
             put32(o, rl.offset);
             put32(o, tableIndex[symbolIndex[rl.symbol]]);
             put16(o, rl.type);
@@ -1043,26 +1111,32 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     put32(strings, 0);   // length, patched below
     for (size_t i = 0; i < symbols.size(); ++i) {
         const SymbolEntry& s = symbols[i];
-        if (s.name.size() <= 8) { std::string n = s.name; n.resize(8, '\0'); o += n; }
+        if (s.name.size() <= 8) { std::string nm = s.name; nm.resize(8, '\0'); o += nm; }
         else { put32(o, 0); put32(o, static_cast<unsigned long>(strings.size())); strings += s.name; strings += '\0'; }
         put32(o, s.value); put16(o, static_cast<unsigned long>(s.section)); put16(o, static_cast<unsigned long>(s.type));
         put8(o, s.storageClass); put8(o, s.isSection ? 1 : 0);
         if (s.isSection) {
-            const Section& sec = *all[s.section - 1];
+            const Section& sec = secs[static_cast<size_t>(s.section - 1)];
             put32(o, static_cast<unsigned long>(sec.bytes.size()));
             put16(o, sec.relocs.size() >= 0xFFFF ? 0xFFFF : static_cast<unsigned long>(sec.relocs.size()));
-            put16(o, 0); put32(o, 0); put16(o, 0); put8(o, 0); put8(o, 0); put8(o, 0); put8(o, 0);
+            put16(o, 0); put32(o, 0); put16(o, 0); put8(o, s.selection); put8(o, 0); put8(o, 0); put8(o, 0);
         }
     }
     unsigned long sl = static_cast<unsigned long>(strings.size());
     for (int i = 0; i < 4; ++i) strings[i] = static_cast<char>((sl >> (8 * i)) & 0xFF);
     o += strings;
 
-    result.relocations = static_cast<int>(text.relocs.size() + data.relocs.size() + rdata.relocs.size());
+    unsigned long relocations = 0, dataBytes = 0, rdataBytes = 0;
+    for (size_t s = 0; s < n; ++s) {
+        relocations += static_cast<unsigned long>(secs[s].relocs.size());
+        if (secs[s].isCode) continue;
+        if (secs[s].name == ".data") dataBytes += static_cast<unsigned long>(secs[s].bytes.size()); else rdataBytes += static_cast<unsigned long>(secs[s].bytes.size());
+    }
+    result.relocations = static_cast<int>(relocations);
     result.symbols = static_cast<int>(symbols.size());
-    result.textBytes = static_cast<unsigned long>(text.bytes.size());
-    result.dataBytes = static_cast<unsigned long>(data.bytes.size());
-    result.rdataBytes = static_cast<unsigned long>(rdata.bytes.size());
+    result.textBytes = textBytes;
+    result.dataBytes = dataBytes;
+    result.rdataBytes = rdataBytes;
     result.fileBytes = static_cast<unsigned long>(o.size());
     objectBytes.swap(o);
     return true;

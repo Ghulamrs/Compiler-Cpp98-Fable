@@ -109,10 +109,11 @@ struct IrFunction {
     int                      paramCount;
     bool                     hasThis;
     bool                     hasTry;
+    bool                     linkOnce;   // inline, template instantiation or implicit member: one copy survives linking (COMDAT)
     std::vector<std::string> notes;      // constructs that were approximated
     std::map<int, const Type*> tempTypes;
 
-    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false) {}
+    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false) {}
     int  newTemp(const Type* t) { tempTypes[nextTemp] = t; return nextTemp++; }
     int  newBlock(const std::string& label);
     void computeCfg();

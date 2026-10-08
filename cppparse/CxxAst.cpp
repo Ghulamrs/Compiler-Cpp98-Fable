@@ -131,9 +131,15 @@ CxxArena::~CxxArena()
 
 namespace {
 
+int g_exprDepth = 0;
+
+struct DepthGuard { DepthGuard() { ++g_exprDepth; } ~DepthGuard() { --g_exprDepth; } };
+
 std::string exprText(const Expr* e)
 {
     if (!e) return "";
+    DepthGuard guard;
+    if (g_exprDepth > 100) return "<cycle>";   // a malformed tree must not overflow the stack
     switch (e->kind) {
     case Expr::IntLit: case Expr::FloatLit: case Expr::CharLit: case Expr::StringLit: case Expr::BoolLit: return e->text;
     case Expr::This: return "this";
@@ -385,6 +391,157 @@ std::string dumpTranslationUnit(const TranslationUnit& tu)
 void countTranslationUnit(const TranslationUnit& tu, Counts& out)
 {
     for (size_t i = 0; i < tu.decls.size(); ++i) countDecl(tu.decls[i], out);
+}
+
+// ---- deep copies ------------------------------------------------------------------------------------------
+
+namespace {
+
+struct Cloner {
+    CxxArena& a;
+    explicit Cloner(CxxArena& arena) : a(arena) {}
+
+    void name(QualifiedName& n)
+    {
+        for (size_t i = 0; i < n.parts.size(); ++i) {
+            NameComponent& c = n.parts[i];
+            if (c.convType) c.convType = typeId(c.convType);
+            for (size_t k = 0; k < c.templateArgs.size(); ++k) {
+                if (c.templateArgs[k].type) c.templateArgs[k].type = typeId(c.templateArgs[k].type);
+                if (c.templateArgs[k].expr) c.templateArgs[k].expr = expr(c.templateArgs[k].expr);
+            }
+        }
+    }
+    void declSpec(DeclSpec& s)
+    {
+        name(s.name);
+        if (s.classDef) s.classDef = classDecl(s.classDef);
+        if (s.enumDef) s.enumDef = enumDecl(s.enumDef);
+    }
+    void init(Initializer& i)
+    {
+        for (size_t k = 0; k < i.args.size(); ++k) i.args[k] = expr(i.args[k]);
+    }
+    Expr* expr(const Expr* e)
+    {
+        if (!e) return 0;
+        Expr* c = a.expr(e->kind, e->loc);
+        *c = *e;
+        name(c->name);
+        for (size_t i = 0; i < c->kids.size(); ++i) c->kids[i] = expr(c->kids[i]);
+        for (size_t i = 0; i < c->placement.size(); ++i) c->placement[i] = expr(c->placement[i]);
+        if (c->type) c->type = typeId(c->type);
+        c->semaType = 0; c->semaSym = 0; c->semaLvalue = false; c->semaConst = false; c->semaValue = 0;
+        return c;
+    }
+    Stmt* stmt(const Stmt* s)
+    {
+        if (!s) return 0;
+        Stmt* c = a.stmt(s->kind, s->loc);
+        *c = *s;
+        c->expr = expr(c->expr);
+        c->expr2 = expr(c->expr2);
+        c->decl = decl(c->decl);
+        c->init = stmt(c->init);
+        for (size_t i = 0; i < c->kids.size(); ++i) c->kids[i] = stmt(c->kids[i]);
+        return c;
+    }
+    TypeId* typeId(const TypeId* t)
+    {
+        if (!t) return 0;
+        TypeId* c = a.typeId();
+        *c = *t;
+        declSpec(c->spec);
+        c->decl = declarator(c->decl);
+        return c;
+    }
+    Param* param(const Param* p)
+    {
+        if (!p) return 0;
+        Param* c = a.param();
+        *c = *p;
+        declSpec(c->spec);
+        c->decl = declarator(c->decl);
+        c->defaultValue = expr(c->defaultValue);
+        return c;
+    }
+    Declarator* declarator(const Declarator* d)
+    {
+        if (!d) return 0;
+        Declarator* c = a.declarator();
+        *c = *d;
+        name(c->name);
+        for (size_t i = 0; i < c->parts.size(); ++i) {
+            DeclaratorPart& p = c->parts[i];
+            p.arraySize = expr(p.arraySize);
+            for (size_t k = 0; k < p.params.size(); ++k) p.params[k] = param(p.params[k]);
+            for (size_t k = 0; k < p.throwSpec.size(); ++k) p.throwSpec[k] = typeId(p.throwSpec[k]);
+            name(p.memberClass);
+        }
+        c->bitfield = expr(c->bitfield);
+        c->semaSym = 0;
+        return c;
+    }
+    TemplateParam* templateParam(const TemplateParam* t)
+    {
+        if (!t) return 0;
+        TemplateParam* c = a.templateParam();
+        *c = *t;
+        c->defaultType = typeId(c->defaultType);
+        c->nonType = param(c->nonType);
+        for (size_t i = 0; i < c->params.size(); ++i) c->params[i] = templateParam(c->params[i]);
+        return c;
+    }
+    EnumDecl* enumDecl(const EnumDecl* e)
+    {
+        if (!e) return 0;
+        EnumDecl* c = a.enumDecl();
+        *c = *e;
+        for (size_t i = 0; i < c->enumerators.size(); ++i) c->enumerators[i].value = expr(c->enumerators[i].value);
+        return c;
+    }
+    ClassDecl* classDecl(const ClassDecl* k)
+    {
+        if (!k) return 0;
+        ClassDecl* c = a.classDecl();
+        *c = *k;
+        name(c->name);
+        for (size_t i = 0; i < c->bases.size(); ++i) name(c->bases[i].name);
+        for (size_t i = 0; i < c->members.size(); ++i) c->members[i] = decl(c->members[i]);
+        return c;
+    }
+    Decl* decl(const Decl* d)
+    {
+        if (!d) return 0;
+        Decl* c = a.decl(d->kind, d->loc);
+        *c = *d;
+        declSpec(c->spec);
+        for (size_t i = 0; i < c->declarators.size(); ++i) { c->declarators[i].decl = declarator(c->declarators[i].decl); init(c->declarators[i].init); }
+        c->declarator = declarator(c->declarator);
+        for (size_t i = 0; i < c->memInits.size(); ++i) { name(c->memInits[i].name); for (size_t k = 0; k < c->memInits[i].args.size(); ++k) c->memInits[i].args[k] = expr(c->memInits[i].args[k]); }
+        c->body = stmt(c->body);
+        c->classDef = classDecl(c->classDef);
+        c->enumDef = enumDecl(c->enumDef);
+        name(c->target);
+        for (size_t i = 0; i < c->decls.size(); ++i) c->decls[i] = decl(c->decls[i]);
+        for (size_t i = 0; i < c->templateParams.size(); ++i) c->templateParams[i] = templateParam(c->templateParams[i]);
+        c->semaSym = 0;
+        return c;
+    }
+};
+
+} // namespace
+
+Decl* cloneDecl(const Decl* d, CxxArena& arena)
+{
+    Cloner c(arena);
+    return c.decl(d);
+}
+
+ClassDecl* cloneClassDecl(const ClassDecl* k, CxxArena& arena)
+{
+    Cloner c(arena);
+    return c.classDecl(k);
 }
 
 } // namespace cxx

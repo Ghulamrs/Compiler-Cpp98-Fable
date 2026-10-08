@@ -1,0 +1,174 @@
+// istream - cppparse's C++98 library: formatted input from a virtual character source that the
+// string and file streams supply. One character of lookahead is kept here.
+#ifndef CPPPARSE_ISTREAM
+#define CPPPARSE_ISTREAM
+
+#include <cstddef>
+#include <cstdlib>
+#include <ios>
+#include <string>
+
+namespace std {
+
+class istream : public ios {
+public:
+    istream() : m_peek(-2), m_count(0) {}
+    virtual ~istream() {}
+
+    int get()
+    {
+        int c = next();
+        if (c < 0) { setstate(eofbit | failbit); m_count = 0; return -1; }
+        m_count = 1;
+        return c;
+    }
+    istream& get(char& c) { int v = get(); if (v >= 0) c = static_cast<char>(v); return *this; }
+    int peek() { if (m_peek == -2) m_peek = underflow(); if (m_peek < 0) setstate(eofbit); return m_peek < 0 ? -1 : m_peek; }
+    istream& read(char* s, streamsize n)
+    {
+        m_count = 0;
+        for (streamsize i = 0; i < n; ++i) {
+            int c = next();
+            if (c < 0) { setstate(eofbit | failbit); break; }
+            s[i] = static_cast<char>(c);
+            ++m_count;
+        }
+        return *this;
+    }
+    istream& getline(char* s, streamsize n, char delim = '\n')
+    {
+        m_count = 0;
+        streamsize i = 0;
+        for (;;) {
+            int c = next();
+            if (c < 0) { setstate(eofbit); if (i == 0) setstate(failbit); break; }
+            ++m_count;
+            if (c == delim) break;
+            if (i + 1 >= n) { setstate(failbit); break; }
+            s[i++] = static_cast<char>(c);
+        }
+        if (n > 0) s[i] = 0;
+        return *this;
+    }
+    istream& ignore(streamsize n = 1, int delim = -1)
+    {
+        m_count = 0;
+        for (streamsize i = 0; i < n; ++i) {
+            int c = next();
+            if (c < 0) { setstate(eofbit); break; }
+            ++m_count;
+            if (c == delim) break;
+        }
+        return *this;
+    }
+    streamsize gcount() const { return m_count; }
+
+    istream& operator>>(char& c) { skipSpace(); int v = next(); if (v < 0) setstate(eofbit | failbit); else c = static_cast<char>(v); return *this; }
+    istream& operator>>(unsigned char& c) { char ch; *this >> ch; c = static_cast<unsigned char>(ch); return *this; }
+    istream& operator>>(bool& v) { long long t; integer(t); v = t != 0; return *this; }
+    istream& operator>>(short& v) { long long t; integer(t); v = static_cast<short>(t); return *this; }
+    istream& operator>>(unsigned short& v) { long long t; integer(t); v = static_cast<unsigned short>(t); return *this; }
+    istream& operator>>(int& v) { long long t; integer(t); v = static_cast<int>(t); return *this; }
+    istream& operator>>(unsigned& v) { long long t; integer(t); v = static_cast<unsigned>(t); return *this; }
+    istream& operator>>(long& v) { long long t; integer(t); v = static_cast<long>(t); return *this; }
+    istream& operator>>(unsigned long& v) { long long t; integer(t); v = static_cast<unsigned long>(t); return *this; }
+    istream& operator>>(long long& v) { integer(v); return *this; }
+    istream& operator>>(unsigned long long& v) { long long t; integer(t); v = static_cast<unsigned long long>(t); return *this; }
+    istream& operator>>(float& v) { double d; real(d); v = static_cast<float>(d); return *this; }
+    istream& operator>>(double& v) { real(v); return *this; }
+    istream& operator>>(string& s)
+    {
+        skipSpace();
+        s.clear();
+        for (;;) {
+            int c = peek();
+            if (c < 0 || isSpace(c)) break;
+            s.push_back(static_cast<char>(c));
+            next();
+        }
+        if (s.empty()) setstate(failbit);
+        return *this;
+    }
+    istream& operator>>(istream& (*fn)(istream&)) { return fn(*this); }
+
+    // the next character or -1 at the end (the lookahead first)
+    int next()
+    {
+        if (m_peek != -2) { int c = m_peek; m_peek = -2; return c; }
+        return underflow();
+    }
+
+protected:
+    virtual int underflow() = 0;
+
+    static bool isSpace(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+    void skipSpace() { if (m_flags & skipws) while (isSpace(peek())) next(); }
+    void integer(long long& v)
+    {
+        skipSpace();
+        v = 0;
+        bool negative = false, any = false;
+        int c = peek();
+        if (c == '+' || c == '-') { negative = c == '-'; next(); c = peek(); }
+        int base = (m_flags & hex) ? 16 : (m_flags & oct) ? 8 : 10;
+        for (;;) {
+            c = peek();
+            int d;
+            if (c >= '0' && c <= '9') d = c - '0';
+            else if (base == 16 && c >= 'a' && c <= 'f') d = c - 'a' + 10;
+            else if (base == 16 && c >= 'A' && c <= 'F') d = c - 'A' + 10;
+            else break;
+            if (d >= base) break;
+            v = v * base + d;
+            any = true;
+            next();
+        }
+        if (!any) setstate(failbit);
+        if (negative) v = -v;
+    }
+    void real(double& v)
+    {
+        skipSpace();
+        char buf[64];
+        size_t n = 0;
+        for (;;) {
+            int c = peek();
+            bool ok = (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E';
+            if (!ok || n + 1 >= 64) break;
+            buf[n++] = static_cast<char>(c);
+            next();
+        }
+        buf[n] = 0;
+        char* end = 0;
+        v = strtod(buf, &end);
+        if (n == 0 || end == buf) setstate(failbit);
+    }
+
+    int        m_peek;
+    streamsize m_count;
+};
+
+inline istream& getline(istream& in, string& s, char delim = '\n')
+{
+    s.clear();
+    bool any = false;
+    for (;;) {
+        int c = in.peek();
+        if (c < 0) { in.setstate(ios::eofbit); if (!any) in.setstate(ios::failbit); break; }
+        in.next();
+        any = true;
+        if (c == delim) break;
+        s.push_back(static_cast<char>(c));
+    }
+    return in;
+}
+
+inline istream& ws(istream& in)
+{
+    while (in.peek() == ' ' || in.peek() == '\t' || in.peek() == '\n' || in.peek() == '\r') in.next();
+    return in;
+}
+
+}
+
+#endif

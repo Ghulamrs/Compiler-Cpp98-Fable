@@ -182,6 +182,7 @@ int main(int argc, char* argv[])
         ppOpt.defines.push_back("CALLBACK=");
         ppOpt.defines.push_back("APIENTRY=");
         for (size_t i = 0; i < inputs.size(); ++i) {
+            if (!fileExists(inputs[i])) { std::cerr << "error: cannot read " << inputs[i] << "\n"; ++totalErrors; continue; }
             Preprocessor pp(ppOpt);
             pp.run(inputs[i]);
             cxx::CxxArena arena;
@@ -213,6 +214,7 @@ int main(int argc, char* argv[])
                 sema::TypeTable types;
                 sema::Program program;
                 sema::Sema sema(types, program);
+                sema.useArena(arena);   // nodes sema adds must outlive it: the AST dump runs later
                 sema.analyze(tu, pp.files());
                 const sema::SemaStats& st = sema.stats();
                 std::cout << "  sema: " << sema.errorCount() << " error(s); classes " << st.classes << ", functions analysed " << st.functionsDefined << ", variables " << st.variables
@@ -230,9 +232,9 @@ int main(int argc, char* argv[])
                     // version 6 stage 4: IR from the analysed tree, then the shared back end
                     IrGen gen(program, types);
                     std::vector<IrFunction*> functions;
-                    gen.generate(functions);
                     X86Module x86(copt.msvcNames);
-                    gen.registerMetadata(x86, copt.msvcNames);
+                    gen.registerMetadata(x86, copt.msvcNames);   // first: it queues the vtable members and the dynamic initialisers
+                    gen.generate(functions);
                     BackEndOptions bo;
                     bo.optLevel = copt.optLevel; bo.threads = copt.threads; bo.x86 = copt.x86;
                     BackEndResult br;

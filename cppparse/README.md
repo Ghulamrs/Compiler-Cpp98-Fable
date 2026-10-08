@@ -109,7 +109,7 @@ The checks are static and declaration-level: macros are not expanded and
 `#if` conditions are not evaluated, so code that depends on them can give
 false positives. Argument checks compare counts, not types; full type
 checking needs an expression parser and is planned for version 3 together
-with an AST and a three-address IR. The folder `sample-bad/` contains one
+with an AST and a three-address IR. The folder `examples/sample-bad/` contains one
 example of every finding and is part of the regression test.
 
 ## Symbol table and map file
@@ -135,10 +135,10 @@ builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
 `obj/debug`. `-NoTests` stops after the build. The test groups (14 as of
 version 6) run against whichever configuration was built. The first four: the Visual Studio 2010 solution in
-`sample/` with checks on the report, symbols and map, the `cpp` folder
+`examples/sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken
-folder `sample-bad/`, which must produce every health code. Any C++98 compiler works for the sources themselves, e.g.
+folder `examples/sample-bad/`, which must produce every health code. Any C++98 compiler works for the sources themselves, e.g.
 `g++ -std=c++98 -pedantic -Wall -o cppparse cppparse/*.cpp`.
 
 ## How it works
@@ -212,7 +212,7 @@ dead code and dead store elimination, branch folding, unreachable block
 removal, block merging. `-O2` adds loop-invariant code motion (dominators,
 natural loops, preheaders) and inlining of small functions. `-O3` inlines
 larger functions and fully unrolls loops with a constant trip count of at
-most 8. The folder `sample-opt/` shows each transformation; the test
+most 8. The folder `examples/sample-opt/` shows each transformation; the test
 checks, for example, that `constants()` folds to `ret #14` at `-O1`,
 `square` is inlined at `-O2` and `unroll()` becomes `ret #6` at `-O3`.
 
@@ -256,7 +256,7 @@ implemented on this target). `--assemble` runs `ml64 /c` to produce
 `square_int_x`); `extern "C"` functions keep their name.
 
 Test 6 assembles the `sample-opt` output with `ml64`, links it with the
-MSVC-compiled `sample-opt-driver/driver.cpp` and runs it at `-O0`, `-O2`
+MSVC-compiled `examples/sample-opt-driver/driver.cpp` and runs it at `-O0`, `-O2`
 and `-O3`: all 19 result checks pass, templates included.
 
 ## Version 5: parallel pipeline, many input files
@@ -347,7 +347,7 @@ and enum types, template instances with type and integer arguments, and
 the name and parameter-type back-references. `extern "C"` functions and
 `main` keep their names. Test 9 compiles the sample with cl, checks that
 every function symbol cl defines is spelled identically in cppparse's
-object, then links `sample-opt-driver/driver-native.cpp`, which declares
+object, then links `examples/sample-opt-driver/driver-native.cpp`, which declares
 the functions as plain C++, against cppparse's object and runs it.
 
 ## Source layout
@@ -383,7 +383,9 @@ as the acceptance bar:
 4. **IR generation** (`IrGen.*`, `--compile6`, done): from the analysed
    tree into the shared back end, with object lifetimes (destructors,
    copy constructors, temporaries, unwinding; done).
-5. **Library headers**: cppparse's own C++98 `std` and C headers.
+5. **Library headers** (`include/`, `libcpp/`, done): cppparse's own
+   C++98 `std` and C headers, with COMDAT objects and dynamic
+   initialisation so that several translation units link.
 6. **Reports** rebuilt on the new AST, and the version 4 and 5 gaps.
 
 Every stage works per translation unit and runs on the worker pool.
@@ -447,7 +449,7 @@ and `__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__cplusplus`
 (`199711L`). The result is a token stream with file and line positions,
 the list of included and missing files, all macro definitions and the
 diagnostics. `cppparse -E -I inc pp.cpp` prints the preprocessed text
-like `cl /EP`; test 10 compares the two on `sample-pp/` (identical apart
+like `cl /EP`; test 10 compares the two on `examples/sample-pp/` (identical apart
 from whitespace) and checks that `#error` and a missing include are
 diagnosed.
 
@@ -503,7 +505,7 @@ text. Test 13 compiles `sample-opt` through the version 6 pipeline at
 and the exception runtime, and runs it: all 19 checks pass, including
 templates and exceptions.
 
-**Object lifetimes** (`IrGen.cpp`, `sample-life/`, test 14): every
+**Object lifetimes** (`IrGen.cpp`, `examples/sample-life/`, test 14): every
 constructed local, by-value parameter and class temporary is recorded
 with a "constructed" flag byte. Block scopes destroy their objects in
 reverse order on normal exit; `break`, `continue` and `return` unwind
@@ -526,11 +528,50 @@ objects built inside it at a handler entry; a constructor whose body
 throws destroys the members and bases it already built. `throw obj`
 copy-constructs the exception object into heap storage that the
 runtime owns (`cppparse_throw_owned`) and destroys with the class's
-destructor when the handler ends. The driver `sample-life-driver/
+destructor when the handler ends. The driver `examples/sample-life-driver/
 driver-life.cpp` counts constructions, destructions, copies and live
 buffers across 24 checks at `-O0`, `-O2` and `-O3`. Functions with
 such objects contain a try region, so the SSA phase skips them; the
 block-local passes still run.
+
+**Standard library** (`include/`, `libcpp/iostream.cpp`, `examples/
+sample-lib/`, test 15): cppparse's own C++98 headers, written so that
+the same files serve semantic analysis of cppparse's sources and real
+compilation. `cstddef`, `cstdlib`, `cstdio`, `cstring`, `cctype`,
+`cmath` and `ctime` declare the C runtime (`extern "C"`, with
+`using ::name` in `std`; `size_t` is the 64-bit type of this target);
+`exception`, `new`, `stdexcept`, `utility` and `algorithm` (pointer
+ranges: `sort`, `stable_sort`, `reverse`, `find`, `lower_bound`, ...)
+are implemented in place; `string` is one class over a zero-terminated
+heap buffer; `vector` keeps its elements in malloc storage built with
+placement new and destroyed explicitly; `map` and `set` share the AVL
+tree of `__tree` (parent links, erase unlinks nodes so other iterators
+stay valid); `ios`, `ostream`, `istream`, `sstream`, `fstream` and
+`iostream` format and parse without the C library's variadic functions,
+and `std::cout`, `cerr` and `cin` are objects defined in
+`libcpp/iostream.cpp`, which cppparse compiles and the program links.
+To make that work across translation units, every inline function,
+template instantiation and implicit member is emitted in a COMDAT
+section of its own (selection "any") by the COFF writer, vtables
+likewise, static const members with a constant initialiser are folded
+rather than emitted, and globals that need construction are built by a
+per-module initialiser registered in `.CRT$XCU`, so the C runtime runs
+it before `main`. The library exposed a long list of compiler defects
+that are now fixed: per-instantiation copies of template syntax trees,
+using-declarations, parameter names that are also type names, base
+class type names in derived bodies, qualified lookup from nested classes,
+pseudo-destructor calls, placement new, default arguments, conversion
+operators and `operator->` as wrapper nodes, reference-returning calls,
+`this` adjustment for members of a base, operator templates in the
+mangler, string literal concatenation, indirect calls, and live
+intervals of values that cross a loop's back edge. Test 15 compiles the
+three samples and `libcpp/iostream.cpp` to four objects, links them
+with `examples/sample-lib-driver/driver-lib.cpp` and runs 13 checks at
+`-O0` and `-O2`. Measured against the self-hosting target: analysing
+cppparse's own 39 sources with these headers (`--sema6 -I cppparse/include`)
+reports 78 errors in total, against 1548 without them; the rest are
+overloads and conversions the analysis does not resolve yet, plus a few
+types the headers still lack.
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

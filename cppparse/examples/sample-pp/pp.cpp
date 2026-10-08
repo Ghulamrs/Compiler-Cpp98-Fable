@@ -1,4 +1,4 @@
-// sample-pp/pp.cpp - exercises the version 6 preprocessor; the test compares
+// examples/sample-pp/pp.cpp - exercises the version 6 preprocessor; the test compares
 // cppparse -E with cl /EP on this file (whitespace ignored).
 #include "pp.h"
 #include "inc/inner.h"

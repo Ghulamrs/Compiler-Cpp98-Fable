@@ -9,5 +9,9 @@ $ref = @(); foreach ($u in $units) { $ref += "out\refobj\$u.obj" }
 $ours = @(); foreach ($u in $units) { $ours += "out\selfobj\${u}6.obj" }
 & $link /nologo /SUBSYSTEM:CONSOLE /MAP:out\maps\ref.map "/OUT:out\maps\ref.exe" @ref "out\refobj\iostream.obj" "out\refobj\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Select-String -Pattern "error" | ForEach-Object { $_.Line }
 & $link /nologo /SUBSYSTEM:CONSOLE /MAP:out\maps\ours.map "/OUT:out\maps\ours.exe" @ours "out\selfhost\iostream6.obj" "out\refobj\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Select-String -Pattern "error" | ForEach-Object { $_.Line }
-if ((Test-Path "out\maps\ref.map") -and (Test-Path "out\maps\ours.map")) { python "$PSScriptRoot\mapdiff.py" "out\maps\ref.map" "out\maps\ours.map" }
+if ((Test-Path "out\maps\ref.map") -and (Test-Path "out\maps\ours.map")) {
+    python "$PSScriptRoot\mapdiff.py" "out\maps\ref.map" "out\maps\ours.map"
+    # one file per unit on each side (out\maps\ref, out\maps\ours) for a directory comparison
+    python "$PSScriptRoot\mapsplit.py" "out\maps\ref.map" "out\maps\ours.map" "out\maps"
+}
 else { Write-Host "map files missing" }

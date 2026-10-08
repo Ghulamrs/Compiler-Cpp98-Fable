@@ -133,8 +133,26 @@ Compiles every `cppparse/*.cpp` and `cppparse/legacy/*.cpp` with MSVC at
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
-`obj/debug`. `-NoTests` stops after the build. The test groups (14 as of
-version 6) run against whichever configuration was built. The first four: the Visual Studio 2010 solution in
+`obj/debug`. `-NoTests` stops after the build. The test groups (15 as of
+version 6) run against whichever configuration was built.
+
+A Visual Studio 2022 solution does the same build inside the IDE:
+`cpp\cppparse.sln` with the project `cppparse\cppparse.vcxproj` (x64,
+Debug and Release, `/W4 /permissive-` with warnings as errors, output in
+`sandbox\vs\<Configuration>\`). The project names the v143 toolset; a
+newer Visual Studio retargets it on opening, and MSBuild builds it with
+`/p:PlatformToolset=<installed toolset>`:
+
+```
+msbuild cpp\cppparse.sln /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145
+```
+
+The scripts in `sandbox\scripts\` run the version 6 pipeline outside the
+test suite: `lib.ps1` and `life.ps1` (the library and lifetime samples
+with their native drivers), `selfhost.ps1` (compiles cppparse's own
+sources with cppparse and links `cppparse-self.exe`), `mix.ps1` (builds a
+layout-compatible reference with cl against cppparse's headers and swaps
+cppparse's objects in one unit at a time). The first four: the Visual Studio 2010 solution in
 `examples/sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken

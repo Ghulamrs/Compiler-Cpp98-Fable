@@ -1612,7 +1612,7 @@ void IrGen::stmt(cxx::Stmt* s)
         return;
     }
     case cxx::Stmt::Case: case cxx::Stmt::Default: for (size_t i = 0; i < s->kids.size(); ++i) stmt(s->kids[i]); return;
-    case cxx::Stmt::Break: for (size_t i = m_loops.size(); i > 0; --i) { leaveScopes(m_loops[i - 1].cleanupDepth, line); leaveTryRegions(m_loops[i - 1].tryDepth, line); br(m_loops[i - 1].breakBlock, line); return; } return;
+    case cxx::Stmt::Break: if (!m_loops.empty()) { const LoopTargets& lt = m_loops.back(); leaveScopes(lt.cleanupDepth, line); leaveTryRegions(lt.tryDepth, line); br(lt.breakBlock, line); } return;
     case cxx::Stmt::Continue: for (size_t i = m_loops.size(); i > 0; --i) if (m_loops[i - 1].continueBlock >= 0) { leaveScopes(m_loops[i - 1].cleanupDepth, line); leaveTryRegions(m_loops[i - 1].tryDepth, line); br(m_loops[i - 1].continueBlock, line); return; } return;
     case cxx::Stmt::Return: {
         IrInst in = make(IrInst::Ret, 0, line);

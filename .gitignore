@@ -7,3 +7,7 @@
 # cppparse build and test outputs
 sandbox/obj/
 sandbox/out/
+sandbox/vs/
+sandbox/debug/
+.vs/
+*.vcxproj.user

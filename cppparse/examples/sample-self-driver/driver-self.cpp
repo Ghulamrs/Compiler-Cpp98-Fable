@@ -3,6 +3,8 @@
 //   cl /EHsc driver-self.cpp self.obj cppparse_rt.obj legacy_stdio_definitions.lib
 // The expected values are what the same source gives when cl compiles it against cppparse's headers.
 #include <cstdio>
+#include <cstddef>
+#include <windows.h>
 
 int aggregates();
 int conditionalTemporaries();
@@ -18,9 +20,42 @@ int castsAndStatics();
 int narrowArithmetic();
 int bigFrame();
 int stringEscapes();
+int carriedCounter(const int* left, int nl, const int* right, int nr, int* out);
+int sharedStatic();
+int nestedStatics();
+int wideConstants();
 
 static int g_failures = 0;
 
+static int g_sinkCalls = 0;
+void selfSink(std::size_t n) { if (n < 100) ++g_sinkCalls; }
+
+static long carried()
+{
+    int left[5] = { 1, 4, 6, 20, 30 }, right[4] = { 2, 3, 7, 10 }, out[9];
+    long n = carriedCounter(left, 5, right, 4, out);
+    long s = 0;
+    for (int i = 0; i < 9; ++i) s = s * 3 + out[i];
+    return g_sinkCalls * 10000000L + n * 100000L + s;
+}
+
+static int g_shared[4];
+
+static DWORD WINAPI callShared(LPVOID slot)
+{
+    g_shared[reinterpret_cast<std::size_t>(slot)] = sharedStatic();
+    return 0;
+}
+
+static long staticFromThreads()            // the threads race into the initializer of one static local
+{
+    HANDLE h[4];
+    for (std::size_t i = 0; i < 4; ++i) h[i] = CreateThread(0, 0, callShared, reinterpret_cast<LPVOID>(i), 0, 0);
+    WaitForMultipleObjects(4, h, TRUE, INFINITE);
+    for (int i = 0; i < 4; ++i) CloseHandle(h[i]);
+    for (int i = 0; i < 4; ++i) if (g_shared[i] != g_shared[0]) return -g_shared[i];
+    return g_shared[0];
+}
 static void check(const char* what, long got, long expected)
 {
     if (got == expected) std::printf("  ok   %-28s = %ld\n", what, got);
@@ -44,6 +79,10 @@ int main()
     check("castsAndStatics()", castsAndStatics(), 70611111);
     check("narrowArithmetic()", narrowArithmetic(), 755793458);
     check("stringEscapes()", stringEscapes(), 16357);
+    check("carriedCounter()", carried(), 20914949);
+    check("sharedStatic() in 4 threads", staticFromThreads(), 421);
+    check("nestedStatics()", nestedStatics(), 1005);
+    check("wideConstants()", wideConstants(), 1415111);
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

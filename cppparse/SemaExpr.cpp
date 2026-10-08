@@ -29,6 +29,36 @@ long fitTo(long v, const Type* t)
     }
 }
 
+// the IR sign-extends the 32 bits of semaValue, so an operation of a 64-bit type is folded only while its
+// result stays in that range; otherwise it is left to run (1ULL << 40 was folded to 1 << 8)
+void foldWide(cxx::Expr* e, const std::string& op, long a, long b, bool isUnsigned)
+{
+    const long long x = a, y = b;
+    const unsigned long long ux = static_cast<unsigned long long>(x), uy = static_cast<unsigned long long>(y);
+    unsigned long long r = 0;
+    bool ok = true;
+    if (op == "+") r = ux + uy;
+    else if (op == "-") r = ux - uy;
+    else if (op == "*") r = ux * uy;
+    else if (op == "/" || op == "%") {
+        if (y == 0 || (!isUnsigned && y == -1)) ok = false;
+        else if (isUnsigned) r = op == "/" ? ux / uy : ux % uy;
+        else r = static_cast<unsigned long long>(op == "/" ? x / y : x % y);
+    }
+    else if (op == "<<" || op == ">>") {
+        if (y < 0 || y > 63) ok = false;
+        else if (op == "<<") r = ux << y;
+        else r = isUnsigned ? ux >> y : static_cast<unsigned long long>(x >> y);
+    }
+    else if (op == "&") r = ux & uy;
+    else if (op == "|") r = ux | uy;
+    else if (op == "^") r = ux ^ uy;
+    else ok = false;
+    const long long s = static_cast<long long>(r);
+    e->semaConst = ok && static_cast<long long>(static_cast<long>(s)) == s;
+    e->semaValue = e->semaConst ? static_cast<long>(s) : 0;
+}
+
 bool aggregateType(const Type* t)
 {
     if (!t) return false;
@@ -908,8 +938,10 @@ const Type* Sema::exprBinary(cxx::Expr* e, Scope* in)
     }
     if (op == "+" || op == "-") {
         if (l->isArithmetic() && r->isArithmetic()) {
+            const Type* rt = m_types.arithmeticResult(l, r);
             if (lc && rc) { e->semaConst = true; e->semaValue = op == "+" ? lv + rv : lv - rv; }
-            return m_types.arithmeticResult(l, r);
+            if (lc && rc && rt->isIntegral() && m_types.sizeOf(rt) == 8) foldWide(e, op, lv, rv, rt->isUnsigned());
+            return rt;
         }
         if (l->kind == Type::Pointer && r->isIntegral()) return l;
         if (op == "+" && l->isIntegral() && r->kind == Type::Pointer) return r;
@@ -927,7 +959,9 @@ const Type* Sema::exprBinary(cxx::Expr* e, Scope* in)
                 e->semaConst = true; e->semaValue = static_cast<long>(op == "/" ? a / b : a % b);
             } else { e->semaConst = true; e->semaValue = op == "*" ? lv * rv : op == "/" ? lv / rv : lv % rv; }
         }
-        return m_types.arithmeticResult(l, r);
+        const Type* rt = m_types.arithmeticResult(l, r);
+        if (e->semaConst && rt->isIntegral() && m_types.sizeOf(rt) == 8) foldWide(e, op, lv, rv, rt->isUnsigned());
+        return rt;
     }
     if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
         if (!l->isIntegral() || !r->isIntegral()) { error(e->loc, "S109", "operands of " + op + " must be integral, not " + l->text() + " and " + r->text()); return m_types.error(); }
@@ -936,7 +970,9 @@ const Type* Sema::exprBinary(cxx::Expr* e, Scope* in)
             if (op == ">>" && m_types.promoted(l)->isUnsigned()) e->semaValue = static_cast<long>(static_cast<unsigned long>(lv) >> rv);
             else e->semaValue = op == "&" ? (lv & rv) : op == "|" ? (lv | rv) : op == "^" ? (lv ^ rv) : op == "<<" ? static_cast<long>(static_cast<unsigned long>(lv) << rv) : (lv >> rv);
         }
-        return (op == "<<" || op == ">>") ? m_types.promoted(l) : m_types.arithmeticResult(l, r);
+        const Type* rt = (op == "<<" || op == ">>") ? m_types.promoted(l) : m_types.arithmeticResult(l, r);
+        if (lc && rc && m_types.sizeOf(rt) == 8) foldWide(e, op, lv, rv, rt->isUnsigned());
+        return rt;
     }
     if (op == ".*" || op == "->*") {
         const Type* obj = op == "->*" ? (l->kind == Type::Pointer ? l->inner : l) : m_types.unref(e->kids[0]->semaType);

@@ -680,6 +680,39 @@ hit between the units of cppparse on `sample-opt`: `sandbox/scripts/mix.ps1`,
 which links each cppparse object among cl-built ones, runs every
 combination correctly.
 
+**Bootstrap gate and the self-run suite**: after the checks above,
+`selfhost.ps1` lets `cppparse-self.exe` compile the same 36 sources and
+`libcpp/iostream.cpp` (into `out/selfobj2`), links `cppparse-self2.exe`
+from them, runs it on `sample-opt`, and compares every object and `.asm`
+listing of the second generation with the first byte for byte; any
+difference fails the script, and the summary says how many units the
+self-built compiler compiles exactly as the MSVC-built one (all 36). The
+stage takes about three minutes (`-SkipBootstrap` leaves it out).
+`build-cppparse.ps1 -Exe sandbox/out/selfhost/cppparse-self.exe` skips the
+MSVC build and runs all 16 test groups with the self-built compiler. That
+exercised the legacy pipeline, folder mode, the reports and the worker
+threads in self-built code for the first time and found these defects:
+static locals were initialised under a plain guard byte, so two workers
+could both run the initializer or use an object not yet built (the guard
+is now taken through a recursive lock in the runtime,
+`cppparse_static_enter`/`leave`, as cl's thread-safe statics do); the
+register allocator's linear intervals did not cover loop headers that only
+pass a value on when the value's copies sit in edge blocks laid out after
+the loop, so the header's comparison could take the value's register
+(intervals now span every block where block liveness says the value is
+live); equal interval starts were ordered by whatever `std::sort` did, so
+the MSVC-built and the self-built compiler assigned registers differently
+at `-O2` (ties now go by temporary number, and both produce identical
+objects at every level); `IrBuilder::call` read the first operand of a
+`new T` without operands; `ostream` rounded fixed and scientific output
+through floating-point arithmetic (`132.95` with one decimal gave `133.0`,
+where printf gives `132.9`) and now converts the exact binary value; and
+constant expressions of 64-bit types were folded in 32 bits by sema and
+the IR optimiser (`1ULL << 52` became `1 << 20`), which now fold them only
+while the result fits the sign-extended 32-bit immediates and otherwise
+leave the operation to run. The register, static-local and 64-bit constant
+defects are reproduced in `sample-self` and checked by test 16.
+
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.
 They come from calls to library functions that the front end has no

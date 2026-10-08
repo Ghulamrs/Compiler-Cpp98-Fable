@@ -483,15 +483,28 @@ bool Parser::declaratorSuffixes(Declarator& d, bool inParams)
         if (at("(")) {
             // a function declarator, unless this is "T x(args)" direct-initialisation: a named declarator outside a
             // parameter list whose parenthesis does not start with a type (or ')' / 'void')
-            if (!inParams && !d.name.empty() && suffixes.empty() && peek().text != ")" && peek().text != "void" && peek().text != "...") {
+            const bool maybeInit = !inParams && !d.name.empty() && suffixes.empty() && peek().text != ")" && peek().text != "void" && peek().text != "...";
+            if (maybeInit) {
                 size_t save = m_pos; advance();
                 bool typeStart = looksLikeTypeStart();
                 m_pos = save;
                 if (!typeStart) break;
             }
             DeclaratorPart p; p.kind = DeclaratorPart::Function;
+            size_t parenAt = m_pos;
+            size_t errs = m_diags.size();
+            int errorsBefore = m_errors;
             advance();
-            if (!parameterList(p)) return false;
+            if (maybeInit) ++m_tentative;
+            bool params = parameterList(p);
+            if (maybeInit) --m_tentative;
+            if (!params) {
+                if (!maybeInit) return false;
+                // "T x(U(1, 2), v)": the parenthesis starts with a type name but holds initializer arguments, not
+                // parameters; the initializer is read after the declarator
+                m_pos = parenAt; m_diags.resize(errs); m_errors = errorsBefore;
+                break;
+            }
             while (at("const") || at("volatile")) { if (at("const")) p.isConst = true; else p.isVolatile = true; advance(); }
             if (at("throw") && peek().text == "(") {
                 advance(); advance();

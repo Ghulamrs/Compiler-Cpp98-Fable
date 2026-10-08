@@ -11,6 +11,87 @@
 
 namespace std {
 
+// the exact decimal expansion of a finite double >= 0, one digit at a time: first the digits of the integer
+// part, then those of the fraction, kept as the binary fraction num / 2^bits and multiplied by ten per digit
+struct __decimal_digits {
+    char         intDigits[320];   // most significant first, no leading zeros
+    int          intCount;
+    int          used;             // integer digits handed out so far
+    unsigned int num[36];          // 32-bit limbs, least significant first
+    int          bits;
+
+    explicit __decimal_digits(double v) : intCount(0), used(0), bits(0)
+    {
+        unsigned long long raw;
+        memcpy(&raw, &v, sizeof raw);
+        const unsigned long long one = 1;
+        int biased = static_cast<int>((raw >> 52) & 0x7FF);
+        unsigned long long mant = raw & ((one << 52) - 1);
+        if (biased != 0) mant |= one << 52;
+        int e = biased != 0 ? biased - 1075 : -1074;
+        for (int i = 0; i < 36; ++i) num[i] = 0;
+        if (mant == 0) return;
+        if (e >= 0) { shiftedWhole(mant, e); return; }
+        bits = -e;
+        unsigned long long whole = bits < 64 ? mant >> bits : 0;
+        unsigned long long frac = bits < 64 ? mant & ((one << bits) - 1) : mant;
+        num[0] = static_cast<unsigned int>(frac);
+        num[1] = static_cast<unsigned int>(frac >> 32);
+        char tmp[24];
+        int k = 0;
+        while (whole > 0) { tmp[k++] = static_cast<char>('0' + whole % 10); whole /= 10; }
+        while (k > 0) intDigits[intCount++] = tmp[--k];
+    }
+    // mant * 2^e in base 10^9 limbs, then printed
+    void shiftedWhole(unsigned long long mant, int e)
+    {
+        unsigned int limb[40];
+        int n = 0;
+        while (mant > 0) { limb[n++] = static_cast<unsigned int>(mant % 1000000000); mant /= 1000000000; }
+        for (int s = 0; s < e; ++s) {
+            unsigned int carry = 0;
+            for (int i = 0; i < n; ++i) { unsigned int t = limb[i] * 2 + carry; carry = t >= 1000000000 ? 1 : 0; limb[i] = t - carry * 1000000000; }
+            if (carry) limb[n++] = 1;
+        }
+        char tmp[16];
+        int k = 0;
+        unsigned int top = limb[n - 1];
+        while (top > 0) { tmp[k++] = static_cast<char>('0' + top % 10); top /= 10; }
+        while (k > 0) intDigits[intCount++] = tmp[--k];
+        for (int i = n - 2; i >= 0; --i) {
+            unsigned int x = limb[i];
+            for (int d = 8; d >= 0; --d) { intDigits[intCount + d] = static_cast<char>('0' + x % 10); x /= 10; }
+            intCount += 9;
+        }
+    }
+    int fractionDigit()
+    {
+        if (bits == 0) return 0;
+        const int limb = bits / 32, shift = bits % 32;
+        unsigned long long carry = 0;
+        for (int i = 0; i <= limb + 1; ++i) { unsigned long long t = static_cast<unsigned long long>(num[i]) * 10 + carry; num[i] = static_cast<unsigned int>(t); carry = t >> 32; }
+        unsigned long long high = num[limb] | (static_cast<unsigned long long>(num[limb + 1]) << 32);
+        int d = static_cast<int>((high >> shift) & 15);
+        num[limb] &= shift ? (static_cast<unsigned int>(1) << shift) - 1 : 0;
+        num[limb + 1] = 0;
+        return d;
+    }
+    int digit() { return used < intCount ? intDigits[used++] - '0' : fractionDigit(); }
+    bool restIsZero() const
+    {
+        for (int i = used; i < intCount; ++i) if (intDigits[i] != '0') return false;
+        for (int i = 0; i < 36; ++i) if (num[i]) return false;
+        return true;
+    }
+    // whether the digits not taken yet round the last taken one up; an exact half rounds to even, as printf does
+    bool roundsUp(int lastDigit)
+    {
+        int d = digit();
+        if (d != 5) return d > 5;
+        return !restIsZero() || (lastDigit & 1) != 0;
+    }
+};
+
 class ostream : public ios {
 public:
     ostream() {}
@@ -109,39 +190,57 @@ protected:
         while (u > 0) { tmp[k++] = static_cast<char>('0' + u % 10); u /= 10; }
         while (k > 0) out[n++] = tmp[--k];
     }
-    // fixed notation with p digits after the point; the integer part fits unsigned long long
-    static void fixedDigits(double v, int p, char* out, size_t& n)
+    // ++ on a digit string; false when it carried out of the first digit (all digits are then '0')
+    static bool roundDigitsUp(char* d, int digitCount)
     {
-        double scale = 1.0;
-        for (int i = 0; i < p; ++i) scale *= 10.0;
-        v += 0.5 / scale;
-        unsigned long long ip = static_cast<unsigned long long>(v);
-        double frac = v - static_cast<double>(ip);
-        digits(ip, out, n);
-        if (p > 0) out[n++] = '.';
-        for (int i = 0; i < p; ++i) { frac *= 10.0; int d = static_cast<int>(frac); if (d > 9) d = 9; out[n++] = static_cast<char>('0' + d); frac -= d; }
+        int i = digitCount - 1;
+        while (i >= 0 && d[i] == '9') { d[i] = '0'; --i; }
+        if (i < 0) return false;
+        ++d[i];
+        return true;
     }
-    static void scientificDigits(double v, int p, char* out, size_t& n, bool upper)
+    // fixed notation with p digits after the point, correctly rounded; the integer part has at most 19 digits.
+    // The point is written when digits follow it or showpoint asks for it
+    static void fixedDigits(double v, int p, bool point, char* out, size_t& n)
     {
-        int e = 0;
-        if (v > 0) {
-            while (v >= 10.0) { v /= 10.0; ++e; }
-            while (v < 1.0) { v *= 10.0; --e; }
+        __decimal_digits g(v);
+        char d[340];
+        int whole = g.intCount, digitCount = 0;
+        while (digitCount < whole + p) d[digitCount++] = static_cast<char>('0' + g.digit());
+        if (g.roundsUp(digitCount > 0 ? d[digitCount - 1] - '0' : 0) && !roundDigitsUp(d, digitCount)) {
+            for (int k = digitCount; k > 0; --k) d[k] = d[k - 1];
+            d[0] = '1';
+            ++digitCount;
+            ++whole;
         }
-        double scale = 1.0;
-        for (int i = 0; i < p; ++i) scale *= 10.0;
-        v += 0.5 / scale;
-        if (v >= 10.0) { v /= 10.0; ++e; }
-        int lead = static_cast<int>(v);
-        out[n++] = static_cast<char>('0' + lead);
-        v -= lead;
-        if (p > 0) out[n++] = '.';
-        for (int i = 0; i < p; ++i) { v *= 10.0; int d = static_cast<int>(v); if (d > 9) d = 9; out[n++] = static_cast<char>('0' + d); v -= d; }
+        if (whole == 0) out[n++] = '0';
+        for (int i = 0; i < whole; ++i) out[n++] = d[i];
+        if (p > 0 || point) out[n++] = '.';
+        for (int i = whole; i < digitCount; ++i) out[n++] = d[i];
+    }
+    // scientific notation with p digits after the point, correctly rounded; returns the exponent
+    static int scientificDigits(double v, int p, bool point, char* out, size_t& n, bool upper)
+    {
+        __decimal_digits g(v);
+        char d[340];
+        int e = 0;
+        int first = g.digit();
+        if (g.intCount > 0) e = g.intCount - 1;
+        else if (v > 0) { e = -1; while (first == 0) { first = g.digit(); --e; } }
+        d[0] = static_cast<char>('0' + first);
+        int digitCount = 1;
+        while (digitCount < p + 1) d[digitCount++] = static_cast<char>('0' + g.digit());
+        if (g.roundsUp(d[digitCount - 1] - '0') && !roundDigitsUp(d, digitCount)) { d[0] = '1'; ++e; }
+        out[n++] = d[0];
+        if (p > 0 || point) out[n++] = '.';
+        for (int i = 1; i < digitCount; ++i) out[n++] = d[i];
+        const int exponent = e;
         out[n++] = upper ? 'E' : 'e';
         out[n++] = e < 0 ? '-' : '+';
         if (e < 0) e = -e;
         if (e < 10) out[n++] = '0';
         digits(static_cast<unsigned long long>(e), out, n);
+        return exponent;
     }
     static void stripZeros(char* out, size_t& n, size_t from)
     {
@@ -166,15 +265,19 @@ protected:
         if (v > 1.7976931348623157e308) { out[n++] = 'i'; out[n++] = 'n'; out[n++] = 'f'; return n; }
         int p = static_cast<int>(m_precision);
         if (p < 0) p = 6;
+        if (p > 300) p = 300;
         bool upper = (m_flags & uppercase) != 0;
+        bool point = (m_flags & showpoint) != 0;
         size_t from = n;
-        if ((m_flags & floatfield) == fixed) { if (v < 1e19) fixedDigits(v, p, out, n); else scientificDigits(v, p, out, n, upper); return n; }
-        if ((m_flags & floatfield) == scientific) { scientificDigits(v, p, out, n, upper); return n; }
+        if ((m_flags & floatfield) == fixed) { if (v < 1e19) fixedDigits(v, p, point, out, n); else scientificDigits(v, p, point, out, n, upper); return n; }
+        if ((m_flags & floatfield) == scientific) { scientificDigits(v, p, point, out, n, upper); return n; }
         if (p == 0) p = 1;
-        int e = 0;
-        if (v > 0) { double t = v; while (t >= 10.0) { t /= 10.0; ++e; } while (t < 1.0) { t *= 10.0; --e; } }
-        if (e < -4 || e >= p) scientificDigits(v, p - 1, out, n, upper);
-        else fixedDigits(v, p - 1 - e, out, n);
+        // the exponent that decides between the notations is that of the value rounded to p digits
+        char sci[340];
+        size_t sn = 0;
+        int e = scientificDigits(v, p - 1, point, sci, sn, upper);
+        if (e < -4 || e >= p) { memcpy(out + n, sci, sn); n += sn; }
+        else fixedDigits(v, p - 1 - e, point, out, n);
         if (!(m_flags & showpoint)) stripZeros(out, n, from);
         return n;
     }

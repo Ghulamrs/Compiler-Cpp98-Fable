@@ -344,3 +344,68 @@ int stringEscapes()                        // octal and hexadecimal escapes in s
     const char* s = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\101\x42\0end";
     return static_cast<int>(std::strlen(s)) * 1000 + static_cast<unsigned char>(s[10]) + s[14] + s[15];
 }
+
+void selfSink(size_t n);                   // defined by the driver: a call the optimiser cannot see into
+
+// the header of the second and third loop only passes n on (its copies sit in edge blocks after the loops):
+// n keeps its register there
+int carriedCounter(const int* left, int nl, const int* right, int nr, int* out)
+{
+    const int* a = left;
+    const int* b = right;
+    size_t n = 0;
+    while (a < left + nl && b < right + nr) {
+        if (*b < *a) { out[n] = *b; ++b; }
+        else { out[n] = *a; ++a; }
+        ++n;
+    }
+    while (a < left + nl) { selfSink(n); out[n] = *a; ++a; ++n; }
+    while (b < right + nr) { selfSink(n); out[n] = *b; ++b; ++n; }
+    return static_cast<int>(n);
+}
+
+namespace {
+
+int g_spin = 0;
+int g_slowBuilt = 0;
+
+struct Slow {
+    int value;
+    Slow() : value(0) { for (int i = 0; i < 20000000; ++i) g_spin += i & 1; ++g_slowBuilt; value = 42; }
+};
+
+int innerStatic() { static std::string s("inner"); return static_cast<int>(s.size()); }
+
+struct Outer {
+    int n;
+    Outer() : n(innerStatic() * 2) {}
+};
+
+}
+
+int sharedStatic()                         // called by several threads at once: one construction, seen by all
+{
+    static Slow s;
+    return s.value * 10 + g_slowBuilt;
+}
+
+int nestedStatics()                        // an initializer that reaches another static local
+{
+    static Outer o;
+    return o.n * 100 + innerStatic();
+}
+int wideConstants()                        // constant expressions of 64-bit types are not folded in 32 bits
+{
+    const unsigned long long one = 1;
+    unsigned long long a = one << 52;
+    unsigned long long b = (one << 40) + 5;
+    unsigned long long c = static_cast<unsigned long long>(-1) / 2;
+    long long d = -(static_cast<long long>(1) << 33);
+    unsigned long long e = 1;
+    e <<= 45;
+    unsigned long long mask = (one << 52) - 1;
+    int r = static_cast<int>(a >> 50) * 100000 + static_cast<int>(b >> 40) * 10000 + static_cast<int>(b & 0xFF) * 1000;
+    r += static_cast<int>(c >> 62) * 100 + ((d >> 33) == -1 && (d & 0xFFFFFFFF) == 0 ? 10 : 0) + static_cast<int>(e >> 45);
+    if ((mask >> 51) == 1 && (mask & 1) == 1) r += 1000000;
+    return r;
+}

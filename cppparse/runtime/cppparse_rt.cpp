@@ -23,6 +23,8 @@
 //
 // Build: cl /c /EHsc cppparse_rt.cpp, then link the object with the cppparse-generated .obj.
 // Strict C++98 (C subset).
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <intrin.h>
 #include <setjmp.h>
 #include <stdio.h>
@@ -182,6 +184,40 @@ void cppparse_rethrow(void)
 /* atomic counters for code compiled by cppparse (MSVC's InterlockedIncrement is a compiler intrinsic) */
 long cppparse_interlocked_increment(long volatile* value) { return _InterlockedIncrement(value); }
 long cppparse_interlocked_decrement(long volatile* value) { return _InterlockedDecrement(value); }
+
+/* static locals that need construction: the generated code tests the guard byte and, when it is clear, calls
+   cppparse_static_enter, which returns 1 with the lock held when this thread is to run the initializer (it
+   then calls cppparse_static_leave) and 0 when another thread finished it meanwhile. One lock serves every
+   static local and is recursive, since an initializer may reach another static local. An initializer that
+   throws leaves the lock held by its thread (the generated code has no handler around it) */
+static long volatile g_staticOwner = 0;   /* thread id of the holder, 0 when free */
+static int           g_staticDepth = 0;
+
+static void staticAcquire(void)
+{
+    long self = (long)GetCurrentThreadId();
+    if (g_staticOwner == self) { ++g_staticDepth; return; }
+    while (_InterlockedCompareExchange(&g_staticOwner, self, 0) != 0) SwitchToThread();
+    g_staticDepth = 1;
+}
+
+static void staticRelease(void)
+{
+    if (--g_staticDepth == 0) _InterlockedExchange(&g_staticOwner, 0);
+}
+
+int cppparse_static_enter(unsigned char volatile* guard)
+{
+    staticAcquire();
+    if (*guard) { staticRelease(); return 0; }
+    return 1;
+}
+
+void cppparse_static_leave(unsigned char volatile* guard)
+{
+    *guard = 1;
+    staticRelease();
+}
 
 /* for tests: both must be 0 when no try region is active and no handler is running */
 int cppparse_frame_depth(void)

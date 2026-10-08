@@ -1564,13 +1564,24 @@ void IrGen::localDecl(cxx::Decl* d)
                 guard.linkOnce = m_out->linkOnce;
                 if (m_x86) m_x86->addGlobal(guard);
                 LValue gl; gl.kind = LValue::Global; gl.global = guard.name; gl.type = b;
-                int done = m_out->newBlock("static.done"), doInit = m_out->newBlock("static.init");
-                condbr(toBool(load(gl, b, line), b, line), done, doInit, line);
+                // thread-safe as cl's: a clear guard leads to the runtime's lock, which says whether this
+                // thread runs the initializer (another one may have finished it meanwhile); the runtime sets
+                // the guard after the object is built and releases the lock
+                int done = m_out->newBlock("static.done"), check = m_out->newBlock("static.lock"), doInit = m_out->newBlock("static.init");
+                condbr(toBool(load(gl, b, line), b, line), done, check, line);
+                m_block = check;
+                IrInst enter = make(IrInst::Call, m_semaTypes.basic(sema::Type::Int), line);
+                enter.sub = "cppparse_static_enter";
+                enter.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(b))));
+                condbr(emit(enter), doInit, done, line);
                 m_block = doInit;
-                store(gl, constant(1, b, line), b, line);
                 LValue lv; lv.kind = LValue::Global; lv.global = gname; lv.type = m_semaTypes.unref(var->type);
                 initObject(lv, var->type, var, id, line);
                 endFullExpr(line);
+                IrInst leave = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+                leave.sub = "cppparse_static_leave";
+                leave.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(b))));
+                emit(leave);
                 br(done, line);
                 m_block = done;
             }

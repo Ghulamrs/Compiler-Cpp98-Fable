@@ -595,7 +595,7 @@ int IrBuilder::call(Expr* e)
     IrInst in = make(f && f->isConstructor ? IrInst::Call : IrInst::Call, rt, line);
 
     // callee kinds
-    Expr* callee = e->kids[0];
+    Expr* callee = e->kids.empty() ? 0 : e->kids[0];   // new T has no kids
     size_t firstArg = 1;
     int thisPtr = -1;
 

@@ -18,15 +18,25 @@
 #   -Config Release   (default) /O2, output sandbox\cppparse.exe, objects in obj\cppparse
 #   -Config Debug     /Od /Zi /RTC1 /D_DEBUG /MTd, output sandbox\debug\cppparse.exe (+ .pdb), objects in obj\debug
 #   -NoTests          build only
+#   -Exe <path>       no build: run the tests with that compiler, e.g. the self-built
+#                     sandbox\out\selfhost\cppparse-self.exe (see scripts\selfhost.ps1)
 param(
     [ValidateSet("Release", "Debug")] [string] $Config = "Release",
-    [switch] $NoTests
+    [switch] $NoTests,
+    [string] $Exe = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $Sandbox = $PSScriptRoot
 $Src     = Split-Path $Sandbox -Parent
+
+# PowerShell names are case-insensitive, so $Exe is also the $exe the tests run
+if ($Exe -ne "") {
+    if (Test-Path $Exe) { $Exe = (Resolve-Path $Exe).Path }
+    elseif (Test-Path "$Sandbox\$Exe") { $Exe = (Resolve-Path "$Sandbox\$Exe").Path }
+    else { throw "compiler not found: $Exe" }
+}
 
 $VsRoot  = "D:\Microsoft Visual Studio 2026"
 $MsvcVer = (Get-ChildItem "$VsRoot\VC\Tools\MSVC" | Sort-Object Name | Select-Object -Last 1).Name
@@ -56,15 +66,18 @@ try {
 
     if ($Config -eq "Debug") { $objDir = "obj\debug"; $exeDir = "$Sandbox\debug"; $cflags = @("/Od", "/Zi", "/RTC1", "/D_DEBUG", "/MTd") }
     else { $objDir = "obj\cppparse"; $exeDir = $Sandbox; $cflags = @("/O2") }
-    New-Item -ItemType Directory -Force $objDir, $exeDir | Out-Null
-    $exe = "$exeDir\cppparse.exe"
-    Write-Host "=== Building cppparse.exe ($Config) ==="
-    $sources = @(Get-ChildItem "..\cppparse\*.cpp" | ForEach-Object { "..\cppparse\" + $_.Name }) + @(Get-ChildItem "..\cppparse\legacy\*.cpp" | ForEach-Object { "..\cppparse\legacy\" + $_.Name })
-    $linkFlags = @(); if ($Config -eq "Debug") { $linkFlags = @("/link", "/DEBUG") }
-    $output = & $cl /nologo /EHsc /W4 /permissive- @cflags /I..\cppparse /I..\cppparse\legacy "/Fo$objDir\" "/Fe$exe" "/Fd$objDir\cppparse.pdb" @sources @linkFlags 2>&1 | Out-String
-    Write-Host $output
-    if ($LASTEXITCODE -ne 0) { throw "cppparse failed to compile (exit code $LASTEXITCODE)" }
-    if ($output -match "warning C") { throw "cppparse compiled with warnings (W4 must be clean)" }
+    if ($Exe -ne "") { Write-Host "=== Not building: the tests run $exe ===" }
+    else {
+        New-Item -ItemType Directory -Force $objDir, $exeDir | Out-Null
+        $exe = "$exeDir\cppparse.exe"
+        Write-Host "=== Building cppparse.exe ($Config) ==="
+        $sources = @(Get-ChildItem "..\cppparse\*.cpp" | ForEach-Object { "..\cppparse\" + $_.Name }) + @(Get-ChildItem "..\cppparse\legacy\*.cpp" | ForEach-Object { "..\cppparse\legacy\" + $_.Name })
+        $linkFlags = @(); if ($Config -eq "Debug") { $linkFlags = @("/link", "/DEBUG") }
+        $output = & $cl /nologo /EHsc /W4 /permissive- @cflags /I..\cppparse /I..\cppparse\legacy "/Fo$objDir\" "/Fe$exe" "/Fd$objDir\cppparse.pdb" @sources @linkFlags 2>&1 | Out-String
+        Write-Host $output
+        if ($LASTEXITCODE -ne 0) { throw "cppparse failed to compile (exit code $LASTEXITCODE)" }
+        if ($output -match "warning C") { throw "cppparse compiled with warnings (W4 must be clean)" }
+    }
 
     # ---- test 1: Visual Studio 2010 solution --------------------------------
     if ($NoTests) { Write-Host "built $exe"; $global:LASTEXITCODE = 0; return }
@@ -503,7 +516,7 @@ try {
         $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\selfdriver$lvl.exe" "..\cppparse\examples\sample-self-driver\driver-self.cpp" $obj "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the self-hosting driver:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\selfdriver$lvl.exe" 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   selfdriver$lvl.exe: all 14 self-hosting checks correct (-O$lvl)" }
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   selfdriver$lvl.exe: all 18 self-hosting checks correct (-O$lvl)" }
         else { Write-Host "  FAIL selfdriver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed self-hosting check(s) failed" }

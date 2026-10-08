@@ -116,7 +116,7 @@ public:
 
 private:
     struct Interval { int temp; int start, end; bool isFloat; int reg; int slot; Interval() : temp(-1), start(1 << 30), end(-1), isFloat(false), reg(-1), slot(0) {} };
-    struct ByStart { bool operator()(const Interval* a, const Interval* b) const { return a->start < b->start; } };
+    struct ByStart { bool operator()(const Interval* a, const Interval* b) const { return a->start != b->start ? a->start < b->start : a->temp < b->temp; } };
 
     void computeIntervals();
     void allocate();
@@ -199,6 +199,20 @@ void X86Function::computeIntervals()
         int blockStart = m_blockStart[static_cast<size_t>(m_linear[static_cast<size_t>(uses[u].second)].first)];
         Interval& iv = m_intervals[uses[u].first];
         if (blockStart < iv.start) iv.start = blockStart;
+    }
+    // an interval spans every block the value is live through: a loop header that only passes a value on (its
+    // copies sit in edge blocks laid out after the loop) must not give the value's register to another one
+    std::vector<std::set<int> > liveIn, liveOut;
+    m_f.computeLiveness(liveIn, liveOut);
+    for (size_t b = 0; b < m_f.blocks.size(); ++b) {
+        for (std::set<int>::const_iterator t = liveIn[b].begin(); t != liveIn[b].end(); ++t) {
+            std::map<int, Interval>::iterator it = m_intervals.find(*t);
+            if (it != m_intervals.end() && m_blockStart[b] < it->second.start) it->second.start = m_blockStart[b];
+        }
+        for (std::set<int>::const_iterator t = liveOut[b].begin(); t != liveOut[b].end(); ++t) {
+            std::map<int, Interval>::iterator it = m_intervals.find(*t);
+            if (it != m_intervals.end() && m_blockEnd[b] > it->second.end) it->second.end = m_blockEnd[b];
+        }
     }
     for (std::map<int, Interval>::iterator it = m_intervals.begin(); it != m_intervals.end(); ++it)
         if (!it->second.isFloat) it->second.isFloat = tempIsFloat(it->first);

@@ -79,6 +79,37 @@ long foldInt(const std::string& sub, long x, long y, bool& ok)
     return 0;
 }
 
+// an operation of a 64-bit type on the sign-extended 32-bit immediates of the IR: folded only while the result
+// stays in that range (1 << 40 used to fold to 0)
+bool foldWideInt(const std::string& sub, long a, long b, long& out)
+{
+    const long long x = a, y = b;
+    const unsigned long long ux = static_cast<unsigned long long>(x), uy = static_cast<unsigned long long>(y);
+    unsigned long long r;
+    if (sub == "add") r = ux + uy;
+    else if (sub == "sub") r = ux - uy;
+    else if (sub == "mul") r = ux * uy;
+    else if (sub == "sdiv" || sub == "srem") { if (y == 0 || y == -1) return false; r = static_cast<unsigned long long>(sub == "sdiv" ? x / y : x % y); }
+    else if (sub == "udiv" || sub == "urem") { if (y == 0) return false; r = sub == "udiv" ? ux / uy : ux % uy; }
+    else if (sub == "shl" || sub == "ashr" || sub == "lshr") {
+        if (y < 0 || y > 63) return false;
+        r = sub == "shl" ? ux << y : sub == "lshr" ? ux >> y : static_cast<unsigned long long>(x >> y);
+    }
+    else if (sub == "and") r = ux & uy;
+    else if (sub == "or") r = ux | uy;
+    else if (sub == "xor") r = ux ^ uy;
+    else return false;
+    const long long s = static_cast<long long>(r);
+    if (static_cast<long long>(static_cast<long>(s)) != s) return false;
+    out = static_cast<long>(s);
+    return true;
+}
+
+bool isWideInt(const Type* t)
+{
+    return t && t->kind != Type::Double && t->builtinSize() == 8;
+}
+
 double foldFloat(const std::string& sub, double x, double y, bool& ok, bool& isCmp, long& cmp)
 {
     ok = true; isCmp = false; cmp = 0;
@@ -251,7 +282,9 @@ int Optimizer::constantFold(IrFunction& f)
                     in = n; ++changes;
                 } else {
                     bool ok;
-                    long r = foldInt(in.sub, in.args[0].ival, in.args[1].ival, ok);
+                    long r = 0;
+                    if (in.op == IrInst::Bin && isWideInt(in.type)) ok = foldWideInt(in.sub, in.args[0].ival, in.args[1].ival, r);
+                    else r = foldInt(in.sub, in.args[0].ival, in.args[1].ival, ok);
                     if (!ok) continue;
                     IrInst n; n.op = IrInst::Const; n.dst = in.dst; n.line = in.line; n.type = in.type;
                     n.args.push_back(IrOperand::imm(r, in.type));

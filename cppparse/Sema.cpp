@@ -669,7 +669,14 @@ Symbol* Sema::declareEnum(cxx::EnumDecl* e, Scope* in, cxx::Access access)
         const cxx::Enumerator& x = e->enumerators[i];
         Symbol* s = m_prog.newSymbol(Symbol::Enumerator, x.name, in);     // enumerators live in the enclosing scope
         s->loc = x.loc; s->access = access; s->type = en->type; s->ownerClass = in->kind == Scope::Class ? in->owner : 0;
-        if (x.value) { expr(x.value, in); long v; if (constantValue(x.value, v)) next = v; else error(x.loc, "S114", "enumerator value is not a constant"); }
+        if (x.value) {
+            expr(x.value, in);
+            long v;
+            // in a template's pattern the value may depend on the parameters (sizeof of a dependent type): checked per instantiation
+            const bool dependent = in->kind == Scope::TemplateParams || (in->kind == Scope::Class && in->owner && in->owner->isDependentContext);
+            if (constantValue(x.value, v)) next = v;
+            else if (!dependent) error(x.loc, "S114", "enumerator value is not a constant");
+        }
         s->hasConstValue = true; s->constValue = next; s->index = static_cast<int>(i);
         ++next;
     }
@@ -925,6 +932,24 @@ void Sema::declareTemplate(cxx::Decl* d, Scope* in, cxx::Access access)
     cxx::ClassDecl* classAst = 0;
     if (inner->kind == cxx::Decl::Class) classAst = inner->classDef;
     else if (inner->kind == cxx::Decl::Simple && inner->spec.kind == cxx::DeclSpec::Class && inner->declarators.empty()) classAst = inner->spec.classDef;
+    if (!classAst && inner->kind == cxx::Decl::Simple && inner->spec.kind == cxx::DeclSpec::Named && inner->declarators.empty()
+        && (inner->spec.elaborated == "class" || inner->spec.elaborated == "struct" || inner->spec.elaborated == "union")
+        && inner->spec.name.parts.size() == 1 && !inner->spec.name.parts[0].hasTemplateArgs) {
+        // "template <...> class X;" declares the template without a definition: its specialisations may follow,
+        // and an instantiation before a definition is an incomplete class
+        const std::string& name = inner->spec.name.parts[0].ident;
+        Symbol* ct = 0;
+        const std::vector<Symbol*>* v = in->find(name);
+        if (v) for (size_t i = 0; i < v->size() && !ct; ++i) if ((*v)[i]->kind == Symbol::ClassTemplate && !(*v)[i]->patternArgs.size()) ct = (*v)[i];
+        if (!ct) {
+            ct = m_prog.newSymbol(Symbol::ClassTemplate, name, in);
+            ct->loc = d->loc; ct->access = access; ct->templateAst = d; ct->templateParams = tparams; ct->isDependentContext = true;
+            tscope->owner = ct;
+            ++m_stats.symbols;
+        }
+        d->semaSym = ct; inner->semaSym = ct;
+        return;
+    }
     if (classAst) {
         std::string name = classAst->name.parts.empty() ? std::string("") : classAst->name.parts.back().ident;
         bool specialization = !classAst->name.parts.empty() && classAst->name.parts.back().hasTemplateArgs;

@@ -23,8 +23,10 @@ function LinkAndRun([string]$name, [string[]]$objs) {
     if (Test-Path $exe) { Remove-Item $exe }
     $lo = & $link /nologo /SUBSYSTEM:CONSOLE "/OUT:$exe" @objs "out\refobj\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Out-String
     if (-not (Test-Path $exe)) { return "link failed: " + (($lo.Split("`n") | Select-String -Pattern "error" | Select-Object -First 2 | ForEach-Object { $_.Line }) -join " | ") }
-    $null = & $exe --compile6 -O0 -q -I ..\cppparse\include -o out\mix -n probe "..\cppparse\examples\sample-opt\opt.cpp" 2>&1
-    return "exit $LASTEXITCODE"
+    $p = Start-Process -FilePath $exe -ArgumentList "--compile6 -O0 -q -I ..\cppparse\include -o out\mix -n probe ..\cppparse\examples\sample-opt\opt.cpp" -NoNewWindow -PassThru -RedirectStandardOutput "out\mix\$name.out" -RedirectStandardError "out\mix\$name.err"
+    $null = $p.Handle   # keeps the process handle so that ExitCode is available after the exit
+    if (-not $p.WaitForExit(120000)) { $p.Kill(); return "timeout" }
+    return "exit $($p.ExitCode)"
 }
 if ($Stage -eq "all" -or $Stage -eq "mix") {
     $ref = @(); foreach ($f in $units) { $ref += "out\refobj\$($f.BaseName).obj" }

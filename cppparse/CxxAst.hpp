@@ -137,6 +137,7 @@ struct Expr {
         Delete,          // delete [ [] ] e
         Throw,           // throw [e]
         Typeid,          // typeid(e) / typeid(type)
+        InitList,        // { e, e, ... } nested in a brace initializer (kids: the elements)
         Error
     };
     Kind               kind;

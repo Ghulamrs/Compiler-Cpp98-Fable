@@ -53,7 +53,7 @@ struct Type {
     bool isClass()      const { return kind == Class; }
     bool isReference()  const { return kind == Reference; }
     bool isVoid()       const { return kind == Void; }
-    bool isUnsigned()   const { return kind == Bool || kind == UChar || kind == UShort || kind == UInt || kind == ULong || kind == ULongLong || kind == Char; }
+    bool isUnsigned()   const { return kind == Bool || kind == UChar || kind == UShort || kind == UInt || kind == ULong || kind == ULongLong; }   // char is signed, as with cl
     bool isDependent()  const;
     std::string key()  const;   // interning key
     std::string text() const;   // "const int*"
@@ -268,6 +268,14 @@ private:
     const Type* exprNew(cxx::Expr* e, Scope* in);
     const Type* exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked);
     const Type* valueType(cxx::Expr* e);          // lvalue-to-rvalue: the type after decay, without top-level cv
+    // brace initialisation of aggregates: elided braces become explicit InitList nodes and every element
+    // initializer is converted to its element type
+    bool        isAggregate(const Type* t);
+    long        braceCount(const Type* t, const std::vector<cxx::Expr*>& items);   // elements of an array of unknown bound
+    cxx::Expr*  braceInit(const Type* t, std::vector<cxx::Expr*>& items, size_t& pos, Scope* in, const cxx::Loc& loc, long* count);
+    cxx::Expr*  braceElement(const Type* t, std::vector<cxx::Expr*>& items, size_t& pos, Scope* in);
+    void        braceDeclInit(Symbol* var, cxx::Initializer& init, Scope* in);
+    const Type* completedArray(const Type* t, const cxx::Initializer& init);
     bool   constantValue(cxx::Expr* e, long& out);
     Symbol* classOperator(const std::string& op, cxx::Expr* e, const std::vector<cxx::Expr*>& operands, Scope* in, const Type*& result);
     Symbol* resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report);

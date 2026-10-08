@@ -491,6 +491,24 @@ try {
     if ($failed -ne 0) { throw "$failed standard library check(s) failed" }
 
     Write-Host ""
+    Write-Host "=== Test 16: version 6 self-hosting constructs (sample-self: what cppparse got wrong compiling itself) ==="
+    $failed = 0
+    foreach ($lvl in @(0, 2, 3)) {
+        $obj = "out\x64\self${lvl}6.obj"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\cppparse\include -o out\x64 -n "self$lvl" "..\cppparse\examples\sample-self\self.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 of sample-self at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        if ($c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL sample-self has semantic errors:"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\selfdriver$lvl.exe" "..\cppparse\examples\sample-self-driver\driver-self.cpp" $obj "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the self-hosting driver:"; Write-Host $clOut; $failed++; continue }
+        $run = & ".\out\x64\selfdriver$lvl.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   selfdriver$lvl.exe: all 14 self-hosting checks correct (-O$lvl)" }
+        else { Write-Host "  FAIL selfdriver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
+    }
+    if ($failed -ne 0) { throw "$failed self-hosting check(s) failed" }
+
+    Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"
     $global:LASTEXITCODE = 0

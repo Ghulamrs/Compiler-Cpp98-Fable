@@ -19,7 +19,7 @@
 //
 // "throw x" copies the object (its size and a type descriptor "Class;Base1;Base2" or the
 // scalar type name come from the generated code) and longjmps to the innermost frame. The
-// frame stack is per process: generated code is not multi-threaded.
+// frame stack, the exception in flight and the caught ones are per thread.
 //
 // Build: cl /c /EHsc cppparse_rt.cpp, then link the object with the cppparse-generated .obj.
 // Strict C++98 (C subset).
@@ -44,8 +44,9 @@ struct cppparse_exception {
     void        (*dtor)(void*);   /* destructor of a class object thrown with cppparse_throw_owned, or 0 */
 };
 
-static struct cppparse_frame*    g_top = 0;
-static struct cppparse_exception g_inflight = { 0, 0, 0, 0 };
+/* per thread: the compiler runs its phases on a worker pool, and every thread has its own chain of frames */
+static __declspec(thread) struct cppparse_frame*    g_top = 0;
+static __declspec(thread) struct cppparse_exception g_inflight = { 0, 0, 0, 0 };
 
 static void dropException(struct cppparse_exception* e)
 {
@@ -54,8 +55,8 @@ static void dropException(struct cppparse_exception* e)
     e->object = 0;
     e->dtor = 0;
 }
-static struct cppparse_exception g_caught[32];
-static int                       g_caughtCount = 0;
+static __declspec(thread) struct cppparse_exception g_caught[32];
+static __declspec(thread) int                       g_caughtCount = 0;
 
 void cppparse_push_frame(struct cppparse_frame* f)
 {

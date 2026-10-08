@@ -617,19 +617,27 @@ void Parser::registerDeclaredNames(const DeclSpec& spec, const Declarator& d)
     if (spec.isTypedef) declareType(d.name.parts[0].ident);
 }
 
+bool Parser::braceElements(std::vector<Expr*>& out)
+{
+    while (!at("}") && !atEnd()) {
+        if (at("{")) {
+            Expr* e = m_arena.expr(Expr::InitList, loc());
+            advance();
+            if (!braceElements(e->kids)) return false;
+            out.push_back(e);
+        } else { Expr* e = assignment(); if (!e) return false; out.push_back(e); }
+        if (!accept(",")) break;
+    }
+    return expect("}", "after the initializer list");
+}
+
 bool Parser::initializer(Initializer& init)
 {
     if (accept("=")) {
         if (at("{")) {
             init.kind = Initializer::Brace;
             advance();
-            while (!at("}") && !atEnd()) {
-                if (at("{")) {                 // nested aggregate: keep it as a brace expression placeholder
-                    Expr* e = m_arena.expr(Expr::Error, loc()); e->text = "{...}"; init.args.push_back(e); skipBalanced();
-                } else { Expr* e = assignment(); if (!e) return false; init.args.push_back(e); }
-                if (!accept(",")) break;
-            }
-            return expect("}", "after the initializer list");
+            return braceElements(init.args);
         }
         init.kind = Initializer::Assign;
         Expr* e = assignment();

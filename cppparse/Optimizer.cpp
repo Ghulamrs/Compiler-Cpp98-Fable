@@ -55,19 +55,26 @@ long foldInt(const std::string& sub, long x, long y, bool& ok)
     if (sub == "add") return x + y;
     if (sub == "sub") return x - y;
     if (sub == "mul") return x * y;
-    if (sub == "sdiv" || sub == "udiv") { if (y == 0) { ok = false; return 0; } return x / y; }
-    if (sub == "srem" || sub == "urem") { if (y == 0) { ok = false; return 0; } return x % y; }
-    if (sub == "shl") return (y >= 0 && y < 63) ? (x << y) : 0;
-    if (sub == "ashr" || sub == "lshr") return (y >= 0 && y < 63) ? (x >> y) : 0;
+    // unsigned operations see the 32-bit pattern of the constants (wider constants are sign-extended)
+    const unsigned long ux = static_cast<unsigned long>(x), uy = static_cast<unsigned long>(y);
+    if (sub == "sdiv" || sub == "srem") { if (y == 0) { ok = false; return 0; } return sub == "sdiv" ? x / y : x % y; }
+    if (sub == "udiv" || sub == "urem") { if (y == 0 || x < 0 || y < 0) { ok = false; return 0; } return static_cast<long>(sub == "udiv" ? ux / uy : ux % uy); }
+    if (sub == "shl") return (y >= 0 && y < 32) ? static_cast<long>(ux << y) : 0;
+    if (sub == "ashr") return (y >= 0 && y < 32) ? (x >> y) : 0;
+    if (sub == "lshr") { if (x < 0) { ok = false; return 0; } return (y >= 0 && y < 32) ? static_cast<long>(ux >> y) : 0; }
     if (sub == "and") return x & y;
     if (sub == "or") return x | y;
     if (sub == "xor") return x ^ y;
     if (sub == "eq") return x == y;
     if (sub == "ne") return x != y;
-    if (sub == "slt" || sub == "ult") return x < y;
-    if (sub == "sle" || sub == "ule") return x <= y;
-    if (sub == "sgt" || sub == "ugt") return x > y;
-    if (sub == "sge" || sub == "uge") return x >= y;
+    if (sub == "slt") return x < y;
+    if (sub == "sle") return x <= y;
+    if (sub == "sgt") return x > y;
+    if (sub == "sge") return x >= y;
+    if (sub == "ult") return ux < uy;
+    if (sub == "ule") return ux <= uy;
+    if (sub == "ugt") return ux > uy;
+    if (sub == "uge") return ux >= uy;
     ok = false;
     return 0;
 }
@@ -263,6 +270,8 @@ int Optimizer::constantFold(IrFunction& f)
                 if (in.type->isFloating()) { n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(o.kind == IrOperand::FImm ? o.fval : static_cast<double>(o.ival), in.type)); }
                 else if (in.type->isIntegral() || in.type->isPointer()) {
                     long v = o.kind == IrOperand::FImm ? static_cast<long>(o.fval) : o.ival;
+                    // a negative 32-bit pattern zero-extended needs a 64-bit constant, which the IR does not have
+                    if (in.sub == "zext" && v < 0 && in.type->builtinSize() > 4) continue;
                     if (in.sub == "trunc") { int bits = in.type->builtinSize() * 8; if (bits < 32) v = in.type->isUnsigned ? (v & ((1L << bits) - 1)) : ((v << (32 - bits)) >> (32 - bits)); }
                     if (in.type->kind == Type::Bool) v = v != 0;
                     n.op = IrInst::Const; n.args.push_back(IrOperand::imm(v, in.type));
@@ -834,9 +843,13 @@ int Optimizer::unrollLoops(IrFunction& f, int maxTrip, int maxBody)
             for (size_t k = 0; k < loop.blocks.size(); ++k) blockMap[loop.blocks[k]] = blockBase + static_cast<int>(k);
             int tempBase = f.nextTemp;
             int maxTemp = 0;
+            std::set<int> loopDefs;   // only these are renamed: values from before the loop (hoisted ones too) stay
             for (size_t k = 0; k < loop.blocks.size(); ++k) {
                 const IrBlock& blk = f.blocks[static_cast<size_t>(loop.blocks[k])];
-                for (size_t i = 0; i < blk.insts.size(); ++i) if (blk.insts[i].dst > maxTemp) maxTemp = blk.insts[i].dst;
+                for (size_t i = 0; i < blk.insts.size(); ++i) {
+                    if (blk.insts[i].dst > maxTemp) maxTemp = blk.insts[i].dst;
+                    if (blk.insts[i].dst >= 0) loopDefs.insert(blk.insts[i].dst);
+                }
             }
             f.nextTemp += maxTemp + 1;
             for (size_t k = 0; k < loop.blocks.size(); ++k) {
@@ -849,7 +862,7 @@ int Optimizer::unrollLoops(IrFunction& f, int maxTrip, int maxBody)
                     if (in.dst >= 0) { f.tempTypes[tempBase + in.dst] = in.type; in.dst += tempBase; }
                     for (size_t a = 0; a < in.args.size(); ++a) {
                         IrOperand& o = in.args[a];
-                        if (o.kind == IrOperand::Temp) o.id += tempBase;
+                        if (o.kind == IrOperand::Temp && loopDefs.count(o.id)) o.id += tempBase;
                         else if (o.kind == IrOperand::Block && blockMap.count(o.id)) o.id = blockMap[o.id];
                     }
                 }

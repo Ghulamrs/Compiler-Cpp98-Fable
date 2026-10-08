@@ -4,6 +4,7 @@
 #include "PathUtil.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <map>
 #include <sstream>
@@ -62,6 +63,7 @@ std::string runtimeName(const std::string& sub)
     if (sub == "__new" || sub == "__new_array") return "malloc";
     if (sub == "__delete" || sub == "__delete_array") return "free";
     if (sub == "__copy") return "memcpy";
+    if (sub == "__zero") return "memset";
     if (sub == "__throw") return "cppparse_throw";
     return sub;
 }
@@ -122,6 +124,7 @@ private:
     void emitBody();
     void emitInst(const IrInst& in, int blockIndex);
     void emitCall(const IrInst& in);
+    void extend(const std::string& rd, const Type* t);
 
     bool isFloatType(const Type* t) const { return t && (t->kind == Type::Float || t->kind == Type::Double); }
     bool tempIsFloat(int t) const { return isFloatType(m_f.typeOf(t)); }
@@ -337,8 +340,17 @@ std::string X86Function::use(const IrOperand& o, const std::string& scratch)
         line("mov " + scratch + ", qword ptr [rbp-" + intToString(it->second.slot) + "]");
         return scratch;
     }
-    case IrOperand::Imm: line("mov " + scratch + ", " + intToString(static_cast<int>(o.ival))); return scratch;
-    case IrOperand::FImm: { std::string c = floatConst(o.fval); line("movsd " + scratch + ", real8 ptr [" + c + "]"); return scratch; }
+    case IrOperand::Imm: {
+        const bool u32 = o.type && o.type->isUnsigned && typeSize(o.type) == 4;
+        line("mov " + (u32 ? reg32(scratch) : scratch) + ", " + intToString(static_cast<int>(o.ival)));
+        return scratch;
+    }
+    case IrOperand::FImm: {
+        std::string c = floatConst(o.fval);
+        line("movsd " + scratch + ", real8 ptr [" + c + "]");
+        if (isSingle(o.type)) line("cvtsd2ss " + scratch + ", " + scratch);   // constants are kept as doubles
+        return scratch;
+    }
     case IrOperand::Local: line("lea " + scratch + ", " + localRef(o.id)); return scratch;
     case IrOperand::Global: { std::string g = m_m.globalSymbol(o.name); m_m.useGlobal(o.name); line("lea " + scratch + ", " + g); return scratch; }
     case IrOperand::Str: { line("lea " + scratch + ", " + m_m.stringLabel(o.name)); return scratch; }
@@ -361,6 +373,17 @@ void X86Function::finish(int temp, int spill, bool isFloat, const std::string& r
 {
     (void)temp;
     if (spill > 0) line(isFloat ? "movsd real8 ptr [rbp-" + intToString(spill) + "], " + reg : "mov qword ptr [rbp-" + intToString(spill) + "], " + reg);
+}
+
+// integer values narrower than 64 bits are kept extended by their signedness: operations on full registers
+// leave carries and borrows in the upper bits, which division, shifts, conversions and indexing would read
+void X86Function::extend(const std::string& rd, const Type* t)
+{
+    const int size = typeSize(t);
+    if (size >= 8 || !t || t->kind == Type::Pointer || t->kind == Type::Reference) return;
+    const bool zero = t->isUnsigned || t->kind == Type::Bool;
+    if (size == 4) line(zero ? "mov " + reg32(rd) + ", " + reg32(rd) : "movsxd " + rd + ", " + reg32(rd));
+    else line(std::string(zero ? "movzx " : "movsx ") + rd + ", " + regSized(rd, size));
 }
 
 void X86Function::emitCall(const IrInst& in)
@@ -403,6 +426,12 @@ void X86Function::emitCall(const IrInst& in)
     }
     if (in.dst >= 0) {
         bool fl = tempIsFloat(in.dst);
+        // the callee (an MSVC-compiled one too) defines only the low bytes of a narrow result: values in
+        // registers are kept extended to 64 bits
+        const int size = fl ? 8 : typeSize(in.type);
+        const bool zero = in.type && (in.type->isUnsigned || in.type->kind == Type::Bool);
+        if (size == 4) line(zero ? "mov eax, eax" : "movsxd rax, eax");
+        else if (size == 2 || size == 1) line(std::string(zero ? "movzx " : "movsx ") + "rax, " + regSized("rax", size));
         int spill;
         std::string rd = def(in.dst, fl, fl ? "xmm0" : "rax", spill);
         if (fl) { if (rd != "xmm0") line("movsd " + rd + ", xmm0"); }
@@ -417,8 +446,21 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     bool dstFloat = in.dst >= 0 && tempIsFloat(in.dst);
     int spill = 0;
     switch (in.op) {
-    case IrInst::Const: { std::string rd = def(in.dst, false, "rax", spill); line("mov " + rd + ", " + intToString(static_cast<int>(in.args[0].ival))); finish(in.dst, spill, false, rd); break; }
-    case IrInst::FConst: { std::string rd = def(in.dst, true, "xmm0", spill); line("movsd " + rd + ", real8 ptr [" + floatConst(in.args[0].fval) + "]"); finish(in.dst, spill, true, rd); break; }
+    case IrInst::Const: {
+        std::string rd = def(in.dst, false, "rax", spill);
+        // an unsigned 32-bit constant is zero-extended (mov to the 32-bit register), others sign-extended
+        const bool u32 = in.type && in.type->isUnsigned && typeSize(in.type) == 4;
+        line("mov " + (u32 ? reg32(rd) : rd) + ", " + intToString(static_cast<int>(in.args[0].ival)));
+        finish(in.dst, spill, false, rd);
+        break;
+    }
+    case IrInst::FConst: {
+        std::string rd = def(in.dst, true, "xmm0", spill);
+        line("movsd " + rd + ", real8 ptr [" + floatConst(in.args[0].fval) + "]");
+        if (isSingle(in.type)) line("cvtsd2ss " + rd + ", " + rd);
+        finish(in.dst, spill, true, rd);
+        break;
+    }
     case IrInst::StrConst: { std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", " + m_m.stringLabel(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
     case IrInst::Copy: {
         std::string rs = use(in.args[0], dstFloat ? "xmm1" : "rdx");
@@ -488,6 +530,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
             std::string rd = def(in.dst, false, "rax", spill);
             std::string src = (s == "srem" || s == "urem") ? "rdx" : "rax";
             if (rd != src) line("mov " + rd + ", " + src);
+            extend(rd, in.type);
             finish(in.dst, spill, false, rd);
             break;
         }
@@ -503,6 +546,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
                 if (rd != a) line("mov " + rd + ", " + a);
                 line(std::string(s == "shl" ? "shl " : s == "ashr" ? "sar " : "shr ") + rd + ", cl");
             }
+            extend(rd, in.type);
             finish(in.dst, spill, false, rd);
             break;
         }
@@ -512,6 +556,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         if (rd == b && rd != a) { if (mn == "add" || mn == "imul" || mn == "and" || mn == "or" || mn == "xor") std::swap(a, b); else { line("mov rdx, " + b); b = "rdx"; } }
         if (rd != a) line("mov " + rd + ", " + a);
         line(mn + " " + rd + ", " + b);
+        extend(rd, in.type);
         finish(in.dst, spill, false, rd);
         break;
     }
@@ -528,6 +573,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         std::string rd = def(in.dst, false, "rax", spill);
         if (rd != a) line("mov " + rd + ", " + a);
         line(std::string(in.sub == "neg" ? "neg " : "not ") + rd);
+        extend(rd, in.type);
         finish(in.dst, spill, false, rd);
         break;
     }
@@ -581,7 +627,13 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         int from = typeSize(in.args[0].type), to = typeSize(in.type);
         if (s == "sext" && from < 8) line(std::string(from == 4 ? "movsxd " : "movsx ") + rd + ", " + regSized(a, from));
         else if (s == "zext" && from < 8) { if (from == 4) line("mov " + reg32(rd) + ", " + reg32(a)); else line("movzx " + rd + ", " + regSized(a, from)); }
-        else if (s == "trunc") { if (rd != a) line("mov " + rd + ", " + a); if (to == 4) line("mov " + reg32(rd) + ", " + reg32(rd)); else if (to == 2) line("movzx " + reg32(rd) + ", " + reg16(rd)); else if (to == 1) line("movzx " + reg32(rd) + ", " + reg8(rd)); }
+        else if (s == "trunc") {
+            // the result is kept extended to 64 bits like every narrow value: by its own signedness
+            const bool zero = in.type && (in.type->isUnsigned || in.type->kind == Type::Bool);
+            if (rd != a) line("mov " + rd + ", " + a);
+            if (to == 4) line(zero ? "mov " + reg32(rd) + ", " + reg32(rd) : "movsxd " + rd + ", " + reg32(rd));
+            else if (to == 2 || to == 1) line(std::string(zero ? "movzx " : "movsx ") + rd + ", " + regSized(rd, to));
+        }
         else if (rd != a) line("mov " + rd + ", " + a);
         finish(in.dst, spill, false, rd);
         break;
@@ -675,7 +727,13 @@ void X86Function::emitBody()
     m_out << "\n";
     line("push rbp");
     line("mov rbp, rsp");
-    line("sub rsp, " + intToString(m_frameSize));
+    if (m_frameSize >= 4096) {
+        // a frame of a page or more is probed page by page, so the stack guard page grows the stack in order
+        m_m.useExtern("__chkstk");
+        line("mov eax, " + intToString(m_frameSize));
+        line("call __chkstk");
+        line("sub rsp, rax");
+    } else line("sub rsp, " + intToString(m_frameSize));
     for (std::map<int, int>::iterator r = m_savedIntOffset.begin(); r != m_savedIntOffset.end(); ++r) line("mov qword ptr [rbp-" + intToString(r->second) + "], " + std::string(kIntRegs[r->first]));
     for (std::map<int, int>::iterator r = m_savedFloatOffset.begin(); r != m_savedFloatOffset.end(); ++r) line("movdqu xmmword ptr [rbp-" + intToString(r->second) + "], xmm" + intToString(kFloatRegBase + r->first));
     // incoming parameters by position
@@ -780,7 +838,7 @@ void X86Module::emitGlobals()
         std::string sym = globalSymbol(g.name);
         bool numeric = !g.init.empty();
         std::string def;
-        if (g.isFloat) def = sym + " REAL8 " + (numeric ? g.init : std::string("0.0"));
+        if (g.isFloat) def = sym + (g.size == 4 ? " REAL4 " : " REAL8 ") + (numeric ? g.init : std::string("0.0"));   // float is loaded with movss
         else if (g.size == 1) def = sym + " DB " + (numeric ? g.init : std::string("0"));
         else if (g.size == 2) def = sym + " DW " + (numeric ? g.init : std::string("0"));
         else if (g.size == 4) def = sym + " DD " + (numeric ? g.init : std::string("0"));
@@ -809,10 +867,10 @@ std::string X86Module::finish()
     s << "\n.data\n" << m_data;
     s << "\n.const\n";
     s << "sign_mask DQ 8000000000000000h, 8000000000000000h\n";
-    for (std::map<std::string, double>::const_iterator fi = m_floats.begin(); fi != m_floats.end(); ++fi) {
-        std::ostringstream v; v.setf(std::ios::fixed); v.precision(17); v << fi->second;
-        s << fi->first << " REAL8 " << v.str() << "\n";
-    }
+    // the label spells the constant's IEEE bits (fconst_<16 hex digits>): emitted as they are, so that no
+    // decimal formatting can round the value (17 fixed digits lose small constants such as 1e-20)
+    for (std::map<std::string, double>::const_iterator fi = m_floats.begin(); fi != m_floats.end(); ++fi)
+        s << fi->first << " DQ 0" << fi->first.substr(7) << "h\n";
     for (std::map<std::string, std::string>::const_iterator si = m_strings.begin(); si != m_strings.end(); ++si) {
         // the literal is stored with quotes and escapes: emit raw bytes
         std::string lit = si->second;
@@ -823,7 +881,20 @@ std::string X86Module::finish()
             unsigned char ch = static_cast<unsigned char>(lit[c]);
             if (ch == '\\' && c + 1 < lit.size()) {
                 char x = lit[++c];
-                ch = x == 'n' ? 10 : x == 't' ? 9 : x == 'r' ? 13 : x == '0' ? 0 : x == '\\' ? '\\' : x == '"' ? '"' : static_cast<unsigned char>(x);
+                if (x >= '0' && x <= '7') {
+                    // up to three octal digits
+                    unsigned v = 0;
+                    for (int k = 0; k < 3 && c < lit.size() && lit[c] >= '0' && lit[c] <= '7'; ++k, ++c) v = v * 8 + static_cast<unsigned>(lit[c] - '0');
+                    --c;
+                    ch = static_cast<unsigned char>(v);
+                } else if (x == 'x') {
+                    unsigned v = 0;
+                    while (c + 1 < lit.size() && isxdigit(static_cast<unsigned char>(lit[c + 1]))) {
+                        char h = lit[++c];
+                        v = v * 16 + static_cast<unsigned>(isdigit(static_cast<unsigned char>(h)) ? h - '0' : tolower(static_cast<unsigned char>(h)) - 'a' + 10);
+                    }
+                    ch = static_cast<unsigned char>(v);
+                } else ch = x == 'n' ? 10 : x == 't' ? 9 : x == 'r' ? 13 : x == 'a' ? 7 : x == 'b' ? 8 : x == 'f' ? 12 : x == 'v' ? 11 : static_cast<unsigned char>(x);
             }
             bytes.push_back(static_cast<int>(ch));
         }

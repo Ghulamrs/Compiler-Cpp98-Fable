@@ -130,6 +130,7 @@ private:
     int    load(const LValue& lv, const sema::Type* t, int line);
     void   store(const LValue& lv, int temp, const sema::Type* t, int line);
     int    convert(int temp, const sema::Type* from, const sema::Type* to, int line);
+    int    offsetAddress(int temp, const sema::Type* fromPtr, const sema::Type* toPtr, long delta, int line);
     int    toBool(int temp, const sema::Type* t, int line);
     int    binary(const std::string& op, int a, const sema::Type* ta, int b, const sema::Type* tb, const sema::Type* result, int line);
     void   leaveTryRegions(size_t depth, int line);
@@ -150,6 +151,9 @@ private:
     int    labelBlock(const std::string& name);
     void   localDecl(cxx::Decl* d);
     void   initObject(const LValue& lv, const sema::Type* t, sema::Symbol* var, cxx::InitDeclarator& id, int line);
+    void   abiResult(IrInst& r, int line);
+    void   initAggregate(const sema::Type* t, int addr, const std::vector<cxx::Expr*>& elems, bool zeroRest, int line);
+    bool   coversAll(const sema::Type* t, const std::vector<cxx::Expr*>& elems) const;
     const sema::Type* exprType(cxx::Expr* e) const;
 
     sema::Program&         m_prog;

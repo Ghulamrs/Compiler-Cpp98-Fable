@@ -16,7 +16,142 @@ bool isNullConstant(const cxx::Expr* e)
     return e && e->semaConst && e->semaValue == 0 && e->semaType && e->semaType->isIntegral() && e->semaType->kind != Type::Enum;
 }
 
+// a folded constant converted to type t (semaValue holds 32 bits: wider types keep the bit pattern)
+long fitTo(long v, const Type* t)
+{
+    switch (t->kind) {
+    case Type::Bool: return v != 0;
+    case Type::Char: case Type::SChar: return static_cast<signed char>(v);
+    case Type::UChar: return static_cast<unsigned char>(v);
+    case Type::Short: return static_cast<short>(v);
+    case Type::UShort: case Type::WChar: return static_cast<unsigned short>(v);
+    default: return v;
+    }
+}
+
+bool aggregateType(const Type* t)
+{
+    if (!t) return false;
+    if (t->kind == Type::Reference) t = t->inner;
+    if (t->kind == Type::Array) return true;
+    if (t->kind != Type::Class || !t->decl || !t->decl->isDefinition) return false;
+    const Symbol* c = t->decl;
+    return !c->hasUserCtor && c->bases.empty() && !c->isPolymorphic;
+}
+
+// how many initializers an element of type t takes when its braces are elided
+long scalarSlots(const Type* t, int depth)
+{
+    if (!t || depth > 32 || !aggregateType(t)) return 1;
+    if (t->kind == Type::Array) return t->arraySize > 0 ? t->arraySize * scalarSlots(t->inner, depth + 1) : 1;
+    long n = 0;
+    const std::vector<Symbol*>& f = t->decl->fields;
+    for (size_t i = 0; i < f.size(); ++i) { n += scalarSlots(f[i]->type, depth + 1); if (t->decl->isUnion) break; }
+    return n > 0 ? n : 1;
+}
+
 } // namespace
+
+bool Sema::isAggregate(const Type* t)
+{
+    return aggregateType(t);
+}
+
+// counted on the syntax alone, so that the size is known where the variable is declared
+long Sema::braceCount(const Type* t, const std::vector<cxx::Expr*>& items)
+{
+    const long slots = aggregateType(t->inner) ? scalarSlots(t->inner, 0) : 1;
+    long n = 0;
+    for (size_t i = 0; i < items.size(); ++n) {
+        if (items[i]->kind == cxx::Expr::InitList || slots == 1) ++i;
+        else i += static_cast<size_t>(slots);
+    }
+    return n;
+}
+
+const Type* Sema::completedArray(const Type* t, const cxx::Initializer& init)
+{
+    if (!t || t->kind != Type::Array || t->arraySize >= 0 || init.kind != cxx::Initializer::Brace) return t;
+    return m_types.array(t->inner, braceCount(t, init.args));
+}
+
+// the initializers from items[pos] on initialise an object of aggregate type t
+cxx::Expr* Sema::braceInit(const Type* t, std::vector<cxx::Expr*>& items, size_t& pos, Scope* in, const cxx::Loc& loc, long* count)
+{
+    cxx::Expr* list = nodeArena().expr(cxx::Expr::InitList, loc);
+    const Type* u = m_types.unqualified(m_types.unref(t));
+    list->semaType = u;
+    long n = 0;
+    if (u->kind == Type::Array) {
+        for (; pos < items.size() && (u->arraySize < 0 || n < u->arraySize); ++n) list->kids.push_back(braceElement(u->inner, items, pos, in));
+    } else if (u->kind == Type::Class && u->decl) {
+        const std::vector<Symbol*>& f = u->decl->fields;
+        for (size_t i = 0; i < f.size() && pos < items.size(); ++i) {
+            list->kids.push_back(braceElement(f[i]->type, items, pos, in));
+            if (u->decl->isUnion) break;
+        }
+    }
+    if (count) *count = n;
+    return list;
+}
+
+cxx::Expr* Sema::braceElement(const Type* t, std::vector<cxx::Expr*>& items, size_t& pos, Scope* in)
+{
+    cxx::Expr* it = items[pos];
+    const Type* u = m_types.unqualified(m_types.unref(t));
+    if (it->kind == cxx::Expr::InitList) {
+        ++pos;
+        if (isAggregate(u)) {
+            size_t p = 0;
+            cxx::Expr* list = braceInit(u, it->kids, p, in, it->loc, 0);
+            if (p < it->kids.size()) error(it->loc, "S105", "too many initialisers for " + u->text());
+            return list;
+        }
+        if (it->kids.size() != 1) { error(it->loc, "S105", "a braced initialiser of " + u->text() + " needs exactly one element"); return it; }
+        it = it->kids[0];
+    } else {
+        if (it->kind != cxx::Expr::Error && !it->semaType) expr(it, in);
+        if (isAggregate(u) && it->kind != cxx::Expr::Error && m_types.unqualified(valueType(it)) != u) {
+            // braces elided: the element takes as many initializers as it needs
+            size_t before = pos;
+            cxx::Expr* list = braceInit(u, items, pos, in, it->loc, 0);
+            if (pos == before) { error(it->loc, "S105", "cannot initialise an element of type " + u->text()); ++pos; }
+            return list;
+        }
+        ++pos;
+    }
+    if (it->kind == cxx::Expr::Error) return it;
+    if (!it->semaType) expr(it, in);
+    if (u->kind == Type::Dependent || u->kind == Type::Error) return it;
+    Conversion c = convert(it, u, in);
+    const Type* vt = valueType(it);
+    if (c.rank == Conversion::None && vt->kind != Type::Error && vt->kind != Type::Dependent) error(it->loc, "S105", "cannot initialise an element of type " + u->text() + " from " + vt->text());
+    return converted(it, c);
+}
+
+// "T x = { ... }": the declarator's arguments become the fully braced elements of x
+void Sema::braceDeclInit(Symbol* var, cxx::Initializer& init, Scope* in)
+{
+    const Type* t = m_types.unref(var->type);
+    if (t->isDependent() || t->kind == Type::Error) {
+        for (size_t a = 0; a < init.args.size(); ++a) if (init.args[a]->kind != cxx::Expr::Error && init.args[a]->kind != cxx::Expr::InitList) expr(init.args[a], in);
+        return;
+    }
+    if (!isAggregate(t)) {
+        if (init.args.size() != 1 || init.args[0]->kind == cxx::Expr::InitList) { if (!init.args.empty()) error(var->loc, "S105", "brace initialiser for '" + var->name + "' of non-aggregate type " + t->text()); return; }
+        size_t pos = 0;
+        init.args[0] = braceElement(t, init.args, pos, in);
+        var->init = init.args[0];
+        return;
+    }
+    size_t pos = 0;
+    long n = 0;
+    cxx::Expr* list = braceInit(t, init.args, pos, in, var->loc, &n);
+    if (pos < init.args.size()) error(var->loc, "S105", "too many initialisers for '" + var->name + "'");
+    init.args = list->kids;
+    var->init = init.args.empty() ? 0 : init.args[0];
+    if (t->kind == Type::Array && t->arraySize < 0) var->type = m_types.array(t->inner, n);
+}
 
 const Type* Sema::valueType(cxx::Expr* e)
 {
@@ -349,6 +484,11 @@ Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::E
     fn->instantiatedFrom = tmpl;
     fn->ownerClass = tmpl->ownerClass;
     fn->isDependentContext = false;
+    if (tmpl->ownerClass && tmpl->name == tmpl->ownerClass->ctorName()) {
+        // a constructor template: declared in the instantiation scope, so declareFunction did not see the class
+        fn->isConstructor = true;
+        fn->type = m_types.function(m_types.basic(Type::Void), fn->type->params, fn->type->variadic, fn->type->constMethod);
+    }
     for (size_t i = 0; i < tmpl->templateParams.size(); ++i) {
         const std::string& pn = tmpl->templateParams[i]->name;
         fn->templateArgs.push_back(bind.count(pn) ? bind[pn] : 0);
@@ -588,9 +728,9 @@ const Type* Sema::exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked
         if (c.rank == Conversion::None && tu->isScalar() && !valueType(e->kids[0])->isScalar() && valueType(e->kids[0])->kind != Type::Class)
             error(e->loc, "S105", "cannot convert " + valueType(e->kids[0])->text() + " to " + tu->text());
         if (c.userFunction) e->semaSym = c.userFunction;
-        if (e->kids[0]->semaConst && tu->isIntegral()) { e->semaConst = true; e->semaValue = e->kids[0]->semaValue; }
+        if (e->kids[0]->semaConst && tu->isIntegral()) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, tu); }
     }
-    if (e->kids.size() == 1 && e->kids[0]->semaConst && tu->isIntegral() && !checked) { e->semaConst = true; e->semaValue = e->kids[0]->semaValue; }
+    if (e->kids.size() == 1 && e->kids[0]->semaConst && tu->isIntegral() && !checked) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, tu); }
     return to;
 }
 
@@ -757,7 +897,13 @@ const Type* Sema::exprBinary(cxx::Expr* e, Scope* in)
                   || (l->kind == Type::MemberPointer && (r->kind == Type::MemberPointer || isNullConstant(e->kids[1])));
         if (!ok) { error(e->loc, "S109", "cannot compare " + l->text() + " with " + r->text()); return m_types.error(); }
         if (l->isIntegral() && r->isIntegral() && l->isUnsigned() != r->isUnsigned() && !lc && !rc && op != "==" && op != "!=") warning(e->loc, "S120", "comparison of signed and unsigned values");
-        if (lc && rc) { e->semaConst = true; e->semaValue = op == "==" ? lv == rv : op == "!=" ? lv != rv : op == "<" ? lv < rv : op == ">" ? lv > rv : op == "<=" ? lv <= rv : lv >= rv; }
+        if (lc && rc) {
+            e->semaConst = true;
+            if (l->isArithmetic() && r->isArithmetic() && m_types.arithmeticResult(l, r)->isUnsigned()) {
+                unsigned long a = static_cast<unsigned long>(lv), b = static_cast<unsigned long>(rv);
+                e->semaValue = op == "==" ? a == b : op == "!=" ? a != b : op == "<" ? a < b : op == ">" ? a > b : op == "<=" ? a <= b : a >= b;
+            } else e->semaValue = op == "==" ? lv == rv : op == "!=" ? lv != rv : op == "<" ? lv < rv : op == ">" ? lv > rv : op == "<=" ? lv <= rv : lv >= rv;
+        }
         return m_types.basic(Type::Bool);
     }
     if (op == "+" || op == "-") {
@@ -767,7 +913,7 @@ const Type* Sema::exprBinary(cxx::Expr* e, Scope* in)
         }
         if (l->kind == Type::Pointer && r->isIntegral()) return l;
         if (op == "+" && l->isIntegral() && r->kind == Type::Pointer) return r;
-        if (op == "-" && l->kind == Type::Pointer && r->kind == Type::Pointer) return m_types.basic(Type::Long);
+        if (op == "-" && l->kind == Type::Pointer && r->kind == Type::Pointer) return m_types.basic(Type::LongLong);
         error(e->loc, "S109", "invalid operands for " + op + ": " + l->text() + " and " + r->text());
         return m_types.error();
     }
@@ -776,13 +922,20 @@ const Type* Sema::exprBinary(cxx::Expr* e, Scope* in)
         if (!ok) { error(e->loc, "S109", "invalid operands for " + op + ": " + l->text() + " and " + r->text()); return m_types.error(); }
         if (lc && rc) {
             if ((op == "/" || op == "%") && rv == 0) warning(e->loc, "S121", "division by zero");
-            else { e->semaConst = true; e->semaValue = op == "*" ? lv * rv : op == "/" ? lv / rv : lv % rv; }
+            else if (op != "*" && m_types.arithmeticResult(l, r)->isUnsigned()) {
+                unsigned long a = static_cast<unsigned long>(lv), b = static_cast<unsigned long>(rv);
+                e->semaConst = true; e->semaValue = static_cast<long>(op == "/" ? a / b : a % b);
+            } else { e->semaConst = true; e->semaValue = op == "*" ? lv * rv : op == "/" ? lv / rv : lv % rv; }
         }
         return m_types.arithmeticResult(l, r);
     }
     if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
         if (!l->isIntegral() || !r->isIntegral()) { error(e->loc, "S109", "operands of " + op + " must be integral, not " + l->text() + " and " + r->text()); return m_types.error(); }
-        if (lc && rc) { e->semaConst = true; e->semaValue = op == "&" ? (lv & rv) : op == "|" ? (lv | rv) : op == "^" ? (lv ^ rv) : op == "<<" ? (lv << rv) : (lv >> rv); }
+        if (lc && rc) {
+            e->semaConst = true;
+            if (op == ">>" && m_types.promoted(l)->isUnsigned()) e->semaValue = static_cast<long>(static_cast<unsigned long>(lv) >> rv);
+            else e->semaValue = op == "&" ? (lv & rv) : op == "|" ? (lv | rv) : op == "^" ? (lv ^ rv) : op == "<<" ? static_cast<long>(static_cast<unsigned long>(lv) << rv) : (lv >> rv);
+        }
         return (op == "<<" || op == ">>") ? m_types.promoted(l) : m_types.arithmeticResult(l, r);
     }
     if (op == ".*" || op == "->*") {
@@ -844,8 +997,30 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         std::string s = e->text;
         bool u = false; int l = 0;
         while (!s.empty() && (s[s.size() - 1] == 'u' || s[s.size() - 1] == 'U' || s[s.size() - 1] == 'l' || s[s.size() - 1] == 'L')) { if (s[s.size() - 1] == 'u' || s[s.size() - 1] == 'U') u = true; else ++l; s.erase(s.size() - 1); }
-        e->semaConst = true; e->semaValue = strtol(s.c_str(), 0, 0);
-        t = m_types.basic(l >= 2 ? (u ? Type::ULongLong : Type::LongLong) : l == 1 ? (u ? Type::ULong : Type::Long) : (u ? Type::UInt : Type::Int));
+        // the type is the first of int, (unsigned int for hexadecimal and octal), long, unsigned long, long
+        // long that holds the value, as cl does; a value beyond 32 bits keeps its low 32 bits
+        int radix = 10;
+        size_t i = 0;
+        if (s.size() > 1 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { radix = 16; i = 2; }
+        else if (s.size() > 1 && s[0] == '0') { radix = 8; i = 1; }
+        unsigned long v = 0;
+        bool wide = false;
+        for (; i < s.size(); ++i) {
+            char c = s[i];
+            int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
+            if (d >= radix) break;
+            if (v > (0xFFFFFFFFUL - static_cast<unsigned long>(d)) / static_cast<unsigned long>(radix)) wide = true;
+            v = v * static_cast<unsigned long>(radix) + static_cast<unsigned long>(d);
+        }
+        const bool fitsSigned = !wide && v <= 0x7FFFFFFFUL;
+        Type::Kind k;
+        if (l >= 2 || wide) k = u || (wide && radix != 10) ? Type::ULongLong : Type::LongLong;
+        else if (u) k = l ? Type::ULong : Type::UInt;
+        else if (l) k = fitsSigned ? Type::Long : Type::ULong;
+        else k = fitsSigned ? Type::Int : (radix == 10 ? Type::ULong : Type::UInt);
+        if (wide) warning(e->loc, "S127", "integer constant " + e->text + " does not fit in 32 bits: only its low 32 bits are kept");
+        e->semaConst = true; e->semaValue = static_cast<long>(v);
+        t = m_types.basic(k);
         break;
     }
     case cxx::Expr::FloatLit: { char last = e->text.empty() ? 0 : e->text[e->text.size() - 1]; t = m_types.basic(last == 'f' || last == 'F' ? Type::Float : last == 'l' || last == 'L' ? Type::LongDouble : Type::Double); break; }
@@ -853,8 +1028,17 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         t = m_types.basic(e->text[0] == 'L' ? Type::WChar : Type::Char);
         std::string b = e->text[0] == 'L' ? e->text.substr(2) : e->text.substr(1);
         e->semaConst = true;
+        e->semaValue = 0;
         if (b.size() >= 2 && b[0] != '\\') e->semaValue = static_cast<unsigned char>(b[0]);
-        else if (b.size() >= 3) { char x = b[1]; e->semaValue = x == 'n' ? 10 : x == 't' ? 9 : x == 'r' ? 13 : x == '0' ? 0 : x == 'a' ? 7 : x == 'b' ? 8 : x == 'f' ? 12 : x == 'v' ? 11 : x == 'x' ? strtol(b.c_str() + 2, 0, 16) : static_cast<unsigned char>(x); }
+        else if (b.size() >= 3) {
+            char x = b[1];
+            if (x >= '0' && x <= '7') {
+                long o = 0;
+                for (size_t k = 1; k < b.size() && k < 4 && b[k] >= '0' && b[k] <= '7'; ++k) o = o * 8 + (b[k] - '0');
+                e->semaValue = o;
+            } else e->semaValue = x == 'n' ? 10 : x == 't' ? 9 : x == 'r' ? 13 : x == 'a' ? 7 : x == 'b' ? 8 : x == 'f' ? 12 : x == 'v' ? 11 : x == 'x' ? strtol(b.c_str() + 2, 0, 16) : static_cast<unsigned char>(x);
+        }
+        if (t->kind == Type::Char) e->semaValue = static_cast<signed char>(e->semaValue);   // char is signed, as with cl
         break;
     }
     case cxx::Expr::StringLit: {
@@ -878,7 +1062,20 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
     case cxx::Expr::Unary: t = exprUnary(e, in); break;
     case cxx::Expr::PostIncDec: {
         const Type* ot = m_types.unref(expr(e->kids[0], in));
-        if (ot->kind == Type::Class) { const Type* r = 0; std::vector<cxx::Expr*> ops; ops.push_back(e->kids[0]); Symbol* f = classOperator(e->text, e, ops, in, r); if (f) { e->semaSym = f; t = r; } else error(e->loc, "S109", "no postfix operator" + e->text + " for " + ot->text()); break; }
+        if (ot->kind == Type::Class) {
+            // the postfix form is operator++(int): a literal 0 is its second operand (kept as kids[1])
+            if (e->kids.size() < 2) {
+                cxx::Expr* zero = nodeArena().expr(cxx::Expr::IntLit, e->loc);
+                zero->text = "0";
+                expr(zero, in);
+                e->kids.push_back(zero);
+            }
+            const Type* r = 0;
+            std::vector<cxx::Expr*> ops; ops.push_back(e->kids[0]); ops.push_back(e->kids[1]);
+            Symbol* f = classOperator(e->text, e, ops, in, r);
+            if (f) { e->semaSym = f; t = r; } else error(e->loc, "S109", "no postfix operator" + e->text + " for " + ot->text());
+            break;
+        }
         if (ot->kind == Type::Dependent || ot->kind == Type::Error) { t = ot; break; }
         if (!e->kids[0]->semaLvalue) { error(e->loc, "S108", "operand of " + e->text + " is not an lvalue"); break; }
         if (ot->isConst) { error(e->loc, "S104", "cannot modify a const value"); break; }
@@ -893,7 +1090,14 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         const Type* av = valueType(e->kids[1]); const Type* bv = valueType(e->kids[2]);
         if (!valueType(e->kids[0])->isScalar() && valueType(e->kids[0])->kind != Type::Dependent && valueType(e->kids[0])->kind != Type::Error) error(e->loc, "S109", "condition of ?: must be scalar");
         if (av->kind == Type::Dependent || bv->kind == Type::Dependent) { t = av; break; }
-        if (e->kids[1]->semaLvalue && e->kids[2]->semaLvalue && m_types.unref(a) == m_types.unref(b)) { e->semaLvalue = true; t = m_types.unref(a); }
+        const Type* ar = m_types.unref(a);
+        const Type* br = m_types.unref(b);
+        if (e->kids[1]->semaLvalue && e->kids[2]->semaLvalue && (ar == br || (ar->kind == Type::Class && m_types.unqualified(ar) == m_types.unqualified(br)))) {
+            // two lvalues of one class type that differ in cv-qualification: an lvalue of the more qualified type
+            // (scalars stay values: a folded constant such as string::npos has no storage)
+            e->semaLvalue = true;
+            t = m_types.qualified(m_types.unqualified(ar), ar->isConst || br->isConst, ar->isVolatile || br->isVolatile);
+        }
         else if (av == bv) t = av;
         else if (av->isArithmetic() && bv->isArithmetic()) t = m_types.arithmeticResult(av, bv);
         else if (av->isPointer() && (bv->isPointer() || isNullConstant(e->kids[2]))) t = av->kind == Type::NullPtr ? bv : av;
@@ -938,16 +1142,17 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         const Type* to = typeOf(e->type->spec, in);
         if (e->type->decl) to = applyDeclarator(to, *e->type->decl, in, 0);
         t = exprCast(e, in, to, e->kind == cxx::Expr::FunctionalCast);
-        if (e->kind != cxx::Expr::FunctionalCast && e->kids.size() == 1 && e->kids[0]->semaConst && to->isIntegral()) { e->semaConst = true; e->semaValue = e->kids[0]->semaValue; }
+        if (e->kind != cxx::Expr::FunctionalCast && e->kids.size() == 1 && e->kids[0]->semaConst && to->isIntegral()) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, m_types.unref(to)); }
         if (to->kind == Type::Reference) e->semaLvalue = true;
         break;
     }
-    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.basic(Type::UInt); if (ot->kind != Type::Dependent && ot->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
-    case cxx::Expr::SizeofType: { const Type* st = typeOf(e->type->spec, in); if (e->type->decl) st = applyDeclarator(st, *e->type->decl, in, 0); t = m_types.basic(Type::UInt); if (st->kind != Type::Dependent && st->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(st); } break; }
+    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.basic(Type::ULongLong); if (ot->kind != Type::Dependent && ot->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
+    case cxx::Expr::SizeofType: { const Type* st = typeOf(e->type->spec, in); if (e->type->decl) st = applyDeclarator(st, *e->type->decl, in, 0); t = m_types.basic(Type::ULongLong); if (st->kind != Type::Dependent && st->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(st); } break; }
     case cxx::Expr::New: t = exprNew(e, in); break;
     case cxx::Expr::Delete: { expr(e->kids[0], in); const Type* pt = valueType(e->kids[0]); if (pt->kind != Type::Pointer && pt->kind != Type::Dependent && pt->kind != Type::Error) error(e->loc, "S109", "delete of a non-pointer of type " + pt->text()); t = m_types.basic(Type::Void); break; }
     case cxx::Expr::Throw: if (!e->kids.empty()) expr(e->kids[0], in); t = m_types.basic(Type::Void); break;
     case cxx::Expr::Typeid: if (!e->kids.empty()) expr(e->kids[0], in); t = m_types.error(); break;
+    case cxx::Expr::InitList: error(e->loc, "S105", "a braced list is not an expression"); t = m_types.error(); break;
     case cxx::Expr::Error: t = m_types.error(); break;
     }
     --m_depth;
@@ -986,7 +1191,7 @@ void Sema::localDecl(cxx::Decl* d, Scope* in, bool isHandler)
             else if (t->isConst && t->kind != Type::Reference && tu->kind != Type::Class) error(dcl->loc, "S123", "const variable '" + name + "' is not initialised");
             continue;
         }
-        if (id.init.kind == cxx::Initializer::Brace) { for (size_t a = 0; a < id.init.args.size(); ++a) if (id.init.args[a]->kind != cxx::Expr::Error) expr(id.init.args[a], in); continue; }
+        if (id.init.kind == cxx::Initializer::Brace) { braceDeclInit(var, id.init, in); continue; }
         for (size_t a = 0; a < id.init.args.size(); ++a) expr(id.init.args[a], in);
         if (tu->kind == Type::Class && tu->decl && tu->decl->isDefinition && t->kind != Type::Reference) {
             std::vector<Symbol*> ctors;
@@ -1140,9 +1345,16 @@ void Sema::analyzeBodies()
         // every argument of "T x(a, b)": the declarator's initializer holds them all
         std::vector<cxx::Expr*> args;
         args.push_back(var->init);
-        if (pb.def) for (size_t k = 0; k < pb.def->declarators.size(); ++k) if (pb.def->declarators[k].decl && pb.def->declarators[k].decl->semaSym == var && !pb.def->declarators[k].init.args.empty()) { args = pb.def->declarators[k].init.args; break; }
+        cxx::InitDeclarator* idp = 0;
+        if (pb.def) for (size_t k = 0; k < pb.def->declarators.size(); ++k) if (pb.def->declarators[k].decl && pb.def->declarators[k].decl->semaSym == var && !pb.def->declarators[k].init.args.empty()) { idp = &pb.def->declarators[k]; args = idp->init.args; break; }
         Symbol* savedClass = m_currentClass;
         m_currentClass = var->ownerClass;
+        if (idp && idp->init.kind == cxx::Initializer::Brace) {
+            braceDeclInit(var, idp->init, scope);
+            m_currentClass = savedClass;
+            if (var->init && var->type->isConst && var->init->semaConst && var->type->isIntegral()) { var->hasConstValue = true; var->constValue = var->init->semaValue; }
+            continue;
+        }
         for (size_t k = 0; k < args.size(); ++k) expr(args[k], scope);
         m_currentClass = savedClass;
         const Type* tu = m_types.unref(var->type);

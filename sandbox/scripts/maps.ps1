@@ -13,5 +13,7 @@ if ((Test-Path "out\maps\ref.map") -and (Test-Path "out\maps\ours.map")) {
     python "$PSScriptRoot\mapdiff.py" "out\maps\ref.map" "out\maps\ours.map"
     # one file per unit on each side (out\maps\ref, out\maps\ours) for a directory comparison
     python "$PSScriptRoot\mapsplit.py" "out\maps\ref.map" "out\maps\ours.map" "out\maps"
+    # folder comparison of the two directories: per-unit summary and out\maps\compare\<unit>.txt side by side
+    python "$PSScriptRoot\mapcompare.py" "out\maps"
 }
 else { Write-Host "map files missing" }

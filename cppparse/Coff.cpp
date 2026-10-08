@@ -792,7 +792,8 @@ bool Encoder::dataLine(const std::string& raw, int line)
     }
     if (!name.empty()) m_c.symbols.push_back(std::make_pair(name, pos()));
     if (dir == "LABEL") return true;
-    size_t valuesAt = text.find(words[di]) + words[di].size();
+    // searched after the name: a decorated name may end in the directive's letters ("?p@@3QBQEBDB DB ...")
+    size_t valuesAt = text.find(words[di], name.size()) + words[di].size();
     std::vector<std::string> values;
     splitOperands(text.substr(valuesAt), values);
     if (values.empty()) return fail("missing value after " + dir, line);

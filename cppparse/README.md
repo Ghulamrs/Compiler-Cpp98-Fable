@@ -611,7 +611,20 @@ initialised on the first pass under a guard byte (COMDAT when the
 function is inline, named per function so every unit agrees); `goto`
 and labels are blocks (objects of the scopes left are not destroyed);
 anonymous-namespace symbols carry a per-unit id (`?A0x<hash>@`) so units
-do not collide. The old front end skips the extensionless standard
+do not collide. The version 6 mangler now spells every name cl.exe gives
+cppparse's own sources (checked unit by unit with `sandbox/scripts/mix.ps1`,
+which links each cppparse object among cl-built ones): class and enum
+results carry `?A` (`?B` when const), template instance names start fresh
+back-reference tables with the template's own name as entry 0, a function
+template name takes no slot, parameter back-references are keyed by type
+(so `AEBVstring@std@@` and its later spelling `AEBV12@` share one slot, a
+top-level `const` makes a separate one, two-character codes like `_N`
+count), `const` template arguments are escaped (`$$CB`), member template
+instances keep their access and constructor templates are `??$?0`, and
+globals follow cl's variable encoding (`3PEBDEB`, `3PAPEAUItem@1@A`,
+`3PAY02HA`). Test 15 compiles `examples/sample-mangle/mangle.cpp` with
+both compilers and requires every decorated name cl uses to be spelled
+identically. The old front end skips the extensionless standard
 headers when it resolves `<...>` includes, since it assumes the `std::`
 names as before.
 

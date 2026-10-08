@@ -473,6 +473,21 @@ try {
         if ($run -match 'cout from cppparse') { Write-Host "  ok   std::cout is a dynamically initialised global of libcpp/iostream.cpp (.CRT`$XCU)" }
         else { Write-Host "  FAIL std::cout produced no output"; $failed++ }
     }
+    # the version 6 mangler against cl on library types: every decorated name cl defines or references must be
+    # spelled identically by cppparse (cl's own helpers are left out: deleting destructors, RTTI, sized delete)
+    $clOut = & $cl /nologo /c /EHsc /W3 /Od /X /I..\cppparse\include "/Foout\x64\mangle_cl.obj" "..\cppparse\examples\sample-mangle\mangle.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-mangle\mangle.cpp" }
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\cppparse\include -o out\x64 -n mangle "..\cppparse\examples\sample-mangle\mangle.cpp" 2>&1 | Out-String
+    $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+    if ($rc -ne 0 -or -not (Test-Path "out\x64\mangle6.obj") -or $c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL --compile6 of sample-mangle:"; Write-Host $c6; $failed++ }
+    else {
+        $clSyms = & $dumpbin /nologo /symbols "out\x64\mangle_cl.obj" | Select-String 'External\s+\| \?' | ForEach-Object { ($_.Line -replace '^.*\| ', '') -replace ' \(.*$', '' } | Where-Object { $_ -notmatch '^\?\?_[GER7]|^\?\?3@YAXPEAX_K@Z$' } | Sort-Object -Unique
+        $ourSyms = & $dumpbin /nologo /symbols "out\x64\mangle6.obj" | Select-String 'External\s+\| \?' | ForEach-Object { ($_.Line -replace '^.*\| ', '') -replace ' \(.*$', '' } | Sort-Object -Unique
+        $missing = @($clSyms | Where-Object { $ourSyms -notcontains $_ })
+        if ($missing.Count -eq 0 -and $clSyms.Count -gt 100) { Write-Host "  ok   sample-mangle: all $($clSyms.Count) decorated names cl uses are spelled identically by the version 6 mangler" }
+        else { Write-Host "  FAIL sample-mangle: $($missing.Count) of $($clSyms.Count) decorated names differ from cl's:"; $missing | Select-Object -First 30 | ForEach-Object { Write-Host "    cl: $_" }; $failed++ }
+    }
     if ($failed -ne 0) { throw "$failed standard library check(s) failed" }
 
     Write-Host ""

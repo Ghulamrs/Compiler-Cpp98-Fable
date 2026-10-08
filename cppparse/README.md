@@ -573,6 +573,30 @@ reports 78 errors in total, against 1548 without them; the rest are
 overloads and conversions the analysis does not resolve yet, plus a few
 types the headers still lack.
 
+**Stage 6, first steps (self-hosting)**: with the headers, all 36 own
+sources now analyse with zero semantic errors and every one of them
+compiles to a COFF object; the 36 objects link with the exception runtime
+and `libcpp` into `cppparse-self.exe`, a cppparse built by cppparse. That
+executable still crashes when run: making it work is the next milestone.
+The steps that got here: forward declarations (`struct X;`) declare in
+their own scope instead of resolving to an outer `X`; a function hides
+a class of the same name in calls and in what the parser took for a
+functional cast (`stat(path, &st)`); a call with too few arguments no
+longer instantiates a function template; `vector`, `set` and
+`set::insert` have range member templates with an integer-dispatch
+trait (`__traits`); `windows.h`, `io.h`, `direct.h`, `sys/stat.h` and
+`sys/types.h` declare the platform API the sources use (the interlocked
+operations come from the runtime, they are compiler intrinsics in MSVC);
+`string::insert(iterator, char)` and `rdbuf()`; a value-initialised
+`double` member emits a float constant; static locals are module globals
+initialised on the first pass under a guard byte (COMDAT when the
+function is inline, named per function so every unit agrees); `goto`
+and labels are blocks (objects of the scopes left are not destroyed);
+anonymous-namespace symbols carry a per-unit id (`?A0x<hash>@`) so units
+do not collide. The old front end skips the extensionless standard
+headers when it resolves `<...>` includes, since it assumes the `std::`
+names as before.
+
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.
 They come from calls to library functions that the front end has no

@@ -50,6 +50,7 @@ public:
     ostream& operator<<(const string& s) { return padded(s.data(), s.size()); }
     ostream& operator<<(ostream& (*fn)(ostream&)) { return fn(*this); }
     ostream& operator<<(ios_base& (*fn)(ios_base&)) { fn(*this); return *this; }
+    ostream& operator<<(streambuf* sb);     // defined in <istream>: copies the rest of that stream's input
 
 protected:
     virtual void sink(const char* s, size_t n) = 0;

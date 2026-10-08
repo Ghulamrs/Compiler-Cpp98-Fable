@@ -69,7 +69,11 @@ std::string SemaMangler::templateName(const sema::Symbol* inst, const std::strin
 std::string SemaMangler::symbolName(const sema::Symbol* s)
 {
     if (s->kind == sema::Symbol::Class && s->instantiatedFrom) return templateName(s, s->instantiatedFrom->name);
-    if (s->kind == sema::Symbol::Namespace && s->name.empty()) return "?A0x00000000@";
+    if (s->kind == sema::Symbol::Namespace && s->name.empty()) {
+        std::string hex;
+        for (int i = 7; i >= 0; --i) hex += "0123456789abcdef"[(g_mangleUnitId >> (4 * i)) & 15];
+        return "?A0x" + hex + "@";
+    }
     return name(s->name);
 }
 
@@ -235,6 +239,9 @@ std::string SemaMangler::vtable(const sema::Symbol& c)
 } // namespace
 
 std::string msvcMangleSymbol(const sema::Symbol& fn) { SemaMangler m; return m.function(fn); }
+unsigned long g_mangleUnitId = 0;
+void setMangleUnitId(unsigned long id) { g_mangleUnitId = id; }
+
 std::string msvcMangleVariableSymbol(const sema::Symbol& v) { SemaMangler m; return m.variable(v); }
 std::string msvcMangleVtableSymbol(const sema::Symbol& c) { SemaMangler m; return m.vtable(c); }
 

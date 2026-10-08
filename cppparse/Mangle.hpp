@@ -36,6 +36,9 @@ std::string msvcMangleVtable(const std::string& qualifiedClassName);
 
 // the same decoration from the version 6 symbols (MangleSema.cpp)
 std::string msvcMangleSymbol(const sema::Symbol& fn);
+// the id that distinguishes this translation unit's anonymous namespace ("?A0x<id>@"), set per unit
+void        setMangleUnitId(unsigned long id);
+extern unsigned long g_mangleUnitId;
 std::string msvcMangleVariableSymbol(const sema::Symbol& v);
 std::string msvcMangleVtableSymbol(const sema::Symbol& c);
 

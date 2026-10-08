@@ -33,7 +33,8 @@ struct IrGlobal {
     int         size;
     bool        isFloat;
     std::string init;        // numeric initialiser text, or empty for zero
-    IrGlobal() : size(8), isFloat(false) {}
+    bool        linkOnce;    // a static local of an inline function: every unit emits it, one copy survives (COMDAT)
+    IrGlobal() : size(8), isFloat(false), linkOnce(false) {}
 };
 
 class X86Module {

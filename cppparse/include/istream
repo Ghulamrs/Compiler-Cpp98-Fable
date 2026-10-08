@@ -6,14 +6,16 @@
 #include <cstddef>
 #include <cstdlib>
 #include <ios>
+#include <ostream>
 #include <string>
 
 namespace std {
 
 class istream : public ios {
 public:
-    istream() : m_peek(-2), m_count(0) {}
+    istream() : m_peek(-2), m_count(0) { m_buf.source = this; }
     virtual ~istream() {}
+    streambuf* rdbuf() { return &m_buf; }
 
     int get()
     {
@@ -146,7 +148,14 @@ protected:
 
     int        m_peek;
     streamsize m_count;
+    streambuf  m_buf;
 };
+
+inline ostream& ostream::operator<<(streambuf* sb)
+{
+    if (sb && sb->source) for (int c = sb->source->next(); c >= 0; c = sb->source->next()) put(static_cast<char>(c));
+    return *this;
+}
 
 inline istream& getline(istream& in, string& s, char delim = '\n')
 {

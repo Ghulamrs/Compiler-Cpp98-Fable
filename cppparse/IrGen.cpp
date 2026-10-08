@@ -21,7 +21,7 @@ bool isReference(const sema::Type* t) { return t && t->kind == sema::Type::Refer
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
     : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_tryCount(0),
-      m_initSymbol(0), m_unwindId(-1), m_bodyBlock(-1) {}
+      m_initSymbol(0), m_x86(0), m_staticCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
 {
@@ -175,6 +175,11 @@ void IrGen::condbr(int cond, int t, int f, int line)
 
 int IrGen::constant(long v, const sema::Type* t, int line)
 {
+    if (t && t->isFloating()) {
+        IrInst fin = make(IrInst::FConst, t, line);
+        fin.args.push_back(IrOperand::fimm(static_cast<double>(v), fin.type));
+        return emit(fin);
+    }
     IrInst in = make(IrInst::Const, t, line);
     in.args.push_back(IrOperand::imm(v, in.type));
     return emit(in);
@@ -398,6 +403,12 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
                 return lv;
             }
             lv.kind = LValue::Local; lv.local = idx; lv.type = declared;
+            return lv;
+        }
+        std::map<Symbol*, std::string>::iterator st = m_staticNames.find(s);
+        if (st != m_staticNames.end()) {
+            lv.kind = LValue::Global; lv.global = st->second; lv.type = m_semaTypes.unref(s->type);
+            if (isReference(s->type)) { IrInst ld = make(IrInst::LoadGlobal, m_semaTypes.pointer(s->type->inner), line); ld.args.push_back(IrOperand::global(lv.global, oldType(s->type))); lv.kind = LValue::Mem; lv.addr = emit(ld); }
             return lv;
         }
         if (s->isMember && !s->isStatic) {
@@ -1429,7 +1440,44 @@ void IrGen::localDecl(cxx::Decl* d)
         cxx::InitDeclarator& id = d->declarators[i];
         Symbol* var = id.decl ? id.decl->semaSym : 0;
         if (!var || var->kind != Symbol::Variable) continue;
-        if (var->isStatic) { m_notes.push_back("L" + numText(d->loc.line) + ": static local '" + var->name + "' treated as an ordinary local"); }
+        if (var->isStatic) {
+            // a static local is a global of this module; an initializer that is not a constant runs on the first pass
+            const int line = id.decl->loc.line;
+            // named after the function and numbered within it, so every unit that compiles an inline function
+            // emits the same symbol (the global is then a COMDAT like the function)
+            std::string gname = m_out->name + "::" + var->name + "#" + numText(m_staticCount++);
+            m_staticNames[var] = gname;
+            const sema::Type* vt = m_semaTypes.unqualified(m_semaTypes.unref(var->type));
+            IrGlobal g;
+            g.name = gname;
+            g.size = sizeOf(vt) > 0 ? sizeOf(vt) : 8;
+            g.isFloat = vt->isFloating();
+            g.linkOnce = m_out->linkOnce;
+            bool scalarConstant = id.init.kind != cxx::Initializer::None && id.init.args.size() == 1 && id.init.args[0]->semaConst && vt->isScalar() && !isReference(var->type) && !vt->isFloating();
+            if (scalarConstant) g.init = numText(id.init.args[0]->semaValue);
+            if (m_x86) m_x86->addGlobal(g);
+            bool needsCode = !scalarConstant && (id.init.kind != cxx::Initializer::None || needsDefaultCtor(vt));
+            if (needsCode) {
+                const sema::Type* b = m_semaTypes.basic(sema::Type::Bool);
+                IrGlobal guard;
+                guard.name = gname + "$guard";
+                guard.size = 1;
+                guard.isFloat = false;
+                guard.linkOnce = m_out->linkOnce;
+                if (m_x86) m_x86->addGlobal(guard);
+                LValue gl; gl.kind = LValue::Global; gl.global = guard.name; gl.type = b;
+                int done = m_out->newBlock("static.done"), doInit = m_out->newBlock("static.init");
+                condbr(toBool(load(gl, b, line), b, line), done, doInit, line);
+                m_block = doInit;
+                store(gl, constant(1, b, line), b, line);
+                LValue lv; lv.kind = LValue::Global; lv.global = gname; lv.type = m_semaTypes.unref(var->type);
+                initObject(lv, var->type, var, id, line);
+                endFullExpr(line);
+                br(done, line);
+                m_block = done;
+            }
+            continue;
+        }
         int slot = newLocal(var->name, var->type, false);
         m_slots[var] = slot;
         LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = m_semaTypes.unref(var->type);
@@ -1437,6 +1485,15 @@ void IrGen::localDecl(cxx::Decl* d)
         if (!isReference(var->type) && needsDtor(var->type)) registerCleanup(slot, var->type, false, 0, id.decl->loc.line);
         endFullExpr(id.decl->loc.line);
     }
+}
+
+int IrGen::labelBlock(const std::string& name)
+{
+    std::map<std::string, int>::iterator it = m_labels.find(name);
+    if (it != m_labels.end()) return it->second;
+    int b = m_out->newBlock("label." + name);
+    m_labels[name] = b;
+    return b;
 }
 
 void IrGen::scopedStmt(cxx::Stmt* s, int line)
@@ -1580,7 +1637,14 @@ void IrGen::stmt(cxx::Stmt* s)
         emit(in);
         return;
     }
-    case cxx::Stmt::Goto: case cxx::Stmt::Label: m_notes.push_back("L" + numText(line) + ": goto/label not supported"); for (size_t i = 0; i < s->kids.size(); ++i) stmt(s->kids[i]); return;
+    case cxx::Stmt::Goto: br(labelBlock(s->label), line); return;   // objects of the scopes left are not destroyed
+    case cxx::Stmt::Label: {
+        int b = labelBlock(s->label);
+        br(b, line);
+        m_block = b;
+        for (size_t i = 0; i < s->kids.size(); ++i) stmt(s->kids[i]);
+        return;
+    }
     case cxx::Stmt::Try: {
         m_out->hasTry = true;
         int id = m_tryCount++;
@@ -1702,7 +1766,7 @@ void IrGen::prologue(Symbol* fn)
     m_block = m_bodyBlock;
     m_unwindId = m_tryCount++;
     m_tryStack.push_back(m_unwindId);
-    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear();
+    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0;
     for (size_t i = 0; i < byValue.size(); ++i)
         if (needsDtor(byValue[i].second)) registerCleanup(byValue[i].first, byValue[i].second, true, 0, fn->loc.line);
 }
@@ -1895,6 +1959,7 @@ void IrGen::generate(std::vector<IrFunction*>& out)
 
 void IrGen::registerMetadata(X86Module& x86, bool msvc)
 {
+    m_x86 = &x86;
     for (size_t i = 0; i < m_prog.symbols.size(); ++i) {
         Symbol* s = m_prog.symbols[i];
         if (s->kind == Symbol::Class && s->isDefinition && s->isPolymorphic && !s->isDependentContext && s->layoutDone) {

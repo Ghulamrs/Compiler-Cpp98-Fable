@@ -27,6 +27,8 @@ public:
     set() {}
     set(const set& o) : m_tree(o.m_tree) {}
     set(const K* first, const K* last) { for (; first != last; ++first) m_tree.insert(*first); }
+    template <class It> set(It first, It last) { for (; first != last; ++first) m_tree.insert(*first); }
+    template <class It> void insert(It first, It last) { for (; first != last; ++first) m_tree.insert(*first); }
     set& operator=(const set& o) { m_tree = o.m_tree; return *this; }
 
     size_t   size() const { return m_tree.size(); }

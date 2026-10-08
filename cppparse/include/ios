@@ -6,6 +6,14 @@
 
 namespace std {
 
+// what istream::rdbuf() hands out: a handle on the stream's character source, so that
+// "out << in.rdbuf()" copies the rest of the input
+class streambuf {
+public:
+    streambuf() : source(0) {}
+    istream* source;
+};
+
 class ios_base {
 public:
     typedef int fmtflags;

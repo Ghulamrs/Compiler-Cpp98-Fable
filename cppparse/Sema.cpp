@@ -819,7 +819,22 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
     if (d->spec.kind == cxx::DeclSpec::Class && d->spec.classDef) { defined = declareClass(d->spec.classDef, in, access, 0); d->semaSym = defined; }
     else if (d->spec.kind == cxx::DeclSpec::Enum && d->spec.enumDef) { defined = declareEnum(d->spec.enumDef, in, access); d->semaSym = defined; }
     else if (d->spec.kind == cxx::DeclSpec::Named && !d->spec.elaborated.empty() && d->spec.elaborated != "typename" && d->spec.elaborated != "enum" && d->declarators.empty()) {
-        namedType(d->spec.name, in, d->spec.elaborated, d->spec.loc);     // "class X;"
+        // "class X;" declares X in this scope unless this scope has it already: an X of an outer scope does not count
+        if (d->spec.name.parts.size() == 1 && !d->spec.name.global) {
+            const std::string& nm = d->spec.name.parts[0].ident;
+            Symbol* here = 0;
+            const std::vector<Symbol*>* v = in->find(nm);
+            if (v) for (size_t k = 0; k < v->size() && !here; ++k) if ((*v)[k]->kind == Symbol::Class || (*v)[k]->kind == Symbol::ClassTemplate) here = (*v)[k];
+            if (!here) {
+                Symbol* cls = m_prog.newSymbol(Symbol::Class, nm, in);
+                cls->loc = d->spec.loc; cls->access = access; cls->type = m_types.classType(cls);
+                cls->isStruct = d->spec.elaborated != "class"; cls->isUnion = d->spec.elaborated == "union";
+                cls->isDependentContext = in->kind == Scope::TemplateParams || (in->kind == Scope::Class && in->owner && in->owner->isDependentContext);
+                d->semaSym = cls;
+            }
+            return;
+        }
+        namedType(d->spec.name, in, d->spec.elaborated, d->spec.loc);
         return;
     }
     if (d->declarators.empty()) return;

@@ -4,7 +4,7 @@
 New-Item -ItemType Directory -Force "$Sandbox\out\maps" | Out-Null
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
-$units = @(); foreach ($f in (Get-ChildItem "..\cppparse\*.cpp") + (Get-ChildItem "..\cppparse\legacy\*.cpp")) { $units += $f.BaseName }
+$units = @(); foreach ($f in $OwnSources) { $units += $f.BaseName }
 $ref = @(); foreach ($u in $units) { $ref += "out\refobj\$u.obj" }
 $ours = @(); foreach ($u in $units) { $ours += "out\selfobj\${u}6.obj" }
 & $link /nologo /SUBSYSTEM:CONSOLE /MAP:out\maps\ref.map "/OUT:out\maps\ref.exe" @ref "out\refobj\iostream.obj" "out\refobj\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Select-String -Pattern "error" | ForEach-Object { $_.Line }

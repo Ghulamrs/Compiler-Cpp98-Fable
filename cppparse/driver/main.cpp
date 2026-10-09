@@ -95,6 +95,12 @@ void usage()
         "                   -asm6.txt, <name>6.asm (and <name>6.obj with --obj); -O, --msvc-mangling apply\n"
         "  -I <dir>         version 6: include directory for the preprocessor (also -Idir)\n"
         "  -D NAME[=value]  version 6: predefine a macro (also -DNAME=value); -U NAME undefines one\n"
+        "  --target NAME    version 6: x86_64-windows (default; COFF objects, MSVC ABI) or x86_64-linux\n"
+        "                   (LP64 sizes and macros for -E, --parse6, --sema6; no back end yet)\n"
+        "                   predefined always: __cplusplus=199711L, __cppparse__=6, __STDC__=1; for\n"
+        "                   x86_64-windows also _WIN32=1, _WIN64=1, _M_X64=100 (not _MSC_VER, not _DEBUG);\n"
+        "                   for x86_64-linux __linux__, __unix__, __x86_64__, __LP64__, __ELF__\n"
+        "                   --compile6 stops at a missing include file (the other modes warn)\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
         "  @list.txt        response file: one path, pattern or option per line\n"
         "  -q               quiet: print only errors\n"
@@ -210,6 +216,16 @@ int main(int argc, char* argv[])
         else if (a == "-D" && i + 1 < args.size()) ppOpt.defines.push_back(args[++i]);
         else if (a.size() > 2 && a[0] == '-' && a[1] == 'D') ppOpt.defines.push_back(a.substr(2));
         else if (a == "-U" && i + 1 < args.size()) ppOpt.undefines.push_back(args[++i]);
+        else if (a == "--target" && i + 1 < args.size()) {
+            ppOpt.target = findTarget(args[++i]);
+            if (!ppOpt.target) {
+                std::cerr << "unknown target: " << args[i] << " (known:";
+                const std::vector<std::string> names = targetNames();
+                for (size_t k = 0; k < names.size(); ++k) std::cerr << " " << names[k];
+                std::cerr << ")\n";
+                return 2;
+            }
+        }
         else if (a.size() == 3 && a[0] == '-' && a[1] == 'O' && a[2] >= '0' && a[2] <= '3') copt.optLevel = a[2] - '0';
         else if (a == "-q") quiet = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "unknown option: " << a << "\n"; usage(); return 2; }
@@ -220,6 +236,11 @@ int main(int argc, char* argv[])
         }
     }
     if (inputs.empty()) { usage(); return 2; }
+    const Target& target = ppOpt.target ? *ppOpt.target : defaultTarget();
+    if (compile6 && !target.hasBackEnd) {
+        std::cerr << "error: no back end for target " << target.name << " yet: -E, --parse6 and --sema6 work for it, --compile6 does not\n";
+        return 2;
+    }
 
     if (parse6) {
         // version 6: preprocess and parse every input with the new front end; print counts and syntax errors
@@ -232,6 +253,13 @@ int main(int argc, char* argv[])
             if (!fileExists(inputs[i])) { std::cerr << "error: cannot read " << inputs[i] << "\n"; ++totalErrors; continue; }
             Preprocessor pp(ppOpt);
             pp.run(inputs[i]);
+            if (compile6 && !pp.missingIncludes().empty()) {
+                // an object compiled without one of its headers would rest on undeclared names and guessed types
+                for (size_t k = 0; k < pp.missingIncludes().size(); ++k)
+                    std::cerr << inputs[i] << ": error: cannot open include file '" << pp.missingIncludes()[k] << "'\n";
+                totalErrors += static_cast<int>(pp.missingIncludes().size());
+                continue;
+            }
             cxx::CxxArena arena;
             cxx::TranslationUnit tu;
             tu.path = inputs[i];
@@ -259,6 +287,7 @@ int main(int argc, char* argv[])
                 std::cout << "  " << (d[k].file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(d[k].file)] : "?") << "(" << d[k].line << "): error: " << d[k].message << "\n";
             if (sema6) {
                 sema::TypeTable types;
+                types.setTarget(target);
                 sema::Program program;
                 sema::Sema sema(types, program);
                 sema.useArena(arena);   // nodes sema adds must outlive it: the AST dump runs later
@@ -285,6 +314,21 @@ int main(int argc, char* argv[])
                     setMangleUnitId(unitId & 0xFFFFFFFFUL);
                     gen.registerMetadata(x86, copt.msvcNames);   // first: it queues the vtable members and the dynamic initialisers
                     gen.generate(functions);
+                    if (!gen.failedMembersUsed().empty()) {
+                        // a member of a class template instantiation whose body has errors is needed after all
+                        // (an implicit call sema does not see): its held-back diagnostics are real, nothing is written
+                        const std::vector<sema::Symbol*>& bad = gen.failedMembersUsed();
+                        for (size_t k = 0; k < bad.size(); ++k) {
+                            std::cout << "  error S128: '" << bad[k]->qualifiedName() << "' is used, but its instantiation has errors:\n";
+                            const std::vector<sema::Diag>* held = sema.heldDiagnostics(bad[k]);
+                            for (size_t h = 0; held && h < held->size() && h < 10; ++h)
+                                std::cout << "    " << ((*held)[h].loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>((*held)[h].loc.file)] : "?")
+                                          << "(" << (*held)[h].loc.line << "): " << (*held)[h].code << ": " << (*held)[h].message << "\n";
+                        }
+                        totalErrors += static_cast<int>(bad.size());
+                        for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
+                        continue;
+                    }
                     BackEndOptions bo;
                     bo.optLevel = copt.optLevel; bo.threads = copt.threads; bo.x86 = copt.x86;
                     BackEndResult br;

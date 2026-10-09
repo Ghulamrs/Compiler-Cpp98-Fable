@@ -48,6 +48,9 @@ public:
     const std::vector<std::string>& notes() const { return m_notes; }
     static std::string irName(const sema::Symbol* fn);
     int functionsGenerated() const { return m_generated; }
+    // members of class template instantiations whose bodies had errors (Symbol::instantiationFailed) that the
+    // generated code needs all the same, e.g. through an implicit destructor call: the unit cannot be compiled
+    const std::vector<sema::Symbol*>& failedMembersUsed() const { return m_failedUsed; }
 
 private:
     struct LValue {
@@ -167,6 +170,7 @@ private:
     std::vector<IrFunction*>* m_outList;
     std::set<sema::Symbol*>   m_done;
     std::vector<sema::Symbol*> m_queue;
+    std::vector<sema::Symbol*> m_failedUsed;
     std::vector<std::string>   m_notes;
     int                        m_generated;
     std::vector<sema::Symbol*> m_dynamicGlobals;   // globals built by the module's initialiser, in declaration order

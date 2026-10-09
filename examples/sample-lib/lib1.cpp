@@ -1,5 +1,5 @@
 // lib1.cpp - exercises cppparse's own string, vector, utility and algorithm headers; compiled
-// by cppparse --compile6 -I cppparse/include and checked by examples/sample-lib-driver/driver-lib.cpp.
+// by cppparse --compile6 -I include and checked by examples/sample-lib-driver/driver-lib.cpp.
 #include <algorithm>
 #include <cstring>
 #include <string>

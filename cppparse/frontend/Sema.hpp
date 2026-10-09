@@ -14,6 +14,7 @@
 #define CPPPARSE_SEMA_HPP
 
 #include "CxxAst.hpp"
+#include "Target.hpp"
 
 #include <map>
 #include <set>
@@ -84,10 +85,15 @@ public:
     int  rank(const Type* t) const;        // integer conversion rank
     const Type* promoted(const Type* t);   // integral / floating promotion
     const Type* arithmeticResult(const Type* a, const Type* b);   // usual arithmetic conversions
+    void setTarget(const Target& target);  // the sizes of long, wchar_t, long double and pointers
+    const Type* sizeType() const { return m_basic[m_sizeIsLong ? Type::ULong : Type::ULongLong]; }     // size_t
+    const Type* ptrdiffType() const { return m_basic[m_sizeIsLong ? Type::Long : Type::LongLong]; }    // ptrdiff_t
 private:
     const Type* intern(const Type& t);
     const Type*                    m_basic[Type::Error + 1];
     std::map<std::string, Type*>   m_types;
+    int                            m_pointerSize, m_longSize, m_wcharSize, m_longDoubleSize, m_maxAlign;
+    bool                           m_sizeIsLong;
 };
 
 
@@ -142,6 +148,10 @@ struct Symbol {
     std::vector<const Type*> templateArgs;           // for an instantiation: the type arguments (0 for non-type)
     std::vector<long>        templateIntArgs;
     bool          isDependentContext;     // declared inside a template: not analysed until instantiated
+    bool          isImplicitInstantiation; // class: made from a template by instantiateClassTemplate (not an explicit specialisation)
+    bool          isLazyInstantiation;    // function analysed tentatively (Sema::isLazyMember): generated only when used
+    bool          instantiationFailed;    // such a function whose body has errors: its diagnostics are held back and
+                                          // it is never generated; a use of it is an error (14.7.1)
     std::vector<Symbol*>     partialSpecs;        // class template: its partial specialisations (ClassTemplate symbols)
     std::vector<cxx::TemplateArg> patternArgs;    // partial specialisation: the argument pattern
     bool          isImplicit;             // compiler-generated constructor / destructor / assignment
@@ -216,6 +226,8 @@ public:
     const SemaStats& stats() const { return m_stats; }
     int errorCount() const;
     std::string dumpSymbols() const;     // text dump of the global scope for tests
+    // the diagnostics held back for a member with instantiationFailed (0 when there are none)
+    const std::vector<Diag>* heldDiagnostics(Symbol* fn) const;
 
     // used by later stages
     Symbol* lookupQualified(const cxx::QualifiedName& n, Scope* from, bool typesOnly);
@@ -239,6 +251,12 @@ private:
     // bodies
     struct PendingBody { Symbol* fn; cxx::Decl* def; Scope* scope; };
     void   analyzeBodies();
+    // implicit instantiation (C++98 14.7.1): a non-virtual member function of a class template instantiation,
+    // and a function template specialisation, is analysed tentatively; errors in its body count only when it
+    // is reachable from code that is not itself tentative
+    bool   isLazyMember(const Symbol* fn) const;
+    void   noteUse(Symbol* used);           // m_currentFunction (0 at namespace scope) refers to used
+    void   reportUsedFailedMembers();       // releases the held diagnostics of every member reachable from real code
     void   analyzeFunctionBody(Symbol* fn, cxx::Decl* def, Scope* enclosing);
     void   stmt(cxx::Stmt* s, Scope* in, Symbol* fn);
     void   localDecl(cxx::Decl* d, Scope* in, bool isHandler = false);
@@ -300,6 +318,9 @@ private:
     Symbol*                    m_currentClass;
     int                        m_loopDepth, m_switchDepth, m_depth;
     std::set<std::string>      m_reportedUnknown;
+    std::map<Symbol*, std::set<Symbol*> > m_uses;          // function (0: namespace scope) -> functions it refers to
+    std::set<Symbol*>                     m_lazyMembers;   // members analysed tentatively
+    std::map<Symbol*, std::vector<Diag> > m_held;          // their held-back diagnostics
     // nodes sema adds to the tree (instantiation copies, conversion wrappers) live in the translation
     // unit's arena when one is given, so they outlive this object; m_cloneArena is the fallback
     cxx::CxxArena*                m_externalArena;

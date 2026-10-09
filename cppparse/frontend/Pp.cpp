@@ -126,9 +126,8 @@ Preprocessor::Preprocessor(const PpOptions& opt) : m_opt(opt), m_errors(0)
     predefine("__cplusplus=199711L");
     predefine("__cppparse__=6");
     predefine("__STDC__=1");
-    predefine("_WIN32=1");
-    predefine("_M_X64=100");
-    predefine("_WIN64=1");
+    const Target& target = opt.target ? *opt.target : defaultTarget();
+    for (size_t i = 0; i < target.predefines.size(); ++i) predefine(target.predefines[i]);
     for (size_t i = 0; i < opt.defines.size(); ++i) predefine(opt.defines[i]);
     for (size_t i = 0; i < opt.undefines.size(); ++i) m_macros.erase(opt.undefines[i]);
 }

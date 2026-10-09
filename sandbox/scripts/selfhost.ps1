@@ -2,14 +2,17 @@
 # with the exception runtime and libcpp into out\selfhost\cppparse-self.exe, then runs that on a sample.
 # The bootstrap stage (skipped with -SkipBootstrap) then has the self-built compiler compile the same sources
 # to out\selfobj2, links out\selfhost2\cppparse-self2.exe from them and requires every object and listing to
-# be byte-identical to the MSVC-built compiler's
-param([string]$Lvl = "0", [switch]$SkipCompile, [switch]$SkipBootstrap)
+# be byte-identical to the MSVC-built compiler's. -Compiler starts from another MSVC-built cppparse.exe
+# (e.g. sandbox\vs\Debug\cppparse.exe from the solution) instead of sandbox\cppparse.exe
+param([string]$Lvl = "0", [switch]$SkipCompile, [switch]$SkipBootstrap, [string]$Compiler = "")
 . "$PSScriptRoot\toolset.ps1"
+if ($Compiler -ne "") { $Exe = (Resolve-Path $Compiler).Path }
+Write-Host "=== starting compiler: $Exe ==="
 New-Item -ItemType Directory -Force "$Sandbox\out\selfobj", "$Sandbox\out\selfhost" | Out-Null
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
 $started = Get-Date
-$units = @(); foreach ($f in (Get-ChildItem "..\cppparse\*.cpp") + (Get-ChildItem "..\cppparse\legacy\*.cpp")) { $units += $f }
+$units = $OwnSources
 function SameBytes([string]$a, [string]$b) {
     if (-not (Test-Path $a) -or -not (Test-Path $b)) { return $false }
     return [System.Linq.Enumerable]::SequenceEqual([byte[]][System.IO.File]::ReadAllBytes("$Sandbox\$a"), [byte[]][System.IO.File]::ReadAllBytes("$Sandbox\$b"))
@@ -19,11 +22,11 @@ function CompileOwn([string]$compiler, [string]$objDir, [string]$libDir) {
     foreach ($f in $units) {
         $n = $f.BaseName
         if (Test-Path "$objDir\${n}6.obj") { Remove-Item "$objDir\${n}6.obj" }
-        $out = & $compiler --compile6 "-O$Lvl" --obj --msvc-mangling -q -I ..\cppparse -I ..\cppparse\legacy -I ..\cppparse\include -o $objDir -n $n $f.FullName 2>&1 | Out-String
+        $out = & $compiler --compile6 "-O$Lvl" --obj --msvc-mangling -q @OwnIncludes -o $objDir -n $n $f.FullName 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$objDir\${n}6.obj")) { $failed++; Write-Host "FAIL $n"; Write-Host (($out.Split("`n") | Select-String -Pattern "error|note|  line" | Select-Object -First 4 | ForEach-Object { $_.Line }) -join "`n") }
     }
     Write-Host "own sources compiled: $($units.Count - $failed) of $($units.Count)"
-    & $compiler --compile6 "-O$Lvl" --obj --msvc-mangling -q -I ..\cppparse\include -o $libDir -n iostream "..\cppparse\libcpp\iostream.cpp" | Out-Null
+    & $compiler --compile6 "-O$Lvl" --obj --msvc-mangling -q -I ..\include -o $libDir -n iostream "..\libcpp\iostream.cpp" | Out-Null
     return $failed
 }
 function LinkOwn([string]$objDir, [string]$libDir, [string]$exe) {
@@ -38,7 +41,7 @@ function LinkOwn([string]$objDir, [string]$libDir, [string]$exe) {
 function CheckSample([string]$exe, [string]$dir) {
     Write-Host "=== running $exe on examples\sample-opt ==="
     if (Test-Path "$dir\self-opt6.obj") { Remove-Item "$dir\self-opt6.obj" }
-    & $exe --compile6 -O0 --obj --msvc-mangling -I ..\cppparse\include -o $dir -n self-opt "..\cppparse\examples\sample-opt\opt.cpp" 2>&1 | Select-Object -First 20 | ForEach-Object { Write-Host "$_" }
+    & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o $dir -n self-opt "..\examples\sample-opt\opt.cpp" 2>&1 | Select-Object -First 20 | ForEach-Object { Write-Host "$_" }
     $rc = $LASTEXITCODE
     Write-Host "self-built compiler exit code $rc"
     if ($rc -ne 0 -or -not (Test-Path "$dir\self-opt6.obj")) { Write-Host "no object written"; return $false }
@@ -50,10 +53,10 @@ function CheckSample([string]$exe, [string]$dir) {
     return $same
 }
 if (-not $SkipCompile) { $null = CompileOwn $Exe "out\selfobj" "out\selfhost" }
-& $cl /nologo /c /EHsc /W3 "/Foout\selfhost\cppparse_rt.obj" "..\cppparse\runtime\cppparse_rt.cpp" | Out-Null
+& $cl /nologo /c /EHsc /W3 "/Foout\selfhost\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" | Out-Null
 if (-not (LinkOwn "out\selfobj" "out\selfhost" "out\selfhost\cppparse-self.exe")) { Write-Host "link failed"; exit 1 }
 New-Item -ItemType Directory -Force "$Sandbox\out\selfhost\ref" | Out-Null
-& $Exe --compile6 -O0 --obj --msvc-mangling -q -I ..\cppparse\include -o out\selfhost\ref -n self-opt "..\cppparse\examples\sample-opt\opt.cpp" | Out-Null
+& $Exe --compile6 -O0 --obj --msvc-mangling -q -I ..\include -o out\selfhost\ref -n self-opt "..\examples\sample-opt\opt.cpp" | Out-Null
 if (-not (CheckSample "out\selfhost\cppparse-self.exe" "out\selfhost")) { exit 1 }
 Write-Host ("stage 1 (MSVC-built compiler builds and checks cppparse-self.exe): {0:N0} s" -f ((Get-Date) - $started).TotalSeconds)
 if ($SkipBootstrap) { exit 0 }

@@ -1,4 +1,4 @@
-# builds the multi-file C sample cpp\sample-c with cl as C (/TC) and as C++ (/TP), and with the three generations
+# builds the multi-file C sample cpp\examples\sample-c with cl as C (/TC) and as C++ (/TP), and with the three generations
 # of cppparse: A (sandbox\cppparse.exe, built by cl), B (out\selfhost\cppparse-self.exe, built by A) and C
 # (out\selfhost2\cppparse-self2.exe, built by B; see selfhost.ps1), each at -O0 and -O2. Every build runs in its
 # own folder under out\cprog; its output must equal the cl C++ build's, and the objects of A, B and C must be
@@ -6,12 +6,12 @@
 . "$PSScriptRoot\toolset.ps1"
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
-$srcDir = (Resolve-Path "..\sample-c").Path
+$srcDir = (Resolve-Path "..\examples\sample-c").Path
 $units = @(Get-ChildItem "$srcDir\*.cpp" | ForEach-Object { $_.BaseName })
 $out = "$Sandbox\out\cprog"
 New-Item -ItemType Directory -Force $out | Out-Null
 $libs = @("libucrt.lib", "libvcruntime.lib", "libcmt.lib", "kernel32.lib", "legacy_stdio_definitions.lib")
-& $cl /nologo /c /EHsc /W3 "/Fo$out\cppparse_rt.obj" "..\cppparse\runtime\cppparse_rt.cpp" | Out-Null
+& $cl /nologo /c /EHsc /W3 "/Fo$out\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" | Out-Null
 $failed = 0
 
 function RunBuild([string]$name, [string]$program) {
@@ -54,7 +54,7 @@ foreach ($lvl in @("0", "2")) {
         $objs = @(); $bad = $false
         foreach ($u in $units) {
             [System.IO.File]::Delete("$dir\${u}6.obj")
-            $o = & $compiler --compile6 "-O$lvl" --obj --msvc-mangling -q "-I$srcDir" -I ..\cppparse\include -o $dir -n $u "$srcDir\$u.cpp" 2>&1 | Out-String
+            $o = & $compiler --compile6 "-O$lvl" --obj --msvc-mangling -q "-I$srcDir" -I ..\include -o $dir -n $u "$srcDir\$u.cpp" 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$dir\${u}6.obj")) { Write-Host "$name failed on $u :"; Write-Host $o; $bad = $true }
             $objs += "$dir\${u}6.obj"
         }

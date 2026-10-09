@@ -18,7 +18,7 @@ extern "C" {
     int      branches_int_v(int v);
     unsigned pick_unsigned_flags(unsigned flags);
     int      useTemplates();
-    // version 5: exceptions (the runtime cppparse/runtime/cppparse_rt.cpp is linked as well)
+    // version 5: exceptions (the runtime runtime/cppparse_rt.cpp is linked as well)
     int      throwCatchInt_int_v(int v);
     int      catchAll_int_v(int v);
     int      throwThrough_int_v(int v);

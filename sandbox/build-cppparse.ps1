@@ -30,6 +30,9 @@ $ErrorActionPreference = "Stop"
 
 $Sandbox = $PSScriptRoot
 $Src     = Split-Path $Sandbox -Parent
+# cppparse's source folders (see scripts\toolset.ps1): each is an include folder of the build as well
+$SourceDirs = @("driver", "common", "frontend", "middle", "backend", "analyzer")
+$sourceIncludes = @(); foreach ($d in $SourceDirs) { $sourceIncludes += "/I..\cppparse\$d" }
 
 # PowerShell names are case-insensitive, so $Exe is also the $exe the tests run
 if ($Exe -ne "") {
@@ -71,9 +74,9 @@ try {
         New-Item -ItemType Directory -Force $objDir, $exeDir | Out-Null
         $exe = "$exeDir\cppparse.exe"
         Write-Host "=== Building cppparse.exe ($Config) ==="
-        $sources = @(Get-ChildItem "..\cppparse\*.cpp" | ForEach-Object { "..\cppparse\" + $_.Name }) + @(Get-ChildItem "..\cppparse\legacy\*.cpp" | ForEach-Object { "..\cppparse\legacy\" + $_.Name })
+        $sources = @(); foreach ($d in $SourceDirs) { $sources += @(Get-ChildItem "..\cppparse\$d\*.cpp" | ForEach-Object { "..\cppparse\$d\" + $_.Name }) }
         $linkFlags = @(); if ($Config -eq "Debug") { $linkFlags = @("/link", "/DEBUG") }
-        $output = & $cl /nologo /EHsc /W4 /permissive- @cflags /I..\cppparse /I..\cppparse\legacy "/Fo$objDir\" "/Fe$exe" "/Fd$objDir\cppparse.pdb" @sources @linkFlags 2>&1 | Out-String
+        $output = & $cl /nologo /EHsc /W4 /permissive- @cflags @sourceIncludes "/Fo$objDir\" "/Fe$exe" "/Fd$objDir\cppparse.pdb" @sources @linkFlags 2>&1 | Out-String
         Write-Host $output
         if ($LASTEXITCODE -ne 0) { throw "cppparse failed to compile (exit code $LASTEXITCODE)" }
         if ($output -match "warning C") { throw "cppparse compiled with warnings (W4 must be clean)" }
@@ -83,7 +86,7 @@ try {
     if ($NoTests) { Write-Host "built $exe"; $global:LASTEXITCODE = 0; return }
 
     Write-Host "=== Test 1: sample\Sample.sln ==="
-    & $exe -o "out\sample" "..\cppparse\examples\sample\Sample.sln"
+    & $exe -o "out\sample" "..\examples\sample\Sample.sln"
     if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on Sample.sln" }
 
     $report = Get-Content "out\sample\Sample-report.txt" -Raw
@@ -166,7 +169,7 @@ try {
     # ---- test 4: health checker on the deliberately broken folder ----------------
     Write-Host "=== Test 4: health checker (sample-bad folder) ==="
     New-Item -ItemType Directory -Force "out\bad" | Out-Null
-    & $exe -o "out\bad" -n "bad" --text-only "..\cppparse\examples\sample-bad"
+    & $exe -o "out\bad" -n "bad" --text-only "..\examples\sample-bad"
     if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on sample-bad" }
     $health = Get-Content "out\bad\bad-health.txt" -Raw
     # E142-E145 and I146 are the count-based call checks; for type-checked bodies the typed T codes replace them
@@ -178,7 +181,7 @@ try {
     foreach ($code in $codes) {
         if ($health.Contains("[$code]")) { Write-Host "  ok   $code" } else { Write-Host "  FAIL code not reported: $code"; $failed++ }
     }
-    & $exe --strict --health "..\cppparse\examples\sample-bad" | Out-Null
+    & $exe --strict --health "..\examples\sample-bad" | Out-Null
     if ($LASTEXITCODE -eq 3) { Write-Host "  ok   --strict exit code 3" } else { Write-Host "  FAIL --strict exit code was $LASTEXITCODE"; $failed++ }
     if ($failed -ne 0) { throw "$failed check(s) failed on sample-bad" }
 
@@ -201,7 +204,7 @@ try {
     New-Item -ItemType Directory -Force "out\opt" | Out-Null
     $failed = 0
     foreach ($lvl in 0..3) {
-        & $exe -o "out\opt" -n "opt$lvl" "-O$lvl" --text-only "..\cppparse\examples\sample-opt"
+        & $exe -o "out\opt" -n "opt$lvl" "-O$lvl" --text-only "..\examples\sample-opt"
         if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on sample-opt at -O$lvl" }
         $h = Get-Content "out\opt\opt$lvl-health.txt" -Raw
         if ($h -match "\[T1") { Write-Host "  FAIL sample-opt produced type findings at -O$lvl"; $failed++ }
@@ -234,7 +237,7 @@ try {
         @{ name = 'AST dump annotates types';                 ok = ($ast0 -match 'binary .\*.\s+: int') }
     )
     foreach ($c in $checks) { if ($c.ok) { Write-Host "  ok   $($c.name)" } else { Write-Host "  FAIL $($c.name)"; $failed++ } }
-    & $exe -o "out\sample" -O2 "..\cppparse\examples\sample\Sample.sln" | Out-Null
+    & $exe -o "out\sample" -O2 "..\examples\sample\Sample.sln" | Out-Null
     $asmS = Get-Content "out\sample\Sample-asm.txt" -Raw
     if ($asmS -match 'vptr') { Write-Host "  ok   virtual call lowered through the vtable (Sample)" } else { Write-Host "  FAIL no vtable call in Sample-asm.txt"; $failed++ }
     if ($ir2 -match '= phi ') { Write-Host "  ok   SSA form with phi nodes in the IR dump" } else { Write-Host "  FAIL no phi nodes in the -O2 IR dump"; $failed++ }
@@ -250,7 +253,7 @@ try {
     New-Item -ItemType Directory -Force "out\x64" | Out-Null
     $failed = 0
     # version 5: the exception runtime, linked with every driver
-    $rtOut = & $cl /nologo /c /EHsc /W3 "/Foout\x64\cppparse_rt.obj" "..\cppparse\runtime\cppparse_rt.cpp" 2>&1 | Out-String
+    $rtOut = & $cl /nologo /c /EHsc /W3 "/Foout\x64\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $rtOut; throw "cppparse_rt.cpp failed to compile" }
     Write-Host "  ok   runtime cppparse_rt.cpp compiled"
     foreach ($lvl in @(0, 2, 3)) {
@@ -259,7 +262,7 @@ try {
         $mlOut = & $ml64 /nologo /c "/Foout\x64\opt$lvl.obj" $asmPath 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL ml64 rejected opt$lvl.asm:"; Write-Host $mlOut; $failed++; continue }
         Write-Host "  ok   ml64 assembled opt$lvl.asm"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\driver$lvl.exe" "..\cppparse\examples\sample-opt-driver\driver.cpp" "out\x64\opt$lvl.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\driver$lvl.exe" "..\examples\sample-opt-driver\driver.cpp" "out\x64\opt$lvl.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with opt$lvl.obj:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\driver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   driver$lvl.exe: all results correct (-O$lvl)" }
@@ -270,7 +273,10 @@ try {
     Write-Host "=== Test 7: version 5 parallel pipeline (wildcards, @response file, -j determinism) ==="
     New-Item -ItemType Directory -Force "out\par" | Out-Null
     $failed = 0
-    @("# response file written by the test", "..\cppparse\*.cpp", "..\cppparse\*.hpp", "..\cppparse\legacy\*.cpp", "..\cppparse\legacy\*.hpp", "-O3", "-q") | Out-File -Encoding ascii "out\par\list.rsp"
+    # a pattern that matches nothing is an error, so only the folders that have headers get a *.hpp line
+    $rsp = @("# response file written by the test")
+    foreach ($d in $SourceDirs) { foreach ($x in @("cpp", "hpp")) { if (Test-Path "..\cppparse\$d\*.$x") { $rsp += "..\cppparse\$d\*.$x" } } }
+    ($rsp + @("-O3", "-q")) | Out-File -Encoding ascii "out\par\list.rsp"
     $null = & $exe -j 1 -o out\par -n j1 "@out\par\list.rsp"
     if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL -j 1 run exited with $LASTEXITCODE"; $failed++ }
     $null = & $exe -j 12 -o out\par -n j12 "@out\par\list.rsp"
@@ -285,7 +291,7 @@ try {
     }
     $log = Get-Content "out\par\j12-opt.log" -Raw
     if ($log -match 'phase times \(ms, 12 thread') { Write-Host "  ok   phase times logged" } else { Write-Host "  FAIL phase times missing from the log"; $failed++ }
-    $wild = & $exe -j 4 --no-compile -o out\par -n wild "..\cppparse\examples\sample-opt\*.cpp" "..\Vect*.hpp" | Out-String
+    $wild = & $exe -j 4 --no-compile -o out\par -n wild "..\examples\sample-opt\*.cpp" "..\Vect*.hpp" | Out-String
     if ($LASTEXITCODE -eq 0 -and $wild -match '2 files \(1 headers, 1 sources\)') { Write-Host "  ok   wildcards on the command line" } else { Write-Host "  FAIL command-line wildcards:"; Write-Host $wild; $failed++ }
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"   # the expected stderr line must not stop the script
     $null = & $exe -q --no-compile -o out\par -n none "..\cppparse\nothing*.cpp" 2>&1
@@ -297,11 +303,11 @@ try {
     $failed = 0
     foreach ($lvl in @(0, 3)) {
         $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-        $out = & $exe "-O$lvl" --obj -q -o out\x64 -n "own$lvl" "..\cppparse\examples\sample-opt" 2>&1 | Out-String
+        $out = & $exe "-O$lvl" --obj -q -o out\x64 -n "own$lvl" "..\examples\sample-opt" 2>&1 | Out-String
         $ErrorActionPreference = $eap
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path "out\x64\own$lvl.obj")) { Write-Host "  FAIL --obj at -O$lvl :"; Write-Host $out; $failed++; continue }
         Write-Host "  ok   own COFF writer produced own$lvl.obj (-O$lvl)"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\owndriver$lvl.exe" "..\cppparse\examples\sample-opt-driver\driver.cpp" "out\x64\own$lvl.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\owndriver$lvl.exe" "..\examples\sample-opt-driver\driver.cpp" "out\x64\own$lvl.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with own$lvl.obj:"; Write-Host $clOut; $failed++; continue }
         Write-Host "  ok   linked own$lvl.obj with the MSVC-compiled driver"
         $run = & ".\out\x64\owndriver$lvl.exe" 2>&1 | Out-String
@@ -323,10 +329,10 @@ try {
 
     Write-Host "=== Test 9: version 5 MSVC-compatible mangling (--msvc-mangling, native C++ driver) ==="
     $failed = 0
-    $clObj = & $cl /nologo /c /EHsc "/Foout\x64\opt_cl.obj" "..\cppparse\examples\sample-opt\opt.cpp" 2>&1 | Out-String
+    $clObj = & $cl /nologo /c /EHsc "/Foout\x64\opt_cl.obj" "..\examples\sample-opt\opt.cpp" 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clObj; throw "cl could not compile sample-opt\opt.cpp" }
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-    $out = & $exe -O2 --obj --msvc-mangling -q -o out\x64 -n msvc "..\cppparse\examples\sample-opt" 2>&1 | Out-String
+    $out = & $exe -O2 --obj --msvc-mangling -q -o out\x64 -n msvc "..\examples\sample-opt" 2>&1 | Out-String
     $ErrorActionPreference = $eap
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path "out\x64\msvc.obj")) { Write-Host "  FAIL --msvc-mangling --obj:"; Write-Host $out; $failed++ }
     else {
@@ -337,7 +343,7 @@ try {
         $missing = @($clSyms | Where-Object { $ourSyms -notcontains $_ })
         if ($missing.Count -eq 0) { Write-Host "  ok   all $($clSyms.Count) function names cl produced are spelled identically by cppparse" }
         else { Write-Host "  FAIL $($missing.Count) of $($clSyms.Count) decorated names differ:"; $missing | ForEach-Object { Write-Host "    cl: $_" }; $ourSyms | Select-Object -First 40 | ForEach-Object { Write-Host "    ours: $_" }; $failed++ }
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\nativedriver.exe" "..\cppparse\examples\sample-opt-driver\driver-native.cpp" "out\x64\msvc.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\nativedriver.exe" "..\examples\sample-opt-driver\driver-native.cpp" "out\x64\msvc.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the native-declaration driver:"; Write-Host $clOut; $failed++ }
         else {
             Write-Host "  ok   linked driver-native.cpp (plain C++ declarations) with msvc.obj"
@@ -349,7 +355,7 @@ try {
 
     Write-Host "=== Test 10: version 6 preprocessor (-E against cl /EP) ==="
     $failed = 0
-    Push-Location "..\cppparse\examples\sample-pp"
+    Push-Location "..\examples\sample-pp"
     try {
         $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"   # cl prints the file name on stderr
         $clPp = & $cl /nologo /EP /Iinc pp.cpp 2>$null | Out-String
@@ -385,30 +391,30 @@ try {
 
     Write-Host "=== Test 11: version 6 parser (--parse6 on the samples and on cppparse's own sources) ==="
     $failed = 0
-    $p6 = & $exe --parse6 -o out\par -n opt6 "..\cppparse\examples\sample-opt\opt.cpp" 2>&1 | Out-String
+    $p6 = & $exe --parse6 -o out\par -n opt6 "..\examples\sample-opt\opt.cpp" 2>&1 | Out-String
     if ($p6 -match ' 0 syntax error\(s\)' -and $p6 -match 'classes 4, enums 0, functions defined 26' -and $p6 -match 'templates 2') { Write-Host "  ok   sample-opt parses without errors (4 classes, 26 functions, 2 templates)" }
     else { Write-Host "  FAIL sample-opt:"; Write-Host $p6; $failed++ }
     $ast = Get-Content "out\par\opt6-ast6.txt" -Raw
     if ($ast -match 'function int square\(int x\)' -and $ast -match 'struct BadIndex : public Failure' -and $ast -match 'template <typename T, int N>' -and $ast -match 'catch \(decl\)' -and $ast -match 'return x \* x') { Write-Host "  ok   AST dump shows functions, bases, templates, handlers and expressions" }
     else { Write-Host "  FAIL AST dump contents"; $failed++ }
-    $p6 = & $exe --parse6 -I ..\cppparse\examples\sample\include "..\cppparse\examples\sample\src\main.cpp" "..\cppparse\examples\sample\src\Shape.cpp" 2>&1 | Out-String
+    $p6 = & $exe --parse6 -I ..\examples\sample\include "..\examples\sample\src\main.cpp" "..\examples\sample\src\Shape.cpp" 2>&1 | Out-String
     if (($p6 | Select-String ' 0 syntax error' -AllMatches).Matches.Count -eq 2) { Write-Host "  ok   the VS2010 sample (namespaces, templates, operators, virtual bases) parses without errors" }
     else { Write-Host "  FAIL sample:"; Write-Host $p6; $failed++ }
-    $ownList = @(Get-ChildItem "..\cppparse\*.cpp" | ForEach-Object { $_.FullName }) + @(Get-ChildItem "..\cppparse\legacy\*.cpp" | ForEach-Object { $_.FullName })
-    $own = & $exe --parse6 -I ..\cppparse -I ..\cppparse\legacy $ownList 2>&1 | Out-String
+    $ownList = @(); $ownInc = @(); foreach ($d in $SourceDirs) { $ownList += @(Get-ChildItem "..\cppparse\$d\*.cpp" | ForEach-Object { $_.FullName }); $ownInc += @("-I", "..\cppparse\$d") }
+    $own = & $exe --parse6 @ownInc $ownList 2>&1 | Out-String
     $ownErrors = ($own | Select-String '\): error' -AllMatches).Matches.Count
     $ownFiles = ($own | Select-String ' 0 syntax error' -AllMatches).Matches.Count
     if ($ownErrors -eq 0 -and $ownFiles -ge 30) { Write-Host "  ok   all $ownFiles of cppparse's own sources parse without syntax errors (self-hosting step 1)" }
     else { Write-Host "  FAIL own sources: $ownErrors error(s):"; ($own | Select-String '\): error') | Select-Object -First 10 | ForEach-Object { Write-Host "    $($_.Line.Trim())" }; $failed++ }
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-    $bad = & $exe --parse6 (Get-ChildItem "..\cppparse\examples\sample-bad\*.cpp" | ForEach-Object { $_.FullName }) 2>&1 | Out-String
+    $bad = & $exe --parse6 (Get-ChildItem "..\examples\sample-bad\*.cpp" | ForEach-Object { $_.FullName }) 2>&1 | Out-String
     $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
     if ($rc -ne 0 -and $bad -match 'syntax error' -and $bad -match 'functions defined') { Write-Host "  ok   broken sample: errors reported, parsing continued" } else { Write-Host "  FAIL broken sample handling"; $failed++ }
     if ($failed -ne 0) { throw "$failed parser check(s) failed" }
 
     Write-Host "=== Test 12: version 6 semantic analysis (--sema6 on sample-opt and the samples) ==="
     $failed = 0
-    $s6 = & $exe --sema6 -o out\par -n opt6 "..\cppparse\examples\sample-opt\opt.cpp" 2>&1 | Out-String
+    $s6 = & $exe --sema6 -o out\par -n opt6 "..\examples\sample-opt\opt.cpp" 2>&1 | Out-String
     if ($s6 -match 'sema: 0 error\(s\)' -and $s6 -match 'functions analysed 26' -and $s6 -match 'unresolved 0' -and $s6 -match 'instantiations 1 classes / 1 functions') { Write-Host "  ok   sample-opt: no semantic errors, 26 functions, all names resolved, templates instantiated" }
     else { Write-Host "  FAIL sample-opt sema:"; Write-Host $s6; $failed++ }
     $sym = Get-Content "out\par\opt6-sym6.txt" -Raw
@@ -416,7 +422,7 @@ try {
     $missing = @($checks | Where-Object { $sym -notmatch $_ })
     if ($missing.Count -eq 0) { Write-Host "  ok   symbol dump: layouts, member functions, instantiated class and function template" }
     else { Write-Host "  FAIL symbol dump misses: $($missing -join ' | ')"; $failed++ }
-    $s6 = & $exe --sema6 -I ..\cppparse\examples\sample\include "..\cppparse\examples\sample\src\Shape.cpp" 2>&1 | Out-String
+    $s6 = & $exe --sema6 -I ..\examples\sample\include "..\examples\sample\src\Shape.cpp" 2>&1 | Out-String
     if ($s6 -match 'sema: \d+ error' -and $s6 -match 'calls resolved \d+' -and $s6 -notmatch 'ambiguous [1-9]') { Write-Host "  ok   the VS2010 sample analyses (errors only from missing std headers)" }
     else { Write-Host "  FAIL sample sema:"; Write-Host $s6; $failed++ }
     $bad = $s6 | Select-String '\): error S' | Where-Object { $_.Line -notmatch "std::|'size_t'|iterator" }
@@ -428,11 +434,11 @@ try {
     foreach ($lvl in @(0, 2)) {
         $obj = "out\x64\v6o${lvl}6.obj"
         $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -o out\x64 -n "v6o$lvl" "..\cppparse\examples\sample-opt\opt.cpp" 2>&1 | Out-String
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -o out\x64 -n "v6o$lvl" "..\examples\sample-opt\opt.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 at -O$lvl :"; Write-Host $c6; $failed++; continue }
         Write-Host "  ok   version 6 pipeline produced $obj (-O$lvl)"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\v6driver$lvl.exe" "..\cppparse\examples\sample-opt-driver\driver-native.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\v6driver$lvl.exe" "..\examples\sample-opt-driver\driver-native.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the native driver with the version 6 object:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\v6driver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   v6driver$lvl.exe: all results correct (-O$lvl, version 6 front end)" }
@@ -446,11 +452,11 @@ try {
     foreach ($lvl in @(0, 2, 3)) {
         $obj = "out\x64\life${lvl}6.obj"
         $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -o out\x64 -n "life$lvl" "..\cppparse\examples\sample-life\life.cpp" 2>&1 | Out-String
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -o out\x64 -n "life$lvl" "..\examples\sample-life\life.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 of sample-life at -O$lvl :"; Write-Host $c6; $failed++; continue }
         if ($c6 -match 'sema: 0 error') { Write-Host "  ok   sample-life analysed without errors (-O$lvl)" } else { Write-Host "  FAIL sample-life has semantic errors:"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\lifedriver$lvl.exe" "..\cppparse\examples\sample-life-driver\driver-life.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\lifedriver$lvl.exe" "..\examples\sample-life-driver\driver-life.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the lifetime driver:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\lifedriver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   lifedriver$lvl.exe: all 24 lifetime checks correct (-O$lvl)" }
@@ -462,14 +468,14 @@ try {
     if ($failed -ne 0) { throw "$failed object lifetime check(s) failed" }
 
     Write-Host ""
-    Write-Host "=== Test 15: version 6 standard library (cppparse/include: string, vector, map, set, algorithm, streams) ==="
+    Write-Host "=== Test 15: version 6 standard library (include/: string, vector, map, set, algorithm, streams) ==="
     $failed = 0
     foreach ($lvl in @(0, 2)) {
         $objs = @()
         foreach ($unit in @("examples\sample-lib\lib1.cpp", "examples\sample-lib\lib2.cpp", "examples\sample-lib\lib3.cpp", "libcpp\iostream.cpp")) {
             $name = [System.IO.Path]::GetFileNameWithoutExtension($unit) + "L$lvl"
             $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-            $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\cppparse\include -o out\x64 -n $name "..\cppparse\$unit" 2>&1 | Out-String
+            $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $name "..\$unit" 2>&1 | Out-String
             $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
             if ($rc -ne 0 -or -not (Test-Path "out\x64\${name}6.obj")) { Write-Host "  FAIL --compile6 of $unit at -O$lvl :"; Write-Host $c6; $failed++; continue }
             if ($c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL $unit has semantic errors:"; Write-Host $c6; $failed++; continue }
@@ -477,7 +483,7 @@ try {
         }
         if ($objs.Count -ne 4) { continue }
         Write-Host "  ok   the library samples and libcpp/iostream.cpp compile without errors (-O$lvl)"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\libdriver$lvl.exe" "..\cppparse\examples\sample-lib-driver\driver-lib.cpp" @objs "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\libdriver$lvl.exe" "..\examples\sample-lib-driver\driver-lib.cpp" @objs "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the library driver (COMDAT objects from four units):"; Write-Host $clOut; $failed++; continue }
         Write-Host "  ok   four objects link: inline functions and template instantiations are COMDAT"
         $run = & ".\out\x64\libdriver$lvl.exe" 2>&1 | Out-String
@@ -488,10 +494,10 @@ try {
     }
     # the version 6 mangler against cl on library types: every decorated name cl defines or references must be
     # spelled identically by cppparse (cl's own helpers are left out: deleting destructors, RTTI, sized delete)
-    $clOut = & $cl /nologo /c /EHsc /W3 /Od /X /I..\cppparse\include "/Foout\x64\mangle_cl.obj" "..\cppparse\examples\sample-mangle\mangle.cpp" 2>&1 | Out-String
+    $clOut = & $cl /nologo /c /EHsc /W3 /Od /X /I..\include "/Foout\x64\mangle_cl.obj" "..\examples\sample-mangle\mangle.cpp" 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-mangle\mangle.cpp" }
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-    $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\cppparse\include -o out\x64 -n mangle "..\cppparse\examples\sample-mangle\mangle.cpp" 2>&1 | Out-String
+    $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n mangle "..\examples\sample-mangle\mangle.cpp" 2>&1 | Out-String
     $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
     if ($rc -ne 0 -or -not (Test-Path "out\x64\mangle6.obj") -or $c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL --compile6 of sample-mangle:"; Write-Host $c6; $failed++ }
     else {
@@ -509,11 +515,11 @@ try {
     foreach ($lvl in @(0, 2, 3)) {
         $obj = "out\x64\self${lvl}6.obj"
         $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\cppparse\include -o out\x64 -n "self$lvl" "..\cppparse\examples\sample-self\self.cpp" 2>&1 | Out-String
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n "self$lvl" "..\examples\sample-self\self.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 of sample-self at -O$lvl :"; Write-Host $c6; $failed++; continue }
         if ($c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL sample-self has semantic errors:"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\selfdriver$lvl.exe" "..\cppparse\examples\sample-self-driver\driver-self.cpp" $obj "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\selfdriver$lvl.exe" "..\examples\sample-self-driver\driver-self.cpp" $obj "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the self-hosting driver:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\selfdriver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   selfdriver$lvl.exe: all 18 self-hosting checks correct (-O$lvl)" }

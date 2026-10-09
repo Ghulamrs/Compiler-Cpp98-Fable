@@ -20,6 +20,8 @@
 #ifndef CPPPARSE_PP_HPP
 #define CPPPARSE_PP_HPP
 
+#include "Target.hpp"
+
 #include <map>
 #include <set>
 #include <string>
@@ -64,6 +66,8 @@ struct PpOptions {
     std::vector<std::string> includeDirs;
     std::vector<std::string> defines;      // "NAME" or "NAME=value"
     std::vector<std::string> undefines;
+    const Target*            target;       // its macros are predefined; 0: the default target
+    PpOptions() : target(0) {}
 };
 
 class Preprocessor {

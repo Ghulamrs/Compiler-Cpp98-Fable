@@ -6,16 +6,18 @@ param([string]$Stage = "all")
 New-Item -ItemType Directory -Force "$Sandbox\out\refobj", "$Sandbox\out\mix" | Out-Null
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
-$units = @(); foreach ($f in (Get-ChildItem "..\cppparse\*.cpp") + (Get-ChildItem "..\cppparse\legacy\*.cpp")) { $units += $f }
+$units = $OwnSources
+# cl with /X sees only cppparse's headers: the same include folders as the self-build, in cl's spelling
+$clIncludes = @(); for ($k = 1; $k -lt $OwnIncludes.Count; $k += 2) { $clIncludes += "/I" + $OwnIncludes[$k] }
 if ($Stage -eq "all" -or $Stage -eq "ref") {
     $bad = 0
     foreach ($f in $units) {
         $n = $f.BaseName
-        $out = & $cl /nologo /c /EHsc /W3 /Od /X /I..\cppparse /I..\cppparse\legacy /I..\cppparse\include "/Foout\refobj\$n.obj" $f.FullName 2>&1 | Out-String
+        $out = & $cl /nologo /c /EHsc /W3 /Od /X @clIncludes "/Foout\refobj\$n.obj" $f.FullName 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { $bad++; Write-Host "cl FAILED on $n :"; Write-Host ($out.Split("`n") | Select-String -Pattern "error" | Select-Object -First 4 | ForEach-Object { $_.Line }) }
     }
-    & $cl /nologo /c /EHsc /W3 /Od /X /I..\cppparse\include "/Foout\refobj\iostream.obj" "..\cppparse\libcpp\iostream.cpp" | Out-Null
-    & $cl /nologo /c /EHsc /W3 "/Foout\refobj\cppparse_rt.obj" "..\cppparse\runtime\cppparse_rt.cpp" | Out-Null
+    & $cl /nologo /c /EHsc /W3 /Od /X /I..\include "/Foout\refobj\iostream.obj" "..\libcpp\iostream.cpp" | Out-Null
+    & $cl /nologo /c /EHsc /W3 "/Foout\refobj\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" | Out-Null
     Write-Host "reference objects with cppparse's headers: $($units.Count - $bad) ok, $bad failed"
 }
 function LinkAndRun([string]$name, [string[]]$objs) {
@@ -23,7 +25,7 @@ function LinkAndRun([string]$name, [string[]]$objs) {
     if (Test-Path $exe) { Remove-Item $exe }
     $lo = & $link /nologo /SUBSYSTEM:CONSOLE "/OUT:$exe" @objs "out\refobj\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Out-String
     if (-not (Test-Path $exe)) { return "link failed: " + (($lo.Split("`n") | Select-String -Pattern "error" | Select-Object -First 2 | ForEach-Object { $_.Line }) -join " | ") }
-    $p = Start-Process -FilePath $exe -ArgumentList "--compile6 -O0 -q -I ..\cppparse\include -o out\mix -n probe ..\cppparse\examples\sample-opt\opt.cpp" -NoNewWindow -PassThru -RedirectStandardOutput "out\mix\$name.out" -RedirectStandardError "out\mix\$name.err"
+    $p = Start-Process -FilePath $exe -ArgumentList "--compile6 -O0 -q -I ..\include -o out\mix -n probe ..\examples\sample-opt\opt.cpp" -NoNewWindow -PassThru -RedirectStandardOutput "out\mix\$name.out" -RedirectStandardError "out\mix\$name.err"
     $null = $p.Handle   # keeps the process handle so that ExitCode is available after the exit
     if (-not $p.WaitForExit(120000)) { $p.Kill(); return "timeout" }
     return "exit $($p.ExitCode)"

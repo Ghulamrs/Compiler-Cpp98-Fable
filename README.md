@@ -128,7 +128,7 @@ the functions and globals never referenced anywhere, and the entry point.
 powershell -ExecutionPolicy Bypass -File cpp\sandbox\build-cppparse.ps1 [-Config Release|Debug] [-NoTests]
 ```
 
-Compiles every `cppparse/*.cpp` and `cppparse/legacy/*.cpp` with MSVC at
+Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend` and `analyzer` with MSVC at
 `/W4 /permissive-` (warnings fail the build). `-Config Release` (default)
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
@@ -139,7 +139,11 @@ version 6) run against whichever configuration was built.
 A Visual Studio 2022 solution does the same build inside the IDE:
 `cpp\cppparse.sln` with the project `cppparse\cppparse.vcxproj` (x64,
 Debug and Release, `/W4 /permissive-` with warnings as errors, output in
-`sandbox\vs\<Configuration>\`). The project names the v143 toolset; a
+`sandbox\vs\<Configuration>\`). The project compiles only the folders of
+`cppparse\`; `include\`, `platform\`, `libcpp\`, `runtime\`, `docs\` and this
+README appear in Solution Explorer as non-compiled items, each under a filter
+of its folder's name (`cppparse.vcxproj.filters`). Every list is a wildcard,
+so a new file is picked up without editing the project. The project names the v143 toolset; a
 newer Visual Studio retargets it on opening, and MSBuild builds it with
 `/p:PlatformToolset=<installed toolset>`:
 
@@ -152,12 +156,14 @@ test suite: `lib.ps1` and `life.ps1` (the library and lifetime samples
 with their native drivers), `selfhost.ps1` (compiles cppparse's own
 sources with cppparse and links `cppparse-self.exe`), `mix.ps1` (builds a
 layout-compatible reference with cl against cppparse's headers and swaps
-cppparse's objects in one unit at a time). The first four: the Visual Studio 2010 solution in
+cppparse's objects in one unit at a time), `cprog.ps1` (builds the multi-file
+C sample `examples/sample-c/` with cl as C and as C++ and with each generation
+of cppparse, and compares the programs' output). The first four: the Visual Studio 2010 solution in
 `examples/sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken
 folder `examples/sample-bad/`, which must produce every health code. Any C++98 compiler works for the sources themselves, e.g.
-`g++ -std=c++98 -pedantic -Wall -o cppparse cppparse/*.cpp`.
+`g++ -std=c++98 -pedantic -Wall -Icppparse/driver -Icppparse/common -Icppparse/frontend -Icppparse/middle -Icppparse/backend -Icppparse/analyzer -o cppparse cppparse/{driver,common,frontend,middle,backend,analyzer}/*.cpp` (on a host without Windows the worker pool runs the jobs one after another).
 
 ## How it works
 
@@ -370,19 +376,64 @@ the functions as plain C++, against cppparse's object and runs it.
 
 ## Source layout
 
-- `cppparse/`: the version 6 pipeline and the shared back end:
-  `Pp` (preprocessor), `CxxAst`/`CxxParser` (syntax tree and parser),
-  `Sema`/`SemaExpr` (semantic analysis), `Ir` (the intermediate
-  representation), `Optimizer`, `Ssa`, `Lower` (VM64), `X86`, `Coff`,
-  `Mangle`, `BackEnd` (the shared driver), `Parallel`, `PathUtil`,
-  `main`, and `runtime/` (the exception runtime).
-- `cppparse/legacy/`: the version 1 to 5 front end and the reports,
-  kept until the version 6 pipeline replaces them: `Lexer`, `Parser`,
-  `Model`, `CodeBase`, `ProjectReader`, `Report`, `Html`, `Pdf`,
-  `Diagram`, `Symbols`, `Health`, `Ast`, `BodyParser`, `TypeCheck`,
-  `Types`, `Instantiate`, `IrBuilder` (old IR generation and class
-  layouts) and `Compiler` (the old driver). They compile with the rest
-  (`/I legacy`) and are exercised by tests 1 to 9.
+`cppparse/` holds only the compiler's own sources. The version 6 sources are grouped by the stage of the
+compiler they belong to; every folder is an include directory of the build (`build-cppparse.ps1`,
+`cppparse.vcxproj`), so `#include "X.hpp"` works across them.
+
+- `driver/`: `main` (command line and the modes).
+- `common/`: `PathUtil` (strings, paths, files), `Parallel` (the worker pool), `Target` (the target
+  description, see below).
+- `frontend/`: `Pp` (preprocessor), `CxxAst`/`CxxParser` (syntax tree and parser), `Sema`/`SemaExpr`
+  (semantic analysis).
+- `middle/`: `IrGen` (IR from the analysed tree), `Ir` (the intermediate representation), `Optimizer`, `Ssa`.
+- `backend/`: `BackEnd` (the shared driver of the phases below), `Lower` (VM64), `X86` (x86-64 assembly),
+  `Coff` (the object writer), `Mangle`/`MangleSema` (MSVC name decoration, part of the target's ABI).
+- `analyzer/`: the version 1 to 5 pipeline: project reading, the health checker and the reports, and the old
+  compile path kept until the version 6 pipeline replaces it: `Lexer`, `Parser`, `Model`, `CodeBase`,
+  `ProjectReader`, `Report`, `Html`, `Pdf`, `Diagram`, `Symbols`, `Health`, `Ast`, `BodyParser`, `TypeCheck`,
+  `Types`, `Instantiate`, `IrBuilder` (old IR generation and class layouts) and `Compiler` (the old driver).
+  They are exercised by tests 1 to 9.
+
+Everything that is not compiler source sits next to `cppparse/` in the `cpp` folder:
+
+- `include/`: cppparse's C++98 library headers (`<string>`, `<vector>`, `<map>`, `<iostream>`...) and the C
+  headers C++98 defines (`stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `math.h`, `stddef.h`). Only standard
+  headers live here.
+- `platform/`: the minimal Windows declarations cppparse's own sources use (`windows.h` for the worker pool,
+  `io.h`, `direct.h`, `sys/stat.h`, `sys/types.h` for the file helpers). They are not a Windows SDK: only the
+  self-build passes `-I platform` (`sandbox/scripts/toolset.ps1`), and each stops with `#error` when
+  `_WIN32` is not defined.
+- `libcpp/` (`cout`, `cerr`, `cin`), `runtime/` (the exception runtime, built by cl for the Windows target),
+  `examples/` (the test inputs), `docs/`.
+
+## Targets, predefined macros and platform code
+
+A target says what cppparse compiles for: its predefined macros, the sizes of `long`, `wchar_t`, `long double`
+and pointers, the type of `size_t`, the calling convention, the name mangling and the object format
+(`common/Target.cpp`). `--target` selects it:
+
+| target | macros | sizes | ABI, mangling, objects | status |
+|---|---|---|---|---|
+| `x86_64-windows` (default) | `_WIN32=1`, `_WIN64=1`, `_M_X64=100` | `long` 4, `wchar_t` 2, `long double` 8, `size_t` = `unsigned long long` | Microsoft x64, MSVC, COFF | complete |
+| `x86_64-linux` | `__linux__`, `__unix__`, `__x86_64__`, `__LP64__`, `__ELF__` (and the short spellings) | `long` 8, `wchar_t` 4, `long double` 16 (aligned 16), `size_t` = `unsigned long` | System V, Itanium, ELF | `-E`, `--parse6`, `--sema6`; no back end yet |
+
+Every target also has `__cplusplus=199711L`, `__cppparse__=6` and `__STDC__=1`. `_MSC_VER` and `_DEBUG` are never
+predefined: code under them is MSVC's alone. The Linux sizes and macros agree with
+`clang --target=x86_64-linux-gnu`, which will be the reference for the Linux back end as cl is for Windows.
+`--compile6` refuses a target without a back end, and stops at a missing include file instead of compiling
+against undeclared names (the analysis modes only warn).
+
+The host is a different matter from the target: cppparse's own sources are strict C++98, and every call outside
+the standard library sits behind `#ifdef _WIN32` with a standard fallback. `common/Parallel.cpp` uses Windows
+threads there and runs the jobs one after another elsewhere (C++98 has no threads); `common/PathUtil.cpp` uses
+the MSVC directory functions there and POSIX `opendir`/`getcwd` elsewhere; the debug-build assertion hook of
+`driver/main.cpp` is under `_MSC_VER`. When cppparse compiles itself for the Windows target it defines `_WIN32`
+and takes the Windows branches, with the declarations of `platform/`.
+
+Library names the checkers recognise in analysed code are grouped by origin (`libraryNameOrigin` in
+`common/PathUtil.cpp`): ISO C90 functions and macros, C99 additions, the C++98 library, later C++, POSIX, the MSVC
+runtime, Win32 functions and Win32 macros. `isStandardLibraryName` is true for ISO C90 and C++98 only; this is
+data about the analysed program, so none of it depends on the host.
 
 ## Version 6: a clean front end (in progress)
 
@@ -586,7 +637,7 @@ intervals of values that cross a loop's back edge. Test 15 compiles the
 three samples and `libcpp/iostream.cpp` to four objects, links them
 with `examples/sample-lib-driver/driver-lib.cpp` and runs 13 checks at
 `-O0` and `-O2`. Measured against the self-hosting target: analysing
-cppparse's own 39 sources with these headers (`--sema6 -I cppparse/include`)
+cppparse's own 39 sources with these headers (`--sema6 -I include`)
 reports 78 errors in total, against 1548 without them; the rest are
 overloads and conversions the analysis does not resolve yet, plus a few
 types the headers still lack.
@@ -690,7 +741,7 @@ self-built compiler compiles exactly as the MSVC-built one (all 36). The
 stage takes about three minutes (`-SkipBootstrap` leaves it out).
 `build-cppparse.ps1 -Exe sandbox/out/selfhost/cppparse-self.exe` skips the
 MSVC build and runs all 16 test groups with the self-built compiler. That
-exercised the legacy pipeline, folder mode, the reports and the worker
+exercised the old pipeline (`analyzer/`), folder mode, the reports and the worker
 threads in self-built code for the first time and found these defects:
 static locals were initialised under a plain guard byte, so two workers
 could both run the initializer or use an object not yet built (the guard

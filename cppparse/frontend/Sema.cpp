@@ -84,6 +84,17 @@ TypeTable::TypeTable()
         t.kind = static_cast<Type::Kind>(k);
         m_basic[k] = (k >= Type::Pointer && k <= Type::Dependent) ? 0 : intern(t);
     }
+    setTarget(defaultTarget());
+}
+
+void TypeTable::setTarget(const Target& target)
+{
+    m_pointerSize = target.pointerSize;
+    m_longSize = target.longSize;
+    m_wcharSize = target.wcharSize;
+    m_longDoubleSize = target.longDoubleSize;
+    m_maxAlign = target.maxScalarAlign;
+    m_sizeIsLong = target.sizeTypeIsLong;
 }
 
 TypeTable::~TypeTable()
@@ -149,9 +160,13 @@ int TypeTable::sizeOf(const Type* t) const
     switch (t->kind) {
     case Type::Void: return 1;
     case Type::Bool: case Type::Char: case Type::SChar: case Type::UChar: return 1;
-    case Type::WChar: case Type::Short: case Type::UShort: return 2;
-    case Type::Int: case Type::UInt: case Type::Long: case Type::ULong: case Type::Float: case Type::Enum: return 4;
-    case Type::LongLong: case Type::ULongLong: case Type::Double: case Type::LongDouble: case Type::Pointer: case Type::Reference: case Type::NullPtr: case Type::MemberPointer: return 8;
+    case Type::Short: case Type::UShort: return 2;
+    case Type::WChar: return m_wcharSize;
+    case Type::Int: case Type::UInt: case Type::Float: case Type::Enum: return 4;
+    case Type::Long: case Type::ULong: return m_longSize;
+    case Type::LongLong: case Type::ULongLong: case Type::Double: return 8;
+    case Type::LongDouble: return m_longDoubleSize;
+    case Type::Pointer: case Type::Reference: case Type::NullPtr: case Type::MemberPointer: return m_pointerSize;
     case Type::Array: return t->arraySize > 0 ? static_cast<int>(t->arraySize) * sizeOf(t->inner) : 0;
     case Type::Class: return t->decl && t->decl->layoutDone ? t->decl->size : 8;
     default: return 8;
@@ -164,7 +179,7 @@ int TypeTable::alignOf(const Type* t) const
     if (t->kind == Type::Array) return alignOf(t->inner);
     if (t->kind == Type::Class) return t->decl && t->decl->layoutDone ? t->decl->align : 8;
     int s = sizeOf(t);
-    return s > 8 ? 8 : (s < 1 ? 1 : s);
+    return s > m_maxAlign ? m_maxAlign : (s < 1 ? 1 : s);
 }
 
 int TypeTable::rank(const Type* t) const
@@ -212,7 +227,7 @@ Symbol::Symbol()
       isDestructor(false), isConversion(false), isOperator(false), isFriendDecl(false), hasBody(false), isExternC(false),
       definition(0), declAst(0), body(0), vtableSlot(-1), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
       isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), templateAst(0), instantiatedFrom(0),
-      isDependentContext(false), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
+      isDependentContext(false), isImplicitInstantiation(false), isLazyInstantiation(false), instantiationFailed(false), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
       hasCopyAssign(false), hasDefaultCtor(false) {}
 
 std::string Symbol::qualifiedName() const
@@ -566,6 +581,7 @@ void Sema::analyze(cxx::TranslationUnit& tu, const std::vector<std::string>& fil
     m_files = files;
     declareAll(tu.decls, m_prog.global, cxx::AccessPublic);
     analyzeBodies();
+    reportUsedFailedMembers();
 }
 
 void Sema::declareAll(const std::vector<cxx::Decl*>& decls, Scope* in, cxx::Access access)
@@ -1202,6 +1218,7 @@ const Type* Sema::instantiateClassTemplate(Symbol* tmpl, const std::vector<cxx::
     }
     Symbol* cls = m_prog.newSymbol(Symbol::Class, tmpl->name + key, iscope);
     cls->type = m_types.classType(cls); cls->instantiatedFrom = tmpl; cls->templateArgs = types; cls->templateIntArgs = ints; cls->loc = loc;
+    cls->isImplicitInstantiation = true;
     tmpl->instantiations[key] = cls;
     ++m_stats.classInstantiations;
     // the class template's name inside the instantiation means the instantiation (injected class name)

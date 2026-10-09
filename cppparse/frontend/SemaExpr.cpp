@@ -251,7 +251,17 @@ Conversion Sema::convertType(const Type* from, bool lvalue, bool nullConstant, c
         const Type* ru = m_types.unqualified(ref);
         const Type* su = m_types.unqualified(src);
         bool cvOk = (!src->isConst || ref->isConst) && (!src->isVolatile || ref->isVolatile);
-        if (ru == su || (su->kind == Type::Array && ru->kind == Type::Array && su->inner == ru->inner)) {
+        // the cv-qualifiers of an array are those of its elements (8.3.4): double[4] binds to const double (&)[4]
+        bool sameArray = false;
+        if (su->kind == Type::Array && ru->kind == Type::Array) {
+            const Type* se = su; const Type* re = ru;
+            while (se->kind == Type::Array && re->kind == Type::Array && se->arraySize == re->arraySize) { se = se->inner; re = re->inner; }
+            if (se->kind != Type::Array && re->kind != Type::Array && m_types.unqualified(se) == m_types.unqualified(re)) {
+                sameArray = true;
+                cvOk = cvOk && (!se->isConst || re->isConst) && (!se->isVolatile || re->isVolatile);
+            }
+        }
+        if (ru == su || sameArray || (su->kind == Type::Array && ru->kind == Type::Array && su->inner == ru->inner)) {
             if (srcLvalue && cvOk) { c.rank = Conversion::Exact; c.qualification = ru != su || src->isConst != ref->isConst; return c; }
             if (ref->isConst && !ref->isVolatile) { c.rank = Conversion::Exact; return c; }      // const T& binds a temporary
             return c;
@@ -460,7 +470,28 @@ bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::
         const cxx::DeclaratorPart& pt = parts[i - 1];
         if (pt.kind == cxx::DeclaratorPart::Reference) { if (a->kind == Type::Reference) a = a->inner; continue; }
         if (pt.kind == cxx::DeclaratorPart::Pointer) { if (a->kind != Type::Pointer) return false; a = a->inner; continue; }
-        if (pt.kind == cxx::DeclaratorPart::Array) { if (a->kind != Type::Array && a->kind != Type::Pointer) return false; a = a->inner; continue; }
+        if (pt.kind == cxx::DeclaratorPart::Array) {
+            if (a->kind != Type::Array && a->kind != Type::Pointer) return false;
+            // the bound: "T (&a)[N]" deduces N from an array argument (14.8.2.4); a constant bound must match
+            cxx::Expr* bound = pt.arraySize;
+            bool boundIsParam = false;
+            if (bound && bound->kind == cxx::Expr::Name && bound->name.parts.size() == 1 && !bound->name.global && tscope) {
+                const std::vector<Symbol*>* v = tscope->find(bound->name.parts[0].ident);
+                if (v) for (size_t k = 0; k < v->size(); ++k) if ((*v)[k]->kind == Symbol::TemplateParam) boundIsParam = true;
+            }
+            if (boundIsParam) {
+                if (a->kind != Type::Array || a->arraySize < 0) return false;   // a pointer carries no bound
+                const std::string& pn = bound->name.parts[0].ident;
+                std::map<std::string, long>::iterator it = ints.find(pn);
+                if (it == ints.end()) ints[pn] = a->arraySize;
+                else if (it->second != a->arraySize) return false;
+            } else if (bound && byRef && a->kind == Type::Array && a->arraySize >= 0) {
+                long n;
+                if (constantValue(bound, n) && n != a->arraySize) return false;
+            }
+            a = a->inner;
+            continue;
+        }
         return false;
     }
     const cxx::DeclSpec& spec = p->spec;
@@ -901,6 +932,7 @@ cxx::Expr* Sema::boolContext(cxx::Expr* e, Scope* in)
     cxx::Expr* w = nodeArena().expr(cxx::Expr::Cast, e->loc);
     w->kids.push_back(e);
     w->semaSym = c.userFunction;
+    noteUse(c.userFunction);
     w->semaType = c.userFunction->type && c.userFunction->type->kind == Type::Function ? c.userFunction->type->inner : m_types.basic(Type::Bool);
     return w;
 }
@@ -909,6 +941,7 @@ cxx::Expr* Sema::boolContext(cxx::Expr* e, Scope* in)
 // constructor is applied by the IR generator where the object is built, so the operand stays as it is)
 cxx::Expr* Sema::converted(cxx::Expr* e, const Conversion& c)
 {
+    noteUse(c.userFunction);                    // a conversion operator, or a converting constructor
     if (!c.userFunction || !c.userFunction->isConversion) return e;
     cxx::Expr* w = nodeArena().expr(cxx::Expr::Cast, e->loc);
     w->kids.push_back(e);
@@ -982,7 +1015,7 @@ const Type* Sema::exprBinary(cxx::Expr* e, Scope* in)
         }
         if (l->kind == Type::Pointer && r->isIntegral()) return l;
         if (op == "+" && l->isIntegral() && r->kind == Type::Pointer) return r;
-        if (op == "-" && l->kind == Type::Pointer && r->kind == Type::Pointer) return m_types.basic(Type::LongLong);
+        if (op == "-" && l->kind == Type::Pointer && r->kind == Type::Pointer) return m_types.ptrdiffType();
         error(e->loc, "S109", "invalid operands for " + op + ": " + l->text() + " and " + r->text());
         return m_types.error();
     }
@@ -1218,8 +1251,8 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         if (to->kind == Type::Reference) e->semaLvalue = true;
         break;
     }
-    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.basic(Type::ULongLong); if (ot->kind != Type::Dependent && ot->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
-    case cxx::Expr::SizeofType: { const Type* st = typeOf(e->type->spec, in); if (e->type->decl) st = applyDeclarator(st, *e->type->decl, in, 0); t = m_types.basic(Type::ULongLong); if (st->kind != Type::Dependent && st->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(st); } break; }
+    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.sizeType(); if (ot->kind != Type::Dependent && ot->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
+    case cxx::Expr::SizeofType: { const Type* st = typeOf(e->type->spec, in); if (e->type->decl) st = applyDeclarator(st, *e->type->decl, in, 0); t = m_types.sizeType(); if (st->kind != Type::Dependent && st->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(st); } break; }
     case cxx::Expr::New: t = exprNew(e, in); break;
     case cxx::Expr::Delete: { expr(e->kids[0], in); const Type* pt = valueType(e->kids[0]); if (pt->kind != Type::Pointer && pt->kind != Type::Dependent && pt->kind != Type::Error) error(e->loc, "S109", "delete of a non-pointer of type " + pt->text()); t = m_types.basic(Type::Void); break; }
     case cxx::Expr::Throw: if (!e->kids.empty()) expr(e->kids[0], in); t = m_types.basic(Type::Void); break;
@@ -1229,6 +1262,7 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
     }
     --m_depth;
     e->semaType = t ? t : m_types.error();
+    noteUse(e->semaSym);                        // a call, an operator, a named or address-taken function
     return e->semaType;
 }
 
@@ -1274,6 +1308,7 @@ void Sema::localDecl(cxx::Decl* d, Scope* in, bool isHandler)
                 else id.init.args[0] = converted(id.init.args[0], c);
             } else {
                 var->initCtor = resolveOverload(ctors, id.init.args, 0, 0, in, dcl->loc, tu->decl->name + "::" + tu->decl->name, true);
+                noteUse(var->initCtor);
             }
             continue;
         }
@@ -1397,8 +1432,7 @@ void Sema::analyzeFunctionBody(Symbol* fn, cxx::Decl* def, Scope* enclosing)
         const Type* tu = m_types.unref(tt);
         if (tu->kind == Type::Class && tu->decl && tu->decl->isDefinition) {
             std::vector<Symbol*> ctors; lookupMember(tu->decl, tu->decl->ctorName(), ctors);
-            Symbol* c = resolveOverload(ctors, mi.args, 0, 0, fs, mi.loc, tu->decl->name + "::" + tu->decl->name, true);
-            (void)c;
+            noteUse(resolveOverload(ctors, mi.args, 0, 0, fs, mi.loc, tu->decl->name + "::" + tu->decl->name, true));
         } else if (mi.args.size() == 1) {
             Conversion c = convert(mi.args[0], tt, fs);
             if (c.rank == Conversion::None && valueType(mi.args[0])->kind != Type::Error) error(mi.loc, "S105", "cannot initialise '" + mi.name.text() + "' of type " + tt->text() + " from " + valueType(mi.args[0])->text());
@@ -1410,12 +1444,75 @@ void Sema::analyzeFunctionBody(Symbol* fn, cxx::Decl* def, Scope* enclosing)
     ++m_stats.functionsDefined;
 }
 
+bool Sema::isLazyMember(const Symbol* fn) const
+{
+    if (fn->kind != Symbol::Function || fn->isVirtual) return false;   // the vtable needs every virtual member
+    // a function template specialisation exists only because something referred to it, and that something may
+    // itself be a member nobody uses (Vector<Vector<double, 3>, 3>::normalized calling operator/)
+    if (fn->instantiatedFrom && fn->instantiatedFrom->kind == Symbol::FunctionTemplate) return true;
+    // a member of an implicit instantiation, or of a class nested in one
+    for (const Symbol* c = fn->ownerClass; c; c = (c->scope && c->scope->kind == Scope::Class) ? c->scope->owner : 0)
+        if (c->isImplicitInstantiation) return true;
+    return false;
+}
+
+void Sema::noteUse(Symbol* used)
+{
+    if (used && used->kind == Symbol::Function) m_uses[m_currentFunction].insert(used);
+}
+
+const std::vector<Diag>* Sema::heldDiagnostics(Symbol* fn) const
+{
+    std::map<Symbol*, std::vector<Diag> >::const_iterator it = m_held.find(fn);
+    return it == m_held.end() ? 0 : &it->second;
+}
+
+void Sema::reportUsedFailedMembers()
+{
+    if (m_held.empty()) return;
+    // everything that is not a tentatively analysed member is real code; walk what it uses
+    std::vector<Symbol*> work;
+    std::set<Symbol*> reached;
+    for (std::map<Symbol*, std::set<Symbol*> >::iterator it = m_uses.begin(); it != m_uses.end(); ++it)
+        if (!m_lazyMembers.count(it->first)) work.push_back(it->first);
+    while (!work.empty()) {
+        Symbol* f = work.back(); work.pop_back();
+        std::map<Symbol*, std::set<Symbol*> >::iterator u = m_uses.find(f);
+        if (u == m_uses.end()) continue;
+        for (std::set<Symbol*>::iterator g = u->second.begin(); g != u->second.end(); ++g)
+            if (m_lazyMembers.count(*g) && reached.insert(*g).second) work.push_back(*g);
+    }
+    // a used member's errors are real (in symbol creation order, so the output does not depend on addresses)
+    for (size_t i = 0; i < m_prog.symbols.size(); ++i) {
+        Symbol* f = m_prog.symbols[i];
+        if (!reached.count(f) || !m_held.count(f)) continue;
+        const std::vector<Diag>& held = m_held[f];
+        m_diags.insert(m_diags.end(), held.begin(), held.end());
+    }
+}
+
 void Sema::analyzeBodies()
 {
     // instantiations may queue more bodies while others are analysed
     for (size_t i = 0; i < m_pending.size(); ++i) {
         PendingBody pb = m_pending[i];
-        if (pb.fn->kind == Symbol::Function) { if (pb.fn->body) continue; analyzeFunctionBody(pb.fn, pb.def, pb.scope); continue; }
+        if (pb.fn->kind == Symbol::Function) {
+            if (pb.fn->body) continue;
+            if (!isLazyMember(pb.fn)) { analyzeFunctionBody(pb.fn, pb.def, pb.scope); continue; }
+            // tentative: errors are held back until the member turns out to be used
+            m_lazyMembers.insert(pb.fn);
+            pb.fn->isLazyInstantiation = true;
+            size_t mark = m_diags.size();
+            analyzeFunctionBody(pb.fn, pb.def, pb.scope);
+            bool failed = false;
+            for (size_t k = mark; k < m_diags.size(); ++k) if (m_diags[k].severity == Diag::Error) failed = true;
+            if (failed) {
+                pb.fn->instantiationFailed = true;
+                m_held[pb.fn].assign(m_diags.begin() + static_cast<long>(mark), m_diags.end());
+                m_diags.resize(mark);
+            }
+            continue;
+        }
         // a namespace-scope or static member variable initializer
         Symbol* var = pb.fn;
         if (!var->init) continue;
@@ -1440,6 +1537,7 @@ void Sema::analyzeBodies()
             std::vector<Symbol*> ctors;
             lookupMember(tu->decl, tu->decl->ctorName(), ctors);
             var->initCtor = resolveOverload(ctors, args, 0, 0, scope, var->loc, tu->decl->name + "::" + tu->decl->name, true);
+            noteUse(var->initCtor);
         } else if (var->type->kind != Type::Array && var->init->kind != cxx::Expr::Error) {
             Conversion c = convert(var->init, var->type, pb.scope);
             if (c.rank == Conversion::None && valueType(var->init)->kind != Type::Error) error(var->loc, "S105", "cannot initialise '" + var->name + "' of type " + var->type->text() + " from " + valueType(var->init)->text());

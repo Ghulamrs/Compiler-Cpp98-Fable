@@ -42,7 +42,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <ConformanceMode>true</ConformanceMode>
       <ExceptionHandling>Sync</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)legacy;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)driver;$(ProjectDir)common;$(ProjectDir)frontend;$(ProjectDir)middle;$(ProjectDir)backend;$(ProjectDir)analyzer;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
@@ -66,17 +66,27 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="*.cpp" />
-    <ClCompile Include="legacy\*.cpp" />
+    <ClCompile Include="driver\*.cpp" />
+    <ClCompile Include="common\*.cpp" />
+    <ClCompile Include="frontend\*.cpp" />
+    <ClCompile Include="middle\*.cpp" />
+    <ClCompile Include="backend\*.cpp" />
+    <ClCompile Include="analyzer\*.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="*.hpp" />
-    <ClInclude Include="legacy\*.hpp" />
+    <ClInclude Include="common\*.hpp" />
+    <ClInclude Include="frontend\*.hpp" />
+    <ClInclude Include="middle\*.hpp" />
+    <ClInclude Include="backend\*.hpp" />
+    <ClInclude Include="analyzer\*.hpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="README.md" />
-    <None Include="runtime\cppparse_rt.cpp" />
-    <None Include="libcpp\iostream.cpp" />
+    <None Include="..\README.md" />
+    <None Include="..\docs\*.md" />
+    <None Include="..\include\*" />
+    <None Include="..\platform\**\*.h" />
+    <None Include="..\runtime\cppparse_rt.cpp" />
+    <None Include="..\libcpp\iostream.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -3,6 +3,7 @@
 #include "Mangle.hpp"
 #include "PathUtil.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 
@@ -1147,6 +1148,9 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
         if (needsDtor(ct)) registerCleanup(slot, ct, false, 1, line);
         return r;
     }
+    // "t(c, r)" with t an object: operator() on t, also inside a member function of t's own class, where
+    // a plain name would otherwise call through the implicit this
+    const bool objectCall = fn->isOperator && fn->name == "operator()" && callee->kind == cxx::Expr::Name && callee->name.last() != "operator()";
     if (callee->kind == cxx::Expr::Member && fn->ownerClass && !fn->isStatic) {
         cxx::Expr* obj = callee->kids[0];
         const sema::Type* objT = m_semaTypes.unref(exprType(obj));
@@ -1157,7 +1161,7 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
         objT = m_semaTypes.unqualified(objT);
         if (objT->kind == sema::Type::Class && objT->decl && objT->decl != fn->ownerClass) thisPtr = convert(thisPtr, m_semaTypes.pointer(objT), m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass)), line);
         virtualCall = callee->name.parts.size() == 1;
-    } else if (callee->kind != cxx::Expr::Member && fn->ownerClass && !fn->isStatic && m_out->hasThis) {
+    } else if (callee->kind != cxx::Expr::Member && !objectCall && fn->ownerClass && !fn->isStatic && m_out->hasThis) {
         thisPtr = thisTemp(line);
         if (m_fn->ownerClass != fn->ownerClass) thisPtr = convert(thisPtr, m_semaTypes.pointer(m_semaTypes.classType(m_fn->ownerClass)), m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass)), line);
         virtualCall = callee->kind == cxx::Expr::Name && callee->name.parts.size() == 1;
@@ -1858,6 +1862,10 @@ void IrGen::stmt(cxx::Stmt* s)
 void IrGen::need(Symbol* fn)
 {
     if (!fn || fn->kind != Symbol::Function || m_done.count(fn)) return;
+    if (fn->instantiationFailed) {          // never generated: its body did not analyse
+        if (std::find(m_failedUsed.begin(), m_failedUsed.end(), fn) == m_failedUsed.end()) m_failedUsed.push_back(fn);
+        return;
+    }
     if (fn->isImplicit || (fn->hasBody && fn->definition)) m_queue.push_back(fn);
 }
 
@@ -2107,7 +2115,8 @@ void IrGen::generate(std::vector<IrFunction*>& out)
     m_outList = &out;
     for (size_t i = 0; i < m_prog.symbols.size(); ++i) {
         Symbol* s = m_prog.symbols[i];
-        if (s->kind == Symbol::Function && s->hasBody && s->definition && !s->isDependentContext && !(s->ownerClass && s->ownerClass->isDependentContext)) m_queue.push_back(s);
+        if (s->kind == Symbol::Function && s->hasBody && s->definition && !s->isDependentContext && !(s->ownerClass && s->ownerClass->isDependentContext)
+            && !s->isLazyInstantiation) m_queue.push_back(s);   // template instantiations: only through need()
     }
     for (size_t i = 0; i < m_queue.size(); ++i) {
         Symbol* fn = m_queue[i];

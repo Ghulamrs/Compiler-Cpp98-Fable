@@ -147,6 +147,7 @@ private:
     int    construct(sema::Symbol* ctor, int objAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, int line);
     int    argument(cxx::Expr* a, const sema::Type* paramType, int line);
     void   stmt(cxx::Stmt* s);
+    int    labelBlock(const std::string& name);
     void   localDecl(cxx::Decl* d);
     void   initObject(const LValue& lv, const sema::Type* t, sema::Symbol* var, cxx::InitDeclarator& id, int line);
     const sema::Type* exprType(cxx::Expr* e) const;
@@ -166,6 +167,10 @@ private:
     int                        m_generated;
     std::vector<sema::Symbol*> m_dynamicGlobals;   // globals built by the module's initialiser, in declaration order
     sema::Symbol*              m_initSymbol;
+    X86Module*                 m_x86;              // receives the globals that static locals become
+    std::map<sema::Symbol*, std::string> m_staticNames;   // static local -> its global's IR name
+    int                        m_staticCount;
+    std::map<std::string, int> m_labels;           // goto labels of the current function -> block
 
     IrFunction*                m_out;
     sema::Symbol*              m_fn;

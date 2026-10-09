@@ -1076,7 +1076,7 @@ void IrBuilder::stmt(Stmt* s)
     }
     case Stmt::Case: case Stmt::Default: return;
     case Stmt::Break: {
-        for (size_t i = m_loops.size(); i > 0; --i) { leaveTryRegions(m_loops[i - 1].tryDepth, line); br(m_loops[i - 1].breakBlock, line); return; }
+        if (!m_loops.empty()) { leaveTryRegions(m_loops.back().tryDepth, line); br(m_loops.back().breakBlock, line); }
         return;
     }
     case Stmt::Continue: {

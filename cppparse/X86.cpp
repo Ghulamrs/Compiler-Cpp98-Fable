@@ -786,7 +786,7 @@ void X86Module::emitGlobals()
         else if (g.size == 4) def = sym + " DD " + (numeric ? g.init : std::string("0"));
         else if (g.size == 8) def = sym + " DQ " + (numeric ? g.init : std::string("0"));
         else def = sym + " DB " + intToString(g.size) + " DUP (0)";
-        m_data += "        PUBLIC " + sym + "\n" + def + "\n";
+        m_data += std::string(g.linkOnce ? ";@comdat any\n" : "") + "        PUBLIC " + sym + "\n" + def + "\n";
         m_defined.insert(sym);
         m_dataSymbols.insert(sym);
     }

@@ -311,6 +311,7 @@ Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::E
     std::map<std::string, const Type*> bind; std::map<std::string, long> ints;
     size_t nargs = args.size() - firstArg;
     if (nargs > fp->params.size() && !fp->variadic) return 0;
+    for (size_t k = nargs; k < fp->params.size(); ++k) if (!fp->params[k]->defaultValue) return 0;   // too few arguments: not a candidate, no instantiation
     for (size_t a = 0; a < nargs && a < fp->params.size(); ++a) {
         if (!args[firstArg + a]->semaType) expr(args[firstArg + a], in);
         const Type* at = args[firstArg + a]->semaType;
@@ -335,7 +336,7 @@ Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::E
         Symbol* b = m_prog.newSymbol(bind.count(pn) ? Symbol::Typedef : Symbol::Enumerator, pn, iscope);
         if (bind.count(pn)) b->type = bind[pn]; else { b->type = m_types.basic(Type::Int); b->hasConstValue = true; b->constValue = ints[pn]; }
     }
-    cxx::Decl* copy = cxx::cloneDecl(decl, m_cloneArena);   // annotations belong to this instantiation
+    cxx::Decl* copy = cxx::cloneDecl(decl, nodeArena());   // annotations belong to this instantiation
     if (copy->kind != cxx::Decl::Function) copy->declarators.resize(1);
     cxx::Declarator* dcopy = copy->kind == cxx::Decl::Function ? copy->declarator : copy->declarators[0].decl;
     dcopy->name.parts.back().ident = tmpl->name + key;
@@ -440,7 +441,7 @@ const Type* Sema::exprMember(cxx::Expr* e, Scope* in)
             // operator->: the object becomes the operand of a unary node that calls it and yields the pointer
             std::vector<Symbol*> ops; lookupMember(t->decl, "operator->", ops);
             if (!ops.empty()) {
-                cxx::Expr* w = m_cloneArena.expr(cxx::Expr::Unary, e->kids[0]->loc);
+                cxx::Expr* w = nodeArena().expr(cxx::Expr::Unary, e->kids[0]->loc);
                 w->text = "->";
                 w->kids.push_back(e->kids[0]);
                 w->semaSym = ops[0];
@@ -502,6 +503,12 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
             ++m_stats.namesUnresolved;
             if (!m_reportedUnknown.count(what)) { m_reportedUnknown.insert(what); error(e->loc, "S103", "call to undeclared function '" + what + "'"); }
             return m_types.error();
+        }
+        if (s->kind == Symbol::Class) {
+            // a function with the same name as a class hides the class in a call ("stat(path, &st)")
+            std::vector<Symbol*> fns;
+            for (size_t k = 0; k < cands.size(); ++k) if (cands[k]->kind == Symbol::Function || cands[k]->kind == Symbol::FunctionTemplate) fns.push_back(cands[k]);
+            if (!fns.empty()) { s = fns[0]; cands = fns; }
         }
         if (s->kind == Symbol::Class || s->kind == Symbol::Typedef || s->kind == Symbol::ClassTemplate) {
             // T(args): a functional cast / constructor call
@@ -645,7 +652,8 @@ const Type* Sema::exprUnary(cxx::Expr* e, Scope* in)
         Symbol* s = e->kids[0]->semaSym;
         if (s && s->kind == Symbol::Function && s->ownerClass && !s->isStatic && e->kids[0]->kind == cxx::Expr::Name && e->kids[0]->name.parts.size() > 1)
             return m_types.memberPointer(m_types.classType(s->ownerClass), s->type);
-        if (s && (s->kind == Symbol::Function || s->kind == Symbol::FunctionTemplate)) return m_types.pointer(s->type);
+        // the address of a function: only when the operand names it ("&f", "&C::f"), not when it calls one ("&v[i]")
+        if (s && (s->kind == Symbol::Function || s->kind == Symbol::FunctionTemplate) && (e->kids[0]->kind == cxx::Expr::Name || e->kids[0]->kind == cxx::Expr::Member)) return m_types.pointer(s->type);
         if (!e->kids[0]->semaLvalue && ot->kind != Type::Function) { error(e->loc, "S108", "address of a non-lvalue"); return m_types.error(); }
         if (e->kids[0]->semaSym && e->kids[0]->semaSym->kind == Symbol::Variable && e->kids[0]->kind == cxx::Expr::Name && e->kids[0]->name.parts.size() > 1 && e->kids[0]->semaSym->isMember && !e->kids[0]->semaSym->isStatic)
             return m_types.memberPointer(m_types.classType(e->kids[0]->semaSym->ownerClass), e->kids[0]->semaSym->type);
@@ -683,7 +691,7 @@ cxx::Expr* Sema::boolContext(cxx::Expr* e, Scope* in)
     if (!t || t->kind != Type::Class || !t->decl) return e;
     Conversion c = convertType(t, e->semaLvalue, false, m_types.basic(Type::Bool), in, true);
     if (c.rank == Conversion::None || !c.userFunction) { error(e->loc, "S109", "no conversion from " + t->text() + " to bool"); return e; }
-    cxx::Expr* w = m_cloneArena.expr(cxx::Expr::Cast, e->loc);
+    cxx::Expr* w = nodeArena().expr(cxx::Expr::Cast, e->loc);
     w->kids.push_back(e);
     w->semaSym = c.userFunction;
     w->semaType = c.userFunction->type && c.userFunction->type->kind == Type::Function ? c.userFunction->type->inner : m_types.basic(Type::Bool);
@@ -695,7 +703,7 @@ cxx::Expr* Sema::boolContext(cxx::Expr* e, Scope* in)
 cxx::Expr* Sema::converted(cxx::Expr* e, const Conversion& c)
 {
     if (!c.userFunction || !c.userFunction->isConversion) return e;
-    cxx::Expr* w = m_cloneArena.expr(cxx::Expr::Cast, e->loc);
+    cxx::Expr* w = nodeArena().expr(cxx::Expr::Cast, e->loc);
     w->kids.push_back(e);
     w->semaSym = c.userFunction;
     w->semaType = c.userFunction->type && c.userFunction->type->kind == Type::Function ? c.userFunction->type->inner : m_types.error();
@@ -911,6 +919,22 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
     }
     case cxx::Expr::Member: t = exprMember(e, in); break;
     case cxx::Expr::Cast: case cxx::Expr::NamedCast: case cxx::Expr::FunctionalCast: {
+        if (e->kind == cxx::Expr::FunctionalCast && e->type && e->type->spec.kind == cxx::DeclSpec::Named && (!e->type->decl || e->type->decl->parts.empty())) {
+            // "f(args)" parsed as a cast because f is also a type: a visible function of that name hides the type
+            std::vector<Symbol*> all;
+            resolveName(e->type->spec.name, in, false, &all);
+            bool isFunction = false;
+            for (size_t k = 0; k < all.size(); ++k) if ((all[k]->kind == Symbol::Function && !all[k]->isConstructor) || all[k]->kind == Symbol::FunctionTemplate) isFunction = true;   // inside a class its constructors carry the class name
+            if (isFunction) {
+                cxx::Expr* callee = nodeArena().expr(cxx::Expr::Name, e->loc);
+                callee->name = e->type->spec.name;
+                e->kind = cxx::Expr::Call;
+                e->kids.insert(e->kids.begin(), callee);
+                e->type = 0;
+                t = exprCall(e, in);
+                break;
+            }
+        }
         const Type* to = typeOf(e->type->spec, in);
         if (e->type->decl) to = applyDeclarator(to, *e->type->decl, in, 0);
         t = exprCast(e, in, to, e->kind == cxx::Expr::FunctionalCast);

@@ -3,6 +3,7 @@
 #ifndef CPPPARSE_STRING
 #define CPPPARSE_STRING
 
+#include <cctype>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -114,6 +115,7 @@ public:
     string& insert(size_t pos, const char* s) { return insert(pos, s, strlen(s)); }
     string& insert(size_t pos, const string& o) { return insert(pos, o.m_data, o.m_size); }
     string& insert(size_t pos, size_t n, char c) { return insert(pos, string(n, c)); }
+    iterator insert(iterator at, char c) { size_t pos = static_cast<size_t>(at - m_data); insert(pos, &c, 1); return m_data + pos; }
 
     string& erase(size_t pos = 0, size_t n = npos)
     {

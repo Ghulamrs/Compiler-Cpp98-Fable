@@ -256,7 +256,7 @@ Scope* Program::newScope(Scope::Kind k, Scope* parent, Symbol* owner)
 
 
 Sema::Sema(TypeTable& types, Program& program)
-    : m_types(types), m_prog(program), m_currentFunction(0), m_currentClass(0), m_loopDepth(0), m_switchDepth(0), m_depth(0) {}
+    : m_types(types), m_prog(program), m_currentFunction(0), m_currentClass(0), m_loopDepth(0), m_switchDepth(0), m_depth(0), m_externalArena(0) {}
 
 Sema::~Sema()
 {
@@ -819,7 +819,22 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
     if (d->spec.kind == cxx::DeclSpec::Class && d->spec.classDef) { defined = declareClass(d->spec.classDef, in, access, 0); d->semaSym = defined; }
     else if (d->spec.kind == cxx::DeclSpec::Enum && d->spec.enumDef) { defined = declareEnum(d->spec.enumDef, in, access); d->semaSym = defined; }
     else if (d->spec.kind == cxx::DeclSpec::Named && !d->spec.elaborated.empty() && d->spec.elaborated != "typename" && d->spec.elaborated != "enum" && d->declarators.empty()) {
-        namedType(d->spec.name, in, d->spec.elaborated, d->spec.loc);     // "class X;"
+        // "class X;" declares X in this scope unless this scope has it already: an X of an outer scope does not count
+        if (d->spec.name.parts.size() == 1 && !d->spec.name.global) {
+            const std::string& nm = d->spec.name.parts[0].ident;
+            Symbol* here = 0;
+            const std::vector<Symbol*>* v = in->find(nm);
+            if (v) for (size_t k = 0; k < v->size() && !here; ++k) if ((*v)[k]->kind == Symbol::Class || (*v)[k]->kind == Symbol::ClassTemplate) here = (*v)[k];
+            if (!here) {
+                Symbol* cls = m_prog.newSymbol(Symbol::Class, nm, in);
+                cls->loc = d->spec.loc; cls->access = access; cls->type = m_types.classType(cls);
+                cls->isStruct = d->spec.elaborated != "class"; cls->isUnion = d->spec.elaborated == "union";
+                cls->isDependentContext = in->kind == Scope::TemplateParams || (in->kind == Scope::Class && in->owner && in->owner->isDependentContext);
+                d->semaSym = cls;
+            }
+            return;
+        }
+        namedType(d->spec.name, in, d->spec.elaborated, d->spec.loc);
         return;
     }
     if (d->declarators.empty()) return;
@@ -1158,7 +1173,7 @@ const Type* Sema::instantiateClassTemplate(Symbol* tmpl, const std::vector<cxx::
     ++m_stats.classInstantiations;
     // the class template's name inside the instantiation means the instantiation (injected class name)
     Symbol* inj = m_prog.newSymbol(Symbol::Typedef, tmpl->name, iscope); inj->type = cls->type;
-    cxx::ClassDecl* ast = cxx::cloneClassDecl(chosen->classAst, m_cloneArena);   // annotations belong to this instantiation
+    cxx::ClassDecl* ast = cxx::cloneClassDecl(chosen->classAst, nodeArena());   // annotations belong to this instantiation
     Symbol* savedClass = m_currentClass;
     declareClass(ast, iscope, cxx::AccessPublic, cls);
     cls->name = tmpl->name + key;
@@ -1177,7 +1192,7 @@ const Type* Sema::instantiateClassTemplate(Symbol* tmpl, const std::vector<cxx::
         if (def->kind == cxx::Decl::Function && def->declarator) {
             // a copy of the definition for this instantiation, with "Stack<T>::push" rewritten to the
             // instantiation's name so that the member is found
-            cxx::Decl* copy = cxx::cloneDecl(def, m_cloneArena);
+            cxx::Decl* copy = cxx::cloneDecl(def, nodeArena());
             cxx::Declarator* dcopy = copy->declarator;
             if (dcopy->name.parts.size() >= 2) { dcopy->name.parts[dcopy->name.parts.size() - 2].ident = cls->name; dcopy->name.parts[dcopy->name.parts.size() - 2].hasTemplateArgs = false; }
             declare(copy, mscope, cxx::AccessPublic);

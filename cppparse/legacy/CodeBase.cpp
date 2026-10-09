@@ -258,6 +258,9 @@ void CodeBase::resolveIncludes(SourceFile* f, const std::vector<std::string>& in
         if (d.argument.empty() || d.argument.find("$(") != std::string::npos) continue;
 
         std::string found;
+        // the standard headers (<string>, <vector>, ...) are cppparse's own extensionless files in include/: this
+        // front end does not read them, it assumes the std:: names as it always did
+        if (d.systemInclude && d.argument.find('.') == std::string::npos) continue;
         if (!d.systemInclude) {
             std::string cand = joinPath(here, d.argument);
             if (fileExists(cand)) found = cand;

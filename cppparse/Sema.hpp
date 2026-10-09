@@ -209,6 +209,7 @@ struct Conversion {
 class Sema {
 public:
     Sema(TypeTable& types, Program& program);
+    void useArena(cxx::CxxArena& arena) { m_externalArena = &arena; }   // where nodes added to the tree are allocated
     ~Sema();
     void analyze(cxx::TranslationUnit& tu, const std::vector<std::string>& files);
     const std::vector<Diag>& diagnostics() const { return m_diags; }
@@ -291,7 +292,11 @@ private:
     Symbol*                    m_currentClass;
     int                        m_loopDepth, m_switchDepth, m_depth;
     std::set<std::string>      m_reportedUnknown;
-    cxx::CxxArena                 m_cloneArena;        // per-instantiation copies of template syntax trees
+    // nodes sema adds to the tree (instantiation copies, conversion wrappers) live in the translation
+    // unit's arena when one is given, so they outlive this object; m_cloneArena is the fallback
+    cxx::CxxArena*                m_externalArena;
+    cxx::CxxArena                 m_cloneArena;
+    cxx::CxxArena&                nodeArena() { return m_externalArena ? *m_externalArena : m_cloneArena; }
     std::vector<cxx::Decl*>       m_ownedDecls;        // rewritten copies of out-of-line template member definitions
     std::vector<cxx::Declarator*> m_ownedDeclarators;
 };

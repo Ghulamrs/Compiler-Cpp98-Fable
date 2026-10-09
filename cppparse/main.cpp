@@ -35,6 +35,7 @@
 #include "CxxParser.hpp"
 #include "Sema.hpp"
 #include "IrGen.hpp"
+#include "Mangle.hpp"
 #include "BackEnd.hpp"
 #include "Report.hpp"
 #include "Symbols.hpp"
@@ -214,6 +215,7 @@ int main(int argc, char* argv[])
                 sema::TypeTable types;
                 sema::Program program;
                 sema::Sema sema(types, program);
+                sema.useArena(arena);   // nodes sema adds must outlive it: the AST dump runs later
                 sema.analyze(tu, pp.files());
                 const sema::SemaStats& st = sema.stats();
                 std::cout << "  sema: " << sema.errorCount() << " error(s); classes " << st.classes << ", functions analysed " << st.functionsDefined << ", variables " << st.variables
@@ -232,6 +234,9 @@ int main(int argc, char* argv[])
                     IrGen gen(program, types);
                     std::vector<IrFunction*> functions;
                     X86Module x86(copt.msvcNames);
+                    unsigned long unitId = 2166136261UL;   // FNV-1a of the input path: this unit's anonymous namespace id
+                    for (size_t k = 0; k < inputs[i].size(); ++k) unitId = (unitId ^ static_cast<unsigned char>(inputs[i][k])) * 16777619UL;
+                    setMangleUnitId(unitId & 0xFFFFFFFFUL);
                     gen.registerMetadata(x86, copt.msvcNames);   // first: it queues the vtable members and the dynamic initialisers
                     gen.generate(functions);
                     BackEndOptions bo;

@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <__traits>
 
 namespace std {
 
@@ -25,6 +26,8 @@ public:
     explicit vector(size_t n) : m_data(0), m_size(0), m_cap(0) { resize(n); }
     vector(size_t n, const T& v) : m_data(0), m_size(0), m_cap(0) { assign(n, v); }
     vector(const T* first, const T* last) : m_data(0), m_size(0), m_cap(0) { assign(first, last); }
+    // any other iterator pair, or "n copies of v" when both arguments are integers
+    template <class It> vector(It first, It last) : m_data(0), m_size(0), m_cap(0) { initRange(first, last, typename __is_integer<It>::type()); }
     vector(const vector& o) : m_data(0), m_size(0), m_cap(0) { assign(o.m_data, o.m_data + o.m_size); }
     ~vector() { destroyAll(); free(m_data); }
 
@@ -156,6 +159,9 @@ private:
     T*     m_data;
     size_t m_size;
     size_t m_cap;
+
+    template <class It> void initRange(It first, It last, __false_type) { for (; first != last; ++first) push_back(*first); }
+    template <class N> void initRange(N n, N v, __true_type) { assign(static_cast<size_t>(n), static_cast<T>(v)); }
 
     // elements are moved bytewise between buffers: every type stored here must tolerate that
     void grow(size_t n)

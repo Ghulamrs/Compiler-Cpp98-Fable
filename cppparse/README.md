@@ -133,8 +133,26 @@ Compiles every `cppparse/*.cpp` and `cppparse/legacy/*.cpp` with MSVC at
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
-`obj/debug`. `-NoTests` stops after the build. The test groups (14 as of
-version 6) run against whichever configuration was built. The first four: the Visual Studio 2010 solution in
+`obj/debug`. `-NoTests` stops after the build. The test groups (15 as of
+version 6) run against whichever configuration was built.
+
+A Visual Studio 2022 solution does the same build inside the IDE:
+`cpp\cppparse.sln` with the project `cppparse\cppparse.vcxproj` (x64,
+Debug and Release, `/W4 /permissive-` with warnings as errors, output in
+`sandbox\vs\<Configuration>\`). The project names the v143 toolset; a
+newer Visual Studio retargets it on opening, and MSBuild builds it with
+`/p:PlatformToolset=<installed toolset>`:
+
+```
+msbuild cpp\cppparse.sln /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145
+```
+
+The scripts in `sandbox\scripts\` run the version 6 pipeline outside the
+test suite: `lib.ps1` and `life.ps1` (the library and lifetime samples
+with their native drivers), `selfhost.ps1` (compiles cppparse's own
+sources with cppparse and links `cppparse-self.exe`), `mix.ps1` (builds a
+layout-compatible reference with cl against cppparse's headers and swaps
+cppparse's objects in one unit at a time). The first four: the Visual Studio 2010 solution in
 `examples/sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken
@@ -567,7 +585,35 @@ mangler, string literal concatenation, indirect calls, and live
 intervals of values that cross a loop's back edge. Test 15 compiles the
 three samples and `libcpp/iostream.cpp` to four objects, links them
 with `examples/sample-lib-driver/driver-lib.cpp` and runs 13 checks at
-`-O0` and `-O2`.
+`-O0` and `-O2`. Measured against the self-hosting target: analysing
+cppparse's own 39 sources with these headers (`--sema6 -I cppparse/include`)
+reports 78 errors in total, against 1548 without them; the rest are
+overloads and conversions the analysis does not resolve yet, plus a few
+types the headers still lack.
+
+**Stage 6, first steps (self-hosting)**: with the headers, all 36 own
+sources now analyse with zero semantic errors and every one of them
+compiles to a COFF object; the 36 objects link with the exception runtime
+and `libcpp` into `cppparse-self.exe`, a cppparse built by cppparse. That
+executable still crashes when run: making it work is the next milestone.
+The steps that got here: forward declarations (`struct X;`) declare in
+their own scope instead of resolving to an outer `X`; a function hides
+a class of the same name in calls and in what the parser took for a
+functional cast (`stat(path, &st)`); a call with too few arguments no
+longer instantiates a function template; `vector`, `set` and
+`set::insert` have range member templates with an integer-dispatch
+trait (`__traits`); `windows.h`, `io.h`, `direct.h`, `sys/stat.h` and
+`sys/types.h` declare the platform API the sources use (the interlocked
+operations come from the runtime, they are compiler intrinsics in MSVC);
+`string::insert(iterator, char)` and `rdbuf()`; a value-initialised
+`double` member emits a float constant; static locals are module globals
+initialised on the first pass under a guard byte (COMDAT when the
+function is inline, named per function so every unit agrees); `goto`
+and labels are blocks (objects of the scopes left are not destroyed);
+anonymous-namespace symbols carry a per-unit id (`?A0x<hash>@`) so units
+do not collide. The old front end skips the extensionless standard
+headers when it resolves `<...>` includes, since it assumes the `std::`
+names as before.
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

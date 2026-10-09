@@ -23,6 +23,7 @@
 //
 // Build: cl /c /EHsc cppparse_rt.cpp, then link the object with the cppparse-generated .obj.
 // Strict C++98 (C subset).
+#include <intrin.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -176,6 +177,10 @@ void cppparse_rethrow(void)
     }
     dispatch();
 }
+
+/* atomic counters for code compiled by cppparse (MSVC's InterlockedIncrement is a compiler intrinsic) */
+long cppparse_interlocked_increment(long volatile* value) { return _InterlockedIncrement(value); }
+long cppparse_interlocked_decrement(long volatile* value) { return _InterlockedDecrement(value); }
 
 /* for tests: both must be 0 when no try region is active and no handler is running */
 int cppparse_frame_depth(void)

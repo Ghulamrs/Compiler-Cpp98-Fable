@@ -3,6 +3,10 @@
 #ifndef CPPPARSE_WINDOWS_H
 #define CPPPARSE_WINDOWS_H
 
+#ifndef _WIN32
+#error "windows.h declares the Win32 API: only for a 64-bit Windows target"
+#endif
+
 #include <cstddef>
 
 typedef int                BOOL;

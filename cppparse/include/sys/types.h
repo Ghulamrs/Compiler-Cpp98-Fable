@@ -2,6 +2,10 @@
 #ifndef CPPPARSE_SYS_TYPES_H
 #define CPPPARSE_SYS_TYPES_H
 
+#ifndef _WIN32
+#error "sys/types.h declares the MSVC system types: only for a 64-bit Windows target"
+#endif
+
 #include <cstddef>
 #include <ctime>
 

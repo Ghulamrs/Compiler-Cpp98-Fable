@@ -26,7 +26,9 @@
 #  define SAMPLE_TRACE(msg) ((void)0)
 #endif
 
+#ifdef _MSC_VER
 #pragma warning(disable : 4996)
+#endif
 
 namespace sample {
     void trace(const char* msg);

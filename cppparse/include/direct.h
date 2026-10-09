@@ -2,6 +2,10 @@
 #ifndef CPPPARSE_DIRECT_H
 #define CPPPARSE_DIRECT_H
 
+#ifndef _WIN32
+#error "direct.h declares MSVC runtime functions: only for a 64-bit Windows target"
+#endif
+
 extern "C" {
     char* _getcwd(char* buffer, int size);
     int   _mkdir(const char* path);

@@ -94,9 +94,9 @@ void runParallel(ParallelJob& job, size_t count, int threads)
     for (size_t i = 0; i < count; ++i) job.run(i);
 }
 
-#ifdef _WIN32
 Mutex& semanticMutex() { static Mutex m; return m; }
 
+#ifdef _WIN32
 Mutex::Mutex() : m_impl(new CRITICAL_SECTION) { InitializeCriticalSection(static_cast<CRITICAL_SECTION*>(m_impl)); }
 Mutex::~Mutex() { DeleteCriticalSection(static_cast<CRITICAL_SECTION*>(m_impl)); delete static_cast<CRITICAL_SECTION*>(m_impl); }
 void Mutex::lock() { EnterCriticalSection(static_cast<CRITICAL_SECTION*>(m_impl)); }

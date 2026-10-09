@@ -608,7 +608,7 @@ const Type* TypeChecker::checkName(Expr* e)
     }
     if (name == "NULL") { e->isConstant = true; e->cval = 0; e->sym = Expr::SymEnumerator; return m_types.nullType(); }
     e->sym = Expr::SymUnknown;
-    bool quiet = m_macroNames.count(name) || isMacroLike(name) || qualified || startsWith(name, "std") || (m_calleeContext && isStandardLibraryName(name));
+    bool quiet = m_macroNames.count(name) || isMacroLike(name) || qualified || startsWith(name, "std") || (m_calleeContext && isKnownLibraryName(name));
     if (!quiet && m_calleeContext) {
         // an unknown function name: usually a library function or a macro from a system header
         if (m_undeclaredCalls.insert(name).second)

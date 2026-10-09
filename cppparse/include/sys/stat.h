@@ -3,6 +3,10 @@
 #ifndef CPPPARSE_SYS_STAT_H
 #define CPPPARSE_SYS_STAT_H
 
+#ifndef _WIN32
+#error "sys/stat.h declares the MSVC stat functions: only for a 64-bit Windows target"
+#endif
+
 #include <sys/types.h>
 
 struct _stat64i32 {

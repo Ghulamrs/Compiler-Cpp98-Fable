@@ -424,9 +424,13 @@ void X86Function::emitCall(const IrInst& in)
         else { std::string r = use(o, "rax"); line("mov qword ptr [rsp+" + intToString(slot) + "], " + r); }
         isFloatArg.push_back(fl);
     }
+    // a floating-point argument among the first four also goes into its integer register: a variadic callee
+    // (printf, an extern "C" name that does not say it is variadic) reads its arguments from the integer
+    // registers it spills to the home area, as the Microsoft x64 convention requires; any other callee ignores
+    // that register
     for (size_t a = 0; a < isFloatArg.size() && a < 4; ++a) {
         if (isFloatArg[a]) line("movsd xmm" + intToString(static_cast<int>(a)) + ", real8 ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "]");
-        else line("mov " + std::string(argRegs[a]) + ", qword ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "]");
+        line("mov " + std::string(argRegs[a]) + ", qword ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "]");
     }
     if (in.op == IrInst::VCall) {
         line("mov rax, qword ptr [rcx]              ; vptr");
@@ -820,7 +824,7 @@ void X86Module::addFunction(const IrFunction& f, LowerStats& stats) { appendCode
 
 std::string X86Module::codeFor(const IrFunction& f, LowerStats& stats)
 {
-    { Lock l(m_mutex); m_defined.insert(symbol(f.name)); }
+    { Lock l(m_mutex); m_defined.insert(symbol(f.name)); if (f.internal) m_internal.insert(symbol(f.name)); }
     X86Function fn(*this, f, stats);
     return fn.run();
 }
@@ -858,7 +862,7 @@ void X86Module::emitGlobals()
         else if (g.size == 4) def = sym + " DD " + (numeric ? g.init : std::string("0"));
         else if (g.size == 8) def = sym + " DQ " + (numeric ? g.init : std::string("0"));
         else def = sym + " DB " + intToString(g.size) + " DUP (0)";
-        m_data += std::string(g.linkOnce ? ";@comdat any\n" : "") + "        PUBLIC " + sym + "\n" + def + "\n";
+        m_data += std::string(g.linkOnce ? ";@comdat any\n" : "") + (g.internal ? std::string("") : "        PUBLIC " + sym + "\n") + def + "\n";
         m_defined.insert(sym);
         m_dataSymbols.insert(sym);
     }
@@ -928,7 +932,7 @@ std::string X86Module::finish()
     }
     s << "\n.code\n";
     for (std::set<std::string>::iterator d = m_defined.begin(); d != m_defined.end(); ++d)
-        if (!m_dataSymbols.count(*d)) s << "PUBLIC " << *d << "\n";
+        if (!m_dataSymbols.count(*d) && !m_internal.count(*d)) s << "PUBLIC " << *d << "\n";
     s << "\n" << m_code << "END\n";
     return s.str();
 }

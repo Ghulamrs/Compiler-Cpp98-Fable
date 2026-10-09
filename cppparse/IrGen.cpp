@@ -17,6 +17,16 @@ std::string numText(long v) { return intToString(static_cast<int>(v)); }
 
 bool isReference(const sema::Type* t) { return t && t->kind == sema::Type::Reference; }
 
+// internal linkage: a static function or variable at namespace scope, or anything in an anonymous namespace
+bool hasInternalLinkage(const sema::Symbol* s)
+{
+    if (!s) return false;
+    if (s->isStatic && !s->ownerClass && !s->isLocal) return true;
+    for (const sema::Scope* sc = s->scope; sc; sc = sc->parent)
+        if (sc->kind == sema::Scope::Namespace && sc->owner && sc->owner->name.empty()) return true;
+    return false;
+}
+
 } // namespace
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
@@ -1521,6 +1531,30 @@ void IrGen::initObject(const LValue& lv, const sema::Type* t, Symbol* var, cxx::
     }
     if (u->kind == sema::Type::Array) {
         int addr = addressOf(lv, line);
+        if (id.init.kind != cxx::Initializer::Brace && id.init.args.size() == 1 && id.init.args[0]->kind == cxx::Expr::StringLit && sizeOf(u->inner) == 1) {
+            // char s[N] = "...": the literal's bytes with its terminator; the rest of a longer local array is zero
+            // (static storage is zero already)
+            const sema::Type* lt = m_semaTypes.unref(exprType(id.init.args[0]));
+            const long litBytes = lt && lt->kind == sema::Type::Array ? lt->arraySize : 0;
+            const long bytes = u->arraySize < litBytes ? u->arraySize : litBytes;
+            const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+            if (lv.kind == LValue::Local && u->arraySize > bytes) {
+                IrInst z = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+                z.sub = "__zero";
+                z.args.push_back(IrOperand::temp(addr, oldType(vp)));
+                z.args.push_back(IrOperand::imm(0, m_types.intType()));
+                z.args.push_back(IrOperand::imm(u->arraySize, m_types.builtin(Type::LongLong)));
+                emit(z);
+            }
+            const int src = value(id.init.args[0]);
+            IrInst c = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+            c.sub = "__copy";
+            c.args.push_back(IrOperand::temp(addr, oldType(vp)));
+            c.args.push_back(IrOperand::temp(src, oldType(vp)));
+            c.args.push_back(IrOperand::imm(bytes, m_types.builtin(Type::LongLong)));
+            emit(c);
+            return;
+        }
         if (id.init.kind != cxx::Initializer::Brace) { constructDefault(u, addr, line); return; }
         initAggregate(u, addr, id.init.args, lv.kind == LValue::Local, line);
         return;
@@ -1551,6 +1585,7 @@ void IrGen::localDecl(cxx::Decl* d)
             g.size = isReference(var->type) ? 8 : (sizeOf(vt) > 0 ? sizeOf(vt) : 8);   // a reference is a pointer slot
             g.isFloat = !isReference(var->type) && vt->isFloating();
             g.linkOnce = m_out->linkOnce;
+            g.internal = m_out->internal;
             bool scalarConstant = id.init.kind != cxx::Initializer::None && id.init.args.size() == 1 && id.init.args[0]->semaConst && vt->isScalar() && !isReference(var->type) && !vt->isFloating();
             if (scalarConstant) g.init = numText(id.init.args[0]->semaValue);
             if (m_x86) m_x86->addGlobal(g);
@@ -1562,6 +1597,7 @@ void IrGen::localDecl(cxx::Decl* d)
                 guard.size = 1;
                 guard.isFloat = false;
                 guard.linkOnce = m_out->linkOnce;
+                guard.internal = m_out->internal;
                 if (m_x86) m_x86->addGlobal(guard);
                 LValue gl; gl.kind = LValue::Global; gl.global = guard.name; gl.type = b;
                 // thread-safe as cl's: a clear guard leads to the runtime's lock, which says whether this
@@ -1844,6 +1880,8 @@ void IrGen::prologue(Symbol* fn)
     m_out->name = irName(fn);
     m_out->fn = 0;
     m_out->linkOnce = fn->isInline || fn->isImplicit || fn->instantiatedFrom != 0 || (fn->ownerClass && fn->ownerClass->instantiatedFrom != 0);
+    m_out->internal = hasInternalLinkage(fn) || (fn->ownerClass && hasInternalLinkage(fn->ownerClass));
+    if (m_out->internal) m_out->linkOnce = false;   // every unit keeps its own copy
     const sema::Type* rt = fn->type && fn->type->kind == sema::Type::Function ? fn->type->inner : m_semaTypes.basic(sema::Type::Void);
     bool sret = isClassType(rt) && !isReference(rt);
     m_out->retType = oldType(sret ? m_semaTypes.basic(sema::Type::Void) : (isReference(rt) ? m_semaTypes.pointer(rt->inner) : rt));
@@ -2107,6 +2145,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             g.name = name;
             g.size = sizeOf(s->type) > 0 ? sizeOf(s->type) : 8;
             g.isFloat = s->type && s->type->isFloating();
+            g.internal = hasInternalLinkage(s);
             bool dynamic = false;
             const bool scalar = !isClassType(s->type) && m_semaTypes.unref(s->type)->kind != sema::Type::Array;
             if (s->init && s->init->semaConst && scalar) g.init = numText(s->init->semaValue);

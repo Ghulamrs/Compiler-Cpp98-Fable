@@ -152,7 +152,7 @@ std::string argWord(int n) { return intToString(n) + (n == 1 ? " argument" : " a
 
 bool isStdName(const std::string& n)
 {
-    return isStandardLibraryName(n);
+    return isKnownLibraryName(n);
 }
 
 bool inAnonymousNamespace(const std::string& scope)

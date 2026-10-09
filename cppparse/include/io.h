@@ -2,6 +2,10 @@
 #ifndef CPPPARSE_IO_H
 #define CPPPARSE_IO_H
 
+#ifndef _WIN32
+#error "io.h declares MSVC runtime functions: only for a 64-bit Windows target"
+#endif
+
 #include <cstddef>
 #include <ctime>
 

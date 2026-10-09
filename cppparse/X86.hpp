@@ -34,7 +34,8 @@ struct IrGlobal {
     bool        isFloat;
     std::string init;        // numeric initialiser text, or empty for zero
     bool        linkOnce;    // a static local of an inline function: every unit emits it, one copy survives (COMDAT)
-    IrGlobal() : size(8), isFloat(false), linkOnce(false) {}
+    bool        internal;    // internal linkage: a static variable at namespace scope or a static local of an internal function
+    IrGlobal() : size(8), isFloat(false), linkOnce(false), internal(false) {}
 };
 
 class X86Module {
@@ -62,6 +63,7 @@ private:
     std::map<std::string, double>      m_floats;    // that the output is the same whatever the thread timing
     std::set<std::string>    m_externs;
     std::set<std::string>    m_defined;         // PUBLIC symbols defined in this module
+    std::set<std::string>    m_internal;        // defined here with internal linkage: never PUBLIC
     std::set<std::string>    m_globalsUsed;     // mangled global names referenced
     Mutex                    m_mutex;           // guards the pools above while functions are generated in parallel
     bool                               m_msvc;

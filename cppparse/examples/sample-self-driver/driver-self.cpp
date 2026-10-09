@@ -4,7 +4,9 @@
 // The expected values are what the same source gives when cl compiles it against cppparse's headers.
 #include <cstdio>
 #include <cstddef>
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 int aggregates();
 int conditionalTemporaries();
@@ -41,18 +43,24 @@ static long carried()
 
 static int g_shared[4];
 
+#ifdef _WIN32
 static DWORD WINAPI callShared(LPVOID slot)
 {
     g_shared[reinterpret_cast<std::size_t>(slot)] = sharedStatic();
     return 0;
 }
+#endif
 
 static long staticFromThreads()            // the threads race into the initializer of one static local
 {
+#ifdef _WIN32
     HANDLE h[4];
     for (std::size_t i = 0; i < 4; ++i) h[i] = CreateThread(0, 0, callShared, reinterpret_cast<LPVOID>(i), 0, 0);
     WaitForMultipleObjects(4, h, TRUE, INFINITE);
     for (int i = 0; i < 4; ++i) CloseHandle(h[i]);
+#else
+    for (int i = 0; i < 4; ++i) g_shared[i] = sharedStatic();   // no threads on this host: the value is still checked
+#endif
     for (int i = 0; i < 4; ++i) if (g_shared[i] != g_shared[0]) return -g_shared[i];
     return g_shared[0];
 }

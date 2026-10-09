@@ -23,6 +23,9 @@
 //
 // Build: cl /c /EHsc cppparse_rt.cpp, then link the object with the cppparse-generated .obj.
 // Strict C++98 (C subset).
+#ifndef _WIN32
+#error "the cppparse runtime serves the 64-bit Windows target only"
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <intrin.h>

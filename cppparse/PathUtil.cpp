@@ -139,36 +139,93 @@ bool isMacroLike(const std::string& word)
     return letter && word.size() > 1;
 }
 
+namespace {
+
+// library names a checker meets as calls in analysed code, grouped by where they come from: the analysed
+// program may target another platform than the one cppparse runs on, so none of this depends on the host
+const char* const kC90Functions[] = {
+    "printf", "fprintf", "sprintf", "vprintf", "vsprintf", "scanf", "sscanf", "fscanf", "puts", "fputs", "putchar",
+    "getchar", "gets", "fgets", "fopen", "fclose", "fread", "fwrite", "fseek", "ftell", "rewind", "fflush", "feof", "ferror",
+    "remove", "rename", "tmpfile", "perror", "malloc", "calloc", "realloc", "free", "exit", "abort", "atexit", "system", "getenv",
+    "atoi", "atol", "atof", "strtol", "strtoul", "strtod", "rand", "srand", "abs", "labs", "div", "qsort", "bsearch",
+    "strlen", "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strchr", "strrchr", "strstr", "strtok",
+    "strerror", "memcpy", "memmove", "memset", "memcmp", "memchr",
+    "sqrt", "pow", "fabs", "floor", "ceil", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "exp", "log", "log10", "fmod",
+    "sinh", "cosh", "tanh", "ldexp", "frexp", "modf",
+    "isalpha", "isdigit", "isalnum", "isspace", "isupper", "islower", "ispunct", "isprint", "isxdigit", "iscntrl", "isgraph", "toupper", "tolower",
+    "time", "clock", "difftime", "mktime", "localtime", "gmtime", "strftime", "asctime", "ctime",
+    "setlocale", "signal", "raise", "longjmp", "wcslen", "wcscpy", "wcscmp",
+    0 };
+const char* const kC90Macros[] = { "assert", "va_start", "va_end", "va_arg", "setjmp", 0 };
+const char* const kC99Functions[] = { "snprintf", "hypot", "round", 0 };
+const char* const kCpp98Names[] = {
+    "sort", "stable_sort", "find", "find_if", "count", "count_if", "copy", "fill", "swap", "min", "max", "reverse", "unique",
+    "remove_if", "transform", "for_each", "accumulate", "make_pair", "getline", "advance", "distance", "lower_bound", "upper_bound",
+    "equal", "binary_search", "partial_sort", "nth_element", "max_element", "min_element", "replace", "iter_swap",
+    "terminate", "unexpected", "set_terminate", "set_unexpected", "set_new_handler", "uncaught_exception",
+    0 };
+const char* const kCppLaterNames[] = { "to_string", 0 };
+const char* const kPosixFunctions[] = {
+    "stat", "fstat", "opendir", "readdir", "closedir", "mkdir", "rmdir", "chdir", "getcwd", "access", "unlink",
+    "open", "close", "read", "write", "lseek", "getpid", "sleep", "usleep", "strcasecmp", "strncasecmp", "strdup",
+    0 };
+const char* const kMsvcCrtFunctions[] = {
+    "_stat", "_mkdir", "_getcwd", "_access", "_findfirst", "_findnext", "_findclose", "stricmp", "_stricmp", "_strnicmp",
+    0 };
+const char* const kWin32Functions[] = {
+    "GetLastError", "Sleep", "GetTickCount", "MessageBoxA", "MessageBoxW", "CloseHandle", "CreateFileA", "CreateFileW",
+    "ReadFile", "WriteFile", "GetProcAddress", "InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection",
+    "DeleteCriticalSection", "CreateThread", "WaitForSingleObject", "SetEvent", "GetCurrentThreadId",
+    0 };
+// generic-text names that windows.h maps to an A or W function, and macros over the C library
+const char* const kWin32Macros[] = {
+    "MessageBox", "CreateFile", "GetModuleHandle", "LoadLibrary", "OutputDebugString", "CreateEvent", "lstrlen", "lstrcpy",
+    "wsprintf", "ZeroMemory", "CopyMemory",
+    0 };
+
+struct OriginTable { LibraryOrigin origin; const char* const* names; };
+
+const OriginTable kOriginTables[] = {
+    { OriginC90Function, kC90Functions }, { OriginC90Macro, kC90Macros }, { OriginC99Function, kC99Functions },
+    { OriginCpp98, kCpp98Names }, { OriginCppLater, kCppLaterNames }, { OriginPosix, kPosixFunctions },
+    { OriginMsvcCrt, kMsvcCrtFunctions }, { OriginWin32Function, kWin32Functions }, { OriginWin32Macro, kWin32Macros } };
+
+} // namespace
+
+LibraryOrigin libraryNameOrigin(const std::string& n)
+{
+    for (size_t t = 0; t < sizeof(kOriginTables) / sizeof(kOriginTables[0]); ++t)
+        for (int i = 0; kOriginTables[t].names[i]; ++i)
+            if (n == kOriginTables[t].names[i]) return kOriginTables[t].origin;
+    return OriginUnknown;
+}
+
+const char* libraryOriginText(LibraryOrigin o)
+{
+    switch (o) {
+    case OriginC90Function:   return "ISO C90 function";
+    case OriginC90Macro:      return "ISO C90 macro";
+    case OriginC99Function:   return "ISO C99 function (not in C++98)";
+    case OriginCpp98:         return "ISO C++98 library";
+    case OriginCppLater:      return "C++ library after C++98";
+    case OriginPosix:         return "POSIX function";
+    case OriginMsvcCrt:       return "MSVC runtime extension";
+    case OriginWin32Function: return "Win32 API function";
+    case OriginWin32Macro:    return "Win32 API macro";
+    case OriginUnknown:       break;
+    }
+    return "unknown";
+}
+
 bool isStandardLibraryName(const std::string& n)
 {
-    static const char* const names[] = {
-        // C library
-        "printf", "fprintf", "sprintf", "snprintf", "vprintf", "vsprintf", "scanf", "sscanf", "fscanf", "puts", "fputs", "putchar",
-        "getchar", "gets", "fgets", "fopen", "fclose", "fread", "fwrite", "fseek", "ftell", "rewind", "fflush", "feof", "ferror",
-        "remove", "rename", "tmpfile", "perror", "malloc", "calloc", "realloc", "free", "exit", "abort", "atexit", "system", "getenv",
-        "atoi", "atol", "atof", "strtol", "strtoul", "strtod", "rand", "srand", "abs", "labs", "div", "qsort", "bsearch",
-        "strlen", "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strchr", "strrchr", "strstr", "strtok", "strdup",
-        "strerror", "memcpy", "memmove", "memset", "memcmp", "memchr", "stricmp", "strcasecmp", "strncasecmp", "_stricmp", "_strnicmp",
-        "sqrt", "pow", "fabs", "floor", "ceil", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "exp", "log", "log10", "fmod",
-        "sinh", "cosh", "tanh", "ldexp", "frexp", "modf", "hypot", "round",
-        "isalpha", "isdigit", "isalnum", "isspace", "isupper", "islower", "ispunct", "isprint", "isxdigit", "iscntrl", "isgraph", "toupper", "tolower",
-        "time", "clock", "difftime", "mktime", "localtime", "gmtime", "strftime", "asctime", "ctime", "sleep", "usleep",
-        "assert", "va_start", "va_end", "va_arg", "setlocale", "signal", "raise", "longjmp", "setjmp", "wcslen", "wcscpy", "wcscmp",
-        "stat", "fstat", "_stat", "opendir", "readdir", "closedir", "mkdir", "_mkdir", "rmdir", "chdir", "getcwd", "_getcwd",
-        "access", "_access", "unlink", "open", "close", "read", "write", "lseek", "_findfirst", "_findnext", "_findclose", "getpid",
-        // C++ library (usually used unqualified after "using namespace std")
-        "sort", "stable_sort", "find", "find_if", "count", "count_if", "copy", "fill", "swap", "min", "max", "reverse", "unique",
-        "remove_if", "transform", "for_each", "accumulate", "make_pair", "getline", "advance", "distance", "lower_bound", "upper_bound",
-        "equal", "binary_search", "partial_sort", "nth_element", "max_element", "min_element", "replace", "iter_swap", "to_string",
-        "terminate", "unexpected", "set_terminate", "set_unexpected", "set_new_handler", "uncaught_exception",
-        // Windows basics
-        "GetLastError", "Sleep", "GetTickCount", "MessageBox", "MessageBoxA", "MessageBoxW", "OutputDebugString", "CloseHandle",
-        "CreateFile", "CreateFileA", "CreateFileW", "ReadFile", "WriteFile", "GetModuleHandle", "LoadLibrary", "GetProcAddress",
-        "InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection", "CreateThread",
-        "WaitForSingleObject", "SetEvent", "CreateEvent", "ZeroMemory", "CopyMemory", "lstrlen", "lstrcpy", "wsprintf", "GetCurrentThreadId",
-        0 };
-    for (int i = 0; names[i]; ++i) if (n == names[i]) return true;
-    return false;
+    const LibraryOrigin o = libraryNameOrigin(n);
+    return o == OriginC90Function || o == OriginC90Macro || o == OriginCpp98;
+}
+
+bool isKnownLibraryName(const std::string& n)
+{
+    return libraryNameOrigin(n) != OriginUnknown;
 }
 
 std::string lastComponent(const std::string& qualified)

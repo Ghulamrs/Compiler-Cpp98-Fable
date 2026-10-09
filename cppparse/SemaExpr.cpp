@@ -59,6 +59,41 @@ void foldWide(cxx::Expr* e, const std::string& op, long a, long b, bool isUnsign
     e->semaValue = e->semaConst ? static_cast<long>(s) : 0;
 }
 
+// the characters of a string literal's array without the terminator: the text may hold adjacent literals
+// ("a" "b") and an L prefix, and an escape sequence (\n, \x41, \101) is one character
+long stringLiteralLength(const std::string& text)
+{
+    long n = 0;
+    bool inside = false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (!inside) { if (c == '"') inside = true; continue; }
+        if (c == '"') { inside = false; continue; }
+        ++n;
+        if (c != '\\' || i + 1 >= text.size()) continue;
+        const char x = text[++i];
+        if (x == 'x') {
+            while (i + 1 < text.size()) {
+                const char h = text[i + 1];
+                if (!((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F'))) break;
+                ++i;
+            }
+        } else if (x >= '0' && x <= '7') {
+            for (int k = 1; k < 3 && i + 1 < text.size() && text[i + 1] >= '0' && text[i + 1] <= '7'; ++k) ++i;
+        }
+    }
+    return n;
+}
+
+bool isStringInit(const Type* array, const cxx::Initializer& init)
+{
+    if (!array || array->kind != Type::Array || !array->inner) return false;
+    const Type::Kind k = array->inner->kind;
+    if (k != Type::Char && k != Type::SChar && k != Type::UChar && k != Type::WChar) return false;
+    return (init.kind == cxx::Initializer::Assign || init.kind == cxx::Initializer::Parens) && init.args.size() == 1
+        && init.args[0]->kind == cxx::Expr::StringLit;
+}
+
 bool aggregateType(const Type* t)
 {
     if (!t) return false;
@@ -101,7 +136,9 @@ long Sema::braceCount(const Type* t, const std::vector<cxx::Expr*>& items)
 
 const Type* Sema::completedArray(const Type* t, const cxx::Initializer& init)
 {
-    if (!t || t->kind != Type::Array || t->arraySize >= 0 || init.kind != cxx::Initializer::Brace) return t;
+    if (!t || t->kind != Type::Array || t->arraySize >= 0) return t;
+    if (isStringInit(t, init)) return m_types.array(t->inner, stringLiteralLength(init.args[0]->text) + 1);   // char s[] = "..."
+    if (init.kind != cxx::Initializer::Brace) return t;
     return m_types.array(t->inner, braceCount(t, init.args));
 }
 
@@ -1078,8 +1115,7 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         break;
     }
     case cxx::Expr::StringLit: {
-        long n = 0; bool wide = e->text[0] == 'L';
-        for (size_t i = 0; i < e->text.size(); ++i) { if (e->text[i] == '"') continue; if (e->text[i] == '\\' && i + 1 < e->text.size()) ++i; if (e->text[i] == ' ' && i > 0 && e->text[i - 1] == '"') continue; ++n; }
+        const long n = stringLiteralLength(e->text); const bool wide = e->text[0] == 'L';
         t = m_types.array(m_types.qualified(m_types.basic(wide ? Type::WChar : Type::Char), true, false), n + 1);
         e->semaLvalue = true;
         break;
@@ -1210,7 +1246,7 @@ void Sema::localDecl(cxx::Decl* d, Scope* in, bool isHandler)
         cxx::Declarator* dcl = id.decl;
         if (!dcl) continue;
         std::vector<Symbol*> params;
-        const Type* t = applyDeclarator(base, *dcl, in, &params);
+        const Type* t = completedArray(applyDeclarator(base, *dcl, in, &params), id.init);
         const std::string& name = dcl->name.parts.empty() ? std::string("") : dcl->name.parts.back().ident;
         if (d->spec.isTypedef) { Symbol* td = m_prog.newSymbol(Symbol::Typedef, name, in); td->type = t; td->loc = dcl->loc; dcl->semaSym = td; continue; }
         if (t->kind == Type::Function) { declareFunction(d, dcl, d->spec, in, cxx::AccessPublic, t, params); continue; }
@@ -1242,6 +1278,12 @@ void Sema::localDecl(cxx::Decl* d, Scope* in, bool isHandler)
             continue;
         }
         if (tu->kind == Type::Error || tu->kind == Type::Dependent) { var->init = id.init.args.empty() ? 0 : id.init.args[0]; continue; }
+        if (isStringInit(t, id.init)) {
+            // char s[N] = "...": the literal's characters, then zeros; it must fit with its terminator, as in C++
+            if (t->arraySize >= 0 && stringLiteralLength(id.init.args[0]->text) + 1 > t->arraySize) error(dcl->loc, "S105", "string literal too long for '" + name + "'");
+            var->init = id.init.args[0];
+            continue;
+        }
         if (id.init.args.size() == 1) {
             Conversion c = convert(id.init.args[0], t, in);
             if (c.rank == Conversion::None && valueType(id.init.args[0])->kind != Type::Error) error(dcl->loc, "S105", "cannot initialise '" + name + "' of type " + t->text() + " from " + valueType(id.init.args[0])->text());

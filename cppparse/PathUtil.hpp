@@ -23,7 +23,15 @@ void        addUnique(std::vector<std::string>& v, const std::string& s);
 void        addUniqueInt(std::vector<int>& v, int x);
 std::string stripTemplateArgs(const std::string& s);   // "A<T>::B<U>" -> "A::B"
 bool        isMacroLike(const std::string& word);      // "SAMPLE_API": all caps, more than one char
-bool        isStandardLibraryName(const std::string& name); // printf, strlen, isalnum, sort, ...
+// where a library function name used in analysed code comes from (data about the analysed program, not the host)
+enum LibraryOrigin {
+    OriginUnknown, OriginC90Function, OriginC90Macro, OriginC99Function, OriginCpp98, OriginCppLater,
+    OriginPosix, OriginMsvcCrt, OriginWin32Function, OriginWin32Macro
+};
+LibraryOrigin libraryNameOrigin(const std::string& name);
+const char*   libraryOriginText(LibraryOrigin origin);
+bool        isStandardLibraryName(const std::string& name); // ISO C90 or C++98: printf, assert, sort, ...
+bool        isKnownLibraryName(const std::string& name);    // any origin, including POSIX, MSVC and Win32
 std::string lastComponent(const std::string& qualified); // "a::b::c" -> "c"
 std::string xmlEscape(const std::string& s);
 std::string xmlDecode(const std::string& s);

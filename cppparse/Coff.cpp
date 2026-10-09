@@ -956,6 +956,10 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             if (!current) { globalErrors.push_back("line " + numText(lineNo) + ": code outside PROC: " + text); continue; }
             current->lines.push_back(std::make_pair(lineNo, text));
         } else if (section >= 2 && section <= 4) {
+            // a COMDAT data item ends where the next labelled definition begins: a symbol of internal linkage
+            // has no PUBLIC line before it, and must not join the COMDAT section the linker may discard
+            const bool labelled = u0 != "DB" && u0 != "DW" && u0 != "DD" && u0 != "DQ" && u0 != "REAL4" && u0 != "REAL8" && u0 != "ALIGN";
+            if (!comdatNext && labelled && currentPiece && currentPiece->comdat) currentPiece = 0;
             if (comdatNext) { pieces.push_back(new DataPiece(section, true)); currentPiece = pieces.back(); comdatNext = false; }
             if (!currentPiece) {
                 if (!plain[section]) { pieces.push_back(new DataPiece(section, false)); plain[section] = pieces.back(); }

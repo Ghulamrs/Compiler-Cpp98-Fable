@@ -1,5 +1,7 @@
 // Pp.cpp - version 6: C++98 preprocessor. See Pp.hpp.
+#ifdef _MSC_VER
 #define _CRT_SECURE_NO_WARNINGS 1     // localtime for __DATE__ / __TIME__
+#endif
 #include "Pp.hpp"
 #include "PathUtil.hpp"
 

@@ -22,7 +22,7 @@
 //   <name>-diagram.dot    Graphviz source (dot -Tpng -o diagram.png <name>-diagram.dot)
 //
 // Strict C++98.
-#ifdef _DEBUG
+#if defined(_MSC_VER) && defined(_DEBUG)
 #include <crtdbg.h>
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -122,7 +122,7 @@ bool writeOut(const std::string& path, const std::string& content, bool quiet, s
 
 } // namespace
 
-#ifdef _DEBUG
+#if defined(_MSC_VER) && defined(_DEBUG)
 // a debug-runtime assertion (an iterator check, a heap check) is written to stderr and ends the process with
 // exit code 3, so that a build script or a bisection sees it instead of a dialog waiting for a click
 int reportToStderr(int reportType, char* message, int* returnValue)
@@ -158,7 +158,7 @@ int reportToStderr(int reportType, char* message, int* returnValue)
 
 int main(int argc, char* argv[])
 {
-#ifdef _DEBUG
+#if defined(_MSC_VER) && defined(_DEBUG)
     _CrtSetReportHook(reportToStderr);
 #endif
     std::vector<std::string> inputs;

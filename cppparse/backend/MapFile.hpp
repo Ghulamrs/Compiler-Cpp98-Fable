@@ -3,7 +3,8 @@
 //
 //   time stamp         when the map was written, as link /MAP prints it
 //   section table      Start (section:offset), Length, Name, Class
-//   Publics by Value   Address, Size, Type, Symbol (as written to the object), readable name
+//   Publics by Value   Address, Size, Flags (link's: f function, i inline), Type, Symbol (as written to the
+//                      object), readable name
 //   Static symbols     the same for internal linkage
 //   entry point
 //   Symbols by Name    every symbol again, sorted by readable name, with its linkage (public / static)

@@ -39,16 +39,25 @@ std::string typeOf(const CoffSymbolInfo& y, const std::string& readable)
     return "data";
 }
 
+// link's flags: "f" a function, "i" an inline one (in a COMDAT section of its own, one copy kept by the linker)
+std::string flagsOf(const CoffResult& r, const CoffSymbolInfo& y)
+{
+    if (!y.isFunction) return "   ";
+    for (size_t i = 0; i < r.sectionList.size(); ++i)
+        if (r.sectionList[i].number == y.section) return r.sectionList[i].comdat ? "f i" : "f  ";
+    return "f  ";
+}
+
 void symbolLines(std::ostringstream& s, const CoffResult& r, const std::map<std::string, std::string>& names, bool external)
 {
-    s << "  Address         Size        Type      Symbol                                    Name\n\n";
+    s << "  Address         Size        Flags  Type      Symbol                                    Name\n\n";
     int count = 0;
     for (size_t i = 0; i < r.symbolList.size(); ++i) {
         const CoffSymbolInfo& y = r.symbolList[i];
         if (y.external != external) continue;
         std::map<std::string, std::string>::const_iterator n = names.find(y.name);
         const std::string readable = n == names.end() ? std::string() : n->second;
-        s << " " << address(y.section, y.offset) << "   " << hexText(y.size, 8) << "H   " << pad(typeOf(y, readable), 9) << " "
+        s << " " << address(y.section, y.offset) << "   " << hexText(y.size, 8) << "H   " << flagsOf(r, y) << "    " << pad(typeOf(y, readable), 9) << " "
           << pad(y.name, 41) << (readable == y.name ? std::string() : " " + readable) << "\n";
         ++count;
     }
@@ -85,10 +94,10 @@ void byNameLines(std::ostringstream& s, const CoffResult& r, const std::map<std:
         list.push_back(n);
     }
     std::sort(list.begin(), list.end(), ByNameOrder());
-    s << "  Address         Size        Type      Linkage  Symbol                                    Name\n\n";
+    s << "  Address         Size        Flags  Type      Linkage  Symbol                                    Name\n\n";
     for (size_t i = 0; i < list.size(); ++i) {
         const CoffSymbolInfo& y = *list[i].y;
-        s << " " << address(y.section, y.offset) << "   " << hexText(y.size, 8) << "H   " << pad(typeOf(y, list[i].readable), 9) << " "
+        s << " " << address(y.section, y.offset) << "   " << hexText(y.size, 8) << "H   " << flagsOf(r, y) << "    " << pad(typeOf(y, list[i].readable), 9) << " "
           << pad(y.external ? "public" : "static", 8) << " " << pad(y.name, 41)
           << (list[i].readable == y.name ? std::string() : " " + list[i].readable) << "\n";
     }

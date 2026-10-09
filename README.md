@@ -128,7 +128,7 @@ the functions and globals never referenced anywhere, and the entry point.
 powershell -ExecutionPolicy Bypass -File cpp\sandbox\build-cppparse.ps1 [-Config Release|Debug] [-NoTests]
 ```
 
-Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend` and `analyzer` with MSVC at
+Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend`, `analyzer` and `analyzer/report` with MSVC at
 `/W4 /permissive-` (warnings fail the build). `-Config Release` (default)
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
@@ -163,7 +163,7 @@ of cppparse, and compares the programs' output). The first four: the Visual Stud
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken
 folder `examples/sample-bad/`, which must produce every health code. Any C++98 compiler works for the sources themselves, e.g.
-`g++ -std=c++98 -pedantic -Wall -Icppparse/driver -Icppparse/common -Icppparse/frontend -Icppparse/middle -Icppparse/backend -Icppparse/analyzer -o cppparse cppparse/{driver,common,frontend,middle,backend,analyzer}/*.cpp` (on a host without Windows the worker pool runs the jobs one after another).
+`g++ -std=c++98 -pedantic -Wall -Icppparse/driver -Icppparse/common -Icppparse/frontend -Icppparse/middle -Icppparse/backend -Icppparse/analyzer -Icppparse/analyzer/report -o cppparse cppparse/{driver,common,frontend,middle,backend,analyzer,analyzer/report}/*.cpp` (on a host without Windows the worker pool runs the jobs one after another).
 
 ## How it works
 
@@ -388,11 +388,12 @@ compiler they belong to; every folder is an include directory of the build (`bui
 - `middle/`: `IrGen` (IR from the analysed tree), `Ir` (the intermediate representation), `Optimizer`, `Ssa`.
 - `backend/`: `BackEnd` (the shared driver of the phases below), `Lower` (VM64), `X86` (x86-64 assembly),
   `Coff` (the object writer), `Mangle`/`MangleSema` (MSVC name decoration, part of the target's ABI).
-- `analyzer/`: the version 1 to 5 pipeline: project reading, the health checker and the reports, and the old
-  compile path kept until the version 6 pipeline replaces it: `Lexer`, `Parser`, `Model`, `CodeBase`,
-  `ProjectReader`, `Report`, `Html`, `Pdf`, `Diagram`, `Symbols`, `Health`, `Ast`, `BodyParser`, `TypeCheck`,
+- `analyzer/`: the version 1 to 5 pipeline: project reading and the old compile path kept until the version 6
+  pipeline replaces it: `Lexer`, `Parser`, `Model`, `CodeBase`, `ProjectReader`, `Ast`, `BodyParser`, `TypeCheck`,
   `Types`, `Instantiate`, `IrBuilder` (old IR generation and class layouts) and `Compiler` (the old driver).
   They are exercised by tests 1 to 9.
+- `analyzer/report/`: the health checker and the reports, off the compiler's path: `Health`, `Report`,
+  `Symbols`, `Diagram`, `Html`, `Pdf`. Only `driver/main` and `CodeBase::checkHealth` call into them.
 
 Everything that is not compiler source sits next to `cppparse/` in the `cpp` folder:
 

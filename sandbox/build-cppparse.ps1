@@ -31,7 +31,7 @@ $ErrorActionPreference = "Stop"
 $Sandbox = $PSScriptRoot
 $Src     = Split-Path $Sandbox -Parent
 # cppparse's source folders (see scripts\toolset.ps1): each is an include folder of the build as well
-$SourceDirs = @("driver", "common", "frontend", "middle", "backend", "analyzer")
+$SourceDirs = @("driver", "common", "frontend", "middle", "backend", "analyzer", "analyzer\report")
 $sourceIncludes = @(); foreach ($d in $SourceDirs) { $sourceIncludes += "/I..\cppparse\$d" }
 
 # PowerShell names are case-insensitive, so $Exe is also the $exe the tests run

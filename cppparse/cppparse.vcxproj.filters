@@ -19,6 +19,9 @@
     <Filter Include="analyzer">
       <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A06}</UniqueIdentifier>
     </Filter>
+    <Filter Include="analyzer\report">
+      <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A0C}</UniqueIdentifier>
+    </Filter>
     <Filter Include="runtime">
       <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A07}</UniqueIdentifier>
     </Filter>
@@ -54,6 +57,9 @@
     <ClCompile Include="analyzer\*.cpp">
       <Filter>analyzer</Filter>
     </ClCompile>
+    <ClCompile Include="analyzer\report\*.cpp">
+      <Filter>analyzer\report</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common\*.hpp">
@@ -70,6 +76,9 @@
     </ClInclude>
     <ClInclude Include="analyzer\*.hpp">
       <Filter>analyzer</Filter>
+    </ClInclude>
+    <ClInclude Include="analyzer\report\*.hpp">
+      <Filter>analyzer\report</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

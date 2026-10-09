@@ -42,7 +42,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <ConformanceMode>true</ConformanceMode>
       <ExceptionHandling>Sync</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir)driver;$(ProjectDir)common;$(ProjectDir)frontend;$(ProjectDir)middle;$(ProjectDir)backend;$(ProjectDir)analyzer;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)driver;$(ProjectDir)common;$(ProjectDir)frontend;$(ProjectDir)middle;$(ProjectDir)backend;$(ProjectDir)analyzer;$(ProjectDir)analyzer\report;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
@@ -72,6 +72,7 @@
     <ClCompile Include="middle\*.cpp" />
     <ClCompile Include="backend\*.cpp" />
     <ClCompile Include="analyzer\*.cpp" />
+    <ClCompile Include="analyzer\report\*.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common\*.hpp" />
@@ -79,6 +80,7 @@
     <ClInclude Include="middle\*.hpp" />
     <ClInclude Include="backend\*.hpp" />
     <ClInclude Include="analyzer\*.hpp" />
+    <ClInclude Include="analyzer\report\*.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\README.md" />

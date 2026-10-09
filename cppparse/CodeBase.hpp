@@ -29,7 +29,9 @@ public:
 
     // Runs the version 2 health checks (after link()).
     void checkHealth();
+    void addFindings(const std::vector<Finding>& more);   // version 3 type checker results
     const std::vector<Finding>&       findings()  const { return m_findings; }
+    const SourceFile*                 fileByPath(const std::string& path) const;
 
     const std::vector<SourceFile*>&   files()     const { return m_files; }
     const std::vector<ProjectInfo>&   projects()  const { return m_projects; }

@@ -1688,7 +1688,10 @@ void Parser::parseFunctionTail(FunctionInfo& fn, ClassInfo* owner)
 
     if (isPunct("{")) {
         fn.hasBody = true;
+        cur();
+        fn.bodyBegin = m_pos;
         scanBody(fn);
+        fn.bodyEnd = m_pos;
         if (fn.exceptions.functionTryBlock) {
             while (is("catch")) {
                 advance();

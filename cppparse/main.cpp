@@ -11,6 +11,11 @@
 //   <name>-health.txt     version 2 health check findings
 //   <name>-symbols.json   symbol table (also -symbols.txt, tab-separated)
 //   <name>-symbols.map    linker-style map: modules, symbols, cross reference
+//   <name>-ast.txt        version 3: abstract syntax tree of every function body
+//   <name>-ir.txt         version 3: class layouts and the IR before/after -On
+//   <name>-opt.log        version 3: what each optimisation pass changed
+//   <name>-asm.txt        version 3: lowered assembly for the VM64 target
+//   <name>.asm            version 4: x86-64 MASM (Windows x64 ABI); --assemble adds <name>.obj via ml64
 //   <name>-report.html    self-contained HTML report with the class diagram
 //   <name>-report.pdf     the same report as PDF (diagram + text)
 //   <name>-diagram.svg    class diagram picture
@@ -18,6 +23,7 @@
 //
 // Strict C++98.
 #include "CodeBase.hpp"
+#include "Compiler.hpp"
 #include "Diagram.hpp"
 #include "Health.hpp"
 #include "Html.hpp"
@@ -26,6 +32,7 @@
 #include "Report.hpp"
 #include "Symbols.hpp"
 
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -54,6 +61,10 @@ void usage()
         "  --stdout         print the text report to the console, write no files\n"
         "  --health         print the health report to the console, write no files\n"
         "  --strict         exit code 3 when the health check finds errors\n"
+        "  -O0 .. -O3       version 3: optimisation level for the IR (default -O0)\n"
+        "  --no-compile     skip version 3 (AST, type check, IR, lowering)\n"
+        "  --no-x86         version 4: do not write the x86-64 MASM file (<name>.asm)\n"
+        "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
         "  -q               quiet: print only errors\n"
         "  -h, --help       this text\n";
 }
@@ -83,7 +94,8 @@ int main(int argc, char* argv[])
 {
     std::vector<std::string> inputs;
     std::string outDir, outName;
-    bool follow = true, textOnly = false, toStdout = false, quiet = false, healthOnly = false, strict = false;
+    bool follow = true, textOnly = false, toStdout = false, quiet = false, healthOnly = false, strict = false, compile = true, assemble = false;
+    CompileOptions copt;
     ReportOptions opt;
 
     for (int i = 1; i < argc; ++i) {
@@ -98,6 +110,10 @@ int main(int argc, char* argv[])
         else if (a == "--stdout") toStdout = true;
         else if (a == "--health") healthOnly = true;
         else if (a == "--strict") strict = true;
+        else if (a == "--no-compile") compile = false;
+        else if (a == "--no-x86") copt.x86 = false;
+        else if (a == "--assemble") assemble = true;
+        else if (a.size() == 3 && a[0] == '-' && a[1] == 'O' && a[2] >= '0' && a[2] <= '3') copt.optLevel = a[2] - '0';
         else if (a == "-q") quiet = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "unknown option: " << a << "\n"; usage(); return 2; }
         else inputs.push_back(a);
@@ -117,7 +133,10 @@ int main(int argc, char* argv[])
         return 1;
     }
     cb.link();
+    Compiler compiler(cb, copt);
+    if (compile) compiler.run();          // sets FunctionInfo::typeChecked before the health check runs
     cb.checkHealth();
+    if (compile) cb.addFindings(compiler.findings());
     int errors = 0, warnings = 0, infos = 0;
     countFindings(cb.findings(), errors, warnings, infos);
     const int strictExit = (strict && errors > 0) ? 3 : 0;
@@ -137,6 +156,21 @@ int main(int argc, char* argv[])
     if (!writeOut(base + "-symbols.json", renderSymbolsJson(cb), quiet, written)) ok = false;
     if (!writeOut(base + "-symbols.txt", renderSymbolsText(cb), quiet, written)) ok = false;
     if (!writeOut(base + "-symbols.map", renderSymbolsMap(cb), quiet, written)) ok = false;
+    if (compile) {
+        if (!writeOut(base + "-ast.txt", compiler.astText(), quiet, written)) ok = false;
+        if (!writeOut(base + "-ir.txt", "; class layouts\n" + compiler.layoutText() + "\n" + compiler.irText(), quiet, written)) ok = false;
+        if (!writeOut(base + "-opt.log", compiler.optLog(), quiet, written)) ok = false;
+        if (!writeOut(base + "-asm.txt", compiler.asmText(), quiet, written)) ok = false;
+        if (copt.x86) {
+            if (!writeOut(base + ".asm", compiler.x86Text(), quiet, written)) ok = false;
+            if (assemble) {
+                std::string cmd = "ml64 /nologo /c \"/Fo" + base + ".obj\" \"" + base + ".asm\"";
+                if (!quiet) std::cout << "  running " << cmd << "\n";
+                int rc = std::system(cmd.c_str());
+                if (rc != 0) { std::cerr << "error: ml64 failed (exit code " << rc << ")\n"; ok = false; }
+            }
+        }
+    }
     if (!textOnly) {
         DiagramLayout layout;
         layout.build(cb);
@@ -153,6 +187,11 @@ int main(int argc, char* argv[])
                   << t.lines << " lines, " << (t.classes + t.structs + t.unions) << " classes, " << t.methods << " methods, "
                   << t.freeFunctions << " free functions, " << t.globals << " globals, " << t.macros << " macros\n"
                   << "health: " << errors << " errors, " << warnings << " warnings, " << infos << " info\n";
+        if (compile) {
+            std::vector<std::string> lines;
+            compiler.summaryLines(lines);
+            for (size_t i = 0; i < lines.size(); ++i) std::cout << lines[i] << "\n";
+        }
         for (size_t i = 0; i < cb.messages().size(); ++i) std::cout << "  note: " << cb.messages()[i] << "\n";
     }
     if (strictExit) return strictExit;

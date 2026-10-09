@@ -20,7 +20,10 @@ std::string replaceAll(const std::string& s, const std::string& from, const std:
 std::string padRight(const std::string& s, size_t width);
 bool        contains(const std::vector<std::string>& v, const std::string& s);
 void        addUnique(std::vector<std::string>& v, const std::string& s);
+void        addUniqueInt(std::vector<int>& v, int x);
 std::string stripTemplateArgs(const std::string& s);   // "A<T>::B<U>" -> "A::B"
+bool        isMacroLike(const std::string& word);      // "SAMPLE_API": all caps, more than one char
+bool        isStandardLibraryName(const std::string& name); // printf, strlen, isalnum, sort, ...
 std::string lastComponent(const std::string& qualified); // "a::b::c" -> "c"
 std::string xmlEscape(const std::string& s);
 std::string xmlDecode(const std::string& s);

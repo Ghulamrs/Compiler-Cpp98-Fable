@@ -1,5 +1,6 @@
 // Html.cpp - self-contained HTML report.
 #include "Html.hpp"
+#include "Health.hpp"
 #include "PathUtil.hpp"
 
 #include <sstream>
@@ -187,7 +188,7 @@ std::string renderHtmlReport(const CodeBase& cb, const DiagramLayout& layout, co
       << card("files", t.files) << card("header files", t.headers) << card("source files", t.sources) << card("lines", t.lines)
       << card("classes / structs / unions", t.classes + t.structs + t.unions) << card("methods", t.methods) << card("free functions", t.freeFunctions)
       << card("global variables", t.globals) << card("local variables", t.locals) << card("macros", t.macros) << card("directives", t.directives)
-      << card("try blocks", t.tryBlocks) << card("parser diagnostics", t.diagnostics) << "</div></section>\n";
+      << card("try blocks", t.tryBlocks) << card("health errors", t.healthErrors) << card("health warnings", t.healthWarnings) << "</div></section>\n";
 
     // project
     s << "<section id=\"project\"><h2>Project</h2>";
@@ -340,33 +341,24 @@ std::string renderHtmlReport(const CodeBase& cb, const DiagramLayout& layout, co
     s << "</table></section>\n";
 
     // health
-    s << "<section id=\"health\"><h2>Health (preview of the version 2 checker)</h2><ul>";
     {
-        int n = 0;
-        for (size_t f = 0; f < files.size(); ++f)
-            for (size_t d = 0; d < files[f]->directives.size(); ++d) {
-                const Directive& dir = files[f]->directives[d];
-                if (dir.kind == Directive::Include && !dir.inactive && !dir.systemInclude && dir.resolvedPath.empty()) { s << "<li class=\"warn\">include not found: <code>#include \"" << h(dir.argument) << "\"</code> at " << h(locationText(cb, files[f]->path, dir.line, 0)) << "</li>"; ++n; }
+        const std::vector<Finding>& fd = cb.findings();
+        int ne, nw, ni;
+        countFindings(fd, ne, nw, ni);
+        s << "<section id=\"health\"><h2>Health</h2><div class=\"cards\"><div class=\"card\"><b class=\"warn\">" << ne << "</b><span>errors</span></div>"
+          << "<div class=\"card\"><b style=\"color:#c07a00\">" << nw << "</b><span>warnings</span></div><div class=\"card\"><b class=\"dim\">" << ni << "</b><span>info</span></div></div>";
+        if (fd.empty()) s << "<p class=\"ok\">no findings</p>";
+        else {
+            s << "<table><tr><th>Severity</th><th>Code</th><th>Location</th><th>Finding</th></tr>";
+            for (size_t k = 0; k < fd.size(); ++k) {
+                const char* cls = fd[k].severity == Finding::Error ? "warn" : (fd[k].severity == Finding::Warning ? "" : "dim");
+                s << "<tr><td class=\"" << cls << "\">" << severityName(fd[k].severity) << "</td><td>" << fd[k].code << "</td><td>" << h(cb.displayPath(fd[k].file)) << ":" << fd[k].line
+                  << "</td><td>" << h(fd[k].message) << (fd[k].detail.empty() ? "" : "<br><span class=\"dim\">" + h(fd[k].detail) + "</span>") << "</td></tr>";
             }
-        for (size_t i = 0; i < classes.size(); ++i)
-            for (size_t m = 0; m < classes[i]->methods.size(); ++m) {
-                const FunctionInfo& fn = classes[i]->methods[m];
-                if (!fn.definition && !fn.isPureVirtual && fn.linkNote != "= default" && fn.linkNote != "= delete") { s << "<li>method without a body: <code>" << h(classes[i]->qualifiedName + "::" + fn.name + "(" + fn.paramText + ")") << "</code> declared at " << h(locationText(cb, fn.file, fn.line, 0)) << "</li>"; ++n; }
-            }
-        for (size_t f = 0; f < files.size(); ++f)
-            for (size_t k = 0; k < files[f]->functions.size(); ++k) {
-                const FunctionInfo& fn = files[f]->functions[k];
-                if (!fn.qualifier.empty() && fn.declaredAt.empty()) { s << "<li class=\"warn\">definition without declaration: <code>" << h(fn.fullName() + "(" + fn.paramText + ")") << "</code> " << h(locationText(cb, fn.file, fn.line, 0)) << " <span class=\"dim\">" << h(fn.linkNote) << "</span></li>"; ++n; }
-                if (fn.qualifier.empty() && !fn.hasBody && !fn.definition) { s << "<li>free function declared but no body found: <code>" << h(fn.fullName() + "(" + fn.paramText + ")") << "</code> " << h(locationText(cb, fn.file, fn.line, 0)) << "</li>"; ++n; }
-            }
-        for (size_t i = 0; i < classes.size(); ++i)
-            for (size_t b = 0; b < classes[i]->bases.size(); ++b)
-                if (!classes[i]->bases[b].resolved && classes[i]->isDefinition) { s << "<li>base class not defined in the parsed files: <code>" << h(classes[i]->qualifiedName + " : " + classes[i]->bases[b].name) << "</code></li>"; ++n; }
-        std::vector<std::string> diags; collectDiagnostics(cb, diags);
-        for (size_t i = 0; i < diags.size(); ++i) { s << "<li class=\"dim\">parser: " << h(diags[i]) << "</li>"; ++n; }
-        if (n == 0) s << "<li class=\"ok\">no findings</li>";
+            s << "</table>";
+        }
+        s << "<p class=\"dim\">E = will not compile or link, W = likely bug or risky construct, I = worth knowing. Checks are static: macros are not expanded and #if conditions are not evaluated.</p></section>\n";
     }
-    s << "</ul></section>\n";
 
     // totals
     s << "<section id=\"totals\"><h2>Totals</h2><pre>";

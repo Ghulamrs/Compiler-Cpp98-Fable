@@ -957,6 +957,16 @@ void Parser::collectTrailingDeclarators(ClassInfo* owner, Access access, const s
 {
     std::vector<Token> toks;
     int line = cur().line;
+    // "class A { ... }  class B" : the ';' after the body is missing
+    if (cur().type == TokIdentifier) {
+        const std::string& w = cur().text;
+        if (isClassKey(w) || w == "enum" || w == "template" || w == "typedef" || w == "namespace" || w == "using" ||
+            w == "static" || w == "inline" || w == "virtual" || w == "extern" || w == "friend" || w == "explicit" ||
+            w == "operator" || isAccessWord(w) || (isTypeKeyword(w) && w != "const")) {
+            diag(line, "missing ';' after the body of " + (cls ? cls->qualifiedName : baseType));
+            return;
+        }
+    }
     while (!atEnd() && !isPunct(";") && !isPunct("}")) {
         if (isPunct("(") || isPunct("[") || isPunct("{")) {
             const std::string open = cur().text;
@@ -1149,7 +1159,13 @@ bool Parser::parensContainLiteral()
     if (close == std::string::npos) return false;
     for (size_t j = m_pos + 1; j < close; ++j) {
         TokenType ty = m_tokens[j].type;
-        if (ty == TokNumber || ty == TokString || ty == TokChar) return true;
+        if (ty == TokNumber || ty == TokString || ty == TokChar) {
+            // a literal right after '=' is a default argument, not a constructor argument
+            size_t p = j - 1;
+            while (p > m_pos && m_tokens[p].type == TokPreproc) --p;
+            if (m_tokens[p].text == "=") continue;
+            return true;
+        }
         if (ty == TokPunct && (m_tokens[j].text == "+" || m_tokens[j].text == "-" || m_tokens[j].text == "/" ||
                                m_tokens[j].text == "." || m_tokens[j].text == "->" || m_tokens[j].text == "=="))
             return true;
@@ -1261,8 +1277,10 @@ void Parser::parseDeclaration(ClassInfo* owner, Access access, const TemplateInf
 
             if (p == "::" && angle == 0 && paren == 0) {
                 if (nameStart == std::string::npos || !prevScope) {
-                    // leading "::name" or a chain continuing after an identifier
-                    if (head.empty() || head.back().type != TokIdentifier) nameStart = head.size();
+                    // leading "::name"; a chain continuing after an identifier or after the
+                    // closing '>' of its template arguments ("Foo<T>::bar") keeps its start
+                    if (head.empty() || (head.back().type != TokIdentifier && head.back().text != ">"))
+                        nameStart = head.size();
                 }
                 prevScope = true;
                 head.push_back(t);
@@ -1691,66 +1709,226 @@ void Parser::parseFunctionTail(FunctionInfo& fn, ClassInfo* owner)
 
 // ---- function bodies --------------------------------------------------------
 
-// cur() is at '{'. Consumes the balanced block, counting try/catch/throw and
-// recording local variable declarations.
+void Parser::note(FunctionInfo& fn, const char* code, const std::string& text, int line)
+{
+    BodyNote n;
+    n.code = code;
+    n.text = text;
+    n.line = line;
+    fn.notes.push_back(n);
+}
+
+int Parser::countArgs(size_t openIdx) const
+{
+    size_t close = matchClose(openIdx);
+    if (close == std::string::npos) return 0;
+    int depth = 0, args = 0;
+    bool any = false;
+    for (size_t j = openIdx + 1; j < close; ++j) {
+        const Token& k = m_tokens[j];
+        if (k.type == TokPreproc) continue;
+        any = true;
+        if (k.type != TokPunct) continue;
+        if (k.text == "(" || k.text == "[" || k.text == "{") ++depth;
+        else if (k.text == ")" || k.text == "]" || k.text == "}") --depth;
+        else if (k.text == "," && depth == 0) ++args;
+    }
+    return any ? args + 1 : 0;
+}
+
+void Parser::recordCall(FunctionInfo& fn, const std::string& prevPrev, const std::string& prev,
+                        const std::string& name, int argCount, int line)
+{
+    CallInfo c;
+    c.name = name;
+    c.argCount = argCount;
+    c.line = line;
+    if (prev == ".") { c.kind = CallInfo::Member; c.receiver = prevPrev; }
+    else if (prev == "->") { c.kind = CallInfo::Pointer; c.receiver = prevPrev; }
+    else if (prev == "::") { c.kind = CallInfo::Scoped; c.qualifier = prevPrev; }
+    else if (prev == "new") c.kind = CallInfo::New;
+    else c.kind = CallInfo::Plain;
+    if (!c.receiver.empty() && !(isalpha(static_cast<unsigned char>(c.receiver[0])) || c.receiver[0] == '_')) c.receiver = "";
+    if (!c.qualifier.empty() && !(isalpha(static_cast<unsigned char>(c.qualifier[0])) || c.qualifier[0] == '_')) c.qualifier = "";
+    fn.calls.push_back(c);
+}
+
+// records identifier uses and calls found in an initializer token list
+void Parser::scanInitializer(FunctionInfo& fn, const std::vector<Token>& toks)
+{
+    for (size_t i = 0; i < toks.size(); ++i) {
+        const Token& t = toks[i];
+        if (t.type != TokIdentifier) continue;
+        if (isStatementKeyword(t.text) || isTypeKeyword(t.text) || t.text == "sizeof") continue;
+        fn.bodyIdents.push_back(t.text);
+        if (i + 1 < toks.size() && toks[i + 1].text == "(") {
+            int depth = 0, args = 0;
+            bool any = false;
+            for (size_t j = i + 2; j < toks.size(); ++j) {
+                const std::string& s = toks[j].text;
+                if (s == "(" || s == "[" || s == "{") ++depth;
+                else if (s == ")" || s == "]" || s == "}") { if (depth == 0) break; --depth; }
+                else if (s == "," && depth == 0) ++args;
+                if (toks[j].type != TokPunct || (s != ")" && s != "(")) any = true;
+                else if (depth > 0) any = true;
+            }
+            std::string prev = i > 0 ? toks[i - 1].text : "", prevPrev = i > 1 ? toks[i - 2].text : "";
+            recordCall(fn, prevPrev, prev, t.text, any ? args + 1 : 0, t.line);
+        }
+    }
+}
+
+// cur() is at the '(' after if/while/for/switch: looks for "if (x = y)" and
+// for a ';' directly after the closing parenthesis.
+void Parser::checkCondition(FunctionInfo& fn, const std::string& keyword, int line, const std::string& prevToken)
+{
+    cur();
+    size_t open = m_pos;
+    size_t close = matchClose(open);
+    if (close == std::string::npos) return;
+    if (keyword == "if" || keyword == "while") {
+        int d = 0;
+        for (size_t j = open + 1; j < close; ++j) {
+            const Token& k = m_tokens[j];
+            if (k.type != TokPunct) continue;
+            if (k.text == "(" || k.text == "[") ++d;
+            else if (k.text == ")" || k.text == "]") --d;
+            else if (k.text == "=" && d == 0) {
+                size_t p = j - 1;
+                while (p > open && m_tokens[p].type == TokPreproc) --p;
+                size_t pp = p > open ? p - 1 : open;
+                while (pp > open && m_tokens[pp].type == TokPreproc) --pp;
+                bool declShape = p > open && m_tokens[p].type == TokIdentifier && pp > open &&
+                                 (m_tokens[pp].type == TokIdentifier || m_tokens[pp].text == "*" ||
+                                  m_tokens[pp].text == "&" || m_tokens[pp].text == ">");
+                if (!declShape) note(fn, "assign-in-condition", "assignment '=' inside the " + keyword + " condition (did you mean '=='?)", line);
+                break;
+            }
+        }
+    }
+    size_t after = rawNext(close);
+    bool doWhile = (keyword == "while" && prevToken == "}");   // "do { ... } while (cond);"
+    if (keyword != "switch" && !doWhile && after < m_tokens.size() && m_tokens[after].text == ";")
+        note(fn, "empty-statement", "';' directly after " + keyword + " (...): the " + keyword + " controls an empty statement", m_tokens[after].line);
+}
+
+// cur() is at '{'. Consumes the balanced block, counting try/catch/throw,
+// recording local variable declarations, identifier uses, calls, returns and
+// suspicious statement patterns.
 void Parser::scanBody(FunctionInfo& fn)
 {
     int depth = 0;
     bool stmtStart = false;
+    bool afterJump = false;        // the previous statement was return/throw/break/continue
+    bool lastWasCatchAll = false;  // the block that just closed was "catch (...)"
+    std::string prev, prevPrev;    // the two previous significant tokens
     for (;;) {
         const Token& t = cur();
         if (t.type == TokEnd) { diag(fn.line, "unterminated body of " + fn.name); return; }
 
         if (t.type == TokPunct) {
-            if (t.text == "{") { ++depth; stmtStart = true; advance(); continue; }
-            if (t.text == "}") {
+            if (t.text == "{") { ++depth; stmtStart = true; afterJump = false; }
+            else if (t.text == "}") {
                 --depth;
                 fn.endLine = t.line;
                 advance();
                 stmtStart = true;
+                afterJump = false;
+                prevPrev = prev; prev = "}";
                 if (depth == 0) return;
                 continue;
             }
-            if (t.text == ";") { stmtStart = true; advance(); continue; }
-            stmtStart = false;
+            else if (t.text == ";") stmtStart = true;
+            else stmtStart = false;
+            prevPrev = prev; prev = t.text;
             advance();
             continue;
         }
 
         if (t.type == TokIdentifier) {
-            const std::string& w = t.text;
-            if (w == "try") { fn.exceptions.tryBlocks++; advance(); stmtStart = false; continue; }
+            const std::string w = t.text;
+            const int line = t.line;
+            if (stmtStart && afterJump && w != "case" && w != "default" && w != "else") {
+                note(fn, "unreachable", "statement after return/throw/break/continue can never run", line);
+                afterJump = false;
+            }
+            if (stmtStart && w != "catch") lastWasCatchAll = false;
+            const bool jumpStart = stmtStart && (prev == ";" || prev == "{" || prev == "}" || prev == ":");
+
+            if (w == "try") { fn.exceptions.tryBlocks++; advance(); stmtStart = false; prevPrev = prev; prev = w; continue; }
             if (w == "catch") {
                 fn.exceptions.catchHandlers++;
+                if (lastWasCatchAll) note(fn, "handler-after-catch-all", "catch handler placed after catch (...) can never run", line);
                 advance();
                 std::vector<Token> ty;
                 if (isPunct("(")) skipBalanced(&ty);
-                fn.exceptions.caughtTypes.push_back(joinTokens(ty));
-                stmtStart = false;
+                std::string tyText = joinTokens(ty);
+                fn.exceptions.caughtTypes.push_back(tyText);
+                bool catchAll = (tyText == "...");
+                if (!catchAll && !ty.empty()) {
+                    bool byRef = false, builtin = false;
+                    for (size_t i = 0; i < ty.size(); ++i) {
+                        if (ty[i].text == "&" || ty[i].text == "*") byRef = true;
+                        if (ty[i].type == TokIdentifier && isTypeKeyword(ty[i].text) && ty[i].text != "const") builtin = true;
+                    }
+                    if (!byRef && !builtin) note(fn, "catch-by-value", "exception caught by value: catch (" + tyText + "); catch by const reference instead", line);
+                }
+                lastWasCatchAll = catchAll;
+                stmtStart = false; prevPrev = prev; prev = w;
                 continue;
             }
-            if (w == "throw") { fn.exceptions.throwStatements++; advance(); stmtStart = false; continue; }
+            if (w == "throw") { fn.exceptions.throwStatements++; if (jumpStart) afterJump = true; advance(); stmtStart = false; prevPrev = prev; prev = w; continue; }
+            if (w == "return") {
+                if (peek(1).text == ";") fn.returnsVoid++; else fn.returnsValue++;
+                if (jumpStart) afterJump = true;
+                advance(); stmtStart = false; prevPrev = prev; prev = w;
+                continue;
+            }
+            if (w == "break" || w == "continue") { if (jumpStart) afterJump = true; advance(); stmtStart = false; prevPrev = prev; prev = w; continue; }
             if (w == "for" || w == "while" || w == "if" || w == "switch") {
+                const std::string before = prev;
                 advance();
-                if (isPunct("(")) { advance(); stmtStart = true; } else stmtStart = false;
+                if (isPunct("(")) { checkCondition(fn, w, line, before); advance(); stmtStart = true; }
+                else stmtStart = false;
+                prevPrev = prev; prev = "(";
                 continue;
             }
-            if (w == "else" || w == "do") { advance(); stmtStart = true; continue; }
+            if (w == "typedef") {
+                // local typedef: remember the introduced name so calls like "V2d(1, 2)" resolve
+                std::string last;
+                advance();
+                while (!atEnd() && !isPunct(";") && !isPunct("}")) {
+                    if (isIdent()) last = cur().text;
+                    if (isPunct("(") || isPunct("[")) { std::vector<Token> inner; skipBalanced(&inner); for (size_t i = 0; i < inner.size(); ++i) if (inner[i].type == TokIdentifier) last = inner[i].text; continue; }
+                    advance();
+                }
+                if (!last.empty()) fn.localTypedefs.push_back(last);
+                stmtStart = false; prevPrev = prev; prev = w;
+                continue;
+            }
+            if (w == "else" || w == "do") { advance(); stmtStart = true; afterJump = false; prevPrev = prev; prev = w; continue; }
             if (w == "case" || w == "default") {
                 while (!atEnd() && !isPunct(":") && !isPunct(";") && !isPunct("}")) advance();
                 if (isPunct(":")) advance();
-                stmtStart = true;
+                stmtStart = true; afterJump = false; prevPrev = prev; prev = ":";
                 continue;
             }
             if (stmtStart && !isStatementKeyword(w)) {
-                if (tryLocalDeclaration(fn)) { stmtStart = false; continue; }
+                if (tryLocalDeclaration(fn)) { stmtStart = false; prevPrev = prev; prev = "decl"; continue; }
             }
-            stmtStart = false;
+            // an ordinary identifier: a use, possibly a call
+            bool keyword = isStatementKeyword(w) || isTypeKeyword(w) || w == "sizeof" || w == "typeid" ||
+                           w == "static_cast" || w == "dynamic_cast" || w == "reinterpret_cast" || w == "const_cast";
+            if (!keyword) {
+                fn.bodyIdents.push_back(w);
+                if (peek(1).text == "(") recordCall(fn, prevPrev, prev, w, countArgs(rawNext(m_pos)), line);
+            }
             advance();
+            stmtStart = false; prevPrev = prev; prev = w;
             continue;
         }
 
-        stmtStart = false;
+        stmtStart = false; prevPrev = prev; prev = t.text;
         advance();
     }
 }
@@ -1823,16 +2001,32 @@ bool Parser::tryLocalDeclaration(FunctionInfo& fn)
     if (startsWith(v.type, "register ")) v.type = v.type.substr(9);
 
     for (;;) {
+        bool isArray = false;
         while (isPunct("[")) {
             std::vector<Token> dim;
             skipBalanced(&dim);
+            scanInitializer(fn, dim);
             v.type += "[" + joinTokens(dim) + "]";
+            isArray = true;
         }
+        bool pointerOrRef = v.type.find('*') != std::string::npos || v.type.find('&') != std::string::npos;
         if (isPunct("(")) {
             std::vector<Token> init;
+            cur();
+            int args = countArgs(m_pos);
             skipBalanced(&init);
+            scanInitializer(fn, init);
             v.initializer = "(" + joinTokens(init) + ")";
-        } else if (isPunct("=")) {
+            if (!pointerOrRef && !isArray) {
+                CallInfo c; c.kind = CallInfo::Construct; c.name = baseType; c.argCount = args; c.line = v.line;
+                fn.calls.push_back(c);
+            }
+        } else if (!isPunct("=") && !pointerOrRef && !isArray && !isTypeKeyword(lastComponent(baseType))) {
+            // "Foo f;" : default construction
+            CallInfo c; c.kind = CallInfo::Construct; c.name = baseType; c.argCount = 0; c.line = v.line;
+            fn.calls.push_back(c);
+        }
+        if (isPunct("=")) {
             std::vector<Token> init;
             advance();
             int tdepth = 0;
@@ -1855,6 +2049,7 @@ bool Parser::tryLocalDeclaration(FunctionInfo& fn)
                 init.push_back(t);
                 advance();
             }
+            scanInitializer(fn, init);
             v.initializer = joinTokens(init);
         }
         fn.locals.push_back(v);

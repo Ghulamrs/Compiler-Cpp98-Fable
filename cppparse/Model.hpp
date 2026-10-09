@@ -136,6 +136,7 @@ struct FunctionInfo {
     std::vector<std::string>   bodyIdents; // identifiers used in the body (uses, not declarations)
     std::vector<CallInfo>      calls;      // call sites in the body
     std::vector<BodyNote>      notes;      // suspicious patterns seen in the body
+    std::vector<std::string>   localTypedefs; // names introduced by typedefs inside the body
     int                        returnsValue; // "return expr;" statements
     int                        returnsVoid;  // "return;" statements
 

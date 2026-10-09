@@ -29,6 +29,7 @@ struct Totals {
     int typedefs, enums, enumerators, usings, namespaces, friends;
     int tryBlocks, catchHandlers, throwStatements, functionTryBlocks, functionsWithTry;
     int diagnostics, messages;
+    int healthErrors, healthWarnings, healthInfos;
     Totals();
 };
 

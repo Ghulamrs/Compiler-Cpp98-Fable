@@ -1,5 +1,6 @@
 // CodeBase.cpp - loading, include following and cross-file linking.
 #include "CodeBase.hpp"
+#include "Health.hpp"
 #include "Lexer.hpp"
 #include "Parser.hpp"
 #include "PathUtil.hpp"
@@ -422,6 +423,12 @@ void CodeBase::link()
     linkFunctions();
     linkVariables();
     linkAssociations();
+}
+
+void CodeBase::checkHealth()
+{
+    m_findings.clear();
+    runHealthChecks(*this, m_findings);
 }
 
 } // namespace cppparse

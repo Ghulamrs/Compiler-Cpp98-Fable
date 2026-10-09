@@ -77,6 +77,12 @@ private:
     void         collectOperatorName(std::vector<Token>& head, bool& conversion);
     void         scanBody(FunctionInfo& fn);
     bool         tryLocalDeclaration(FunctionInfo& fn);
+    void         note(FunctionInfo& fn, const char* code, const std::string& text, int line);
+    void         recordCall(FunctionInfo& fn, const std::string& prevPrev, const std::string& prev,
+                            const std::string& name, int argCount, int line);
+    int          countArgs(size_t openIdx) const;                 // raw token index of '('
+    void         scanInitializer(FunctionInfo& fn, const std::vector<Token>& toks);
+    void         checkCondition(FunctionInfo& fn, const std::string& keyword, int line, const std::string& prevToken);
     void         collectTrailingDeclarators(ClassInfo* owner, Access access, const std::string& baseType,
                                             bool fromTypedef, ClassInfo* cls);
     void         emitVariable(ClassInfo* owner, VariableInfo& v);

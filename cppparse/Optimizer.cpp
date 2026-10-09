@@ -689,15 +689,15 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts)
             IrBlock& caller = f.blocks[b];
             std::vector<IrInst> tail(caller.insts.begin() + static_cast<long>(i + 1), caller.insts.end());
             caller.insts.erase(caller.insts.begin() + static_cast<long>(i), caller.insts.end());
-            int contId = f.newBlock("inline.cont " + g.fn->name);
+            int contId = f.newBlock("inline.cont " + g.name);
             // (f.blocks may have reallocated: re-fetch references by index from here on)
             f.blocks[static_cast<size_t>(contId)].insts = tail;
 
             // new locals for the callee's locals
             int localBase = static_cast<int>(f.locals.size());
-            for (size_t l = 0; l < g.locals.size(); ++l) { IrLocal nl = g.locals[l]; nl.name = g.fn->name + "." + nl.name; nl.isParam = false; nl.isThis = false; f.locals.push_back(nl); }
+            for (size_t l = 0; l < g.locals.size(); ++l) { IrLocal nl = g.locals[l]; nl.name = g.name + "." + nl.name; nl.isParam = false; nl.isThis = false; f.locals.push_back(nl); }
             int resultLocal = -1;
-            if (call.dst >= 0) { IrLocal rl; rl.name = g.fn->name + ".result"; rl.type = call.type; rl.size = 8; rl.align = 8; f.locals.push_back(rl); resultLocal = static_cast<int>(f.locals.size() - 1); }
+            if (call.dst >= 0) { IrLocal rl; rl.name = g.name + ".result"; rl.type = call.type; rl.size = 8; rl.align = 8; f.locals.push_back(rl); resultLocal = static_cast<int>(f.locals.size() - 1); }
             // argument stores
             for (size_t a = 0; a < call.args.size(); ++a) {
                 IrInst st; st.op = IrInst::StoreLocal; st.type = g.locals[a].type; st.line = call.line;
@@ -712,7 +712,7 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts)
             for (std::map<int, const Type*>::const_iterator t = g.tempTypes.begin(); t != g.tempTypes.end(); ++t) if (t->first > maxTemp) maxTemp = t->first;
             f.nextTemp += maxTemp + 1;
             for (size_t gb = 0; gb < g.blocks.size(); ++gb) {
-                int nb = f.newBlock("inline " + g.fn->name + " " + g.blocks[gb].label);
+                int nb = f.newBlock("inline " + g.name + " " + g.blocks[gb].label);
                 IrBlock& dst = f.blocks[static_cast<size_t>(nb)];
                 for (size_t gi = 0; gi < g.blocks[gb].insts.size(); ++gi) {
                     IrInst in = g.blocks[gb].insts[gi];
@@ -908,26 +908,40 @@ int Optimizer::level1(IrFunction& f, std::vector<std::string>& log)
     return total;
 }
 
-void Optimizer::run(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm)
+void Optimizer::runLocal(IrFunction& f, std::vector<std::string>& log)
 {
     if (m_level <= 0) return;
-    int before = f.instCount();
-    log.push_back("  " + f.name + "  (" + intToString(before) + " instructions, -O" + intToString(m_level) + ")");
-
+    log.push_back("  " + f.name + "  (" + intToString(f.instCount()) + " instructions, -O" + intToString(m_level) + ")");
     level1(f, log);
-    if (m_level >= 2) {
-        int n = licm(f); if (n) log.push_back("    loop-invariant code motion: " + intToString(n));
-        n = inlineCalls(f, 12); if (n) log.push_back("    inlining (small functions): " + intToString(n));
-        level1(f, log);
-    }
+    if (m_level >= 2) { int n = licm(f); if (n) log.push_back("    loop-invariant code motion: " + intToString(n)); }
+}
+
+void Optimizer::runInterprocedural(IrFunction& f, std::vector<std::string>& log)
+{
+    if (m_level < 2) return;
+    int n = inlineCalls(f, 12); if (n) log.push_back("    inlining (small functions): " + intToString(n));
+    level1(f, log);
     if (m_level >= 3) {
-        int n = inlineCalls(f, 40); if (n) log.push_back("    inlining (larger functions): " + intToString(n));
+        n = inlineCalls(f, 40); if (n) log.push_back("    inlining (larger functions): " + intToString(n));
         n = unrollLoops(f, 8, 40); if (n) log.push_back("    loop unrolling: " + intToString(n));
         level1(f, log);
         n = licm(f); if (n) log.push_back("    loop-invariant code motion: " + intToString(n));
         level1(f, log);
     }
+}
 
+void Optimizer::run(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm)
+{
+    if (m_level <= 0) return;
+    runLocal(f, log);
+    runInterprocedural(f, log);
+    runSsa(f, log, ssaForm);
+}
+
+void Optimizer::runSsa(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm)
+{
+    if (m_level <= 0) return;
+    int before = f.instCount();
     // SSA phase last: promote scalars, value-number over the dominator tree, fold, leave SSA, clean up
     if (!f.hasTry) {
         SsaStats ss;
@@ -952,7 +966,7 @@ void Optimizer::run(IrFunction& f, std::vector<std::string>& log, std::string* s
     }
     level1(f, log);
     int after = f.instCount();
-    log.push_back("    result: " + intToString(before) + " -> " + intToString(after) + " instructions, " + intToString(static_cast<int>(f.blocks.size())) + " blocks");
+    log.push_back("    result: " + intToString(before) + " -> " + intToString(after) + " instructions in the final phase, " + intToString(static_cast<int>(f.blocks.size())) + " blocks");
 }
 
 } // namespace cppparse

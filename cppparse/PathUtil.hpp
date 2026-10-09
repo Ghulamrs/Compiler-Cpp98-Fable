@@ -46,6 +46,11 @@ bool        isSourceExtension(const std::string& ext);
 // files and folders
 bool fileExists(const std::string& p);
 bool isDirectory(const std::string& p);
+// "src\*.cpp" -> every matching file ('*' and '?' in the last path component);
+// a pattern without wildcards is returned as is. Returns the number of matches.
+int  expandWildcards(const std::string& pattern, std::vector<std::string>& out);
+// "@list.txt": one path, pattern or option per line; '#' starts a comment
+bool readResponseFile(const std::string& path, std::vector<std::string>& args);
 // recursively collects header and source files under 'dir' (folders whose
 // name starts with '.' are skipped); 'dirsWithHeaders' receives every folder
 // that contains at least one header, for use as include directories

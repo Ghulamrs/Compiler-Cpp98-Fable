@@ -27,7 +27,7 @@ struct LowerStats {
     LowerStats() : instructions(0), spills(0), frameSize(0) {}
 };
 
-std::string lowerFunction(const IrFunction& f, Layouts& layouts, LowerStats& stats);
+std::string lowerFunction(const IrFunction& f, LowerStats& stats);
 std::string mangle(const std::string& name);   // "geom::Circle::area() const" -> "geom__Circle__area_c"
 
 } // namespace cppparse

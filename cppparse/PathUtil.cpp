@@ -365,6 +365,61 @@ void listDirectory(const std::string& dir, std::vector<std::string>& names)
 
 } // namespace
 
+namespace {
+
+bool wildcardMatch(const std::string& pattern, const std::string& name)
+{
+    // case-insensitive '*' / '?' matching on the file name
+    size_t p = 0, n = 0, starP = std::string::npos, starN = 0;
+    while (n < name.size()) {
+        if (p < pattern.size() && (pattern[p] == '?' || tolower(static_cast<unsigned char>(pattern[p])) == tolower(static_cast<unsigned char>(name[n])))) { ++p; ++n; continue; }
+        if (p < pattern.size() && pattern[p] == '*') { starP = p++; starN = n; continue; }
+        if (starP != std::string::npos) { p = starP + 1; n = ++starN; continue; }
+        return false;
+    }
+    while (p < pattern.size() && pattern[p] == '*') ++p;
+    return p == pattern.size();
+}
+
+} // namespace
+
+int expandWildcards(const std::string& pattern, std::vector<std::string>& out)
+{
+    if (pattern.find('*') == std::string::npos && pattern.find('?') == std::string::npos) { out.push_back(pattern); return 1; }
+    std::string dir = dirName(pattern);
+    std::string base = baseName(pattern);
+    std::vector<std::string> names;
+    listDirectory(dir == "." ? currentDirectory() : dir, names);
+    int found = 0;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (!wildcardMatch(base, names[i])) continue;
+        std::string full = (dir == "." ? names[i] : dir + "/" + names[i]);
+        if (isDirectory(full)) continue;
+        out.push_back(full);
+        ++found;
+    }
+    return found;
+}
+
+bool readResponseFile(const std::string& path, std::vector<std::string>& args)
+{
+    std::string text;
+    if (!readFile(path, text)) return false;
+    std::string line;
+    for (size_t i = 0; i <= text.size(); ++i) {
+        char c = i < text.size() ? text[i] : '\n';
+        if (c == '\n' || c == '\r') {
+            std::string t = trim(line);
+            if (!t.empty() && t[0] != '#') {
+                if (t.size() >= 2 && t[0] == '"' && t[t.size() - 1] == '"') t = t.substr(1, t.size() - 2);
+                args.push_back(t);
+            }
+            line.clear();
+        } else line += c;
+    }
+    return true;
+}
+
 void findSourceFiles(const std::string& dir, std::vector<std::string>& headers, std::vector<std::string>& sources,
                      std::vector<std::string>& dirsWithHeaders, int depth)
 {

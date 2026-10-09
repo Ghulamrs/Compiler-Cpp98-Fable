@@ -1,0 +1,38 @@
+// iostream - cppparse's C++98 library: the standard streams on the C runtime's stdin/stdout/stderr.
+// The objects are defined in libcpp/iostream.cpp, which is compiled by cppparse and linked in.
+#ifndef CPPPARSE_IOSTREAM
+#define CPPPARSE_IOSTREAM
+
+#include <cstdio>
+#include <istream>
+#include <ostream>
+
+namespace std {
+
+class __fileostream : public ostream {
+public:
+    explicit __fileostream(int index) : m_file(__acrt_iob_func(static_cast<unsigned>(index))) {}
+protected:
+    virtual void sink(const char* s, size_t n) { fwrite(s, 1, n, m_file); }
+    virtual void sync() { fflush(m_file); }
+private:
+    FILE* m_file;
+};
+
+class __fileistream : public istream {
+public:
+    explicit __fileistream(int index) : m_file(__acrt_iob_func(static_cast<unsigned>(index))) {}
+protected:
+    virtual int underflow() { int c = fgetc(m_file); return c == EOF ? -1 : c; }
+private:
+    FILE* m_file;
+};
+
+extern __fileostream cout;
+extern __fileostream cerr;
+extern __fileostream clog;
+extern __fileistream cin;
+
+}
+
+#endif

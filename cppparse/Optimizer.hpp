@@ -35,6 +35,14 @@ public:
     // ssaForm, when given, receives the IR in SSA form after the SSA passes (before phi removal)
     void run(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm = 0);
 
+    // the same work split into phases so that the local phases run in parallel across functions:
+    //   runLocal          -O1 passes and loop-invariant code motion (reads only this function)
+    //   runInterprocedural inlining and unrolling (reads other functions' IR: run sequentially)
+    //   runSsa            SSA construction, value numbering, SSA destruction, final clean-up
+    void runLocal(IrFunction& f, std::vector<std::string>& log);
+    void runInterprocedural(IrFunction& f, std::vector<std::string>& log);
+    void runSsa(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm);
+
     // analyses (also used by lowering)
     static void dominators(const IrFunction& f, std::vector<int>& idom);
     static void naturalLoops(const IrFunction& f, std::vector<LoopInfo>& loops);

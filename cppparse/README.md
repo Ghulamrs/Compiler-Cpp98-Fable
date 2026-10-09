@@ -39,7 +39,8 @@ Written next to the first input, or into the `-o` directory:
 | `<name>-ir.txt`        | version 3: class layouts, IR before/after `-On`                   |
 | `<name>-opt.log`       | version 3: optimisation passes and instruction counts            |
 | `<name>-asm.txt`       | version 3: lowered VM64 assembly                                  |
-| `<name>.asm`           | version 4: x86-64 MASM (Windows x64 ABI); `--assemble` adds `.obj` |
+| `<name>.asm`           | version 4: x86-64 MASM (Windows x64 ABI); `--assemble` adds `.obj` via ml64 |
+| `<name>.obj`           | version 5: COFF object written by cppparse itself (`--obj`) |
 | `<name>-report.html`   | the same report as one self-contained page with the diagram      |
 | `<name>-report.pdf`    | the same report as PDF: title page, diagram pages, text pages    |
 | `<name>-diagram.svg`   | the class diagram picture                                       |
@@ -73,6 +74,17 @@ dashed box = base class not defined in the parsed files.
 --no-compile     skip version 3 and 4
 --no-x86         do not write the x86-64 .asm file
 --assemble       run ml64 on the .asm to produce the .obj (ml64 on PATH)
+--obj            write the .obj with cppparse's own COFF writer (version 5)
+--msvc-mangling  MSVC-compatible decorated names, so MSVC code links with plain C++ declarations
+-E               version 6: preprocess only and print the result (like cl /EP)
+--parse6         version 6: parse with the new front end (counts, syntax errors, <name>-ast6.txt)
+--sema6          version 6: --parse6 plus semantic analysis (<name>-sym6.txt)
+--compile6       version 6: --sema6 plus IR generation and the back end (<name>6.asm, <name>6.obj with --obj)
+-I <dir>         include directory for the preprocessor
+-D NAME[=value]  predefine a macro; -U NAME undefines one
+-j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)
+src\*.cpp        wildcard patterns are expanded by cppparse itself (more than 50 files is fine)
+@list.txt        response file: one path, pattern or option per line; '#' starts a comment
 -q               quiet
 ```
 
@@ -97,7 +109,7 @@ The checks are static and declaration-level: macros are not expanded and
 `#if` conditions are not evaluated, so code that depends on them can give
 false positives. Argument checks compare counts, not types; full type
 checking needs an expression parser and is planned for version 3 together
-with an AST and a three-address IR. The folder `sample-bad/` contains one
+with an AST and a three-address IR. The folder `examples/sample-bad/` contains one
 example of every finding and is part of the regression test.
 
 ## Symbol table and map file
@@ -113,15 +125,20 @@ the functions and globals never referenced anywhere, and the entry point.
 ## Building and testing
 
 ```
-powershell -ExecutionPolicy Bypass -File cpp\sandbox\build-cppparse.ps1
+powershell -ExecutionPolicy Bypass -File cpp\sandbox\build-cppparse.ps1 [-Config Release|Debug] [-NoTests]
 ```
 
-Compiles every `cppparse/*.cpp` with MSVC at `/W4 /permissive-` (warnings
-fail the build), then runs four tests: the Visual Studio 2010 solution in
-`sample/` with checks on the report, symbols and map, the `cpp` folder
+Compiles every `cppparse/*.cpp` and `cppparse/legacy/*.cpp` with MSVC at
+`/W4 /permissive-` (warnings fail the build). `-Config Release` (default)
+builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
+`/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
+`sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
+`obj/debug`. `-NoTests` stops after the build. The test groups (14 as of
+version 6) run against whichever configuration was built. The first four: the Visual Studio 2010 solution in
+`examples/sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken
-folder `sample-bad/`, which must produce every health code. Any C++98 compiler works for the sources themselves, e.g.
+folder `examples/sample-bad/`, which must produce every health code. Any C++98 compiler works for the sources themselves, e.g.
 `g++ -std=c++98 -pedantic -Wall -o cppparse cppparse/*.cpp`.
 
 ## How it works
@@ -195,7 +212,7 @@ dead code and dead store elimination, branch folding, unreachable block
 removal, block merging. `-O2` adds loop-invariant code motion (dominators,
 natural loops, preheaders) and inlining of small functions. `-O3` inlines
 larger functions and fully unrolls loops with a constant trip count of at
-most 8. The folder `sample-opt/` shows each transformation; the test
+most 8. The folder `examples/sample-opt/` shows each transformation; the test
 checks, for example, that `constants()` folds to `ret #14` at `-O1`,
 `square` is inlined at `-O2` and `unroll()` becomes `ret #6` at `-O3`.
 
@@ -239,5 +256,324 @@ implemented on this target). `--assemble` runs `ml64 /c` to produce
 `square_int_x`); `extern "C"` functions keep their name.
 
 Test 6 assembles the `sample-opt` output with `ml64`, links it with the
-MSVC-compiled `sample-opt-driver/driver.cpp` and runs it at `-O0`, `-O2`
+MSVC-compiled `examples/sample-opt-driver/driver.cpp` and runs it at `-O0`, `-O2`
 and `-O3`: all 19 result checks pass, templates included.
+
+## Version 5: parallel pipeline, many input files
+
+**Worker pool** (`Parallel.cpp`): C++98 has no threads, so the pool uses
+`CreateThread` on Windows (a sequential fallback elsewhere). A job is a
+`ParallelJob` with `run(index)`; `runParallel(job, count, threads)` hands
+the indices to the threads through an interlocked counter.
+
+**Parallel loading** (`CodeBase::loadFiles`): every input list (project,
+solution, folder, or the files on the command line) is read, lexed and
+parsed on the pool, one file per job, writing only into its own
+`SourceFile`. Files are registered in list order, then the `#include`s
+they discovered form the next round, until nothing new appears. On the
+49 files of cppparse itself parsing takes 32 ms on 12 threads instead
+of 125 ms.
+
+**Parallel compiling** (`Compiler.cpp`): the per-function phases run on
+the pool: body parse + type check + IR build (and the template
+instantiation rounds), the local optimisation passes, the SSA passes, and
+VM64 plus x86-64 lowering. Inlining and unrolling read the IR of other
+functions, so that phase runs on one thread. The shared structures (type
+table, template instantiator, class layouts, the x86 constant pools) are
+guarded by one recursive lock; results are merged in function order and
+x86 constant labels are derived from their contents (`fconst_<bits>`,
+`str_<hash>`), so every output file is byte-identical whatever `-j` is.
+The optimisation log ends with the time of each phase.
+
+The compile phases allocate heavily and all threads share the C runtime
+heap: on a 12-processor machine they are fastest at 2 to 4 threads and
+get slower beyond, which is why the default compile thread count stops
+at 4 (`-j` overrides it). Arena allocation for the IR and the generated
+text is on the version 6 list.
+
+**Many files**: `src\*.cpp` and `include\*.hpp` are expanded by cppparse
+(no shell globbing is needed on Windows), and `@list.txt` reads paths,
+patterns and options from a file, one per line, so a command line is
+never too long. All plain files are parsed together as one project.
+
+**COFF object writer** (`Coff.cpp`, `--obj`): `<name>.obj` is written by
+cppparse itself, so ml64 is no longer needed to get an object file. The
+writer is a small assembler for exactly the MASM subset that `X86.cpp`
+emits: it parses the text, encodes every PROC on the worker pool (REX,
+ModRM, SIB, RIP-relative operands, the SSE2 scalar instructions, and
+jump relaxation to the 2-byte form where the target is near), then lays
+out `.text`, `.data` and `.rdata`, the relocations (`REL32` for calls,
+`lea` and RIP-relative loads, `ADDR64` for vtable entries), the symbol
+table (functions, globals, vtables, string and float constants, externs)
+and the string table. Lines it cannot encode are reported with their
+line number and the file is not written. Test 8 links the object with
+the MSVC-compiled driver at `-O0` and `-O3`, runs it (all 19 checks
+pass) and compares `dumpbin /disasm` of cppparse's object with ml64's:
+the instruction streams are identical.
+
+**Exceptions** (`runtime/cppparse_rt.cpp`, generated by `X86.cpp`):
+`throw`, `try`/`catch` by value or reference, `catch (...)`, rethrow with
+`throw;`, matching through base classes, and throwing through functions
+without handlers all work on the x86-64 target. The mechanism is
+setjmp/longjmp: every try region owns a 272-byte frame in the function's
+stack frame; entering the region registers it with the runtime and calls
+`_setjmp(frame, NULL)`; leaving it (normally, or by `return`, `break` or
+`continue`, for which the IR builder emits the pops) unregisters it.
+`throw x` copies the object into runtime memory together with a type
+descriptor (`"BadIndex;Failure"` lists the class and all its bases, or
+the scalar type name) and longjmps to the innermost frame, whose dispatch
+stub asks the runtime to match each catch clause in order and otherwise
+rethrows to the outer frame. A handler fetches the object address with
+`cppparse_catch_begin` and frees it with `cppparse_catch_end`. The try
+body always starts a new block, so no value defined inside the region
+dominates the handlers: after a longjmp the callee-saved registers hold
+the values they had when the region was entered, and locals stay in
+memory (functions with try regions are not put into SSA form). Limits:
+no destructors run during unwinding, thrown objects are copied bytewise
+(no copy constructor), the frame stack is per process, and function-
+try-blocks are still skipped. The runtime is linked with the driver in
+tests 6 and 8, which check all of the above and that no frame or handler
+is left registered.
+
+**MSVC-compatible names** (`Mangle.cpp`, `--msvc-mangling`): the x86-64
+output (and so the `.obj`) uses the decorated names cl.exe gives the
+same declarations: `?square@@YAHH@Z`, `?sum@Point@@QEBAHXZ`,
+`??0Point@@QEAA@HH@Z`, `?add@?$Buffer@H$03@@QEAAXAEBH@Z`,
+`??$maxOf@H@@YAHAEBH0@Z`, `?g_shapeVersion@@3HA`, `??_7Circle@geom@@6B@`.
+Covered: namespaces and nested classes, access and static/virtual kinds,
+const methods, constructors, destructors and operators, the fundamental
+types, pointers and references with cv-qualifiers, class/struct/union
+and enum types, template instances with type and integer arguments, and
+the name and parameter-type back-references. `extern "C"` functions and
+`main` keep their names. Test 9 compiles the sample with cl, checks that
+every function symbol cl defines is spelled identically in cppparse's
+object, then links `examples/sample-opt-driver/driver-native.cpp`, which declares
+the functions as plain C++, against cppparse's object and runs it.
+
+## Source layout
+
+- `cppparse/`: the version 6 pipeline and the shared back end:
+  `Pp` (preprocessor), `CxxAst`/`CxxParser` (syntax tree and parser),
+  `Sema`/`SemaExpr` (semantic analysis), `Ir` (the intermediate
+  representation), `Optimizer`, `Ssa`, `Lower` (VM64), `X86`, `Coff`,
+  `Mangle`, `BackEnd` (the shared driver), `Parallel`, `PathUtil`,
+  `main`, and `runtime/` (the exception runtime).
+- `cppparse/legacy/`: the version 1 to 5 front end and the reports,
+  kept until the version 6 pipeline replaces them: `Lexer`, `Parser`,
+  `Model`, `CodeBase`, `ProjectReader`, `Report`, `Html`, `Pdf`,
+  `Diagram`, `Symbols`, `Health`, `Ast`, `BodyParser`, `TypeCheck`,
+  `Types`, `Instantiate`, `IrBuilder` (old IR generation and class
+  layouts) and `Compiler` (the old driver). They compile with the rest
+  (`/I legacy`) and are exercised by tests 1 to 9.
+
+## Version 6: a clean front end (in progress)
+
+Versions 1 to 5 grew a compiler out of a declaration reader. Version 6
+rebuilds the front end the way a compiler is built, keeping the back
+end (IR, optimiser, SSA, x86-64, COFF, runtime) and the execution tests
+as the acceptance bar:
+
+1. **Preprocessor** (`Pp.cpp`, done): translation phases 1 to 4.
+2. **Grammar parser** (`CxxAst.*`, `CxxParser.*`, done): one parser for
+   declarations and statements, producing a single AST for whole
+   translation units.
+3. **Semantic analysis** (`Sema.*`, `SemaExpr.*`, first version done):
+   real types, scopes, name lookup, overload resolution and template
+   instantiation on the AST.
+4. **IR generation** (`IrGen.*`, `--compile6`, done): from the analysed
+   tree into the shared back end, with object lifetimes (destructors,
+   copy constructors, temporaries, unwinding; done).
+5. **Library headers** (`include/`, `libcpp/`, done): cppparse's own
+   C++98 `std` and C headers, with COMDAT objects and dynamic
+   initialisation so that several translation units link.
+6. **Reports** rebuilt on the new AST, and the version 4 and 5 gaps.
+
+Every stage works per translation unit and runs on the worker pool.
+The long-term target is a complete C++98 compiler that compiles
+itself, so every stage is measured against cppparse's own sources.
+
+Version 6 is finished only when every compilation gap left by versions
+4 and 5 is closed:
+
+- templates: member templates and partial specialisations, and
+  instantiation on the AST instead of by token substitution;
+- function-try-blocks and friend functions defined inside a class,
+  which the old front end skips;
+- real declarations for the standard library (cppparse's own C++98
+  headers: `vector`, `string`, `map`, `set`, `cstdio`, ...), which also
+  removes the untyped library-call results of the old front end;
+- exceptions: destructors run during unwinding and thrown objects
+  copied with their copy constructors (both done in the version 6 IR
+  generator), a per-thread frame stack;
+- COFF: `.pdata`/`.xdata` unwind tables and line information;
+- mangling: function-pointer parameter lists, member pointers, varargs;
+- the type checker replaced by real semantic analysis (scopes, lookup,
+  overload resolution, conversions, templates).
+
+**Parser** (`CxxParser.cpp`, `--parse6`): a recursive-descent parser for
+the C++98 grammar over the preprocessor's tokens, producing the
+`cxx::TranslationUnit` tree of `CxxAst.hpp`: declarations with
+decl-specifiers and declarators (pointers, references, arrays,
+functions, member pointers, nested declarators, bit-fields, exception
+specifications), classes with bases and access, enums, namespaces,
+using declarations and directives, templates (type, non-type and
+template template parameters, specialisations, instantiations),
+linkage specifications, all statements, and all expressions including
+casts, `new`/`delete`, `sizeof`, `typeid` and `throw`. The parser keeps
+a scope stack of the type names it has seen (typedefs, classes, enums,
+template parameters, injected class names, names brought in by using
+directives and anonymous namespaces) and the members of every named
+class or namespace, so `T * x` is a declaration only when `T` is a type,
+constructors are recognised by their name, out-of-line members see
+their class's nested types, and reopened namespaces remember their
+earlier parts. Unknown qualified names such as `std::vector<int>` are
+accepted as types where the syntax demands one, so sources parse without
+the standard headers; the C library typedefs (`size_t`, `FILE`, ...) are
+assumed. Ambiguous statements, casts, `sizeof` and `new` placements use
+tentative parsing. After a syntax error the parser skips to the next
+`;` or `}` and continues. `--parse6` prints token and node counts with
+the syntax errors and writes `<name>-ast6.txt`. Test 11 parses
+`sample-opt`, the VS2010 sample and all 30 of cppparse's own sources
+with zero syntax errors, and checks error recovery on `sample-bad`.
+
+**Preprocessor** (`Pp.cpp`, `-E`, `-I`, `-D`, `-U`): line splices,
+comments, pp-tokens, `#include` (quoted form searched next to the
+including file, then `-I` directories; `#pragma once`; a macro as the
+file name), `#define` of object-like and function-like macros with `#`
+and `##`, argument prescan, rescanning and hide sets (a macro never
+expands inside its own expansion, as in `#define f(x) x + f`),
+`#undef`, `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` with full
+constant expressions (`defined`, arithmetic, comparisons, `?:`,
+character constants, octal and hex), `#error`, `#warning`, `#line`,
+and `__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__cplusplus`
+(`199711L`). The result is a token stream with file and line positions,
+the list of included and missing files, all macro definitions and the
+diagnostics. `cppparse -E -I inc pp.cpp` prints the preprocessed text
+like `cl /EP`; test 10 compares the two on `examples/sample-pp/` (identical apart
+from whitespace) and checks that `#error` and a missing include are
+diagnosed.
+
+**Semantic analysis** (`Sema.cpp`, `SemaExpr.cpp`, `--sema6`): types
+are interned objects (fundamental, pointer, reference, array, function,
+class, enum, member pointer, dependent) with cv-qualifiers; symbols are
+the named entities (namespaces, classes, enums, typedefs, variables,
+functions, enumerators, template parameters, class and function
+templates) in scopes with overload sets and using-directives. The
+analysis declares a translation unit in order, analyses member function
+bodies once their class is complete, and for every expression records
+its type, value category, constant value and the entity it refers to.
+Name lookup is unqualified through enclosing scopes and base classes,
+qualified through namespaces and classes, and for members with
+inheritance. Calls, constructors, conversions and operators on class
+operands go through overload resolution with the C++98 implicit
+conversion sequences (exact, promotion, standard, user-defined through
+converting constructors and conversion operators, reference binding,
+derived-to-base). Classes get their layout (bases, vptr, fields,
+alignment) and vtable (slots, overrides, abstractness) and implicit
+special members. Class templates are instantiated from the syntax tree
+with the parameters bound in an instantiation scope (defaults, partial
+specialisations, out-of-line members); function templates are
+instantiated by deduction from the argument types. Diagnostics carry
+S codes (S100 unknown type, S101 undeclared identifier, S102 no such
+member, S103 undeclared function, S104 const assignment, S105
+conversion, S106 ambiguity, S107 no matching function, ...). The
+`--sema6` mode prints the counts and writes `<name>-sym6.txt` with the
+symbols, layouts, vtable slots and instantiations. Test 12 checks
+`sample-opt` (no errors, every name and call resolved, `Buffer<int,4>`
+and `maxOf<int>` instantiated with the right layouts) and the VS2010
+sample. On cppparse's own sources every remaining diagnostic names a
+type or function from a header that is not available (`std::`, the C
+library, the Windows API): the next stage supplies those headers.
+
+**IR generation** (`IrGen.cpp`, `--compile6`): walks every function
+with a body, template instantiations and the implicit special members
+that are used, and produces the same IR the old builder did, but with
+every fact taken from the sema annotations: resolved symbols, field
+offsets (with base-class adjustment), vtable slots for virtual calls,
+chosen constructors and conversions, class layouts, throw descriptors.
+Functions returning a class by value take a hidden result pointer;
+reference parameters and results are addresses.
+The IR still carries the old front end's `Type` objects through an
+adapter, so the optimiser, SSA, lowering, x86-64 and COFF stages run
+unchanged. `--compile6` runs the whole version 6 pipeline and writes
+`<name>-ir6.txt`, `-opt6.log`, `-asm6.txt`, `<name>6.asm` and, with
+`--obj`, `<name>6.obj`; `--msvc-mangling` uses a second mangler
+(`MangleSema.cpp`) driven by the sema symbols, so template instances
+and nested scopes get their decorated names from structure rather than
+text. Test 13 compiles `sample-opt` through the version 6 pipeline at
+`-O0` and `-O2`, links the object with the native-declaration driver
+and the exception runtime, and runs it: all 19 checks pass, including
+templates and exceptions.
+
+**Object lifetimes** (`IrGen.cpp`, `examples/sample-life/`, test 14): every
+constructed local, by-value parameter and class temporary is recorded
+with a "constructed" flag byte. Block scopes destroy their objects in
+reverse order on normal exit; `break`, `continue` and `return` unwind
+the scopes they leave; temporaries die at the end of their full
+expression (a temporary bound to a reference lives as long as the
+reference; one that a `?:` result refers to is destroyed under its
+flag). Copies go through the class's own members: the copy constructor
+for initialisation, by-value arguments (the callee owns and destroys
+its copy, as MSVC does) and return values (constructor calls and calls
+returning the class build the result in place), the copy assignment
+operator for `a = b`; implicit copy constructors, assignments and
+destructors are generated memberwise (bases first). Arrays of objects
+are constructed and destroyed element by element; `new T[n]` keeps the
+element count in front of the elements when `T` has a destructor so
+`delete[]` can run them. A function that owns objects with destructors
+gets a catch-all try region around its body whose handler destroys the
+objects whose flag is still set and rethrows, so destructors run while
+an exception unwinds through the function; a user `try` destroys the
+objects built inside it at a handler entry; a constructor whose body
+throws destroys the members and bases it already built. `throw obj`
+copy-constructs the exception object into heap storage that the
+runtime owns (`cppparse_throw_owned`) and destroys with the class's
+destructor when the handler ends. The driver `examples/sample-life-driver/
+driver-life.cpp` counts constructions, destructions, copies and live
+buffers across 24 checks at `-O0`, `-O2` and `-O3`. Functions with
+such objects contain a try region, so the SSA phase skips them; the
+block-local passes still run.
+
+**Standard library** (`include/`, `libcpp/iostream.cpp`, `examples/
+sample-lib/`, test 15): cppparse's own C++98 headers, written so that
+the same files serve semantic analysis of cppparse's sources and real
+compilation. `cstddef`, `cstdlib`, `cstdio`, `cstring`, `cctype`,
+`cmath` and `ctime` declare the C runtime (`extern "C"`, with
+`using ::name` in `std`; `size_t` is the 64-bit type of this target);
+`exception`, `new`, `stdexcept`, `utility` and `algorithm` (pointer
+ranges: `sort`, `stable_sort`, `reverse`, `find`, `lower_bound`, ...)
+are implemented in place; `string` is one class over a zero-terminated
+heap buffer; `vector` keeps its elements in malloc storage built with
+placement new and destroyed explicitly; `map` and `set` share the AVL
+tree of `__tree` (parent links, erase unlinks nodes so other iterators
+stay valid); `ios`, `ostream`, `istream`, `sstream`, `fstream` and
+`iostream` format and parse without the C library's variadic functions,
+and `std::cout`, `cerr` and `cin` are objects defined in
+`libcpp/iostream.cpp`, which cppparse compiles and the program links.
+To make that work across translation units, every inline function,
+template instantiation and implicit member is emitted in a COMDAT
+section of its own (selection "any") by the COFF writer, vtables
+likewise, static const members with a constant initialiser are folded
+rather than emitted, and globals that need construction are built by a
+per-module initialiser registered in `.CRT$XCU`, so the C runtime runs
+it before `main`. The library exposed a long list of compiler defects
+that are now fixed: per-instantiation copies of template syntax trees,
+using-declarations, parameter names that are also type names, base
+class type names in derived bodies, qualified lookup from nested classes,
+pseudo-destructor calls, placement new, default arguments, conversion
+operators and `operator->` as wrapper nodes, reference-returning calls,
+`this` adjustment for members of a base, operator templates in the
+mangler, string literal concatenation, indirect calls, and live
+intervals of values that cross a loop's back edge. Test 15 compiles the
+three samples and `libcpp/iostream.cpp` to four objects, links them
+with `examples/sample-lib-driver/driver-lib.cpp` and runs 13 checks at
+`-O0` and `-O2`.
+
+Known limit: when cppparse compiles its own 51 sources, 23 of about
+290,000 generated lines mix an XMM register with an integer operand.
+They come from calls to library functions that the front end has no
+declaration for (`strtod`, `std::string::size`, ...): their results carry
+no type, so the register allocator and the instruction emitter disagree
+about the register class. ml64 rejects those lines as well; the COFF
+writer reports them by line number. Real declarations for library
+functions are part of the version 6 front end.

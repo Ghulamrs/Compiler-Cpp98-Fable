@@ -1,0 +1,59 @@
+// fstream - cppparse's C++98 library: file streams on the C runtime's FILE.
+#ifndef CPPPARSE_FSTREAM
+#define CPPPARSE_FSTREAM
+
+#include <cstdio>
+#include <istream>
+#include <ostream>
+#include <string>
+
+namespace std {
+
+class ofstream : public ostream {
+public:
+    ofstream() : m_file(0) {}
+    explicit ofstream(const char* name, openmode mode = out) : m_file(0) { open(name, mode); }
+    virtual ~ofstream() { close(); }
+    void open(const char* name, openmode mode = out)
+    {
+        close();
+        const char* how = (mode & binary) ? ((mode & app) ? "ab" : "wb") : ((mode & app) ? "a" : "w");
+        m_file = fopen(name, how);
+        if (!m_file) setstate(failbit);
+    }
+    bool is_open() const { return m_file != 0; }
+    void close() { if (m_file) { fclose(m_file); m_file = 0; } }
+protected:
+    virtual void sink(const char* s, size_t n) { if (m_file) fwrite(s, 1, n, m_file); }
+    virtual void sync() { if (m_file) fflush(m_file); }
+private:
+    FILE* m_file;
+};
+
+class ifstream : public istream {
+public:
+    ifstream() : m_file(0) {}
+    explicit ifstream(const char* name, openmode mode = in) : m_file(0) { open(name, mode); }
+    virtual ~ifstream() { close(); }
+    void open(const char* name, openmode mode = in)
+    {
+        close();
+        m_file = fopen(name, (mode & binary) ? "rb" : "r");
+        if (!m_file) setstate(failbit);
+    }
+    bool is_open() const { return m_file != 0; }
+    void close() { if (m_file) { fclose(m_file); m_file = 0; } }
+protected:
+    virtual int underflow()
+    {
+        if (!m_file) return -1;
+        int c = fgetc(m_file);
+        return c == EOF ? -1 : c;
+    }
+private:
+    FILE* m_file;
+};
+
+}
+
+#endif

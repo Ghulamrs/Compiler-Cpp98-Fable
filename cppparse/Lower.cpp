@@ -55,8 +55,8 @@ struct ByStart { bool operator()(const Interval* a, const Interval* b) const { r
 
 class FunctionLowerer {
 public:
-    FunctionLowerer(const IrFunction& f, Layouts& layouts, LowerStats& stats)
-        : m_f(f), m_layouts(layouts), m_stats(stats), m_frameSize(0), m_instIndex(0) {}
+    FunctionLowerer(const IrFunction& f, LowerStats& stats)
+        : m_f(f), m_stats(stats), m_frameSize(0), m_instIndex(0) {}
 
     std::string run();
 
@@ -82,7 +82,6 @@ private:
     void        comment(const std::string& s) { m_out << "        ; " << s << "\n"; }
 
     const IrFunction&      m_f;
-    Layouts&               m_layouts;
     LowerStats&            m_stats;
     std::ostringstream     m_out;
     std::string            m_fnLabel;
@@ -392,6 +391,7 @@ void FunctionLowerer::emitInst(const IrInst& in, int blockIndex, size_t instInde
     }
     case IrInst::TryBegin: { std::string hs; for (size_t a = 0; a < in.args.size(); ++a) hs += (a ? ", " : "") + label(in.args[a].id); line("TRY " + hs); break; }
     case IrInst::TryEnd: line("ENDTRY"); break;
+    case IrInst::CatchEnd: line("ENDCATCH"); break;
     case IrInst::CatchParam: { std::string rd = def(in.dst, false, spill); line("MOV " + rd + ", R0            ; exception object (" + in.sub + ")"); finish(in.dst, spill, false, rd); break; }
     case IrInst::Unreachable: line("TRAP                  ; " + in.sub); break;
     default: break;
@@ -443,9 +443,9 @@ std::string FunctionLowerer::run()
 
 } // namespace
 
-std::string lowerFunction(const IrFunction& f, Layouts& layouts, LowerStats& stats)
+std::string lowerFunction(const IrFunction& f, LowerStats& stats)
 {
-    FunctionLowerer L(f, layouts, stats);
+    FunctionLowerer L(f, stats);
     return L.run();
 }
 

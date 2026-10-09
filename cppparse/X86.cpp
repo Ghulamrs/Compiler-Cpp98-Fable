@@ -1,8 +1,10 @@
 // X86.cpp - x86-64 MASM code generation.
 #include "X86.hpp"
+#include "Mangle.hpp"
 #include "PathUtil.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <sstream>
 
@@ -14,6 +16,8 @@ const char* const kIntRegs[] = { "rbx", "rsi", "rdi", "r12", "r13", "r14", "r15"
 const int kIntRegCount = 7;
 const int kFloatRegBase = 6;     // xmm6 .. xmm13
 const int kFloatRegCount = 8;
+const int kTryFrameSize = 272;   // sizeof(jmp_buf) on x64 (256) plus the frame link
+
 
 std::string reg32(const std::string& r)
 {
@@ -59,16 +63,45 @@ std::string runtimeName(const std::string& sub)
     if (sub == "__delete" || sub == "__delete_array") return "free";
     if (sub == "__copy") return "memcpy";
     if (sub == "__throw") return "cppparse_throw";
-    if (endsWith(sub, "?")) return lastComponent(sub.substr(0, sub.size() - 1));   // unknown library function: its C name
-    if (sub.find('(') == std::string::npos) return sub;                            // extern "C": plain name
-    return mangle(sub);
+    return sub;
 }
 
-std::string mangleGlobal(const std::string& name)
+} // namespace
+
+std::string X86Module::symbol(const std::string& irName)
 {
-    if (startsWith(name, "vtable@")) return "vtable_" + mangle(name.substr(7));
+    if (startsWith(irName, "__")) return runtimeName(irName);                                  // __new, __throw, ...
+    if (endsWith(irName, "?")) return lastComponent(irName.substr(0, irName.size() - 1));       // unknown library function: its C name
+    if (irName.find('(') == std::string::npos) return irName;                                  // extern "C": plain name
+    if (m_msvc) {
+        std::map<std::string, std::string>::const_iterator it = m_functionNames.find(irName);
+        if (it != m_functionNames.end()) return it->second;
+    }
+    return mangle(irName);
+}
+
+std::string X86Module::globalSymbol(const std::string& name)
+{
+    if (name.find('(') != std::string::npos) return symbol(name);                              // address of a function
+    if (startsWith(name, "vtable@")) return m_msvc ? msvcMangleVtable(name.substr(7)) : "vtable_" + mangle(name.substr(7));
+    if (m_msvc) {
+        std::map<std::string, std::string>::const_iterator it = m_globalNames.find(name);
+        if (it != m_globalNames.end()) return it->second;
+    }
     return "g_" + mangle(name);
 }
+
+void X86Module::registerSymbolName(const std::string& irName, const std::string& decorated)
+{
+    if (!m_functionNames.count(irName)) m_functionNames[irName] = decorated;
+}
+
+void X86Module::registerGlobalName(const std::string& irGlobalName, const std::string& decorated)
+{
+    if (!m_globalNames.count(irGlobalName)) m_globalNames[irGlobalName] = decorated;
+}
+
+namespace {
 
 } // namespace
 
@@ -76,7 +109,7 @@ std::string mangleGlobal(const std::string& name)
 
 class X86Function {
 public:
-    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0) {}
+    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0) {}
     std::string run();
 
 private:
@@ -116,6 +149,8 @@ private:
     std::vector<int>    m_calls;
     std::vector<int>    m_localOffset;
     int                 m_frameSize;
+    std::map<long, int> m_tryOffset;      // version 5: try region id -> [rbp-offset] of its setjmp frame
+    int                 m_throwSlot;      // [rbp-offset] where a thrown scalar is stored before the call
     std::set<int>       m_usedIntRegs, m_usedFloatRegs;
     std::map<int, int>  m_savedIntOffset, m_savedFloatOffset;
     int                 m_outgoingArgs;
@@ -132,10 +167,12 @@ void X86Function::computeIntervals()
         m_blockEnd[b] = k - 1;
     }
     m_outgoingArgs = 0;
+    std::map<int, int> firstDef;                       // temp -> linear position of its first definition
+    std::vector<std::pair<int, int> > uses;             // (temp, position)
     for (size_t p = 0; p < m_linear.size(); ++p) {
         const IrInst& in = m_f.blocks[static_cast<size_t>(m_linear[p].first)].insts[static_cast<size_t>(m_linear[p].second)];
         int pos = static_cast<int>(p);
-        if (in.dst >= 0) { Interval& iv = m_intervals[in.dst]; iv.temp = in.dst; iv.isFloat = isFloatType(in.type); if (pos < iv.start) iv.start = pos; if (pos > iv.end) iv.end = pos; }
+        if (in.dst >= 0) { Interval& iv = m_intervals[in.dst]; iv.temp = in.dst; iv.isFloat = isFloatType(in.type); if (pos < iv.start) iv.start = pos; if (pos > iv.end) iv.end = pos; if (!firstDef.count(in.dst)) firstDef[in.dst] = pos; }
         for (size_t a = 0; a < in.args.size(); ++a) {
             if (in.args[a].kind != IrOperand::Temp) continue;
             Interval& iv = m_intervals[in.args[a].id];
@@ -143,12 +180,22 @@ void X86Function::computeIntervals()
             if (iv.start > pos) iv.start = pos;
             if (pos > iv.end) iv.end = pos;
             if (in.args[a].type && isFloatType(in.args[a].type)) iv.isFloat = true;
+            uses.push_back(std::make_pair(in.args[a].id, pos));
         }
         if (in.op == IrInst::Call || in.op == IrInst::VCall) {
             m_calls.push_back(pos);
             int n = static_cast<int>(in.args.size());
             if (n - 4 > m_outgoingArgs) m_outgoingArgs = n - 4;
         }
+    }
+    // a use that precedes every definition in linear order is reached through a backward edge: the value is
+    // live from the start of the using block (after SSA, copies of a phi's operands create such uses)
+    for (size_t u = 0; u < uses.size(); ++u) {
+        std::map<int, int>::const_iterator d = firstDef.find(uses[u].first);
+        if (d == firstDef.end() || uses[u].second >= d->second) continue;
+        int blockStart = m_blockStart[static_cast<size_t>(m_linear[static_cast<size_t>(uses[u].second)].first)];
+        Interval& iv = m_intervals[uses[u].first];
+        if (blockStart < iv.start) iv.start = blockStart;
     }
     for (std::map<int, Interval>::iterator it = m_intervals.begin(); it != m_intervals.end(); ++it)
         if (!it->second.isFloat) it->second.isFloat = tempIsFloat(it->first);
@@ -212,15 +259,66 @@ void X86Function::layoutFrame()
         if (it->second.reg < 0) { off = (off + 8 + 7) / 8 * 8; it->second.slot = off; }
     for (std::set<int>::iterator r = m_usedIntRegs.begin(); r != m_usedIntRegs.end(); ++r) { off = (off + 8 + 7) / 8 * 8; m_savedIntOffset[*r] = off; }
     for (std::set<int>::iterator r = m_usedFloatRegs.begin(); r != m_usedFloatRegs.end(); ++r) { off = (off + 16 + 15) / 16 * 16; m_savedFloatOffset[*r] = off; }
+    // version 5: one setjmp frame (jmp_buf plus link, 272 bytes, 16-byte aligned) per try region,
+    // and a 16-byte slot for thrown scalars
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            if (in.op == IrInst::TryBegin) { off = (off + kTryFrameSize + 15) / 16 * 16; m_tryOffset[in.extra] = off; }
+            else if (in.op == IrInst::Throw && !in.args.empty() && m_throwSlot == 0) { off = (off + 16 + 15) / 16 * 16; m_throwSlot = off; }
+        }
     int outgoing = 32 + 8 * m_outgoingArgs;       // shadow space plus stack arguments
     m_frameSize = (off + outgoing + 15) / 16 * 16;
     m_stats.frameSize = m_frameSize;
 }
 
-std::string X86Function::floatConst(double v)
+std::string X86Function::floatConst(double v) { return m_m.floatLabel(v); }
+
+namespace {
+
+std::string hex32(unsigned long v)
 {
-    m_m.m_floats.push_back(v);
-    return "fconst_" + intToString(static_cast<int>(m_m.m_floats.size() - 1));
+    std::string r;
+    for (int i = 7; i >= 0; --i) r += "0123456789abcdef"[(v >> (i * 4)) & 15];
+    return r;
+}
+
+// label for a double from its IEEE bits (two 32-bit halves: C++98 has no 64-bit integer)
+std::string floatName(double v)
+{
+    unsigned long half[2];
+    std::memcpy(half, &v, sizeof half);
+    return "fconst_" + hex32(half[1]) + hex32(half[0]);
+}
+
+// label for a string literal from two independent 32-bit hashes of its contents
+std::string stringName(const std::string& text)
+{
+    unsigned long fnv = 2166136261UL, djb = 5381UL;
+    for (size_t i = 0; i < text.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        fnv = (fnv ^ c) * 16777619UL;
+        djb = djb * 33UL + c;
+    }
+    return "str_" + hex32(fnv) + "_" + hex32(djb);
+}
+
+} // namespace
+
+std::string X86Module::floatLabel(double v)
+{
+    std::string name = floatName(v);
+    Lock l(m_mutex);
+    m_floats[name] = v;
+    return name;
+}
+
+std::string X86Module::stringLabel(const std::string& text)
+{
+    std::string name = stringName(text);
+    Lock l(m_mutex);
+    m_strings[name] = text;
+    return name;
 }
 
 std::string X86Function::use(const IrOperand& o, const std::string& scratch)
@@ -242,8 +340,8 @@ std::string X86Function::use(const IrOperand& o, const std::string& scratch)
     case IrOperand::Imm: line("mov " + scratch + ", " + intToString(static_cast<int>(o.ival))); return scratch;
     case IrOperand::FImm: { std::string c = floatConst(o.fval); line("movsd " + scratch + ", real8 ptr [" + c + "]"); return scratch; }
     case IrOperand::Local: line("lea " + scratch + ", " + localRef(o.id)); return scratch;
-    case IrOperand::Global: { std::string g = mangleGlobal(o.name); m_m.m_globalsUsed.insert(o.name); line("lea " + scratch + ", " + g); return scratch; }
-    case IrOperand::Str: { m_m.m_strings.push_back(o.name); line("lea " + scratch + ", str_" + intToString(static_cast<int>(m_m.m_strings.size() - 1))); return scratch; }
+    case IrOperand::Global: { std::string g = m_m.globalSymbol(o.name); m_m.useGlobal(o.name); line("lea " + scratch + ", " + g); return scratch; }
+    case IrOperand::Str: { line("lea " + scratch + ", " + m_m.stringLabel(o.name)); return scratch; }
     default: return scratch;
     }
 }
@@ -274,14 +372,22 @@ void X86Function::emitCall(const IrInst& in)
     // (a >= 4) are already in place
     static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
     std::vector<bool> isFloatArg;
-    for (size_t a = 0; a < in.args.size(); ++a) {
+    size_t firstArg = 0;
+    if (in.sub == "(indirect)" && !in.args.empty()) {
+        // args[0] is the function pointer: kept in r10 (volatile, not an argument register)
+        std::string fp = use(in.args[0], "r10");
+        if (fp != "r10") line("mov r10, " + fp);
+        firstArg = 1;
+    }
+    for (size_t a = firstArg; a < in.args.size(); ++a) {
         const IrOperand& o = in.args[a];
         bool fl = opIsFloat(o);
-        if (fl) { std::string r = use(o, "xmm4"); line("movsd real8 ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "], " + r); }
-        else { std::string r = use(o, "rax"); line("mov qword ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "], " + r); }
+        int slot = 8 * static_cast<int>(a - firstArg);
+        if (fl) { std::string r = use(o, "xmm4"); line("movsd real8 ptr [rsp+" + intToString(slot) + "], " + r); }
+        else { std::string r = use(o, "rax"); line("mov qword ptr [rsp+" + intToString(slot) + "], " + r); }
         isFloatArg.push_back(fl);
     }
-    for (size_t a = 0; a < in.args.size() && a < 4; ++a) {
+    for (size_t a = 0; a < isFloatArg.size() && a < 4; ++a) {
         if (isFloatArg[a]) line("movsd xmm" + intToString(static_cast<int>(a)) + ", real8 ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "]");
         else line("mov " + std::string(argRegs[a]) + ", qword ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "]");
     }
@@ -289,10 +395,10 @@ void X86Function::emitCall(const IrInst& in)
         line("mov rax, qword ptr [rcx]              ; vptr");
         line("call qword ptr [rax+" + intToString(static_cast<int>(in.extra * 8)) + "]        ; slot " + intToString(static_cast<int>(in.extra)) + " " + in.sub);
     } else if (in.sub == "(indirect)") {
-        line("call rcx");
+        line("call r10");
     } else {
-        std::string callee = runtimeName(in.sub);
-        if (!m_m.m_defined.count(callee)) m_m.m_externs.insert(callee);
+        std::string callee = m_m.symbol(in.sub);
+        m_m.useExtern(callee);
         line("call " + callee);
     }
     if (in.dst >= 0) {
@@ -313,7 +419,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     switch (in.op) {
     case IrInst::Const: { std::string rd = def(in.dst, false, "rax", spill); line("mov " + rd + ", " + intToString(static_cast<int>(in.args[0].ival))); finish(in.dst, spill, false, rd); break; }
     case IrInst::FConst: { std::string rd = def(in.dst, true, "xmm0", spill); line("movsd " + rd + ", real8 ptr [" + floatConst(in.args[0].fval) + "]"); finish(in.dst, spill, true, rd); break; }
-    case IrInst::StrConst: { std::string rd = def(in.dst, false, "rax", spill); m_m.m_strings.push_back(in.args[0].name); line("lea " + rd + ", str_" + intToString(static_cast<int>(m_m.m_strings.size() - 1))); finish(in.dst, spill, false, rd); break; }
+    case IrInst::StrConst: { std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", " + m_m.stringLabel(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
     case IrInst::Copy: {
         std::string rs = use(in.args[0], dstFloat ? "xmm1" : "rdx");
         std::string rd = def(in.dst, dstFloat, dstFloat ? "xmm0" : "rax", spill);
@@ -325,7 +431,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         int size = typeSize(in.type);
         std::string mem;
         if (in.op == IrInst::LoadLocal) mem = localRef(in.args[0].id);
-        else if (in.op == IrInst::LoadGlobal) { mem = "[" + mangleGlobal(in.args[0].name) + "]"; m_m.m_globalsUsed.insert(in.args[0].name); }
+        else if (in.op == IrInst::LoadGlobal) { mem = "[" + m_m.globalSymbol(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
         else mem = "[" + use(in.args[0], "rdx") + "]";
         std::string rd = def(in.dst, dstFloat, dstFloat ? "xmm0" : "rax", spill);
         if (dstFloat) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + rd + ", " + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem);
@@ -340,7 +446,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         bool fl = opIsFloat(in.args[1]);
         std::string mem;
         if (in.op == IrInst::StoreLocal) mem = localRef(in.args[0].id);
-        else if (in.op == IrInst::StoreGlobal) { mem = "[" + mangleGlobal(in.args[0].name) + "]"; m_m.m_globalsUsed.insert(in.args[0].name); }
+        else if (in.op == IrInst::StoreGlobal) { mem = "[" + m_m.globalSymbol(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
         else mem = "[" + use(in.args[0], "rdx") + "]";
         std::string rv = use(in.args[1], fl ? "xmm0" : "rax");
         if (fl) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem + ", " + rv);
@@ -348,7 +454,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         break;
     }
     case IrInst::AddrLocal: { std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", " + localRef(in.args[0].id)); finish(in.dst, spill, false, rd); break; }
-    case IrInst::AddrGlobal: { std::string rd = def(in.dst, false, "rax", spill); m_m.m_globalsUsed.insert(in.args[0].name); line("lea " + rd + ", " + mangleGlobal(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
+    case IrInst::AddrGlobal: { std::string rd = def(in.dst, false, "rax", spill); m_m.useGlobal(in.args[0].name); line("lea " + rd + ", " + m_m.globalSymbol(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
     case IrInst::AddrField: { std::string rb = use(in.args[0], "rdx"); std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", [" + rb + "+" + intToString(static_cast<int>(in.extra)) + "]      ; " + in.sub); finish(in.dst, spill, false, rd); break; }
     case IrInst::AddrIndex: {
         std::string rb = use(in.args[0], "rdx");
@@ -500,14 +606,57 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         break;
     }
     case IrInst::Throw: {
-        if (!in.args.empty()) { std::string r = use(in.args[0], "rcx"); if (r != "rcx") line("mov rcx, " + r); } else line("xor ecx, ecx");
-        m_m.m_externs.insert("cppparse_throw");
+        // cppparse_throw(object address, type descriptor, size): copies the object and longjmps to the innermost frame
+        if (in.args.empty()) { m_m.useExtern("cppparse_rethrow"); line("call cppparse_rethrow            ; throw;"); break; }
+        const Type* t = in.args[0].type;
+        bool cls = t && t->kind == Type::Class;
+        std::string slot = "[rbp-" + intToString(m_throwSlot) + "]";
+        if (cls) { std::string r = use(in.args[0], "rcx"); if (r != "rcx") line("mov rcx, " + r); }
+        else if (opIsFloat(in.args[0])) { std::string r = use(in.args[0], "xmm0"); line("movsd real8 ptr " + slot + ", " + r); line("lea rcx, " + slot); }
+        else { std::string r = use(in.args[0], "rax"); line("mov qword ptr " + slot + ", " + r); line("lea rcx, " + slot); }
+        line("lea rdx, " + m_m.stringLabel("\"" + in.sub + "\""));
+        line("mov r8, " + intToString(static_cast<int>(in.extra > 0 ? in.extra : 8)));
+        if (in.args.size() > 1) {
+            // version 6: the object was copy-constructed into malloc storage, args[1] is its destructor or 0
+            std::string d = use(in.args[1], "r9");
+            if (d != "r9") line("mov r9, " + d);
+            m_m.useExtern("cppparse_throw_owned");
+            line("call cppparse_throw_owned");
+            break;
+        }
+        m_m.useExtern("cppparse_throw");
         line("call cppparse_throw");
         break;
     }
-    case IrInst::TryBegin: comment("try region (exceptions are not implemented on x86-64: throw aborts)"); break;
-    case IrInst::TryEnd: comment("end of try region"); break;
-    case IrInst::CatchParam: { std::string rd = def(in.dst, false, "rax", spill); line("xor " + reg32(rd) + ", " + reg32(rd) + "        ; catch (" + in.sub + ") never entered"); finish(in.dst, spill, false, rd); break; }
+    case IrInst::TryBegin: {
+        // register the frame, then _setjmp(frame, NULL): 0 now, 1 when a throw lands here
+        std::string fr = "[rbp-" + intToString(m_tryOffset[in.extra]) + "]";
+        m_m.useExtern("cppparse_push_frame");
+        m_m.useExtern("_setjmp");
+        line("lea rcx, " + fr);
+        line("call cppparse_push_frame");
+        line("lea rcx, " + fr);
+        line("xor edx, edx");
+        line("call _setjmp");
+        line("test eax, eax");
+        line("jne " + m_label + "_T" + intToString(static_cast<int>(in.extra)) + "        ; exception: dispatch to the handlers");
+        break;
+    }
+    case IrInst::TryEnd: {
+        m_m.useExtern("cppparse_pop_frame");
+        line("lea rcx, [rbp-" + intToString(m_tryOffset[in.extra]) + "]");
+        line("call cppparse_pop_frame");
+        break;
+    }
+    case IrInst::CatchParam: {
+        std::string rd = def(in.dst, false, "rax", spill);
+        m_m.useExtern("cppparse_catch_begin");
+        line("call cppparse_catch_begin       ; catch (" + in.sub + "): rax = object");
+        if (rd != "rax") line("mov " + rd + ", rax");
+        finish(in.dst, spill, false, rd);
+        break;
+    }
+    case IrInst::CatchEnd: { m_m.useExtern("cppparse_catch_end"); line("call cppparse_catch_end"); break; }
     case IrInst::Unreachable: line("ud2                 ; " + in.sub); break;
     default: break;
     }
@@ -515,6 +664,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
 
 void X86Function::emitBody()
 {
+    if (m_f.linkOnce) m_out << ";@comdat any\n";   // read by the COFF writer: the function gets its own COMDAT section
     m_out << m_label << " PROC\n";
     m_out << "        ; " << m_f.name << "\n";
     m_out << "        ; frame " << m_frameSize << " bytes";
@@ -552,12 +702,37 @@ void X86Function::emitBody()
     for (std::map<int, int>::iterator r = m_savedFloatOffset.begin(); r != m_savedFloatOffset.end(); ++r) line("movdqu xmm" + intToString(kFloatRegBase + r->first) + ", xmmword ptr [rbp-" + intToString(r->second) + "]");
     line("leave");
     line("ret");
+    // version 5: one dispatch stub per try region: pop the frame, try the catch clauses in order, else rethrow
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            if (in.op != IrInst::TryBegin) continue;
+            m_out << m_label << "_T" << in.extra << ":        ; handlers of try region " << in.extra << "\n";
+            m_m.useExtern("cppparse_pop_frame");
+            m_m.useExtern("cppparse_match");
+            m_m.useExtern("cppparse_rethrow");
+            line("lea rcx, [rbp-" + intToString(m_tryOffset[in.extra]) + "]");
+            line("call cppparse_pop_frame");
+            bool catchAll = false;
+            for (size_t h = 0; h < in.args.size() && !catchAll; ++h) {
+                int hb = in.args[h].id;
+                std::string ctype = "...";
+                const IrBlock& blk = m_f.blocks[static_cast<size_t>(hb)];
+                for (size_t k = 0; k < blk.insts.size(); ++k) if (blk.insts[k].op == IrInst::CatchParam) { ctype = blk.insts[k].sub; break; }
+                if (ctype == "...") { line("jmp " + label(hb) + "        ; catch (...)"); catchAll = true; break; }
+                line("lea rcx, " + m_m.stringLabel("\"" + ctype + "\""));
+                line("call cppparse_match");
+                line("test eax, eax");
+                line("jne " + label(hb) + "        ; catch (" + ctype + ")");
+            }
+            if (!catchAll) line("call cppparse_rethrow            ; no clause matched: outer frame");
+        }
     m_out << m_label << " ENDP\n\n";
 }
 
 std::string X86Function::run()
 {
-    m_label = mangle(m_f.name);
+    m_label = m_m.symbol(m_f.name);
     computeIntervals();
     allocate();
     layoutFrame();
@@ -567,53 +742,30 @@ std::string X86Function::run()
 
 // ---- module ---------------------------------------------------------------------------------
 
-X86Module::X86Module(const CodeBase& cb, TypeTable& types, Layouts& layouts) : m_cb(cb), m_types(types), m_layouts(layouts) {}
+X86Module::X86Module(bool msvcNames) : m_msvc(msvcNames) {}
 
-void X86Module::addFunction(const IrFunction& f, LowerStats& stats)
+void X86Module::addFunction(const IrFunction& f, LowerStats& stats) { appendCode(codeFor(f, stats)); }
+
+std::string X86Module::codeFor(const IrFunction& f, LowerStats& stats)
 {
-    m_defined.insert(mangle(f.name));
+    { Lock l(m_mutex); m_defined.insert(symbol(f.name)); }
     X86Function fn(*this, f, stats);
-    m_code += fn.run();
+    return fn.run();
 }
+
+void X86Module::appendCode(const std::string& code) { Lock l(m_mutex); m_code += code; }
 
 void X86Module::emitVtables()
 {
-    const std::vector<ClassInfo*>& classes = m_cb.classes();
-    for (size_t i = 0; i < classes.size(); ++i) {
-        const ClassInfo* c = classes[i];
-        if (!c->isDefinition || c->tmpl.isTemplate || !m_layouts.hasVtable(c)) continue;
-        std::string desc = m_layouts.describe(c);
-        size_t vt = desc.find("vtable:");
-        if (vt == std::string::npos) continue;
-        // slot order from the layout description: "[n] key"
-        std::vector<std::string> keys;
-        std::string rest = desc.substr(vt + 7);
-        size_t pos = 0;
-        while ((pos = rest.find('[', pos)) != std::string::npos) {
-            size_t close = rest.find(']', pos);
-            size_t next = rest.find('[', close);
-            std::string key = trim(rest.substr(close + 1, next == std::string::npos ? std::string::npos : next - close - 1));
-            keys.push_back(key);
-            pos = close + 1;
-        }
-        std::string table = "vtable_" + mangle(c->qualifiedName) + " LABEL QWORD\n";
-        for (size_t k = 0; k < keys.size(); ++k) {
-            // find the most derived implementation among c and its bases
-            const FunctionInfo* impl = 0;
-            std::string key = keys[k];
-            if (key.find("::") != std::string::npos) key = key.substr(key.find("::") + 2);
-            for (const ClassInfo* walk = c; walk && !impl; ) {
-                for (size_t m = 0; m < walk->methods.size(); ++m) {
-                    const FunctionInfo& fn = walk->methods[m];
-                    std::string mk = fn.isDestructor ? "~dtor" : fn.name + "(";
-                    if (!fn.isDestructor) { for (size_t p = 0; p < fn.params.size(); ++p) { std::string t; for (size_t ch = 0; ch < fn.params[p].type.size(); ++ch) if (fn.params[p].type[ch] != ' ') t += fn.params[p].type[ch]; mk += t + ";"; } mk += ")"; if (fn.isConst) mk += "c"; }
-                    if (mk == key && (fn.definition || fn.hasBody)) { impl = fn.definition ? fn.definition : &fn; break; }
-                }
-                walk = walk->bases.empty() ? 0 : walk->bases[0].resolved;
-            }
-            std::string sym = impl ? mangle(impl->displayName() + "(" + impl->paramText + ")" + (impl->isConst ? " const" : "")) : "";
+    for (size_t i = 0; i < m_vtables.size(); ++i) {
+        const IrVtable& v = m_vtables[i];
+        std::string tableSym = globalSymbol("vtable@" + v.className);
+        m_dataSymbols.insert(tableSym);
+        std::string table = ";@comdat any\n" + tableSym + " LABEL QWORD\n";   // every translation unit that needs the table emits it
+        for (size_t k = 0; k < v.entries.size(); ++k) {
+            std::string sym = v.entries[k].empty() ? std::string("") : symbol(v.entries[k]);
             if (!sym.empty() && !m_defined.count(sym)) m_externs.insert(sym);
-            table += "        DQ " + (sym.empty() ? std::string("0") : "OFFSET " + sym) + "        ; [" + intToString(static_cast<int>(k)) + "] " + keys[k] + "\n";
+            table += "        DQ " + (sym.empty() ? std::string("0") : "OFFSET " + sym) + "        ; [" + intToString(static_cast<int>(k)) + "] " + v.entries[k] + "\n";
         }
         m_data += table;
     }
@@ -621,28 +773,23 @@ void X86Module::emitVtables()
 
 void X86Module::emitGlobals()
 {
-    const std::vector<SourceFile*>& files = m_cb.files();
     std::set<std::string> done;
-    for (size_t f = 0; f < files.size(); ++f)
-        for (size_t v = 0; v < files[f]->variables.size(); ++v) {
-            const VariableInfo& g = files[f]->variables[v];
-            std::string name = g.qualifier.empty() ? g.fullName() : g.fullName();
-            if (g.isExtern || !done.insert(name).second) continue;
-            const Type* t = m_types.parse(g.type, g.scope, 0);
-            int size = m_layouts.sizeOf(t);
-            std::string sym = mangleGlobal(name);
-            std::string init = trim(g.initializer);
-            bool numeric = !init.empty() && (isdigit(static_cast<unsigned char>(init[0])) || init[0] == '-' || init[0] == '+') && init.find_first_of("(,") == std::string::npos;
-            std::string def;
-            if (t && t->isFloating()) def = sym + " REAL8 " + (numeric ? init : std::string("0.0"));
-            else if (size == 1) def = sym + " DB " + (numeric ? init : std::string("0"));
-            else if (size == 2) def = sym + " DW " + (numeric ? init : std::string("0"));
-            else if (size == 4) def = sym + " DD " + (numeric ? init : std::string("0"));
-            else if (size == 8) def = sym + " DQ " + (numeric ? init : std::string("0"));
-            else def = sym + " DB " + intToString(size) + " DUP (0)";
-            m_data += "        PUBLIC " + sym + "\n" + def + "\n";
-            m_defined.insert(sym);
-        }
+    for (size_t i = 0; i < m_globals.size(); ++i) {
+        const IrGlobal& g = m_globals[i];
+        if (!done.insert(g.name).second) continue;
+        std::string sym = globalSymbol(g.name);
+        bool numeric = !g.init.empty();
+        std::string def;
+        if (g.isFloat) def = sym + " REAL8 " + (numeric ? g.init : std::string("0.0"));
+        else if (g.size == 1) def = sym + " DB " + (numeric ? g.init : std::string("0"));
+        else if (g.size == 2) def = sym + " DW " + (numeric ? g.init : std::string("0"));
+        else if (g.size == 4) def = sym + " DD " + (numeric ? g.init : std::string("0"));
+        else if (g.size == 8) def = sym + " DQ " + (numeric ? g.init : std::string("0"));
+        else def = sym + " DB " + intToString(g.size) + " DUP (0)";
+        m_data += "        PUBLIC " + sym + "\n" + def + "\n";
+        m_defined.insert(sym);
+        m_dataSymbols.insert(sym);
+    }
 }
 
 std::string X86Module::finish()
@@ -656,16 +803,19 @@ std::string X86Module::finish()
     for (std::set<std::string>::iterator e = m_externs.begin(); e != m_externs.end(); ++e)
         if (!m_defined.count(*e)) s << "EXTERN " << *e << ":PROC\n";
     for (std::set<std::string>::iterator g = m_globalsUsed.begin(); g != m_globalsUsed.end(); ++g) {
-        std::string sym = mangleGlobal(*g);
+        std::string sym = globalSymbol(*g);
         if (!m_defined.count(sym) && !startsWith(*g, "vtable@")) { s << "EXTERN " << sym << ":QWORD\n"; m_defined.insert(sym); }
     }
     s << "\n.data\n" << m_data;
     s << "\n.const\n";
     s << "sign_mask DQ 8000000000000000h, 8000000000000000h\n";
-    for (size_t i = 0; i < m_floats.size(); ++i) { std::ostringstream v; v.setf(std::ios::fixed); v.precision(17); v << m_floats[i]; s << "fconst_" << i << " REAL8 " << v.str() << "\n"; }
-    for (size_t i = 0; i < m_strings.size(); ++i) {
+    for (std::map<std::string, double>::const_iterator fi = m_floats.begin(); fi != m_floats.end(); ++fi) {
+        std::ostringstream v; v.setf(std::ios::fixed); v.precision(17); v << fi->second;
+        s << fi->first << " REAL8 " << v.str() << "\n";
+    }
+    for (std::map<std::string, std::string>::const_iterator si = m_strings.begin(); si != m_strings.end(); ++si) {
         // the literal is stored with quotes and escapes: emit raw bytes
-        std::string lit = m_strings[i];
+        std::string lit = si->second;
         if (lit.size() >= 2 && lit[0] == '"') lit = lit.substr(1, lit.size() - 2);
         // MASM limits a line to 512 characters: emit at most 24 bytes per DB line
         std::vector<int> bytes;
@@ -678,16 +828,22 @@ std::string X86Module::finish()
             bytes.push_back(static_cast<int>(ch));
         }
         bytes.push_back(0);
-        s << "str_" << i << " LABEL BYTE\n";
+        s << si->first << " LABEL BYTE\n";
         for (size_t c = 0; c < bytes.size(); c += 24) {
             s << "        DB ";
             for (size_t k = c; k < bytes.size() && k < c + 24; ++k) s << (k == c ? "" : ", ") << bytes[k];
             s << "\n";
         }
     }
+    if (!m_initializers.empty()) {
+        // pointers to the dynamic initialisers of this module's globals: the CRT calls them before main
+        s << "\nCRT$XCU SEGMENT ALIGN(8) ALIAS('.CRT$XCU') READ\n";
+        for (size_t i = 0; i < m_initializers.size(); ++i) s << "        DQ OFFSET " << symbol(m_initializers[i]) << "\n";
+        s << "CRT$XCU ENDS\n";
+    }
     s << "\n.code\n";
     for (std::set<std::string>::iterator d = m_defined.begin(); d != m_defined.end(); ++d)
-        if (!startsWith(*d, "g_") && !startsWith(*d, "vtable_")) s << "PUBLIC " << *d << "\n";
+        if (!m_dataSymbols.count(*d)) s << "PUBLIC " << *d << "\n";
     s << "\n" << m_code << "END\n";
     return s.str();
 }

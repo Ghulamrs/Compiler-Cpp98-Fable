@@ -1,0 +1,18 @@
+// exception - cppparse's C++98 library: the base class of the standard exceptions.
+#ifndef CPPPARSE_EXCEPTION
+#define CPPPARSE_EXCEPTION
+
+namespace std {
+
+class exception {
+public:
+    exception() {}
+    exception(const exception&) {}
+    exception& operator=(const exception&) { return *this; }
+    virtual ~exception() {}
+    virtual const char* what() const { return "exception"; }
+};
+
+}
+
+#endif

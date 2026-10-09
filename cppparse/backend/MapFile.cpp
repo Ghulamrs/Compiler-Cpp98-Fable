@@ -1,6 +1,8 @@
 // MapFile.cpp - the object map in the layout of a Visual Studio linker map.
 #include "MapFile.hpp"
 
+#include <algorithm>
+#include <ctime>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -53,6 +55,46 @@ void symbolLines(std::ostringstream& s, const CoffResult& r, const std::map<std:
     if (count == 0) s << "  (none)\n";
 }
 
+// a symbol of the by-name list: sorted by its readable name, or by its name in the object when it has none
+struct NamedSymbol {
+    const CoffSymbolInfo* y;
+    std::string           readable;
+    std::string           key;
+};
+
+struct ByNameOrder {
+    bool operator()(const NamedSymbol& a, const NamedSymbol& b) const
+    {
+        if (a.key != b.key) return a.key < b.key;
+        if (a.y->name != b.y->name) return a.y->name < b.y->name;
+        return a.y->section != b.y->section ? a.y->section < b.y->section : a.y->offset < b.y->offset;
+    }
+};
+
+// every symbol again, public and static, in name order: the address lists above answer "what is here", this one
+// answers "where is it"
+void byNameLines(std::ostringstream& s, const CoffResult& r, const std::map<std::string, std::string>& names)
+{
+    std::vector<NamedSymbol> list;
+    for (size_t i = 0; i < r.symbolList.size(); ++i) {
+        NamedSymbol n;
+        n.y = &r.symbolList[i];
+        std::map<std::string, std::string>::const_iterator it = names.find(n.y->name);
+        n.readable = it == names.end() ? std::string() : it->second;
+        n.key = n.readable.empty() ? n.y->name : n.readable;
+        list.push_back(n);
+    }
+    std::sort(list.begin(), list.end(), ByNameOrder());
+    s << "  Address         Size        Type      Linkage  Symbol                                    Name\n\n";
+    for (size_t i = 0; i < list.size(); ++i) {
+        const CoffSymbolInfo& y = *list[i].y;
+        s << " " << address(y.section, y.offset) << "   " << hexText(y.size, 8) << "H   " << pad(typeOf(y, list[i].readable), 9) << " "
+          << pad(y.external ? "public" : "static", 8) << " " << pad(y.name, 41)
+          << (list[i].readable == y.name ? std::string() : " " + list[i].readable) << "\n";
+    }
+    if (list.empty()) s << "  (none)\n";
+}
+
 } // namespace
 
 std::string renderObjectMap(const std::string& title, const std::string& object, const CoffResult& r,
@@ -60,6 +102,20 @@ std::string renderObjectMap(const std::string& title, const std::string& object,
 {
     std::ostringstream s;
     s << " " << title << "\n\n";
+    // as link /MAP: the time in seconds since 1970 (hex), then the local date; the object itself keeps a zero
+    // time stamp so that it stays the same from run to run
+    time_t now = time(0);
+    char when[64] = "";
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)      // MSVC deprecates localtime for its localtime_s, which is not C++98
+#endif
+    const struct tm* local = localtime(&now);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    if (local && strftime(when, sizeof when, "%a %b %d %H:%M:%S %Y", local) > 9 && when[8] == '0') when[8] = ' ';   // "Oct  9", as ctime
+    s << " Timestamp is " << hexText(static_cast<unsigned long>(now) & 0xFFFFFFFFUL, 8) << " (" << when << ")\n\n";
     s << " cppparse object map of " << object << "\n";
     s << " Addresses are section:offset in the object; sizes are the encoded bytes of each definition.\n\n";
     if (!r.errors.empty()) {
@@ -109,6 +165,8 @@ std::string renderObjectMap(const std::string& title, const std::string& object,
             s << "\n entry point at        " << address(r.symbolList[i].section, r.symbolList[i].offset) << "\n";
             break;
         }
+    s << "\n Symbols by Name\n\n";
+    byNameLines(s, r, names);
     return s.str();
 }
 

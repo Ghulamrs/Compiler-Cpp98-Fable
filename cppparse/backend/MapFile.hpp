@@ -1,10 +1,12 @@
 // MapFile.hpp - the object map: the layout of the assembled object in the form of a Visual Studio
 // linker map (link /MAP), with the real size of every symbol.
 //
+//   time stamp         when the map was written, as link /MAP prints it
 //   section table      Start (section:offset), Length, Name, Class
 //   Publics by Value   Address, Size, Type, Symbol (as written to the object), readable name
 //   Static symbols     the same for internal linkage
 //   entry point
+//   Symbols by Name    every symbol again, sorted by readable name, with its linkage (public / static)
 //
 // Addresses are section:offset inside the object (a linker map adds the image base after linking);
 // sizes are the bytes the encoder produced for each definition, without alignment padding.

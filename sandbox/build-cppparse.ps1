@@ -95,13 +95,22 @@ try {
         if ($lines -match 'not available') { return @("map not available: " + (($lines | Select-String 'line \d+:' | Select-Object -First 1).Line)) }
         $sections = @{}
         foreach ($l in $lines) { if ($l -match '^ ([0-9a-f]{4}):00000000 ([0-9a-f]{8})H  (\S+)') { $sections[[Convert]::ToInt32($Matches[1], 16)] = @{ Size = [Convert]::ToInt64($Matches[2], 16); Name = $Matches[3] } } }
-        $syms = @()
+        $syms = @(); $byName = @(); $inByName = $false
         foreach ($l in $lines) {
-            if ($l -match '^ ([0-9a-f]{4}):([0-9a-f]{8})   ([0-9a-f]{8})H   (\w+)\s+(\S+)') {
-                $syms += [pscustomobject]@{ Sec = [Convert]::ToInt32($Matches[1], 16); Off = [Convert]::ToInt64($Matches[2], 16); Size = [Convert]::ToInt64($Matches[3], 16); Type = $Matches[4]; Name = $Matches[5] }
+            if ($l -match '^ Symbols by Name') { $inByName = $true; continue }
+            if ($inByName) {
+                if ($l -match '^ ([0-9a-f]{4}):([0-9a-f]{8})   ([0-9a-f]{8})H   (\w+)\s+(public|static)\s+(\S+)\s*(.*)$') {
+                    $byName += [pscustomobject]@{ Key = "$($Matches[1]):$($Matches[2]):$($Matches[3]):$($Matches[6])"; Sort = $(if ($Matches[7]) { $Matches[7] } else { $Matches[6] }) }
+                }
+            } elseif ($l -match '^ ([0-9a-f]{4}):([0-9a-f]{8})   ([0-9a-f]{8})H   (\w+)\s+(\S+)') {
+                $syms += [pscustomobject]@{ Sec = [Convert]::ToInt32($Matches[1], 16); Off = [Convert]::ToInt64($Matches[2], 16); Size = [Convert]::ToInt64($Matches[3], 16); Type = $Matches[4]; Name = $Matches[5]; Key = "$($Matches[1]):$($Matches[2]):$($Matches[3]):$($Matches[5])" }
             }
         }
         if ($syms.Count -eq 0) { return @("no symbols in $mapPath") }
+        # the by-name list at the end: the same symbols, addresses and sizes, in ascending name order
+        $diff = @(Compare-Object @($syms | ForEach-Object Key | Sort-Object) @($byName | ForEach-Object Key | Sort-Object))
+        if ($diff.Count) { $problems += "Symbols by Name differs from the address lists: " + ($diff | Select-Object -First 3 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join '; ' }
+        for ($i = 1; $i -lt $byName.Count; $i++) { if ([string]::CompareOrdinal($byName[$i - 1].Sort, $byName[$i].Sort) -gt 0) { $problems += "Symbols by Name not in order at '$($byName[$i].Sort)'"; break } }
         foreach ($g in ($syms | Group-Object Sec)) {
             if (-not $sections.ContainsKey([int]$g.Name)) { continue }   # a COMDAT section: listed only as part of its group
             $list = @($g.Group | Sort-Object Off)

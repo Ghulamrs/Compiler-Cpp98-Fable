@@ -162,7 +162,11 @@ number of bytes the encoder produced for the definition, without the alignment p
 Visual Studio map does not show. Types: function, data, vtable, string, constant. The symbol is the name in
 the object (MSVC-decorated with `--msvc-mangling`), followed by its readable name. Publics and static
 (internal-linkage) symbols are listed separately, as in Visual Studio's map; COMDAT sections (inline functions,
-template instances, vtables) are grouped by name. If the assembly cannot be encoded, the map says so and lists
+template instances, vtables) are grouped by name. The map starts with a time stamp in link's form
+(`Timestamp is 6ac8c311 (Fri Oct  9 15:33:53 2026)`: seconds since 1970 in hex, then the local time; the
+object itself keeps a zero time stamp, so it stays the same from run to run) and ends with **Symbols by
+Name**: every symbol again, public and static, sorted by its readable name, with a Linkage column. Visual
+Studio's map has only the address order. If the assembly cannot be encoded, the map says so and lists
 the lines instead of showing guessed numbers. Tests 8 and 13 check that the sizes fill each section exactly
 and that every address matches `dumpbin /symbols` of the object.
 

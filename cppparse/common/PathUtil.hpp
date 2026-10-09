@@ -32,6 +32,7 @@ LibraryOrigin libraryNameOrigin(const std::string& name);
 const char*   libraryOriginText(LibraryOrigin origin);
 bool        isStandardLibraryName(const std::string& name); // ISO C90 or C++98: printf, assert, sort, ...
 bool        isKnownLibraryName(const std::string& name);    // any origin, including POSIX, MSVC and Win32
+bool        isDoubleMathFunction(const std::string& name);  // <cmath> function taking and returning only double: fabs, sqrt, pow, ... (also std::)
 std::string lastComponent(const std::string& qualified); // "a::b::c" -> "c"
 std::string xmlEscape(const std::string& s);
 std::string xmlDecode(const std::string& s);

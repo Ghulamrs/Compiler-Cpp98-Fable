@@ -862,7 +862,14 @@ void X86Module::emitGlobals()
         else if (g.size == 4) def = sym + " DD " + (numeric ? g.init : std::string("0"));
         else if (g.size == 8) def = sym + " DQ " + (numeric ? g.init : std::string("0"));
         else def = sym + " DB " + intToString(g.size) + " DUP (0)";
-        m_data += std::string(g.linkOnce ? ";@comdat any\n" : "") + (g.internal ? std::string("") : "        PUBLIC " + sym + "\n") + def + "\n";
+        // as cl: the type's (or the declared) alignment, and at least the natural boundary of the size up to 8 bytes
+        int align = g.size >= 8 ? 8 : g.size >= 4 ? 4 : g.size >= 2 ? 2 : 1;
+        if (g.align > align) align = g.align;
+        // a COMDAT item is a section of its own: its alignment goes to the section (on the marker), not into padding
+        if (g.linkOnce) m_data += ";@comdat any" + (align > 1 ? " align " + intToString(align) : std::string("")) + "\n";
+        m_data += (g.internal ? std::string("") : "        PUBLIC " + sym + "\n");
+        if (!g.linkOnce && align > 1) m_data += "        ALIGN " + intToString(align) + "\n";
+        m_data += def + "\n";
         m_defined.insert(sym);
         m_dataSymbols.insert(sym);
     }
@@ -935,6 +942,22 @@ std::string X86Module::finish()
         if (!m_dataSymbols.count(*d) && !m_internal.count(*d)) s << "PUBLIC " << *d << "\n";
     s << "\n" << m_code << "END\n";
     return s.str();
+}
+
+void X86Module::describeSymbols(const std::vector<IrFunction*>& functions, std::map<std::string, std::string>& out)
+{
+    for (size_t i = 0; i < functions.size(); ++i) out[symbol(functions[i]->name)] = functions[i]->name;
+    for (size_t i = 0; i < m_globals.size(); ++i) out[globalSymbol(m_globals[i].name)] = m_globals[i].name;
+    for (size_t i = 0; i < m_vtables.size(); ++i) out[globalSymbol("vtable@" + m_vtables[i].className)] = m_vtables[i].className + "::`vftable'";
+    for (std::map<std::string, double>::const_iterator fi = m_floats.begin(); fi != m_floats.end(); ++fi) {
+        std::ostringstream v;
+        v.precision(17);
+        v << "double constant " << fi->second;
+        out[fi->first] = v.str();
+    }
+    for (std::map<std::string, std::string>::const_iterator si = m_strings.begin(); si != m_strings.end(); ++si)
+        out[si->first] = "string literal " + (si->second.size() > 48 ? si->second.substr(0, 45) + "...\"" : si->second);
+    out["sign_mask"] = "sign mask for floating-point negation";
 }
 
 } // namespace cppparse

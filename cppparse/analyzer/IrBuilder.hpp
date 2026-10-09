@@ -33,15 +33,20 @@ public:
     int  vtableSlot(const ClassInfo* cls, const FunctionInfo* method);   // -1 if not virtual
     int  classSize(const ClassInfo* cls);
     std::string describe(const ClassInfo* cls);   // "class X: size N { +0 vptr, +8 int a, ... }"
+    // a standard-library class this pipeline does not know (std::vector<double>, std::string, a stream) held
+    // by value, or a class whose layout contains one: its size and field offsets are guesses, so code that
+    // copies, indexes or allocates it would be wrong. Pointers and references to it are fine.
+    bool opaqueByValue(const Type* t);
 
 private:
     struct Layout {
         int size, align; bool vptr;
+        bool opaque;                       // a base or a field is opaque by value (see opaqueByValue)
         std::map<std::string, Field> fields;
         std::map<const ClassInfo*, int> bases;
         std::vector<std::string> vtable;   // "name(params)const" keys
         std::vector<std::string> order;    // display
-        Layout() : size(0), align(1), vptr(false) {}
+        Layout() : size(0), align(1), vptr(false), opaque(false) {}
     };
     const Layout& layout(const ClassInfo* cls);
     std::map<const ClassInfo*, Layout> m_cache;

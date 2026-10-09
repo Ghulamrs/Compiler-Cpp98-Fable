@@ -104,6 +104,22 @@ void Parser::skipBalanced()
     } while (depth > 0 && !atEnd());
 }
 
+int Parser::declspecArguments()
+{
+    if (!at("(")) return 0;
+    int align = 0;
+    const size_t start = m_pos;
+    skipBalanced();
+    // __declspec( align(N) ) among other attributes such as dllimport or noinline
+    for (size_t p = start + 1; p + 3 < m_pos; ++p)
+        if (m_toks[p].kind == PpToken::Ident && m_toks[p].text == "align" && m_toks[p + 1].is("(") && m_toks[p + 2].kind == PpToken::Number && m_toks[p + 3].is(")")) {
+            int n = std::atoi(m_toks[p + 2].text.c_str());
+            if (n >= 1 && n <= 8192 && (n & (n - 1)) == 0) align = n;
+            else error("__declspec(align(" + m_toks[p + 2].text + ")): the alignment must be a power of two from 1 to 8192");
+        }
+    return align;
+}
+
 
 void Parser::pushScope(const std::string& name, bool isClass)
 {
@@ -376,7 +392,13 @@ bool Parser::declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef)
         if (w == "inline") { spec.isInline = true; advance(); any = true; continue; }
         if (w == "const") { spec.isConst = true; advance(); any = true; continue; }
         if (w == "volatile") { spec.isVolatile = true; advance(); any = true; continue; }
-        if (w == "__declspec" || w == "__cdecl" || w == "__stdcall" || w == "__fastcall" || w == "__forceinline" || w == "__inline" || w == "__restrict") {
+        if (w == "__declspec") {                                // Microsoft extension: align(N) is kept, the rest ignored
+            advance();
+            int a = declspecArguments();
+            if (a > spec.align) spec.align = a;
+            any = true; continue;
+        }
+        if (w == "__cdecl" || w == "__stdcall" || w == "__fastcall" || w == "__forceinline" || w == "__inline" || w == "__restrict") {
             advance(); if (at("(")) skipBalanced(); any = true; continue;       // Microsoft extensions, ignored
         }
         if (isTypeKeyword(w)) {
@@ -742,8 +764,10 @@ Decl* Parser::classSpecifier(DeclSpec& spec, Loc here)
     ClassDecl* c = m_arena.classDecl();
     c->key = cur().text;
     c->loc = here;
+    c->pack = cur().pack;               // #pragma pack takes effect at the class key that follows it
+    if (spec.align > 0) { c->declAlign = spec.align; spec.align = 0; }   // "__declspec(align(N)) struct S {...}" aligns the type
     advance();
-    while (at("__declspec")) { advance(); if (at("(")) skipBalanced(); }
+    while (at("__declspec")) { advance(); int a = declspecArguments(); if (a > c->declAlign) c->declAlign = a; }
     if (!at("{")) { if (!qualifiedName(c->name, true, true)) return 0; }
     // the class name is a type from here on (also inside its own body)
     std::string simple = c->name.parts.empty() ? "" : c->name.parts.back().ident;

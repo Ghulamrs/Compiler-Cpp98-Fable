@@ -41,6 +41,7 @@ Written next to the first input, or into the `-o` directory:
 | `<name>-asm.txt`       | version 3: lowered VM64 assembly                                  |
 | `<name>.asm`           | version 4: x86-64 MASM (Windows x64 ABI); `--assemble` adds `.obj` via ml64 |
 | `<name>.obj`           | version 5: COFF object written by cppparse itself (`--obj`) |
+| `<name>.map`           | object map: sections, every symbol's address, real size and type (see below) |
 | `<name>-report.html`   | the same report as one self-contained page with the diagram      |
 | `<name>-report.pdf`    | the same report as PDF: title page, diagram pages, text pages    |
 | `<name>-diagram.svg`   | the class diagram picture                                       |
@@ -82,7 +83,8 @@ dashed box = base class not defined in the parsed files.
 --compile6       version 6: --sema6 plus IR generation and the back end (<name>6.asm, <name>6.obj with --obj)
 -I <dir>         include directory for the preprocessor
 -D NAME[=value]  predefine a macro; -U NAME undefines one
--j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)
+-j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling;
+                 never more than the number of files read)
 src\*.cpp        wildcard patterns are expanded by cppparse itself (more than 50 files is fine)
 @list.txt        response file: one path, pattern or option per line; '#' starts a comment
 -q               quiet
@@ -94,6 +96,20 @@ src\*.cpp        wildcard patterns are expanded by cppparse itself (more than 50
 risky in the code, each finding with a code, severity, location, message
 and a one-line explanation. Severities: **E** will not compile or link,
 **W** likely bug or risky construct, **I** worth knowing.
+
+Each finding is written in the Visual Studio / MSBuild error format, so the
+Output window, the Error List and VS Code link it to the source line:
+
+```
+1>src/main.cpp(9): error E100: include file not found: #include "Missing.h"
+1>    searched next to the including file and in the project include directories
+```
+
+`1>` is the number of the finding's project, counted from 1 in solution
+order (a folder or a list of files is project 1), like the prefix MSBuild
+gives each project's output; the explanation line carries the same prefix.
+The HTML report shows the findings with the Error List's columns: severity,
+code, description, project, file, line.
 
 | area            | codes |
 |-----------------|-------|
@@ -121,6 +137,38 @@ definition or declaration, then all symbols sorted by name, a cross
 reference (every function and global with the places that call or use it),
 the functions and globals never referenced anywhere, and the entry point.
 `<name>-symbols.json` and `-symbols.txt` hold the same symbols for tools.
+
+## Object map
+
+Whenever x86-64 code is generated, `<name>.map` (`<name>6.map` with `--compile6`) describes the object in
+the layout of a Visual Studio linker map (`link /MAP`), built from the COFF writer's own layout. Without `--obj`
+the code is assembled in memory for it and no object is written.
+
+```
+ Start         Length     Name                   Class
+ 0001:00000000 00007031H  .text                  CODE
+ 0002:00000000 00000008H  .data                  DATA
+ 0004-00a9     000012c4H  .text$mn               CODE  COMDAT, 166 section(s)
+
+ Publics by Value
+
+  Address         Size        Type      Symbol                                    Name
+ 0001:0000011c   000002dbH   function  ??0Matrix@mx@@QEAA@HHN@Z                  mx::Matrix::Matrix(int, int, double)
+ 00aa:00000000   00000010H   vtable    ??_7overflow_error@std@@6B@               std::overflow_error::`vftable'
+```
+
+Addresses are `section:offset` in the object (a linker adds the image base when it links). **Size** is the
+number of bytes the encoder produced for the definition, without the alignment padding after it, which a
+Visual Studio map does not show. Types: function, data, vtable, string, constant. The symbol is the name in
+the object (MSVC-decorated with `--msvc-mangling`), followed by its readable name. Publics and static
+(internal-linkage) symbols are listed separately, as in Visual Studio's map; COMDAT sections (inline functions,
+template instances, vtables) are grouped by name. The map starts with a time stamp in link's form
+(`Timestamp is 6ac8c311 (Fri Oct  9 15:33:53 2026)`: seconds since 1970 in hex, then the local time; the
+object itself keeps a zero time stamp, so it stays the same from run to run) and ends with **Symbols by
+Name**: every symbol again, public and static, sorted by its readable name, with a Linkage column. Visual
+Studio's map has only the address order. If the assembly cannot be encoded, the map says so and lists
+the lines instead of showing guessed numbers. Tests 8 and 13 check that the sizes fill each section exactly
+and that every address matches `dumpbin /symbols` of the object.
 
 ## Building and testing
 
@@ -249,7 +297,13 @@ instructions for exception regions.
 Subset limits: function-try-blocks, brace initialisers, goto and local
 classes are reported and skipped; standard-library types are opaque and
 never produce findings; calls through unknown functions are emitted as
-opaque calls.
+opaque calls (the `<cmath>` functions that take and return `double`, such
+as `fabs`, `sqrt` and `pow`, are called with `double` arguments and
+results). A function that uses a standard-library class by value
+(`std::vector<double>`, `std::string`, a stream), or a class whose layout
+contains one, is not compiled: its size and field offsets would be
+guesses. It is reported as T190 and counted as skipped; `--compile6`
+compiles such code with cppparse's own headers.
 
 ## Version 4: SSA, template instantiation, x86-64
 
@@ -515,7 +569,10 @@ expands inside its own expansion, as in `#define f(x) x + f`),
 `#undef`, `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` with full
 constant expressions (`defined`, arithmetic, comparisons, `?:`,
 character constants, octal and hex), `#error`, `#warning`, `#line`,
-and `__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__cplusplus`
+`#pragma pack` as MSVC has it (`pack(n)` with n = 1, 2, 4, 8 or 16,
+`pack()`, `push`/`pop` with an optional identifier and value, `show`;
+every token carries the packing in force, which applies at the next
+class key), and `__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__cplusplus`
 (`199711L`). The result is a token stream with file and line positions,
 the list of included and missing files, all macro definitions and the
 diagnostics. `cppparse -E -I inc pp.cpp` prints the preprocessed text
@@ -540,7 +597,16 @@ conversion sequences (exact, promotion, standard, user-defined through
 converting constructors and conversion operators, reference binding,
 derived-to-base). Classes get their layout (bases, vptr, fields,
 alignment) and vtable (slots, overrides, abstractness) and implicit
-special members. Class templates are instantiated from the syntax tree
+special members. The layout follows MSVC's rules for `#pragma pack(n)`
+(a member's alignment is capped at n) and `__declspec(align(N))` on a
+class, a member or a variable (a floor that packing cannot lower,
+inherited by classes that contain such a member); `alignas` is C++11 and
+not accepted. Globals are placed at their alignment (at least the
+natural boundary of their size, up to 8 bytes, as cl does), and a data
+section is marked with the largest alignment it holds (S129 warns that
+`__declspec(align)` on a local variable is ignored). Test 13 links
+`examples/sample-align/` with a cl-compiled driver that compares every
+size and offset with cl's and checks the globals' values and alignment. Class templates are instantiated from the syntax tree
 with the parameters bound in an instantiation scope (defaults, partial
 specialisations, out-of-line members); function templates are
 instantiated by deduction from the argument types. Diagnostics carry

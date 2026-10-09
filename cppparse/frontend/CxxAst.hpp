@@ -69,6 +69,7 @@ struct DeclSpec {                   // decl-specifier-seq
     ClassDecl*    classDef;         // Class: the definition
     EnumDecl*     enumDef;          // Enum: the definition
     Loc           loc;
+    int           align;            // __declspec(align(N)) among the specifiers (0: none)
     DeclSpec();
     bool hasType() const { return kind != None; }
     std::string text() const;       // "const unsigned int", "std::vector<int>"
@@ -269,7 +270,9 @@ struct ClassDecl {
     std::vector<Decl*>    members;  // each with its access
     bool                  isDefinition;
     Loc                   loc;
-    ClassDecl() : isDefinition(false) {}
+    int                   pack;       // #pragma pack in force at the class key (0: the default)
+    int                   declAlign;  // __declspec(align(N)) on the class (0: none)
+    ClassDecl() : isDefinition(false), pack(0), declAlign(0) {}
 };
 
 struct EnumDecl {

@@ -69,6 +69,7 @@ private:
     void  error(const std::string& msg);
     void  skipTo(const char* a, const char* b);       // error recovery: skip to a or b at depth 0 (consumes a ';', not a '}')
     void  skipBalanced();                             // skip a balanced (...) [...] {...}
+    int   declspecArguments();                        // after __declspec: skips "(...)", returns N of an align(N) in it (0: none)
     static bool isKeyword(const std::string& s);
     static bool isTypeKeyword(const std::string& s);
     static bool isDeclSpecKeyword(const std::string& s);

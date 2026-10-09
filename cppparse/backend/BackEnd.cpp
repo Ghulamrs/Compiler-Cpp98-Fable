@@ -89,7 +89,7 @@ void runBackEnd(std::vector<IrFunction*>& functions, X86Module* x86, const BackE
         out.spills += lj.vmStats[i].spills;
         if (opt.x86 && x86) x86->appendCode(lj.x86Text[i]);
     }
-    if (opt.x86 && x86) out.x86Text = x86->finish();
+    if (opt.x86 && x86) { out.x86Text = x86->finish(); x86->describeSymbols(functions, out.symbolNames); }
     out.irText = irOut.str();
     out.log = logOut.str();
     out.asmText = "; cppparse lowering - target VM64 (R0-R7 integer, F0-F7 float, FP, SP)\n"

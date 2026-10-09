@@ -5,6 +5,7 @@
 
 #include "CodeBase.hpp"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,7 @@ public:
     const std::string& asmText()    const { return m_asm; }
     const std::string& x86Text()    const { return m_x86; }
     const std::string& layoutText() const { return m_layouts; }
+    const std::map<std::string, std::string>& symbolNames() const { return m_symbolNames; }   // x86 symbol -> readable name
     void summaryLines(std::vector<std::string>& out) const;
 
 private:
@@ -53,6 +55,7 @@ private:
     std::vector<Finding> m_findings;
     CompileSummary       m_summary;
     std::string          m_ast, m_ir, m_log, m_asm, m_x86, m_layouts;
+    std::map<std::string, std::string> m_symbolNames;
 };
 
 } // namespace cppparse

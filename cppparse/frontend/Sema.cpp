@@ -226,7 +226,7 @@ Symbol::Symbol()
       isVirtual(false), isPureVirtual(false), isStatic(false), isExtern(false), isInline(false), isExplicit(false), isConstructor(false),
       isDestructor(false), isConversion(false), isOperator(false), isFriendDecl(false), hasBody(false), isExternC(false),
       definition(0), declAst(0), body(0), vtableSlot(-1), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
-      isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), templateAst(0), instantiatedFrom(0),
+      isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), templateAst(0), instantiatedFrom(0),
       isDependentContext(false), isImplicitInstantiation(false), isLazyInstantiation(false), instantiationFailed(false), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
       hasCopyAssign(false), hasDefaultCtor(false) {}
 
@@ -918,6 +918,7 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
             var->isDefinition = var->isDefinition || !d->spec.isExtern;
         }
         dcl->semaSym = var;
+        if (d->spec.align > var->declAlign) var->declAlign = d->spec.align;
         if (!var->declAst || id.init.kind != cxx::Initializer::None) var->declAst = d;   // the declaration carrying the initializer
         if (id.init.kind != cxx::Initializer::None) {
             var->init = id.init.args.empty() ? 0 : id.init.args[0];
@@ -1052,9 +1053,24 @@ bool Sema::derivesFrom(Symbol* derived, Symbol* base, int* offset, int depth)
     return false;
 }
 
+namespace {
+
+// the alignment __declspec(align(N)) demands of a type, which #pragma pack cannot lower: declared on its class or
+// inherited from an aligned member or base (Symbol::declAlign of a laid-out class)
+int declaredFloor(const Type* t)
+{
+    while (t && t->kind == Type::Array) t = t->inner;
+    return t && t->kind == Type::Class && t->decl && t->decl->layoutDone ? t->decl->declAlign : 0;
+}
+
+} // namespace
+
 void Sema::layoutClass(Symbol* cls)
 {
     if (cls->layoutDone) return;
+    // #pragma pack(n) caps the alignment of every member at n; __declspec(align(N)) is a floor it cannot lower
+    const int pack = cls->classAst ? cls->classAst->pack : 0;
+    int floor = cls->classAst ? cls->classAst->declAlign : 0;
     int off = 0, align = 1;
     bool vptr = false;
     for (size_t b = 0; b < cls->bases.size(); ++b) {
@@ -1062,10 +1078,13 @@ void Sema::layoutClass(Symbol* cls)
         if (!bc) continue;
         if (!bc->layoutDone) layoutClass(bc);
         if (b == 0 && bc->isPolymorphic) vptr = true;        // share the primary base's vptr
-        off = (off + bc->align - 1) / bc->align * bc->align;
+        int a = pack > 0 && bc->align > pack ? pack : bc->align;
+        if (bc->declAlign > a) a = bc->declAlign;
+        if (bc->declAlign > floor) floor = bc->declAlign;
+        off = (off + a - 1) / a * a;
         cls->bases[b].offset = off;
         off += bc->size;
-        if (bc->align > align) align = bc->align;
+        if (a > align) align = a;
     }
     bool ownVirtuals = false;
     for (size_t i = 0; i < cls->members->order.size(); ++i) { Symbol* m = cls->members->order[i]; if (m->kind == Symbol::Function && m->isVirtual) ownVirtuals = true; }
@@ -1076,21 +1095,30 @@ void Sema::layoutClass(Symbol* cls)
         for (size_t b = 0; b < cls->bases.size(); ++b) cls->bases[b].offset += 8;
         off += 8;
         cls->vptrOffset = 0;
-        if (align < 8) align = 8;
+        const int va = pack > 0 && pack < 8 ? pack : 8;
+        if (align < va) align = va;
     } else if (vptr) cls->vptrOffset = 0;
     for (size_t f = 0; f < cls->fields.size(); ++f) {
         Symbol* fld = cls->fields[f];
         const Type* ft = fld->type;
-        if (ft->kind == Type::Class && ft->decl && !ft->decl->layoutDone) layoutClass(ft->decl);
+        const Type* elem = ft;
+        while (elem && elem->kind == Type::Array) elem = elem->inner;
+        if (elem && elem->kind == Type::Class && elem->decl && !elem->decl->layoutDone) layoutClass(elem->decl);
         int s = m_types.sizeOf(ft), a = m_types.alignOf(ft);
         if (ft->kind == Type::Reference) { s = 8; a = 8; }
+        if (pack > 0 && a > pack) a = pack;
+        const int need = fld->declAlign > declaredFloor(ft) ? fld->declAlign : declaredFloor(ft);
+        if (need > a) a = need;
+        if (need > floor) floor = need;
         if (cls->isUnion) { fld->offset = 0; if (s > off) off = s; }
         else { off = (off + a - 1) / a * a; fld->offset = off; off += s; }
         if (a > align) align = a;
     }
+    if (floor > align) align = floor;
     if (off == 0) off = 1;
     cls->size = (off + align - 1) / align * align;
     cls->align = align;
+    cls->declAlign = floor;
     cls->layoutDone = true;
 }
 

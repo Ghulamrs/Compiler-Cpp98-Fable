@@ -32,7 +32,7 @@ DeclSpec::DeclSpec()
     : isTypedef(false), isStatic(false), isExtern(false), isMutable(false), isRegister(false), isAuto(false), isFriend(false),
       isVirtual(false), isExplicit(false), isInline(false), isConst(false), isVolatile(false), kind(None),
       builtinChar(0), builtinInt(0), builtinLong(0), builtinShort(0), builtinSigned(0), builtinUnsigned(0), builtinFloat(0),
-      builtinDouble(0), builtinVoid(0), builtinBool(0), builtinWchar(0), classDef(0), enumDef(0) {}
+      builtinDouble(0), builtinVoid(0), builtinBool(0), builtinWchar(0), classDef(0), enumDef(0), align(0) {}
 
 std::string DeclSpec::text() const
 {

@@ -33,6 +33,7 @@
 #endif
 #include "CodeBase.hpp"
 #include "Coff.hpp"
+#include "MapFile.hpp"
 #include "Compiler.hpp"
 #include "Diagram.hpp"
 #include "Health.hpp"
@@ -85,8 +86,9 @@ void usage()
         "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
         "  --obj            version 5: write <name>.obj with cppparse's own COFF writer (no ml64 needed)\n"
         "  --msvc-mangling  version 5: MSVC-compatible decorated names (?square@@YAHH@Z) so MSVC code links with plain C++ declarations\n"
-        "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)\n"
-        "  -E               version 6: preprocess the input files only and print the result (like cl /EP)\n"
+        "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling;\n"
+        "                   never more than the number of files read)\n"
+        "  -E              version 6: preprocess the input files only and print the result (like cl /EP)\n"
         "  --parse6         version 6: preprocess and parse with the new front end; print counts and syntax errors,\n"
         "                   and write <name>-ast6.txt when -o or -n is given\n"
         "  --sema6          version 6: --parse6 plus semantic analysis; prints counts and S-coded diagnostics,\n"
@@ -340,11 +342,12 @@ int main(int argc, char* argv[])
                     writeOut(base + "-asm6.txt", br.asmText, quiet, written);
                     if (copt.x86) {
                         writeOut(base + "6.asm", br.x86Text, quiet, written);
-                        if (obj) {
-                            CoffResult cr;
-                            if (writeCoffObject(br.x86Text, base + "6.obj", copt.threads, cr)) { if (!quiet) std::cout << "  wrote " << base << "6.obj\n"; }
-                            else { std::cerr << "error: " << base << "6.obj not written:\n"; for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n"; totalErrors += 1; }
-                        }
+                        CoffResult cr;
+                        if (!obj) { std::string bytes; assembleCoff(br.x86Text, copt.threads, bytes, cr); }   // only for the map
+                        else if (writeCoffObject(br.x86Text, base + "6.obj", copt.threads, cr)) { if (!quiet) std::cout << "  wrote " << base << "6.obj\n"; }
+                        else { std::cerr << "error: " << base << "6.obj not written:\n"; for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n"; totalErrors += 1; }
+                        std::string mapObject = obj ? baseName(base) + "6.obj" : baseName(base) + "6.asm, assembled in memory (no --obj, no object written)";
+                        writeOut(base + "6.map", renderObjectMap(baseName(inputs[i]), mapObject, cr, br.symbolNames), quiet, written);
                     }
                     for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
                 }
@@ -390,7 +393,8 @@ int main(int argc, char* argv[])
         if (!cb.addInput(inputs[i])) ok = false;
     }
     if (!plainFiles.empty()) {
-        if (!quiet && !toStdout) std::cout << "reading " << plainFiles.size() << " file(s) with " << threads << " thread(s)\n";
+        if (!quiet && !toStdout) std::cout << "reading " << plainFiles.size() << " file(s) with "
+                                           << (threads < static_cast<int>(plainFiles.size()) ? threads : static_cast<int>(plainFiles.size())) << " thread(s)\n";
         if (!cb.addFiles(plainFiles)) ok = false;
     }
     if (cb.files().empty()) {
@@ -398,6 +402,12 @@ int main(int argc, char* argv[])
         for (size_t i = 0; i < cb.messages().size(); ++i) std::cerr << "  " << cb.messages()[i] << "\n";
         return 1;
     }
+    // never more workers than files: parsing already takes one job per file, but the compile phases split
+    // the work by function (and the object writer by block), so a small project would otherwise start
+    // every thread -j allows
+    const int fileCount = static_cast<int>(cb.files().size());
+    if (threads > fileCount) threads = fileCount;
+    if (copt.threads > fileCount) copt.threads = fileCount;
     cb.link();
     Compiler compiler(cb, copt);
     if (compile) compiler.run();          // sets FunctionInfo::typeChecked before the health check runs
@@ -429,19 +439,23 @@ int main(int argc, char* argv[])
         if (!writeOut(base + "-asm.txt", compiler.asmText(), quiet, written)) ok = false;
         if (copt.x86) {
             if (!writeOut(base + ".asm", compiler.x86Text(), quiet, written)) ok = false;
-            if (obj) {
-                CoffResult cr;
-                std::string objPath = base + (assemble ? "-cppparse.obj" : ".obj");   // --assemble keeps <name>.obj for ml64
-                if (writeCoffObject(compiler.x86Text(), objPath, copt.threads, cr)) {
-                    if (!quiet) std::cout << "  wrote " << objPath << "  (" << cr.functions << " functions, " << cr.instructions << " instructions, .text "
-                                          << cr.textBytes << " bytes, .data " << cr.dataBytes << ", .rdata " << cr.rdataBytes << ", "
-                                          << cr.relocations << " relocations, " << cr.symbols << " symbols)\n";
-                } else {
-                    std::cerr << "error: " << objPath << " not written, " << cr.errors.size() << " line(s) could not be encoded:\n";
-                    for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n";
-                    ok = false;
-                }
+            CoffResult cr;
+            std::string objPath = base + (assemble ? "-cppparse.obj" : ".obj");   // --assemble keeps <name>.obj for ml64
+            if (!obj) {
+                // the map needs the real layout: assemble in memory when no object is written
+                std::string bytes;
+                assembleCoff(compiler.x86Text(), copt.threads, bytes, cr);
+            } else if (writeCoffObject(compiler.x86Text(), objPath, copt.threads, cr)) {
+                if (!quiet) std::cout << "  wrote " << objPath << "  (" << cr.functions << " functions, " << cr.instructions << " instructions, .text "
+                                      << cr.textBytes << " bytes, .data " << cr.dataBytes << ", .rdata " << cr.rdataBytes << ", "
+                                      << cr.relocations << " relocations, " << cr.symbols << " symbols)\n";
+            } else {
+                std::cerr << "error: " << objPath << " not written, " << cr.errors.size() << " line(s) could not be encoded:\n";
+                for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n";
+                ok = false;
             }
+            std::string mapObject = obj ? baseName(objPath) : outName + ".asm, assembled in memory (no --obj, no object written)";
+            if (!writeOut(base + ".map", renderObjectMap(cb.title(), mapObject, cr, compiler.symbolNames()), quiet, written)) ok = false;
             if (assemble) {
                 std::string cmd = "ml64 /nologo /c \"/Fo" + base + ".obj\" \"" + base + ".asm\"";
                 if (!quiet) std::cout << "  running " << cmd << "\n";

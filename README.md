@@ -82,7 +82,8 @@ dashed box = base class not defined in the parsed files.
 --compile6       version 6: --sema6 plus IR generation and the back end (<name>6.asm, <name>6.obj with --obj)
 -I <dir>         include directory for the preprocessor
 -D NAME[=value]  predefine a macro; -U NAME undefines one
--j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)
+-j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling;
+                 never more than the number of files read)
 src\*.cpp        wildcard patterns are expanded by cppparse itself (more than 50 files is fine)
 @list.txt        response file: one path, pattern or option per line; '#' starts a comment
 -q               quiet
@@ -94,6 +95,20 @@ src\*.cpp        wildcard patterns are expanded by cppparse itself (more than 50
 risky in the code, each finding with a code, severity, location, message
 and a one-line explanation. Severities: **E** will not compile or link,
 **W** likely bug or risky construct, **I** worth knowing.
+
+Each finding is written in the Visual Studio / MSBuild error format, so the
+Output window, the Error List and VS Code link it to the source line:
+
+```
+1>src/main.cpp(9): error E100: include file not found: #include "Missing.h"
+1>    searched next to the including file and in the project include directories
+```
+
+`1>` is the number of the finding's project, counted from 1 in solution
+order (a folder or a list of files is project 1), like the prefix MSBuild
+gives each project's output; the explanation line carries the same prefix.
+The HTML report shows the findings with the Error List's columns: severity,
+code, description, project, file, line.
 
 | area            | codes |
 |-----------------|-------|

@@ -100,7 +100,7 @@ try {
         'class util::FixedStack::Iterator',
         'struct geom::Rect::Corner',
         'include/Legacy.h   (included by main.cpp)',
-        '[E100] src/main.cpp:9',
+        '1>src/main.cpp(9): error E100: ',
         'function-try-block',
         'double sum = 0.0',
         'const Shape* s = m_shapes[i]',
@@ -145,6 +145,38 @@ try {
     if ($pdf.StartsWith('%PDF-1.4') -and $pdf.Contains('%%EOF')) { Write-Host "  ok   PDF structure" } else { Write-Host "  FAIL PDF structure"; $failed++ }
     $svg = Get-Content "out\sample\Sample-diagram.svg" -Raw
     if ($svg.Contains('class geom::Circle') -and $svg.Contains('<polygon')) { Write-Host "  ok   SVG contents" } else { Write-Host "  FAIL SVG contents"; $failed++ }
+    # the 8 report sections, in order
+    $sections = @('1. PROJECT', '2. FILES', '3. CLASSES', '4. CLASS DIAGRAM', '5. GLOBAL DEFINITIONS', '6. EXCEPTION HANDLING', '7. HEALTH', '8. TOTALS')
+    $pos = -1; $inOrder = $true
+    foreach ($s in $sections) { $at = $report.IndexOf("`n$s"); if ($at -le $pos) { $inOrder = $false; Write-Host "  FAIL section missing or out of order: $s" }; $pos = $at }
+    if ($inOrder) { Write-Host "  ok   report sections 1 to 8 in order" } else { $failed++ }
+    # section 4: the inheritance tree (multiple, private and virtual inheritance, abstract and nested classes)
+    $tree = $report.Substring($report.IndexOf("`n4. CLASS DIAGRAM"), $report.IndexOf("`n5. GLOBAL") - $report.IndexOf("`n4. CLASS DIAGRAM"))
+    foreach ($e in @('class geom::Shape  [abstract]', '+-- class geom::Circle  (private)  also derives from: Shape',
+                     '+-- class geom::Rect  (public virtual)  also derives from: Shape', '+-- class geom::Sphere  (public)',
+                     'struct geom::Rect::Corner  [nested in geom::Rect]', '+-- class util::Matrix2  (public)')) {
+        if ($tree.Contains($e)) { Write-Host "  ok   tree: $e" } else { Write-Host "  FAIL tree missing: $e"; $failed++ }
+    }
+    # the HTML report is one self-contained page with the diagram inside
+    $html = Get-Content "out\sample\Sample-report.html" -Raw
+    if ($html.Contains('<svg') -and -not ($html -match '(src|href)="(https?|file):')) { Write-Host "  ok   HTML self-contained with the diagram" } else { Write-Host "  FAIL HTML diagram missing or external references"; $failed++ }
+    # the PDF has a title page, diagram pages and text pages
+    $pages = ([regex]::Matches($pdf, '/Type\s*/Page[^s]')).Count
+    if ($pages -ge 3) { Write-Host "  ok   PDF pages: $pages" } else { Write-Host "  FAIL PDF has $pages page(s)"; $failed++ }
+    # the diagram legend: private red, virtual labelled, member dashed blue, nested dotted grey, abstract yellow
+    $dot = Get-Content "out\sample\Sample-diagram.dot" -Raw
+    foreach ($e in @('"geom::Circle" -> "geom::Named" [arrowhead=empty, color="#b03030"]',
+                     '"geom::Rect" -> "geom::Named" [arrowhead=empty, color="#222222", label="virtual"]',
+                     '"geom::Canvas" -> "geom::Shape" [style=dashed, arrowhead=open, color="#1a6fb5"]',
+                     '"geom::Rect::Corner" -> "geom::Rect" [style=dotted, arrowhead=none, color="#888888", label="nested"]',
+                     'fillcolor="#fff6d5"')) {
+        if ($dot.Contains($e)) { Write-Host "  ok   dot: $e" } else { Write-Host "  FAIL dot missing: $e"; $failed++ }
+    }
+    # the map: callers in the cross reference and the unreferenced list
+    foreach ($e in @('(?s)LegacyCounter::tick  \(1\)\s+src/main\.cpp:37\s+in main', '(?s)\(anonymous\)::kPi  \(2\)\s+src/Shape\.cpp:74\s+in geom::Circle::area\s+src/Shape\.cpp:80\s+in geom::Circle::perimeter',
+                     ' Unreferenced symbols ')) {
+        if ($map -match $e) { Write-Host "  ok   map: $e" } else { Write-Host "  FAIL map missing: $e"; $failed++ }
+    }
     if ($failed -ne 0) { throw "$failed check(s) failed on Sample.sln" }
 
     # ---- test 2: folder input (the cpp folder itself) ------------------------
@@ -156,6 +188,9 @@ try {
     foreach ($e in @('class cppparse::Parser', 'class cppparse::CodeBase', 'class Vector', 'class Matrix', 'struct cppparse::ClassInfo', 'folder scan (recursive)')) {
         if ($report2.Contains($e)) { Write-Host "  ok   $e" } else { Write-Host "  FAIL missing: $e"; $failed++ }
     }
+    # operator() keeps its own parentheses apart from the parameter list in the map
+    $map2 = Get-Content "out\folder\cpp-folder-symbols.map" -Raw
+    if ($map2.Contains('mx::Matrix::operator()(int r, int c)') -and -not $map2.Contains('operator()()(')) { Write-Host "  ok   map: operator()(int r, int c)" } else { Write-Host "  FAIL map: operator() shown wrongly"; $failed++ }
     if ($failed -ne 0) { throw "$failed check(s) failed on the folder input" }
 
     # ---- test 3: plain files -------------------------------------------------
@@ -179,7 +214,7 @@ try {
                'E163', 'W164', 'W165')
     $failed = 0
     foreach ($code in $codes) {
-        if ($health.Contains("[$code]")) { Write-Host "  ok   $code" } else { Write-Host "  FAIL code not reported: $code"; $failed++ }
+        if ($health -match "(?m)^\d+>[^\r\n]*\(\d+\): (error|warning|info) ${code}: ") { Write-Host "  ok   $code" } else { Write-Host "  FAIL code not reported: $code"; $failed++ }
     }
     & $exe --strict --health "..\examples\sample-bad" | Out-Null
     if ($LASTEXITCODE -eq 3) { Write-Host "  ok   --strict exit code 3" } else { Write-Host "  FAIL --strict exit code was $LASTEXITCODE"; $failed++ }
@@ -194,7 +229,7 @@ try {
     $tcodes = @('T100', 'T101', 'T102', 'T104', 'T106', 'T107', 'T108', 'T109', 'T110', 'T111', 'T112', 'T115', 'T116', 'T117', 'T118', 'T119', 'T121', 'T122', 'T146')
     $failed = 0
     foreach ($code in $tcodes) {
-        if ($health.Contains("[$code]")) { Write-Host "  ok   $code" } else { Write-Host "  FAIL type code not reported: $code"; $failed++ }
+        if ($health -match "(?m)^\d+>[^\r\n]*\(\d+\): (error|warning|info) ${code}: ") { Write-Host "  ok   $code" } else { Write-Host "  FAIL type code not reported: $code"; $failed++ }
     }
     if ($health -match "goodCode") { Write-Host "  FAIL goodCode must not produce findings"; $failed++ } else { Write-Host "  ok   goodCode has no findings" }
     if ($failed -ne 0) { throw "$failed type-check check(s) failed" }
@@ -207,7 +242,7 @@ try {
         & $exe -o "out\opt" -n "opt$lvl" "-O$lvl" --text-only "..\examples\sample-opt"
         if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on sample-opt at -O$lvl" }
         $h = Get-Content "out\opt\opt$lvl-health.txt" -Raw
-        if ($h -match "\[T1") { Write-Host "  FAIL sample-opt produced type findings at -O$lvl"; $failed++ }
+        if ($h -match ": (error|warning|info) T1\d\d: ") { Write-Host "  FAIL sample-opt produced type findings at -O$lvl"; $failed++ }
     }
     $ir1 = Get-Content "out\opt\opt1-ir.txt" -Raw
     $ir2 = Get-Content "out\opt\opt2-ir.txt" -Raw

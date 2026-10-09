@@ -349,11 +349,15 @@ std::string renderHtmlReport(const CodeBase& cb, const DiagramLayout& layout, co
           << "<div class=\"card\"><b style=\"color:#c07a00\">" << nw << "</b><span>warnings</span></div><div class=\"card\"><b class=\"dim\">" << ni << "</b><span>info</span></div></div>";
         if (fd.empty()) s << "<p class=\"ok\">no findings</p>";
         else {
-            s << "<table><tr><th>Severity</th><th>Code</th><th>Location</th><th>Finding</th></tr>";
+            // the columns of Visual Studio's Error List
+            s << "<table><tr><th>Severity</th><th>Code</th><th>Description</th><th>Project</th><th>File</th><th>Line</th></tr>";
             for (size_t k = 0; k < fd.size(); ++k) {
                 const char* cls = fd[k].severity == Finding::Error ? "warn" : (fd[k].severity == Finding::Warning ? "" : "dim");
-                s << "<tr><td class=\"" << cls << "\">" << severityName(fd[k].severity) << "</td><td>" << fd[k].code << "</td><td>" << h(cb.displayPath(fd[k].file)) << ":" << fd[k].line
-                  << "</td><td>" << h(fd[k].message) << (fd[k].detail.empty() ? "" : "<br><span class=\"dim\">" + h(fd[k].detail) + "</span>") << "</td></tr>";
+                int project = projectNumber(cb, fd[k]);
+                std::string projectName = project <= static_cast<int>(cb.projects().size()) ? cb.projects()[static_cast<size_t>(project - 1)].name : cb.title();
+                s << "<tr><td class=\"" << cls << "\">" << severityName(fd[k].severity) << "</td><td>" << fd[k].code << "</td><td>" << h(fd[k].message)
+                  << (fd[k].detail.empty() ? "" : "<br><span class=\"dim\">" + h(fd[k].detail) + "</span>") << "</td><td>" << project << "&gt;" << h(projectName)
+                  << "</td><td>" << h(cb.displayPath(fd[k].file)) << "</td><td>" << fd[k].line << "</td></tr>";
             }
             s << "</table>";
         }

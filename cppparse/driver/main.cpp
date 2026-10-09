@@ -85,8 +85,9 @@ void usage()
         "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
         "  --obj            version 5: write <name>.obj with cppparse's own COFF writer (no ml64 needed)\n"
         "  --msvc-mangling  version 5: MSVC-compatible decorated names (?square@@YAHH@Z) so MSVC code links with plain C++ declarations\n"
-        "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling)\n"
-        "  -E               version 6: preprocess the input files only and print the result (like cl /EP)\n"
+        "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling;\n"
+        "                   never more than the number of files read)\n"
+        "  -E              version 6: preprocess the input files only and print the result (like cl /EP)\n"
         "  --parse6         version 6: preprocess and parse with the new front end; print counts and syntax errors,\n"
         "                   and write <name>-ast6.txt when -o or -n is given\n"
         "  --sema6          version 6: --parse6 plus semantic analysis; prints counts and S-coded diagnostics,\n"
@@ -390,7 +391,8 @@ int main(int argc, char* argv[])
         if (!cb.addInput(inputs[i])) ok = false;
     }
     if (!plainFiles.empty()) {
-        if (!quiet && !toStdout) std::cout << "reading " << plainFiles.size() << " file(s) with " << threads << " thread(s)\n";
+        if (!quiet && !toStdout) std::cout << "reading " << plainFiles.size() << " file(s) with "
+                                           << (threads < static_cast<int>(plainFiles.size()) ? threads : static_cast<int>(plainFiles.size())) << " thread(s)\n";
         if (!cb.addFiles(plainFiles)) ok = false;
     }
     if (cb.files().empty()) {
@@ -398,6 +400,12 @@ int main(int argc, char* argv[])
         for (size_t i = 0; i < cb.messages().size(); ++i) std::cerr << "  " << cb.messages()[i] << "\n";
         return 1;
     }
+    // never more workers than files: parsing already takes one job per file, but the compile phases split
+    // the work by function (and the object writer by block), so a small project would otherwise start
+    // every thread -j allows
+    const int fileCount = static_cast<int>(cb.files().size());
+    if (threads > fileCount) threads = fileCount;
+    if (copt.threads > fileCount) copt.threads = fileCount;
     cb.link();
     Compiler compiler(cb, copt);
     if (compile) compiler.run();          // sets FunctionInfo::typeChecked before the health check runs

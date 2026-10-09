@@ -43,6 +43,8 @@ namespace cppparse {
 void        runHealthChecks(const CodeBase& cb, std::vector<Finding>& out);
 const char* severityName(Finding::Severity s);
 void        countFindings(const std::vector<Finding>& f, int& errors, int& warnings, int& infos);
+int         projectNumber(const CodeBase& cb, const Finding& f);              // 1-based, input order
+std::string findingLine(const CodeBase& cb, const Finding& f);                 // "N>file(line): error CODE: message"
 void        healthLines(const CodeBase& cb, std::vector<std::string>& lines);  // for the reports
 std::string renderHealthText(const CodeBase& cb);                               // standalone file
 

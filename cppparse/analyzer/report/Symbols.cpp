@@ -437,8 +437,12 @@ void collectReferences(const CodeBase& cb, const FunctionInfo& fn, RefMap& refs)
 
 std::string symbolText(const Symbol& y)
 {
+    // the parameter list follows the name itself: the first '(' can belong to the name (operator()) or to
+    // the return type (a function pointer)
+    size_t at = y.signature.find(y.name + "(");
+    if (at != std::string::npos) return y.qualified + y.signature.substr(at + y.name.size());   // name + "(params) const"
     size_t paren = y.signature.find('(');
-    if (paren != std::string::npos) return y.qualified + y.signature.substr(paren);   // name + "(params) const"
+    if (paren != std::string::npos) return y.qualified + y.signature.substr(paren);
     return y.qualified;
 }
 

@@ -945,6 +945,25 @@ void runHealthChecks(const CodeBase& cb, std::vector<Finding>& out)
     std::stable_sort(out.begin(), out.end(), FindingOrder());
 }
 
+// the number of the finding's project, counted from 1 in input (solution) order: the "N>" prefix MSBuild
+// gives every line of a project's build output
+int projectNumber(const CodeBase& cb, const Finding& f)
+{
+    const SourceFile* sf = f.file.empty() ? 0 : cb.fileByPath(f.file);
+    if (sf)
+        for (size_t p = 0; p < cb.projects().size(); ++p)
+            if (cb.projects()[p].name == sf->project) return static_cast<int>(p) + 1;
+    return 1;
+}
+
+// the Visual Studio / MSBuild form "N>file(line): error CODE: message", which the Output window, the
+// Error List and VS Code turn into a link to the line
+std::string findingLine(const CodeBase& cb, const Finding& f)
+{
+    std::string where = f.file.empty() ? cb.title() : cb.displayPath(f.file) + (f.line > 0 ? "(" + intToString(f.line) + ")" : "");
+    return intToString(projectNumber(cb, f)) + ">" + where + ": " + severityName(f.severity) + " " + f.code + ": " + f.message;
+}
+
 void healthLines(const CodeBase& cb, std::vector<std::string>& L)
 {
     const std::vector<Finding>& f = cb.findings();
@@ -962,8 +981,8 @@ void healthLines(const CodeBase& cb, std::vector<std::string>& L)
             last = f[k].severity;
             first = false;
         }
-        L.push_back("    [" + f[k].code + "] " + padRight(cb.displayPath(f[k].file) + ":" + intToString(f[k].line), 30) + " " + f[k].message);
-        if (!f[k].detail.empty()) L.push_back("           " + f[k].detail);
+        L.push_back(findingLine(cb, f[k]));
+        if (!f[k].detail.empty()) L.push_back(intToString(projectNumber(cb, f[k])) + ">    " + f[k].detail);
     }
     std::map<std::string, int> byCode;
     for (size_t k = 0; k < f.size(); ++k) byCode[f[k].code]++;

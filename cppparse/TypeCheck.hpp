@@ -100,6 +100,7 @@ private:
     std::set<std::string>   m_macroNames;
     bool                    m_calleeContext;      // resolving the callee of a call
     std::set<std::string>   m_undeclaredCalls;    // reported once per function
+    bool                    m_receiverConst;      // the object a member call is made on is const
 };
 
 } // namespace cppparse

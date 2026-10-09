@@ -39,6 +39,7 @@ Written next to the first input, or into the `-o` directory:
 | `<name>-ir.txt`        | version 3: class layouts, IR before/after `-On`                   |
 | `<name>-opt.log`       | version 3: optimisation passes and instruction counts            |
 | `<name>-asm.txt`       | version 3: lowered VM64 assembly                                  |
+| `<name>.asm`           | version 4: x86-64 MASM (Windows x64 ABI); `--assemble` adds `.obj` |
 | `<name>-report.html`   | the same report as one self-contained page with the diagram      |
 | `<name>-report.pdf`    | the same report as PDF: title page, diagram pages, text pages    |
 | `<name>-diagram.svg`   | the class diagram picture                                       |
@@ -69,7 +70,9 @@ dashed box = base class not defined in the parsed files.
 --health         print the health report, write nothing
 --strict         exit code 3 when the health check finds errors (for build scripts)
 -O0 .. -O3       version 3 optimisation level (default -O0)
---no-compile     skip version 3
+--no-compile     skip version 3 and 4
+--no-x86         do not write the x86-64 .asm file
+--assemble       run ml64 on the .asm to produce the .obj (ml64 on PATH)
 -q               quiet
 ```
 
@@ -202,7 +205,39 @@ frame layout for locals and spill slots, arguments in R0-R3/F0-F3 then on
 the stack, virtual calls through the vptr, `TRY`/`ENDTRY` pseudo
 instructions for exception regions.
 
-Subset limits: template bodies, function-try-blocks, brace initialisers,
-goto and local classes are reported and skipped; standard-library types
-are opaque and never produce findings; calls through unknown functions
-are emitted as opaque calls.
+Subset limits: function-try-blocks, brace initialisers, goto and local
+classes are reported and skipped; standard-library types are opaque and
+never produce findings; calls through unknown functions are emitted as
+opaque calls.
+
+## Version 4: SSA, template instantiation, x86-64
+
+**SSA** (`Ssa.cpp`): after the version 3 passes every scalar local that
+never has its address taken is promoted to SSA temporaries with phi
+instructions placed by iterated dominance frontiers; global value
+numbering runs over the dominator tree, trivial phis are folded, and the
+phis are removed again with parallel copies on split critical edges
+before lowering. `-ir.txt` shows the SSA form of every function.
+
+**Template instantiation** (`Instantiate.cpp`): `FixedStack<double, 32>`
+or `Buffer<int, 4>` used in a declaration becomes a real class with the
+parameters substituted in fields, signatures, bases, typedefs and every
+method body (in-class or out-of-line); `maxOf(7, 2)` deduces `T` from the
+argument types and instantiates the function template. Instantiated
+bodies are parsed, type checked and compiled in extra rounds; integral
+arguments such as `R - 1` are folded; dependent uses inside other
+templates are left alone; a user-written explicit specialisation wins.
+Member templates and partial specialisations are not instantiated.
+
+**x86-64** (`X86.cpp`): `<name>.asm` holds MASM for the Windows x64 ABI:
+callee-saved registers allocated by linear scan, frame with shadow space,
+arguments in RCX/RDX/R8/R9 and XMM0-XMM3, SSE2 floating point, vtables in
+`.data`, strings and float constants in `.const`, `malloc`/`free`/`memcpy`
+for the runtime helpers, `cppparse_throw` for `throw` (exceptions are not
+implemented on this target). `--assemble` runs `ml64 /c` to produce
+`<name>.obj`. Symbols use cppparse's own mangling (`square(int x)` is
+`square_int_x`); `extern "C"` functions keep their name.
+
+Test 6 assembles the `sample-opt` output with `ml64`, links it with the
+MSVC-compiled `sample-opt-driver/driver.cpp` and runs it at `-O0`, `-O2`
+and `-O3`: all 19 result checks pass, templates included.

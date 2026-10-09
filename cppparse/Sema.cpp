@@ -195,10 +195,13 @@ const Type* TypeTable::arithmeticResult(const Type* a, const Type* b)
     if (a->kind == Type::LongDouble || b->kind == Type::LongDouble) return basic(Type::LongDouble);
     if (a->kind == Type::Double || b->kind == Type::Double) return basic(Type::Double);
     if (a->kind == Type::Float || b->kind == Type::Float) return basic(Type::Float);
-    if (rank(a) > rank(b)) return a;
-    if (rank(b) > rank(a)) return b;
-    if (a->isUnsigned()) return a;
-    return b;
+    if (rank(a) == rank(b)) return a->isUnsigned() ? a : b;
+    const Type* hi = rank(a) > rank(b) ? a : b;
+    const Type* lo = hi == a ? b : a;
+    // long and unsigned int have the same size here: the signed type cannot hold every value of the other
+    if (!hi->isUnsigned() && lo->isUnsigned() && sizeOf(hi) == sizeOf(lo))
+        return basic(hi->kind == Type::Long ? Type::ULong : hi->kind == Type::LongLong ? Type::ULongLong : Type::UInt);
+    return hi;
 }
 
 
@@ -666,7 +669,14 @@ Symbol* Sema::declareEnum(cxx::EnumDecl* e, Scope* in, cxx::Access access)
         const cxx::Enumerator& x = e->enumerators[i];
         Symbol* s = m_prog.newSymbol(Symbol::Enumerator, x.name, in);     // enumerators live in the enclosing scope
         s->loc = x.loc; s->access = access; s->type = en->type; s->ownerClass = in->kind == Scope::Class ? in->owner : 0;
-        if (x.value) { expr(x.value, in); long v; if (constantValue(x.value, v)) next = v; else error(x.loc, "S114", "enumerator value is not a constant"); }
+        if (x.value) {
+            expr(x.value, in);
+            long v;
+            // in a template's pattern the value may depend on the parameters (sizeof of a dependent type): checked per instantiation
+            const bool dependent = in->kind == Scope::TemplateParams || (in->kind == Scope::Class && in->owner && in->owner->isDependentContext);
+            if (constantValue(x.value, v)) next = v;
+            else if (!dependent) error(x.loc, "S114", "enumerator value is not a constant");
+        }
         s->hasConstValue = true; s->constValue = next; s->index = static_cast<int>(i);
         ++next;
     }
@@ -777,7 +787,11 @@ Symbol* Sema::declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::Dec
                 dcl->semaSym = e;
                 // an out-of-line definition supplies the parameter names
                 if (!params.empty() && e->params.size() == params.size()) for (size_t k = 0; k < params.size(); ++k) if (e->params[k]->name.empty()) e->params[k]->name = params[k]->name;
-                if (!params.empty()) { e->params = params; }
+                if (!params.empty()) {
+                    // default arguments given by the declaration stay with the function
+                    if (e->params.size() == params.size()) for (size_t k = 0; k < params.size(); ++k) if (!params[k]->init && e->params[k]->init) params[k]->init = e->params[k]->init;
+                    e->params = params;
+                }
                 return e;
             }
         }
@@ -849,7 +863,7 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
         Scope* dscope = in;
         if (dcl->name.parts.size() > 1) { Scope* q = scopeForQualifier(dcl->name, in); if (q) dscope = q; }
         std::vector<Symbol*> params;
-        const Type* t = applyDeclarator(base, *dcl, dscope, &params);
+        const Type* t = completedArray(applyDeclarator(base, *dcl, dscope, &params), id.init);
         const std::string& name = dcl->name.parts.empty() ? std::string("") : dcl->name.parts.back().ident;
         if (d->spec.isTypedef) {
             Symbol* td = m_prog.newSymbol(Symbol::Typedef, name, in);
@@ -870,6 +884,7 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
             if (q) { std::vector<Symbol*> out; if (q->kind == Scope::Class) lookupMember(q->owner, name, out); for (size_t k = 0; k < out.size() && !var; ++k) if (out[k]->kind == Symbol::Variable) var = out[k]; }
             if (!var) { error(dcl->loc, "S116", "'" + dcl->name.text() + "' is not a static member of its class"); continue; }
             var->isDefinition = true;
+            if (var->type && var->type->kind == Type::Array && var->type->arraySize < 0 && t->kind == Type::Array) var->type = t;
         } else {
             // "extern int x;" after "int x;" refers to the same variable
             const std::vector<Symbol*>* v = target->find(name);
@@ -917,6 +932,24 @@ void Sema::declareTemplate(cxx::Decl* d, Scope* in, cxx::Access access)
     cxx::ClassDecl* classAst = 0;
     if (inner->kind == cxx::Decl::Class) classAst = inner->classDef;
     else if (inner->kind == cxx::Decl::Simple && inner->spec.kind == cxx::DeclSpec::Class && inner->declarators.empty()) classAst = inner->spec.classDef;
+    if (!classAst && inner->kind == cxx::Decl::Simple && inner->spec.kind == cxx::DeclSpec::Named && inner->declarators.empty()
+        && (inner->spec.elaborated == "class" || inner->spec.elaborated == "struct" || inner->spec.elaborated == "union")
+        && inner->spec.name.parts.size() == 1 && !inner->spec.name.parts[0].hasTemplateArgs) {
+        // "template <...> class X;" declares the template without a definition: its specialisations may follow,
+        // and an instantiation before a definition is an incomplete class
+        const std::string& name = inner->spec.name.parts[0].ident;
+        Symbol* ct = 0;
+        const std::vector<Symbol*>* v = in->find(name);
+        if (v) for (size_t i = 0; i < v->size() && !ct; ++i) if ((*v)[i]->kind == Symbol::ClassTemplate && !(*v)[i]->patternArgs.size()) ct = (*v)[i];
+        if (!ct) {
+            ct = m_prog.newSymbol(Symbol::ClassTemplate, name, in);
+            ct->loc = d->loc; ct->access = access; ct->templateAst = d; ct->templateParams = tparams; ct->isDependentContext = true;
+            tscope->owner = ct;
+            ++m_stats.symbols;
+        }
+        d->semaSym = ct; inner->semaSym = ct;
+        return;
+    }
     if (classAst) {
         std::string name = classAst->name.parts.empty() ? std::string("") : classAst->name.parts.back().ident;
         bool specialization = !classAst->name.parts.empty() && classAst->name.parts.back().hasTemplateArgs;

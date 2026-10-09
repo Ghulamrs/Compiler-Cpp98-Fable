@@ -106,6 +106,7 @@ private:
     Decl* linkageSpec(Loc at);
     bool  memInitializers(Decl* fn);
     bool  initializer(Initializer& init);
+    bool  braceElements(std::vector<Expr*>& out);      // after "{": the elements and the closing "}"
     void  registerDeclaredNames(const DeclSpec& spec, const Declarator& d);
 
     // statements

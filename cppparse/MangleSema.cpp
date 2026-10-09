@@ -18,15 +18,29 @@ private:
     std::string number(long v);
     std::string name(const std::string& component);
     std::string symbolName(const sema::Symbol* s);
-    std::string templateName(const sema::Symbol* inst, const std::string& base, bool baseIsOperatorCode = false);
+    std::string templateName(const sema::Symbol* inst, const std::string& base, bool baseIsOperatorCode, bool isFunction);
     std::string scopesOf(const sema::Scope* s);
     std::string type(const sema::Type* t);
+    std::string resultType(const sema::Type* t);
+    std::string templateArgType(const sema::Type* t);
     std::string paramType(const sema::Type* t);
+    std::string paramList(const sema::Type* fn);
     std::string classType(const sema::Type* t);
     std::string operatorCode(const std::string& fname, bool& ok);
     std::vector<std::string> m_names;
-    std::vector<std::string> m_argTypes;
+    std::vector<std::string> m_argTypes;   // keyed by the encoding without back-references: one entry per distinct type
 };
+
+std::string cvCode(const sema::Type* t)
+{
+    if (!t) return "A";
+    return t->isConst ? (t->isVolatile ? "D" : "B") : (t->isVolatile ? "C" : "A");
+}
+
+bool isPointerLike(const sema::Type* t)
+{
+    return t && (t->kind == sema::Type::Pointer || t->kind == sema::Type::Reference || t->kind == sema::Type::MemberPointer || t->kind == sema::Type::NullPtr);
+}
 
 std::string SemaMangler::number(long v)
 {
@@ -48,18 +62,22 @@ std::string SemaMangler::name(const std::string& component)
     return component + "@";
 }
 
-// "?$Buffer@H$03@": the arguments use their own back-reference tables, the whole name takes one slot
-std::string SemaMangler::templateName(const sema::Symbol* inst, const std::string& base, bool baseIsOperatorCode)
+// "?$Buffer@H$03@": the template name and its arguments start fresh back-reference tables (the template's
+// own name is their first entry); a class template instance then takes one slot of the enclosing table,
+// a function template instance takes none
+std::string SemaMangler::templateName(const sema::Symbol* inst, const std::string& base, bool baseIsOperatorCode, bool isFunction)
 {
     std::vector<std::string> savedNames = m_names, savedArgs = m_argTypes;
     m_names.clear(); m_argTypes.clear();
-    std::string enc = "?$" + base + (baseIsOperatorCode ? "" : "@");   // "?$?8HH@" for operator==<int, int>
+    std::string enc = "?$";
+    enc += baseIsOperatorCode ? base : name(base);   // "?$?8HH@" for operator==<int, int>
     for (size_t i = 0; i < inst->templateArgs.size(); ++i) {
-        if (inst->templateArgs[i]) enc += type(inst->templateArgs[i]);
+        if (inst->templateArgs[i]) enc += templateArgType(inst->templateArgs[i]);
         else enc += "$0" + number(i < inst->templateIntArgs.size() ? inst->templateIntArgs[i] : 0);
     }
     enc += "@";
     m_names = savedNames; m_argTypes = savedArgs;
+    if (isFunction) return enc;
     for (size_t i = 0; i < m_names.size(); ++i)
         if (m_names[i] == enc) return std::string(1, static_cast<char>('0' + i));
     if (m_names.size() < 10) m_names.push_back(enc);
@@ -68,11 +86,11 @@ std::string SemaMangler::templateName(const sema::Symbol* inst, const std::strin
 
 std::string SemaMangler::symbolName(const sema::Symbol* s)
 {
-    if (s->kind == sema::Symbol::Class && s->instantiatedFrom) return templateName(s, s->instantiatedFrom->name);
+    if (s->kind == sema::Symbol::Class && s->instantiatedFrom) return templateName(s, s->instantiatedFrom->name, false, false);
     if (s->kind == sema::Symbol::Namespace && s->name.empty()) {
         std::string hex;
         for (int i = 7; i >= 0; --i) hex += "0123456789abcdef"[(g_mangleUnitId >> (4 * i)) & 15];
-        return "?A0x" + hex + "@";
+        return name("?A0x" + hex);
     }
     return name(s->name);
 }
@@ -122,40 +140,69 @@ std::string SemaMangler::type(const sema::Type* t)
     case sema::Type::NullPtr: return "PEAX";
     case sema::Type::Pointer: case sema::Type::Array: {
         const sema::Type* in = t->inner;
+        const char* ptr = t->isConst ? (t->isVolatile ? "S" : "Q") : (t->isVolatile ? "R" : "P");
+        if (t->kind == sema::Type::Array) ptr = "Q";   // an array parameter is a const pointer
         if (in && in->kind == sema::Type::Function) {
-            std::string s = "P6A" + type(in->inner);
-            if (in->params.empty()) s += "X"; else { for (size_t i = 0; i < in->params.size(); ++i) s += type(in->params[i]); s += "@"; }
-            return s + "Z";
+            std::string s = std::string(ptr) + "6A";
+            s += resultType(in->inner);
+            return s + paramList(in) + "Z";
         }
-        std::string pcv = in && in->isConst ? (in->isVolatile ? "D" : "B") : (in && in->isVolatile ? "C" : "A");
-        return std::string(t->kind == sema::Type::Pointer && t->isConst ? "Q" : "P") + "E" + pcv + type(in);
+        return std::string(ptr) + "E" + cvCode(in) + type(in);
     }
-    case sema::Type::Reference: {
-        const sema::Type* in = t->inner;
-        std::string pcv = in && in->isConst ? (in->isVolatile ? "D" : "B") : (in && in->isVolatile ? "C" : "A");
-        return "AE" + pcv + type(in);
-    }
+    case sema::Type::Reference: return "AE" + cvCode(t->inner) + type(t->inner);
     case sema::Type::Class: return classType(t);
-    case sema::Type::Enum: return "W4" + (t->decl ? symbolName(t->decl) + scopesOf(t->decl->scope) : std::string("enum@")) + "@";
+    case sema::Type::Enum: {
+        if (!t->decl) return "W4enum@@";
+        std::string s = "W4";
+        s += symbolName(t->decl);
+        s += scopesOf(t->decl->scope);
+        return s + "@";
+    }
     case sema::Type::Function: {
-        std::string s = "$$A6A" + type(t->inner);
-        if (t->params.empty()) s += "X"; else { for (size_t i = 0; i < t->params.size(); ++i) s += type(t->params[i]); s += "@"; }
-        return s + "Z";
+        std::string s = "$$A6A";
+        s += resultType(t->inner);
+        return s + paramList(t) + "Z";
     }
     case sema::Type::MemberPointer: return "PEAX";
     default: return "X";
     }
 }
 
+// a class, union or enum result, and a cv-qualified non-pointer one, is prefixed with "?" and its qualifiers
+std::string SemaMangler::resultType(const sema::Type* t)
+{
+    if (t && (t->kind == sema::Type::Class || t->kind == sema::Type::Enum || (!isPointerLike(t) && (t->isConst || t->isVolatile))))
+        return "?" + cvCode(t) + type(t);
+    return type(t);
+}
+
+// a cv-qualified non-pointer template argument is escaped: pair<const string, int> -> "$$CBVstring@std@@H"
+std::string SemaMangler::templateArgType(const sema::Type* t)
+{
+    if (t && !isPointerLike(t) && (t->isConst || t->isVolatile)) return "$$C" + cvCode(t) + type(t);
+    return type(t);
+}
+
+// parameters encoded in more than one character get a slot of the argument table; the key is the
+// encoding without back-references, so two spellings of one type ("AEBVstring@std@@", "AEBV12@") match,
+// plus the top-level qualifiers, which the encoding drops but which still make "const string" a type of its own
 std::string SemaMangler::paramType(const sema::Type* t)
 {
-    std::string enc = type(t);
-    bool primitive = enc.size() == 1 || (enc.size() == 2 && enc[0] == '_');
-    if (primitive) return enc;
+    SemaMangler plain;
+    std::string key = cvCode(t) + plain.type(t);
     for (size_t i = 0; i < m_argTypes.size(); ++i)
-        if (m_argTypes[i] == enc) return std::string(1, static_cast<char>('0' + i));
-    if (m_argTypes.size() < 10) m_argTypes.push_back(enc);
+        if (m_argTypes[i] == key) return std::string(1, static_cast<char>('0' + i));
+    std::string enc = type(t);
+    if (enc.size() > 1 && m_argTypes.size() < 10) m_argTypes.push_back(key);
     return enc;
+}
+
+std::string SemaMangler::paramList(const sema::Type* fn)
+{
+    if (fn->params.empty()) return fn->variadic ? "Z" : "X";
+    std::string s;
+    for (size_t i = 0; i < fn->params.size(); ++i) s += paramType(fn->params[i]);
+    return s + (fn->variadic ? "Z" : "@");
 }
 
 std::string SemaMangler::operatorCode(const std::string& fname, bool& ok)
@@ -180,42 +227,47 @@ std::string SemaMangler::function(const sema::Symbol& f)
     const sema::Symbol* owner = f.ownerClass;
     if (f.isExternC) return f.name;
     if (f.name == "main" && !owner && f.scope && f.scope->kind == sema::Scope::Global) return "main";
+    // an instance of a member template keeps the template's access and, for a constructor template, its "?0"
+    const sema::Symbol* tmpl = f.instantiatedFrom && !f.templateArgs.empty() ? f.instantiatedFrom : 0;
+    bool ctor = f.isConstructor || (tmpl && owner && tmpl->name == owner->ctorName());
+    cxx::Access access = tmpl && tmpl->ownerClass ? tmpl->access : f.access;
     std::string out = "?";
-    if (f.isConstructor) out += "?0";
+    if (tmpl) {
+        bool ok = ctor;
+        std::string base = ctor ? std::string("?0") : tmpl->name;
+        if (!ctor && base.compare(0, 8, "operator") == 0) {
+            std::string code = operatorCode(base, ok);
+            if (ok) base = "?" + code;
+        }
+        out += templateName(&f, base, ok, true);   // "??$?0PEAH@" for a template constructor
+    }
+    else if (ctor) out += "?0";
     else if (f.isDestructor) out += "?1";
     else if (f.isConversion) out += "?B";
-    else if (f.instantiatedFrom && !f.templateArgs.empty()) {
-        bool ok = false;
-        std::string code = f.instantiatedFrom->name.compare(0, 8, "operator") == 0 ? operatorCode(f.instantiatedFrom->name, ok) : std::string();
-        out += templateName(&f, ok ? "?" + code : f.instantiatedFrom->name, ok);
-    }
     else if (f.isOperator) { bool ok; std::string code = operatorCode(f.name, ok); out += ok ? "?" + code : name(f.name); }
     else out += name(f.name);
     out += scopesOf(f.scope) + "@";
     const sema::Type* ft = f.type;
     if (owner && !f.isStatic) {
-        char acc = f.access == cxx::AccessPrivate ? 'A' : f.access == cxx::AccessProtected ? 'I' : 'Q';
+        char acc = access == cxx::AccessPrivate ? 'A' : access == cxx::AccessProtected ? 'I' : 'Q';
         if (f.isVirtual) acc = static_cast<char>(acc + 4);
         out += acc;
         out += "E";
         out += ft && ft->constMethod ? "B" : "A";
         out += "A";
     } else if (owner) {
-        out += f.access == cxx::AccessPrivate ? "C" : f.access == cxx::AccessProtected ? "K" : "S";
+        out += access == cxx::AccessPrivate ? "C" : access == cxx::AccessProtected ? "K" : "S";
         out += "A";
     } else out += "YA";
-    if (f.isConstructor || f.isDestructor) out += "@";
-    else out += type(ft ? ft->inner : 0);
-    if (!ft || ft->params.empty()) out += "X";
-    else {
-        for (size_t i = 0; i < ft->params.size(); ++i) out += paramType(ft->params[i]);
-        out += ft->variadic ? "Z" : "@";
-    }
+    if (ctor || f.isDestructor) out += "@";
+    else out += resultType(ft ? ft->inner : 0);
+    out += ft ? paramList(ft) : std::string("X");
     return out + "Z";
 }
 
 std::string SemaMangler::variable(const sema::Symbol& v)
 {
+    if (v.isExternC) return v.name;
     // the back-reference table depends on the order of these calls: one statement each
     std::string out = "?";
     out += name(v.name);
@@ -223,8 +275,37 @@ std::string SemaMangler::variable(const sema::Symbol& v)
     out += "@";
     if (v.isMember) out += v.access == cxx::AccessPrivate ? "0" : v.access == cxx::AccessProtected ? "1" : "2";
     else out += "3";
-    out += type(v.type);
-    out += v.type && v.type->isConst ? "B" : "A";
+    const sema::Type* t = v.type;
+    if (t && (t->kind == sema::Type::Pointer || t->kind == sema::Type::Reference)) {
+        // "int* p" -> "PEAHEA": the pointer, then its own __ptr64 and the pointee's qualifiers again
+        out += type(t);
+        out += "E";
+        out += cvCode(t->inner);
+    } else if (t && t->kind == sema::Type::Array) {
+        // "T a[4]" -> "PA" T "A": a pointer to the element without __ptr64, the outer dimension is dropped;
+        // "int a[2][3]" -> "PAY02HA"
+        const sema::Type* first = t->inner;
+        const sema::Type* elem = first;
+        while (elem && elem->kind == sema::Type::Array) elem = elem->inner;
+        bool c = (elem && elem->isConst) || (first && first->isConst), vol = (elem && elem->isVolatile) || (first && first->isVolatile);
+        out += c ? (vol ? "S" : "Q") : (vol ? "R" : "P");
+        if (first && first->kind == sema::Type::Array) {
+            out += "AY";
+            long dims = 0;
+            for (const sema::Type* e = first; e && e->kind == sema::Type::Array; e = e->inner) ++dims;
+            out += number(dims);
+            for (const sema::Type* e = first; e && e->kind == sema::Type::Array; e = e->inner) out += number(e->arraySize < 0 ? 0 : e->arraySize);
+            out += templateArgType(elem);
+            out += "A";
+        } else {
+            out += cvCode(first);
+            out += type(first);
+            out += cvCode(first);
+        }
+    } else {
+        out += type(t);
+        out += cvCode(t);
+    }
     return out;
 }
 

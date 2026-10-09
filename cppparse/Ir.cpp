@@ -125,6 +125,39 @@ void IrFunction::computeCfg()
                 addUniqueInt(blocks[static_cast<size_t>(blocks[i].succs[s])].preds, static_cast<int>(i));
 }
 
+void IrFunction::computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut) const
+{
+    const size_t n = blocks.size();
+    std::vector<std::vector<int> > succ(n);
+    std::vector<std::set<int> > used(n), defined(n);
+    for (size_t b = 0; b < n; ++b)
+        for (size_t k = 0; k < blocks[b].insts.size(); ++k) {
+            const IrInst& in = blocks[b].insts[k];
+            for (size_t a = 0; a < in.args.size(); ++a) {
+                if (in.args[a].kind == IrOperand::Temp && !defined[b].count(in.args[a].id)) used[b].insert(in.args[a].id);
+                if (in.args[a].kind == IrOperand::Block && (in.op == IrInst::Br || in.op == IrInst::CondBr || in.op == IrInst::TryBegin)
+                    && in.args[a].id >= 0 && static_cast<size_t>(in.args[a].id) < n) addUniqueInt(succ[b], in.args[a].id);
+            }
+            if (in.dst >= 0) defined[b].insert(in.dst);
+        }
+    liveIn.assign(n, std::set<int>());
+    liveOut.assign(n, std::set<int>());
+    // the sets only grow, so a pass that leaves every size unchanged has reached the fixed point
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t b = n; b-- > 0;) {
+            std::set<int>& out = liveOut[b];
+            for (size_t s = 0; s < succ[b].size(); ++s) out.insert(liveIn[static_cast<size_t>(succ[b][s])].begin(), liveIn[static_cast<size_t>(succ[b][s])].end());
+            std::set<int>& in = liveIn[b];
+            const size_t before = in.size();
+            in.insert(used[b].begin(), used[b].end());
+            for (std::set<int>::const_iterator t = out.begin(); t != out.end(); ++t) if (!defined[b].count(*t)) in.insert(*t);
+            if (in.size() != before) changed = true;
+        }
+    }
+}
+
 int IrFunction::instCount() const
 {
     int n = 0;

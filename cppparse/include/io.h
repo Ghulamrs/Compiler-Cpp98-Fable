@@ -10,7 +10,7 @@ struct _finddata_t {
     time_t    time_create;
     time_t    time_access;
     time_t    time_write;
-    unsigned long long size;
+    unsigned long size;           // _fsize_t: the 64i32 functions report 32-bit sizes
     char      name[260];
 };
 

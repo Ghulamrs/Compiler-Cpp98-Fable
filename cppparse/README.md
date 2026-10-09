@@ -133,7 +133,7 @@ Compiles every `cppparse/*.cpp` and `cppparse/legacy/*.cpp` with MSVC at
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
-`obj/debug`. `-NoTests` stops after the build. The test groups (15 as of
+`obj/debug`. `-NoTests` stops after the build. The test groups (16 as of
 version 6) run against whichever configuration was built.
 
 A Visual Studio 2022 solution does the same build inside the IDE:
@@ -348,7 +348,7 @@ dominates the handlers: after a longjmp the callee-saved registers hold
 the values they had when the region was entered, and locals stay in
 memory (functions with try regions are not put into SSA form). Limits:
 no destructors run during unwinding, thrown objects are copied bytewise
-(no copy constructor), the frame stack is per process, and function-
+(no copy constructor), and function-
 try-blocks are still skipped. The runtime is linked with the driver in
 tests 6 and 8, which check all of the above and that no frame or handler
 is left registered.
@@ -422,7 +422,7 @@ Version 6 is finished only when every compilation gap left by versions
   removes the untyped library-call results of the old front end;
 - exceptions: destructors run during unwinding and thrown objects
   copied with their copy constructors (both done in the version 6 IR
-  generator), a per-thread frame stack;
+  generator), a per-thread frame stack (done in the runtime);
 - COFF: `.pdata`/`.xdata` unwind tables and line information;
 - mangling: function-pointer parameter lists, member pointers, varargs;
 - the type checker replaced by real semantic analysis (scopes, lookup,
@@ -594,9 +594,8 @@ types the headers still lack.
 **Stage 6, first steps (self-hosting)**: with the headers, all 36 own
 sources now analyse with zero semantic errors and every one of them
 compiles to a COFF object; the 36 objects link with the exception runtime
-and `libcpp` into `cppparse-self.exe`, a cppparse built by cppparse. That
-executable still crashes when run: making it work is the next milestone.
-The steps that got here: forward declarations (`struct X;`) declare in
+and `libcpp` into `cppparse-self.exe`, a cppparse built by cppparse (it
+works now, see the next paragraph). The steps that got here: forward declarations (`struct X;`) declare in
 their own scope instead of resolving to an outer `X`; a function hides
 a class of the same name in calls and in what the parser took for a
 functional cast (`stat(path, &st)`); a call with too few arguments no
@@ -611,9 +610,75 @@ initialised on the first pass under a guard byte (COMDAT when the
 function is inline, named per function so every unit agrees); `goto`
 and labels are blocks (objects of the scopes left are not destroyed);
 anonymous-namespace symbols carry a per-unit id (`?A0x<hash>@`) so units
-do not collide. The old front end skips the extensionless standard
+do not collide. The version 6 mangler now spells every name cl.exe gives
+cppparse's own sources (checked unit by unit with `sandbox/scripts/mix.ps1`,
+which links each cppparse object among cl-built ones): class and enum
+results carry `?A` (`?B` when const), template instance names start fresh
+back-reference tables with the template's own name as entry 0, a function
+template name takes no slot, parameter back-references are keyed by type
+(so `AEBVstring@std@@` and its later spelling `AEBV12@` share one slot, a
+top-level `const` makes a separate one, two-character codes like `_N`
+count), `const` template arguments are escaped (`$$CB`), member template
+instances keep their access and constructor templates are `??$?0`, and
+globals follow cl's variable encoding (`3PEBDEB`, `3PAPEAUItem@1@A`,
+`3PAY02HA`). Test 15 compiles `examples/sample-mangle/mangle.cpp` with
+both compilers and requires every decorated name cl uses to be spelled
+identically. The old front end skips the extensionless standard
 headers when it resolves `<...>` includes, since it assumes the `std::`
 names as before.
+
+**Stage 6: the self-built compiler works** (`examples/sample-self/`, test 16):
+`sandbox/scripts/selfhost.ps1` builds `cppparse-self.exe` from the 36 objects
+cppparse makes of its own sources at `-O0`, runs it on `sample-opt` and requires
+its object and listings to be byte-identical to those of the MSVC-built
+compiler. The self-built compiler also compiles `sample-life`, the three
+`sample-lib` units, `libcpp/iostream.cpp`, `sample-self` and all 36 of its own
+sources at `-O0` and `-O2` to the same bytes as the reference build (cl with
+cppparse's headers). That reference is used rather than the MSVC-built
+`sandbox/cppparse.exe` because the latter links MSVC's library, whose
+`std::sort` may order equal elements differently from cppparse's and so
+could change a register assignment at `-O2`; on `sample-opt` the two give
+identical output, so no such difference has been seen yet. The defects
+found on the way, each reproduced in
+`sample-self` and checked against cl's result by `driver-self.cpp`:
+aggregate initialisation (nested and elided braces, arrays of unknown bound
+sized from their initializer, zero fill of what is not initialised;
+`const char* const k[] = {...}` used to get 8 bytes); a `?:` temporary bound
+to a reference lost the flag that says whether its arm ran, the operand of
+another type was not converted (`c ? "xmm" + s : kNames[r]` as a string), an
+lvalue operand next to a prvalue was not copied, and two class lvalues that
+differ in const are an lvalue; default arguments of a declaration were lost
+when the out-of-line definition replaced the parameters; indices and pointer
+differences were 32-bit (`long` is 32-bit here) and `sizeof` was
+`unsigned int`; integer literals above `LONG_MAX` were clamped (types now as
+cl: `0xFFFFFFFF` is `unsigned int`, `2166136261` is `unsigned long`; values
+beyond 32 bits warn, S127), `char` is signed and escapes in character and
+string literals (octal, `\x`) are decoded; constant folding of unsigned
+operations and of casts to narrow types; narrow integer results are
+re-extended after every operation, call and same-size signedness change (the
+upper bits of a register used to keep carries that division and indexing
+read); `a op= b` computes in the common type; constructor templates were not
+constructors (no member initialisers ran); `&v[0]` through `operator[]`
+loaded the element instead of taking its address; `it++` on a class called
+the prefix operator; null pointers stayed null only without a base offset,
+and `static_cast` to a derived class did not subtract it; slicing copies and
+assignments of polymorphic classes keep their own vptr; a static reference
+local had the size of its referent; `float` constants and statics were
+doubles; frames of a page or more call `__chkstk`; float constants are
+emitted as their exact bits; loop unrolling (`-O3`) renamed the values a
+loop uses from before it, such as hoisted invariants. The old type checker
+recursed without end on a copy constructor when it looked for a converting
+constructor (`c ? T(1) : t`). For linking with MSVC-compiled code,
+constructors return `this` and functions with a hidden result pointer return
+it in `rax` as cl does, narrow results of calls are extended, the `new[]`
+cookie is 8 bytes and the exception runtime's frame chain is per thread. The
+remaining differences from cl's ABI (the virtual destructor slot holds the
+destructor rather than a scalar deleting destructor, classes of 1, 2, 4 or 8
+bytes are passed by address and returned through a hidden pointer, a
+non-polymorphic first base is laid out before a polymorphic one) are not
+hit between the units of cppparse on `sample-opt`: `sandbox/scripts/mix.ps1`,
+which links each cppparse object among cl-built ones, runs every
+combination correctly.
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

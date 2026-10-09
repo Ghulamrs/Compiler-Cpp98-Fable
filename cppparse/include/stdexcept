@@ -35,6 +35,31 @@ public:
     explicit invalid_argument(const string& message) : logic_error(message) {}
 };
 
+class domain_error : public logic_error {
+public:
+    explicit domain_error(const string& message) : logic_error(message) {}
+};
+
+class length_error : public logic_error {
+public:
+    explicit length_error(const string& message) : logic_error(message) {}
+};
+
+class range_error : public runtime_error {
+public:
+    explicit range_error(const string& message) : runtime_error(message) {}
+};
+
+class overflow_error : public runtime_error {
+public:
+    explicit overflow_error(const string& message) : runtime_error(message) {}
+};
+
+class underflow_error : public runtime_error {
+public:
+    explicit underflow_error(const string& message) : runtime_error(message) {}
+};
+
 }
 
 #endif

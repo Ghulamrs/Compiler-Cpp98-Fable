@@ -174,6 +174,11 @@ std::string exprText(const Expr* e)
     case Expr::Delete: return std::string(e->arrayDelete ? "delete[] " : "delete ") + exprText(e->kids[0]);
     case Expr::Throw: return e->kids.empty() ? "throw" : "throw " + exprText(e->kids[0]);
     case Expr::Typeid: return "typeid(" + (e->type ? e->type->text() : exprText(e->kids.empty() ? 0 : e->kids[0])) + ")";
+    case Expr::InitList: {
+        std::string s = "{";
+        for (size_t i = 0; i < e->kids.size(); ++i) { if (i) s += ", "; s += exprText(e->kids[i]); }
+        return s + "}";
+    }
     case Expr::Error: return "<error>";
     }
     return "?";

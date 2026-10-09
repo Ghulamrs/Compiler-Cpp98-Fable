@@ -297,6 +297,7 @@ int TypeChecker::convRank(const Type* from, bool fromLvalue, const Type* to, std
             for (size_t p = 0; p < c.params.size(); ++p) if (c.params[p].defaultValue.empty()) ++required;
             if (required > 1) continue;
             const Type* pt = m_types.unref(m_types.parse(c.params[0].type, t->cls->qualifiedName, t->cls));
+            if (m_types.withConst(pt, false) == tc) continue;   // the copy constructor converts nothing (and would recurse)
             std::string w2;
             if (pt->isUnknown() || convRank(f, fromLvalue, m_types.withConst(pt, false), w2) >= 0) return 3;
         }

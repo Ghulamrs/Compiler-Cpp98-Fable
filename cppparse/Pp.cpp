@@ -674,8 +674,11 @@ bool Preprocessor::substitute(const PpMacro& mac, const std::vector<std::vector<
         else if (rightEmpty) repl.push_back(left);
         else if (paste(left, right, joined)) repl.push_back(joined);
         else { diag(PpDiag::Error, ident.file, ident.line, "pasting \"" + left.text + "\" and \"" + right.text + "\" does not give a valid token"); repl.push_back(left); repl.push_back(right); }
-        res.erase(res.begin() + static_cast<long>(i) - 1, res.begin() + static_cast<long>(i) + 2);
-        res.insert(res.begin() + static_cast<long>(i) - 1, repl.begin(), repl.end());
+        // the offset is computed before the seek: "begin() + i - 1" would first step past the end of a vector
+        // that the erase has shortened
+        const long at = static_cast<long>(i) - 1;
+        res.erase(res.begin() + at, res.begin() + (at + 3));
+        res.insert(res.begin() + at, repl.begin(), repl.end());
         i = i >= 2 ? i - 2 : 0;
     }
     for (size_t i = 0; i < res.size(); ++i)

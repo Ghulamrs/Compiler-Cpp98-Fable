@@ -33,6 +33,7 @@
 #include "Ast.hpp"
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -117,6 +118,8 @@ struct IrFunction {
     int  newTemp(const Type* t) { tempTypes[nextTemp] = t; return nextTemp++; }
     int  newBlock(const std::string& label);
     void computeCfg();
+    // temporaries live on entry to and on exit from every block, with the successors taken from the branches
+    void computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut) const;
     int  instCount() const;
     const Type* typeOf(int temp) const;
 };

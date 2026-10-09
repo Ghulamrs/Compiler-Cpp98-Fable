@@ -9,7 +9,7 @@
 //                                  argument prescan, rescanning, hide sets (no recursion)
 //   #if / #ifdef / #ifndef / #elif / #else / #endif
 //                                  full constant expressions with defined, arithmetic, ?:, characters
-//   #error / #warning / #pragma once / #line (ignored)
+//   #error / #warning / #pragma once / #pragma pack / #line (ignored)
 //   __FILE__ __LINE__ __DATE__ __TIME__ __cplusplus (199711L) __cppparse__
 //
 // The result is a flat token list with (file, line) positions, the list of
@@ -38,7 +38,8 @@ struct PpToken {
     bool                     space;    // preceded by white space
     bool                     bol;      // first token on its line
     std::vector<std::string> hide;     // macro names that must not expand this token again
-    PpToken() : kind(End), file(0), line(0), space(false), bol(false) {}
+    int                      pack;     // #pragma pack value in force where the token was output (0: the default)
+    PpToken() : kind(End), file(0), line(0), space(false), bol(false), pack(0) {}
     bool is(const char* s) const { return text == s; }
 };
 
@@ -112,6 +113,9 @@ private:
     std::vector<PpDiag>             m_diags;
     std::map<std::string, PpMacro>  m_macros;
     std::set<std::string>           m_pragmaOnce;
+    int                             m_pack;          // #pragma pack: the current value (0: the default)
+    std::vector<std::pair<std::string, int> > m_packStack;   // push records: identifier (may be empty), value
+    void packPragma(const std::vector<PpToken>& line, int fileIndex);
     std::map<std::string, std::string> m_fileCache;
     int                             m_errors;
 };

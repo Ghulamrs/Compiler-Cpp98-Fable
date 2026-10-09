@@ -121,7 +121,7 @@ std::string PpMacro::bodyText() const
     return s;
 }
 
-Preprocessor::Preprocessor(const PpOptions& opt) : m_opt(opt), m_errors(0)
+Preprocessor::Preprocessor(const PpOptions& opt) : m_opt(opt), m_errors(0), m_pack(0)
 {
     predefine("__cplusplus=199711L");
     predefine("__cppparse__=6");
@@ -266,6 +266,7 @@ void Preprocessor::directive(std::vector<PpToken>& line, int fileIndex, std::vec
     }
     if (name == "pragma") {
         if (line.size() >= 2 && line[1].text == "once" && fileIndex >= 0) m_pragmaOnce.insert(toLower(normalizePath(m_files[static_cast<size_t>(fileIndex)])));
+        if (line.size() >= 2 && line[1].text == "pack") packPragma(line, fileIndex);
         return;                                                 // other pragmas are ignored
     }
     if (name == "line" || name == "ident" || name == "sccs" || name == "assert" || name == "unassert" || name == "import" || name == "include_next") {
@@ -489,7 +490,49 @@ void Preprocessor::expandChunk(std::vector<PpToken>& chunk)
 {
     std::vector<PpToken> out;
     expandTokens(chunk, out);
+    for (size_t i = 0; i < out.size(); ++i) out[i].pack = m_pack;   // the parser reads it at each class key
     m_out.insert(m_out.end(), out.begin(), out.end());
+}
+
+// #pragma pack( [show] | [push|pop] [, identifier] [, n] | [n] ), as MSVC: n is 1, 2, 4, 8 or 16; "pack()" restores
+// the default; "pop, identifier" pops records until that identifier's record is gone (nothing if it is not on the
+// stack); a pop that names n sets n afterwards
+void Preprocessor::packPragma(const std::vector<PpToken>& line, int fileIndex)
+{
+    const int ln = line[0].line;
+    std::vector<std::string> args;
+    size_t i = 2;
+    if (i >= line.size() || !line[i].is("(")) { diag(PpDiag::Warning, fileIndex, ln, "#pragma pack: expected '('"); return; }
+    std::string cur;
+    for (++i; i < line.size() && !line[i].is(")"); ++i) {
+        if (line[i].is(",")) { args.push_back(cur); cur.clear(); } else cur += line[i].text;
+    }
+    if (i >= line.size()) { diag(PpDiag::Warning, fileIndex, ln, "#pragma pack: expected ')'"); return; }
+    if (!cur.empty() || !args.empty()) args.push_back(cur);
+    std::string action;
+    if (!args.empty() && (args[0] == "push" || args[0] == "pop" || args[0] == "show")) { action = args[0]; args.erase(args.begin()); }
+    std::string ident;
+    int n = -1;
+    for (size_t a = 0; a < args.size(); ++a) {
+        const std::string& s = args[a];
+        if (s.empty()) continue;
+        if (isdigit(static_cast<unsigned char>(s[0]))) {
+            n = atoi(s.c_str());
+            if (n != 1 && n != 2 && n != 4 && n != 8 && n != 16) { diag(PpDiag::Warning, fileIndex, ln, "#pragma pack: " + s + " is not 1, 2, 4, 8 or 16; ignored"); return; }
+        } else ident = s;
+    }
+    if (action == "show") { diag(PpDiag::Warning, fileIndex, ln, "#pragma pack: the current packing is " + intToString(m_pack ? m_pack : 16)); return; }
+    if (action == "push") { m_packStack.push_back(std::make_pair(ident, m_pack)); if (n >= 0) m_pack = n; return; }
+    if (action == "pop") {
+        if (!ident.empty()) {
+            size_t k = m_packStack.size();
+            while (k > 0 && m_packStack[k - 1].first != ident) --k;
+            if (k > 0) { m_pack = m_packStack[k - 1].second; m_packStack.resize(k - 1); }
+        } else if (!m_packStack.empty()) { m_pack = m_packStack.back().second; m_packStack.pop_back(); }
+        if (n >= 0) m_pack = n;
+        return;
+    }
+    m_pack = n >= 0 ? n : 0;                                    // pack(n), or pack() for the default
 }
 
 namespace {

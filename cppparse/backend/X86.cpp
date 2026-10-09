@@ -862,7 +862,14 @@ void X86Module::emitGlobals()
         else if (g.size == 4) def = sym + " DD " + (numeric ? g.init : std::string("0"));
         else if (g.size == 8) def = sym + " DQ " + (numeric ? g.init : std::string("0"));
         else def = sym + " DB " + intToString(g.size) + " DUP (0)";
-        m_data += std::string(g.linkOnce ? ";@comdat any\n" : "") + (g.internal ? std::string("") : "        PUBLIC " + sym + "\n") + def + "\n";
+        // as cl: the type's (or the declared) alignment, and at least the natural boundary of the size up to 8 bytes
+        int align = g.size >= 8 ? 8 : g.size >= 4 ? 4 : g.size >= 2 ? 2 : 1;
+        if (g.align > align) align = g.align;
+        // a COMDAT item is a section of its own: its alignment goes to the section (on the marker), not into padding
+        if (g.linkOnce) m_data += ";@comdat any" + (align > 1 ? " align " + intToString(align) : std::string("")) + "\n";
+        m_data += (g.internal ? std::string("") : "        PUBLIC " + sym + "\n");
+        if (!g.linkOnce && align > 1) m_data += "        ALIGN " + intToString(align) + "\n";
+        m_data += def + "\n";
         m_defined.insert(sym);
         m_dataSymbols.insert(sym);
     }

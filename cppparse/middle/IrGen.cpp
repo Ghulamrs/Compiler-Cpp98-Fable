@@ -1590,6 +1590,8 @@ void IrGen::localDecl(cxx::Decl* d)
             g.isFloat = !isReference(var->type) && vt->isFloating();
             g.linkOnce = m_out->linkOnce;
             g.internal = m_out->internal;
+            g.align = isReference(var->type) ? 8 : alignOf(vt);
+            if (var->declAlign > g.align) g.align = var->declAlign;
             bool scalarConstant = id.init.kind != cxx::Initializer::None && id.init.args.size() == 1 && id.init.args[0]->semaConst && vt->isScalar() && !isReference(var->type) && !vt->isFloating();
             if (scalarConstant) g.init = numText(id.init.args[0]->semaValue);
             if (m_x86) m_x86->addGlobal(g);
@@ -2155,6 +2157,8 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             g.size = sizeOf(s->type) > 0 ? sizeOf(s->type) : 8;
             g.isFloat = s->type && s->type->isFloating();
             g.internal = hasInternalLinkage(s);
+            g.align = isReference(s->type) ? 8 : alignOf(s->type);
+            if (s->declAlign > g.align) g.align = s->declAlign;
             bool dynamic = false;
             const bool scalar = !isClassType(s->type) && m_semaTypes.unref(s->type)->kind != sema::Type::Array;
             if (s->init && s->init->semaConst && scalar) g.init = numText(s->init->semaValue);

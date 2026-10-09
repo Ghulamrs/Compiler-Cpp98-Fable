@@ -129,6 +129,7 @@ void collectGlobals(const CodeBase& cb, TypeTable& types, Layouts& layouts, X86M
             IrGlobal ig;
             ig.name = g.fullName();
             ig.size = layouts.sizeOf(t);
+            ig.align = layouts.alignOf(t);
             ig.isFloat = t && t->isFloating();
             std::string init = trim(g.initializer);
             bool numeric = !init.empty() && (isdigit(static_cast<unsigned char>(init[0])) || init[0] == '-' || init[0] == '+') && init.find_first_of("(,") == std::string::npos;

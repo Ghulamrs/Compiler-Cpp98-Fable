@@ -140,6 +140,7 @@ struct Symbol {
     Symbol*       initCtor;               // variable of class type: the constructor chosen for its initialisation
     bool          hasConstValue;
     long          constValue;
+    int           declAlign;              // __declspec(align(N)) on a variable or field (0: none)
     // templates
     cxx::Decl*    templateAst;            // the template declaration (Decl::Template)
     std::vector<Symbol*>     templateParams;

@@ -542,6 +542,24 @@ try {
     if ($mtx -match '(?m)^ [0-9a-f]{4}-[0-9a-f]{4}\s+[0-9a-f]{8}H  \.text\$mn\s+CODE  COMDAT, \d+ section') { Write-Host "  ok   mtx6.map: COMDAT sections grouped" } else { $p += "COMDAT sections not grouped" }
     if ($p.Count -eq 0) { Write-Host "  ok   mtx6.map: sizes fill the sections, addresses match dumpbin /symbols" }
     else { Write-Host "  FAIL mtx6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
+    # #pragma pack and __declspec(align(N)): cppparse's layouts and globals against a cl-compiled driver that
+    # checks every size and offset with cl's own, reads the globals, and checks their alignment
+    foreach ($lvl in @(0, 2)) {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n "align$lvl" "..\examples\sample-align\align.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\align${lvl}6.obj")) { Write-Host "  FAIL sample-align at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\aligndriver$lvl.exe" /I..\examples\sample-align "..\examples\sample-align-driver\driver-align.cpp" "out\x64\align${lvl}6.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the alignment driver (-O$lvl):"; Write-Host $clOut; $failed++; continue }
+        $run = & ".\out\x64\aligndriver$lvl.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   aligndriver$lvl.exe: pack and align layouts equal cl's, globals read and aligned (-O$lvl)" }
+        else { Write-Host "  FAIL aligndriver$lvl.exe (-O$lvl):"; Write-Host ($run.Split("`n") | Where-Object { $_ -match 'FAIL' }); $failed++ }
+        $p = @(Test-ObjectMap "out\x64\align${lvl}6.map" "out\x64\align${lvl}6.obj")
+        $am = Get-Content "out\x64\align${lvl}6.map" -Raw
+        if ($am -notmatch '(?m)^ 0002:[0-9a-f]{6}[048c]0   [0-9a-f]{8}H   data\s+\?g_align64@@3NA') { $p += "g_align64 not at a 64-byte offset in the map" }
+        if ($p.Count -eq 0) { Write-Host "  ok   align${lvl}6.map: sizes fill the sections, addresses match dumpbin, g_align64 64-aligned" }
+        else { Write-Host "  FAIL align${lvl}6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
+    }
     if ($failed -ne 0) { throw "$failed version 6 compile check(s) failed" }
 
     Write-Host ""

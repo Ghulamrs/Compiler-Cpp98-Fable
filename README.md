@@ -565,7 +565,10 @@ expands inside its own expansion, as in `#define f(x) x + f`),
 `#undef`, `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` with full
 constant expressions (`defined`, arithmetic, comparisons, `?:`,
 character constants, octal and hex), `#error`, `#warning`, `#line`,
-and `__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__cplusplus`
+`#pragma pack` as MSVC has it (`pack(n)` with n = 1, 2, 4, 8 or 16,
+`pack()`, `push`/`pop` with an optional identifier and value, `show`;
+every token carries the packing in force, which applies at the next
+class key), and `__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__cplusplus`
 (`199711L`). The result is a token stream with file and line positions,
 the list of included and missing files, all macro definitions and the
 diagnostics. `cppparse -E -I inc pp.cpp` prints the preprocessed text
@@ -590,7 +593,16 @@ conversion sequences (exact, promotion, standard, user-defined through
 converting constructors and conversion operators, reference binding,
 derived-to-base). Classes get their layout (bases, vptr, fields,
 alignment) and vtable (slots, overrides, abstractness) and implicit
-special members. Class templates are instantiated from the syntax tree
+special members. The layout follows MSVC's rules for `#pragma pack(n)`
+(a member's alignment is capped at n) and `__declspec(align(N))` on a
+class, a member or a variable (a floor that packing cannot lower,
+inherited by classes that contain such a member); `alignas` is C++11 and
+not accepted. Globals are placed at their alignment (at least the
+natural boundary of their size, up to 8 bytes, as cl does), and a data
+section is marked with the largest alignment it holds (S129 warns that
+`__declspec(align)` on a local variable is ignored). Test 13 links
+`examples/sample-align/` with a cl-compiled driver that compares every
+size and offset with cl's and checks the globals' values and alignment. Class templates are instantiated from the syntax tree
 with the parameters bound in an instantiation scope (defaults, partial
 specialisations, out-of-line members); function templates are
 instantiated by deduction from the argument types. Diagnostics carry

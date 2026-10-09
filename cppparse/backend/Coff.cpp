@@ -286,9 +286,10 @@ struct Chunk {
     std::map<std::string, unsigned long>      labels;    // local labels
     std::vector<std::pair<std::string, unsigned long> > symbols;   // named definitions (PROC names, data labels)
     std::vector<unsigned long>                padStarts;  // where ALIGN padding begins: a data item ends there
+    unsigned long                             maxAlign;   // the largest ALIGN (or COMDAT marker alignment): the section's alignment
     std::vector<std::string>                  errors;
     int                                       instructions;
-    Chunk() : instructions(0) {}
+    Chunk() : maxAlign(1), instructions(0) {}
 };
 
 
@@ -787,7 +788,8 @@ bool Encoder::dataLine(const std::string& raw, int line)
     std::string dir = upperText(words[di]);
     if (dir == "ALIGN") {
         long n = 0;
-        if (di + 1 >= words.size() || !parseLong(words[di + 1], n) || n <= 0) return fail("bad ALIGN", line);
+        if (di + 1 >= words.size() || !parseLong(words[di + 1], n) || n <= 0 || n > 8192 || (n & (n - 1)) != 0) return fail("bad ALIGN", line);
+        if (static_cast<unsigned long>(n) > m_c.maxAlign) m_c.maxAlign = static_cast<unsigned long>(n);
         if (pos() % static_cast<unsigned long>(n)) m_c.padStarts.push_back(pos());
         while (pos() % static_cast<unsigned long>(n)) byte(0);
         if (!name.empty()) m_c.symbols.push_back(std::make_pair(name, pos()));
@@ -867,7 +869,8 @@ struct Section {
     std::vector<Reloc>         relocs;
     int                        selection;     // IMAGE_COMDAT_SELECT_* of a COMDAT section, 0 otherwise
     bool                       isCode;
-    Section() : characteristics(0), selection(0), isCode(false) {}
+    unsigned long              align;         // the largest alignment its contents ask for (ALIGN, COMDAT marker)
+    Section() : characteristics(0), selection(0), isCode(false), align(1) {}
 };
 
 struct SymbolEntry {
@@ -937,6 +940,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     int section = 0;            // 0 none, 1 text, 2 data, 3 rdata, 4 CRT initialisers
     CodeBlock* current = 0;
     bool comdatNext = false;    // ";@comdat any" was seen: the next PROC or data item is a COMDAT
+    unsigned long comdatAlign = 0;   // ";@comdat any align N": the alignment of that item's section
     std::vector<std::string> globalErrors;
 
     size_t lineStart = 0;
@@ -947,7 +951,12 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         lineStart = nl == std::string::npos ? masmText.size() + 1 : nl + 1;
         ++lineNo;
         std::string marker = trimWs(raw);
-        if (marker.compare(0, 8, ";@comdat") == 0) { comdatNext = true; continue; }
+        if (marker.compare(0, 8, ";@comdat") == 0) {
+            comdatNext = true;
+            size_t al = marker.find(" align ");                  // ";@comdat any align 32": the item's section alignment
+            comdatAlign = al == std::string::npos ? 0UL : static_cast<unsigned long>(atol(marker.c_str() + al + 7));
+            continue;
+        }
         size_t sc = raw.find(';');
         if (sc != std::string::npos) raw = raw.substr(0, sc);
         std::string text = trimWs(raw);
@@ -973,6 +982,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             blocks.back().name = w0;
             blocks.back().comdat = comdatNext;
             comdatNext = false;
+            comdatAlign = 0;
             current = &blocks.back();
             continue;
         }
@@ -983,9 +993,14 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         } else if (section >= 2 && section <= 4) {
             // a COMDAT data item ends where the next labelled definition begins: a symbol of internal linkage
             // has no PUBLIC line before it, and must not join the COMDAT section the linker may discard
+            // (an ALIGN starts the next item too: it pads for the definition after it)
             const bool labelled = u0 != "DB" && u0 != "DW" && u0 != "DD" && u0 != "DQ" && u0 != "REAL4" && u0 != "REAL8" && u0 != "ALIGN";
-            if (!comdatNext && labelled && currentPiece && currentPiece->comdat) currentPiece = 0;
-            if (comdatNext) { pieces.push_back(new DataPiece(section, true)); currentPiece = pieces.back(); comdatNext = false; }
+            if (!comdatNext && (labelled || u0 == "ALIGN") && currentPiece && currentPiece->comdat) currentPiece = 0;
+            if (comdatNext) {
+                pieces.push_back(new DataPiece(section, true)); currentPiece = pieces.back(); comdatNext = false;
+                if (comdatAlign > currentPiece->chunk.maxAlign) currentPiece->chunk.maxAlign = comdatAlign;
+                comdatAlign = 0;
+            }
             if (!currentPiece) {
                 if (!plain[section]) { pieces.push_back(new DataPiece(section, false)); plain[section] = pieces.back(); }
                 currentPiece = plain[section];
@@ -1058,6 +1073,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         } else if (dp.kind == 4) { target = &secs[crtIndex]; sectionNumber = static_cast<int>(crtIndex + 1); }
         else { target = &secs[static_cast<size_t>(dp.kind - 1)]; sectionNumber = dp.kind; }
         unsigned long base = static_cast<unsigned long>(target->bytes.size());
+        if (c.maxAlign > target->align) target->align = c.maxAlign;
         target->bytes.insert(target->bytes.end(), c.bytes.begin(), c.bytes.end());
         for (size_t r = 0; r < c.relocs.size(); ++r) { Reloc rl = c.relocs[r]; rl.offset += base; target->relocs.push_back(rl); }
         for (size_t k = 0; k < c.symbols.size(); ++k) {
@@ -1074,6 +1090,16 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     }
     for (size_t p = 0; p < pieces.size(); ++p) delete pieces[p];
     pieces.clear();
+    // a section whose contents need more than its default alignment (16, or 8 for the initialisers) says so in its
+    // IMAGE_SCN_ALIGN_* bits, which the linker honours when it places the section (a 32- or 64-byte aligned variable)
+    for (size_t s = 0; s < secs.size(); ++s) {
+        const unsigned long bits = (secs[s].characteristics >> 20) & 0xF;
+        const unsigned long declared = bits ? 1UL << (bits - 1) : 16UL;
+        if (secs[s].align <= declared) continue;
+        unsigned long k = 1;
+        while ((1UL << (k - 1)) < secs[s].align && k < 14) ++k;
+        secs[s].characteristics = (secs[s].characteristics & ~0x00F00000UL) | (k << 20);
+    }
     for (size_t s = 0; s < secs.size(); ++s) {
         CoffSectionInfo si; si.number = static_cast<int>(s + 1); si.name = secs[s].name; si.size = static_cast<unsigned long>(secs[s].bytes.size());
         si.isCode = secs[s].isCode; si.comdat = (secs[s].characteristics & kComdat) != 0;

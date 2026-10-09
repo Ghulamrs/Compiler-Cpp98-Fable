@@ -35,7 +35,8 @@ struct IrGlobal {
     std::string init;        // numeric initialiser text, or empty for zero
     bool        linkOnce;    // a static local of an inline function: every unit emits it, one copy survives (COMDAT)
     bool        internal;    // internal linkage: a static variable at namespace scope or a static local of an internal function
-    IrGlobal() : size(8), isFloat(false), linkOnce(false), internal(false) {}
+    int         align;       // the type's alignment or a larger __declspec(align(N)); 0: from the size only
+    IrGlobal() : size(8), isFloat(false), linkOnce(false), internal(false), align(0) {}
 };
 
 class X86Module {

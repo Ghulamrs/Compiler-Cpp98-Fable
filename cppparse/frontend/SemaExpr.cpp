@@ -1,5 +1,6 @@
 // SemaExpr.cpp - version 6 stage 3: expressions, conversions, overload resolution, statements, bodies.
 #include "Sema.hpp"
+#include "PathUtil.hpp"
 
 #include <cstdlib>
 #include <sstream>
@@ -1286,6 +1287,10 @@ void Sema::localDecl(cxx::Decl* d, Scope* in, bool isHandler)
         if (t->kind == Type::Function) { declareFunction(d, dcl, d->spec, in, cxx::AccessPublic, t, params); continue; }
         Symbol* var = m_prog.newSymbol(Symbol::Variable, name, in);
         var->type = t; var->loc = dcl->loc; var->isLocal = true; var->isStatic = d->spec.isStatic; var->isExtern = d->spec.isExtern;
+        var->declAlign = d->spec.align;
+        // cl realigns the stack frame for such a local; this back end lays locals out by their type only
+        if (d->spec.align > 0 && !d->spec.isStatic && !d->spec.isExtern)
+            warning(dcl->loc, "S129", "__declspec(align(" + intToString(d->spec.align) + ")) on a local variable is not supported and is ignored");
         dcl->semaSym = var;
         ++m_stats.variables;
         const Type* tu = m_types.unref(t);

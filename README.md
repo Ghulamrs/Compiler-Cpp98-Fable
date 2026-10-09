@@ -152,14 +152,16 @@ the code is assembled in memory for it and no object is written.
 
  Publics by Value
 
-  Address         Size        Type      Symbol                                    Name
- 0001:0000011c   000002dbH   function  ??0Matrix@mx@@QEAA@HHN@Z                  mx::Matrix::Matrix(int, int, double)
- 00aa:00000000   00000010H   vtable    ??_7overflow_error@std@@6B@               std::overflow_error::`vftable'
+  Address         Size        Flags  Type      Symbol                                    Name
+ 0001:0000011c   000002dbH   f      function  ??0Matrix@mx@@QEAA@HHN@Z                  mx::Matrix::Matrix(int, int, double)
+ 00aa:00000000   00000010H          vtable    ??_7overflow_error@std@@6B@               std::overflow_error::`vftable'
 ```
 
 Addresses are `section:offset` in the object (a linker adds the image base when it links). **Size** is the
 number of bytes the encoder produced for the definition, without the alignment padding after it, which a
-Visual Studio map does not show. Types: function, data, vtable, string, constant. The symbol is the name in
+Visual Studio map does not show. **Flags** are link's: `f` a function, `f i` an inline one (in a COMDAT
+section of its own: inline functions, template instances; one copy survives linking); data has none, as in
+Visual Studio's map. Types: function, data, vtable, string, constant. The symbol is the name in
 the object (MSVC-decorated with `--msvc-mangling`), followed by its readable name. Publics and static
 (internal-linkage) symbols are listed separately, as in Visual Studio's map; COMDAT sections (inline functions,
 template instances, vtables) are grouped by name. The map starts with a time stamp in link's form

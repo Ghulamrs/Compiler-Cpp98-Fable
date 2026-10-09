@@ -98,15 +98,21 @@ try {
         $syms = @(); $byName = @(); $inByName = $false
         foreach ($l in $lines) {
             if ($l -match '^ Symbols by Name') { $inByName = $true; continue }
+            # a row: address, size, link's flags (3 characters: "f i", "f  " or blank), type, [linkage,] symbol, name
             if ($inByName) {
-                if ($l -match '^ ([0-9a-f]{4}):([0-9a-f]{8})   ([0-9a-f]{8})H   (\w+)\s+(public|static)\s+(\S+)\s*(.*)$') {
-                    $byName += [pscustomobject]@{ Key = "$($Matches[1]):$($Matches[2]):$($Matches[3]):$($Matches[6])"; Sort = $(if ($Matches[7]) { $Matches[7] } else { $Matches[6] }) }
+                if ($l -match '^ (?<sec>[0-9a-f]{4}):(?<off>[0-9a-f]{8})   (?<size>[0-9a-f]{8})H   (?<flags>.{3})    (?<type>\w+)\s+(?<link>public|static)\s+(?<sym>\S+)\s*(?<name>.*)$') {
+                    $byName += [pscustomobject]@{ Key = "$($Matches.sec):$($Matches.off):$($Matches.size):$($Matches.flags):$($Matches.sym)"; Sort = $(if ($Matches.name) { $Matches.name } else { $Matches.sym }) }
                 }
-            } elseif ($l -match '^ ([0-9a-f]{4}):([0-9a-f]{8})   ([0-9a-f]{8})H   (\w+)\s+(\S+)') {
-                $syms += [pscustomobject]@{ Sec = [Convert]::ToInt32($Matches[1], 16); Off = [Convert]::ToInt64($Matches[2], 16); Size = [Convert]::ToInt64($Matches[3], 16); Type = $Matches[4]; Name = $Matches[5]; Key = "$($Matches[1]):$($Matches[2]):$($Matches[3]):$($Matches[5])" }
+            } elseif ($l -match '^ (?<sec>[0-9a-f]{4}):(?<off>[0-9a-f]{8})   (?<size>[0-9a-f]{8})H   (?<flags>.{3})    (?<type>\w+)\s+(?<sym>\S+)') {
+                $syms += [pscustomobject]@{ Sec = [Convert]::ToInt32($Matches.sec, 16); Off = [Convert]::ToInt64($Matches.off, 16); Size = [Convert]::ToInt64($Matches.size, 16); Flags = $Matches.flags; Type = $Matches.type; Name = $Matches.sym; Key = "$($Matches.sec):$($Matches.off):$($Matches.size):$($Matches.flags):$($Matches.sym)" }
             }
         }
         if ($syms.Count -eq 0) { return @("no symbols in $mapPath") }
+        # link's flags: a function is "f", and "f i" when it is inline (in a COMDAT section, absent from the table)
+        foreach ($s in $syms) {
+            $want = if ($s.Type -ne 'function') { '   ' } elseif ($sections.ContainsKey($s.Sec)) { 'f  ' } else { 'f i' }
+            if ($s.Flags -ne $want) { $problems += "$($s.Name): flags '$($s.Flags)', expected '$want'"; break }
+        }
         # the by-name list at the end: the same symbols, addresses and sizes, in ascending name order
         $diff = @(Compare-Object @($syms | ForEach-Object Key | Sort-Object) @($byName | ForEach-Object Key | Sort-Object))
         if ($diff.Count) { $problems += "Symbols by Name differs from the address lists: " + ($diff | Select-Object -First 3 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join '; ' }
@@ -565,7 +571,7 @@ try {
         else { Write-Host "  FAIL aligndriver$lvl.exe (-O$lvl):"; Write-Host ($run.Split("`n") | Where-Object { $_ -match 'FAIL' }); $failed++ }
         $p = @(Test-ObjectMap "out\x64\align${lvl}6.map" "out\x64\align${lvl}6.obj")
         $am = Get-Content "out\x64\align${lvl}6.map" -Raw
-        if ($am -notmatch '(?m)^ 0002:[0-9a-f]{6}[048c]0   [0-9a-f]{8}H   data\s+\?g_align64@@3NA') { $p += "g_align64 not at a 64-byte offset in the map" }
+        if ($am -notmatch '(?m)^ 0002:[0-9a-f]{6}[048c]0   [0-9a-f]{8}H   .{3}    data\s+\?g_align64@@3NA') { $p += "g_align64 not at a 64-byte offset in the map" }
         if ($p.Count -eq 0) { Write-Host "  ok   align${lvl}6.map: sizes fill the sections, addresses match dumpbin, g_align64 64-aligned" }
         else { Write-Host "  FAIL align${lvl}6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
     }

@@ -18,10 +18,30 @@
 
 namespace cppparse {
 
+// the layout of the assembled object, for the map file
+struct CoffSectionInfo {
+    int           number;       // 1-based section number, as in the symbol table
+    std::string   name;         // .text, .data, .rdata, .CRT$XCU, .text$mn (a COMDAT function)
+    unsigned long size;         // bytes
+    bool          isCode;
+    bool          comdat;
+};
+
+struct CoffSymbolInfo {
+    std::string   name;         // the symbol as written to the object (decorated)
+    int           section;      // 1-based
+    unsigned long offset;       // within the section
+    unsigned long size;         // bytes the definition occupies, without the alignment padding after it
+    bool          isFunction;
+    bool          external;     // PUBLIC; false for internal linkage
+};
+
 struct CoffResult {
     int functions, instructions, relocations, symbols;
     unsigned long textBytes, dataBytes, rdataBytes, fileBytes;
     std::vector<std::string> errors;     // lines that could not be encoded (the file is not written)
+    std::vector<CoffSectionInfo> sectionList;   // every section, in section-number order
+    std::vector<CoffSymbolInfo>  symbolList;    // every defined symbol, by section and offset
     CoffResult() : functions(0), instructions(0), relocations(0), symbols(0), textBytes(0), dataBytes(0), rdataBytes(0), fileBytes(0) {}
 };
 

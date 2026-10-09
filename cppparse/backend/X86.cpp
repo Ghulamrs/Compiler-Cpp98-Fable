@@ -937,4 +937,20 @@ std::string X86Module::finish()
     return s.str();
 }
 
+void X86Module::describeSymbols(const std::vector<IrFunction*>& functions, std::map<std::string, std::string>& out)
+{
+    for (size_t i = 0; i < functions.size(); ++i) out[symbol(functions[i]->name)] = functions[i]->name;
+    for (size_t i = 0; i < m_globals.size(); ++i) out[globalSymbol(m_globals[i].name)] = m_globals[i].name;
+    for (size_t i = 0; i < m_vtables.size(); ++i) out[globalSymbol("vtable@" + m_vtables[i].className)] = m_vtables[i].className + "::`vftable'";
+    for (std::map<std::string, double>::const_iterator fi = m_floats.begin(); fi != m_floats.end(); ++fi) {
+        std::ostringstream v;
+        v.precision(17);
+        v << "double constant " << fi->second;
+        out[fi->first] = v.str();
+    }
+    for (std::map<std::string, std::string>::const_iterator si = m_strings.begin(); si != m_strings.end(); ++si)
+        out[si->first] = "string literal " + (si->second.size() > 48 ? si->second.substr(0, 45) + "...\"" : si->second);
+    out["sign_mask"] = "sign mask for floating-point negation";
+}
+
 } // namespace cppparse

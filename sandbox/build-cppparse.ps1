@@ -85,6 +85,50 @@ try {
     # ---- test 1: Visual Studio 2010 solution --------------------------------
     if ($NoTests) { Write-Host "built $exe"; $global:LASTEXITCODE = 0; return }
 
+    # checks an object map (<name>.map) against itself and, given the object, against dumpbin's symbol table:
+    # no definition overlaps the next one, the functions fill .text exactly (they are packed without padding),
+    # and every address is the section and offset the object really has. Returns the problems found.
+    function Test-ObjectMap([string]$mapPath, [string]$objPath = "") {
+        $problems = @()
+        if (-not (Test-Path $mapPath)) { return @("missing $mapPath") }
+        $lines = Get-Content $mapPath
+        if ($lines -match 'not available') { return @("map not available: " + (($lines | Select-String 'line \d+:' | Select-Object -First 1).Line)) }
+        $sections = @{}
+        foreach ($l in $lines) { if ($l -match '^ ([0-9a-f]{4}):00000000 ([0-9a-f]{8})H  (\S+)') { $sections[[Convert]::ToInt32($Matches[1], 16)] = @{ Size = [Convert]::ToInt64($Matches[2], 16); Name = $Matches[3] } } }
+        $syms = @()
+        foreach ($l in $lines) {
+            if ($l -match '^ ([0-9a-f]{4}):([0-9a-f]{8})   ([0-9a-f]{8})H   (\w+)\s+(\S+)') {
+                $syms += [pscustomobject]@{ Sec = [Convert]::ToInt32($Matches[1], 16); Off = [Convert]::ToInt64($Matches[2], 16); Size = [Convert]::ToInt64($Matches[3], 16); Type = $Matches[4]; Name = $Matches[5] }
+            }
+        }
+        if ($syms.Count -eq 0) { return @("no symbols in $mapPath") }
+        foreach ($g in ($syms | Group-Object Sec)) {
+            if (-not $sections.ContainsKey([int]$g.Name)) { continue }   # a COMDAT section: listed only as part of its group
+            $list = @($g.Group | Sort-Object Off)
+            for ($i = 0; $i -lt $list.Count; $i++) {
+                $end = $list[$i].Off + $list[$i].Size
+                $limit = if ($i + 1 -lt $list.Count) { $list[$i + 1].Off } else { $sections[[int]$g.Name].Size }
+                if ($end -gt $limit) { $problems += "$($list[$i].Name) ends at $end beyond $limit" }
+            }
+            if ($sections[[int]$g.Name].Name -like '.text*') {
+                $sum = ($list | Measure-Object Size -Sum).Sum
+                if ($sum -ne $sections[[int]$g.Name].Size) { $problems += "section $($g.Name): functions add up to $sum bytes, the section has $($sections[[int]$g.Name].Size)" }
+            }
+        }
+        if ($objPath -ne "") {
+            $real = @{}
+            # dumpbin follows a decorated name with " (undecorated)": the name is the first word after the bar
+            foreach ($l in (& "$Msvc\bin\Hostx64\x64\dumpbin.exe" /nologo /symbols $objPath)) {
+                if ($l -match '^[0-9A-F]{3,} ([0-9A-F]{8}) SECT([0-9A-F]+)\s.*\| (\S+)') { $real[$Matches[3]] = @([Convert]::ToInt32($Matches[2], 16), [Convert]::ToInt64($Matches[1], 16)) }
+            }
+            foreach ($s in $syms) {
+                if (-not $real.ContainsKey($s.Name)) { $problems += "$($s.Name) is not in the object"; continue }
+                if ($real[$s.Name][0] -ne $s.Sec -or $real[$s.Name][1] -ne $s.Off) { $problems += "$($s.Name): map $($s.Sec):$($s.Off), object $($real[$s.Name][0]):$($real[$s.Name][1])" }
+            }
+        }
+        return $problems
+    }
+
     Write-Host "=== Test 1: sample\Sample.sln ==="
     & $exe -o "out\sample" "..\examples\sample\Sample.sln"
     if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on Sample.sln" }
@@ -360,6 +404,12 @@ try {
         if ($diff -eq 0 -and $same -gt 100) { Write-Host "  ok   dumpbin disassembly of own3.obj matches ml64's opt3.obj ($same instructions)" }
         else { Write-Host "  FAIL disassembly differs: $same same, $diff different (first differences follow)"; $shown = 0; for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count) -and $shown -lt 8; $i++) { if ($i -ge $a.Count -or $i -ge $b.Count -or $a[$i] -ne $b[$i]) { Write-Host "    [$i] ml64: $($a[$i])   own: $($b[$i])"; $shown++ } }; $failed++ }
     }
+    # the object map: real sizes, consistent with the sections and with dumpbin's symbol table
+    foreach ($lvl in @(0, 3)) {
+        $p = @(Test-ObjectMap "out\x64\own$lvl.map" "out\x64\own$lvl.obj")
+        if ($p.Count -eq 0) { Write-Host "  ok   own$lvl.map: sizes fill the sections, addresses match dumpbin /symbols" }
+        else { Write-Host "  FAIL own$lvl.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
+    }
     if ($failed -ne 0) { throw "$failed COFF check(s) failed" }
 
     Write-Host "=== Test 9: version 5 MSVC-compatible mangling (--msvc-mangling, native C++ driver) ==="
@@ -478,7 +528,20 @@ try {
         $run = & ".\out\x64\v6driver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   v6driver$lvl.exe: all results correct (-O$lvl, version 6 front end)" }
         else { Write-Host "  FAIL v6driver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
+        $p = @(Test-ObjectMap "out\x64\v6o${lvl}6.map" $obj)
+        if ($p.Count -eq 0) { Write-Host "  ok   v6o${lvl}6.map: sizes fill the sections, addresses match dumpbin /symbols" }
+        else { Write-Host "  FAIL v6o${lvl}6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
     }
+    # a map with vtables and COMDAT sections: the matrix sample through the version 6 pipeline
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $null = & $exe --compile6 -O2 --obj --msvc-mangling -q -I ..\include -I .. -I ..\examples\sample-matrix -o out\x64 -n mtx "..\examples\sample-matrix\matrix.cpp" 2>&1
+    $ErrorActionPreference = $eap
+    $p = @(Test-ObjectMap "out\x64\mtx6.map" "out\x64\mtx6.obj")
+    $mtx = if (Test-Path "out\x64\mtx6.map") { Get-Content "out\x64\mtx6.map" -Raw } else { "" }
+    if ($mtx -match 'vtable\s+\S+\s+\S+::`vftable''' -and $mtx -notmatch '(?m)data\s+\S+\s+\S+::`vftable''') { Write-Host "  ok   mtx6.map: vtables typed as vtable" } else { $p += "vtables not typed as vtable" }
+    if ($mtx -match '(?m)^ [0-9a-f]{4}-[0-9a-f]{4}\s+[0-9a-f]{8}H  \.text\$mn\s+CODE  COMDAT, \d+ section') { Write-Host "  ok   mtx6.map: COMDAT sections grouped" } else { $p += "COMDAT sections not grouped" }
+    if ($p.Count -eq 0) { Write-Host "  ok   mtx6.map: sizes fill the sections, addresses match dumpbin /symbols" }
+    else { Write-Host "  FAIL mtx6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
     if ($failed -ne 0) { throw "$failed version 6 compile check(s) failed" }
 
     Write-Host ""

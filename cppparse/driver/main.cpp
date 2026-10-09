@@ -33,6 +33,7 @@
 #endif
 #include "CodeBase.hpp"
 #include "Coff.hpp"
+#include "MapFile.hpp"
 #include "Compiler.hpp"
 #include "Diagram.hpp"
 #include "Health.hpp"
@@ -341,11 +342,12 @@ int main(int argc, char* argv[])
                     writeOut(base + "-asm6.txt", br.asmText, quiet, written);
                     if (copt.x86) {
                         writeOut(base + "6.asm", br.x86Text, quiet, written);
-                        if (obj) {
-                            CoffResult cr;
-                            if (writeCoffObject(br.x86Text, base + "6.obj", copt.threads, cr)) { if (!quiet) std::cout << "  wrote " << base << "6.obj\n"; }
-                            else { std::cerr << "error: " << base << "6.obj not written:\n"; for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n"; totalErrors += 1; }
-                        }
+                        CoffResult cr;
+                        if (!obj) { std::string bytes; assembleCoff(br.x86Text, copt.threads, bytes, cr); }   // only for the map
+                        else if (writeCoffObject(br.x86Text, base + "6.obj", copt.threads, cr)) { if (!quiet) std::cout << "  wrote " << base << "6.obj\n"; }
+                        else { std::cerr << "error: " << base << "6.obj not written:\n"; for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n"; totalErrors += 1; }
+                        std::string mapObject = obj ? baseName(base) + "6.obj" : baseName(base) + "6.asm, assembled in memory (no --obj, no object written)";
+                        writeOut(base + "6.map", renderObjectMap(baseName(inputs[i]), mapObject, cr, br.symbolNames), quiet, written);
                     }
                     for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
                 }
@@ -437,19 +439,23 @@ int main(int argc, char* argv[])
         if (!writeOut(base + "-asm.txt", compiler.asmText(), quiet, written)) ok = false;
         if (copt.x86) {
             if (!writeOut(base + ".asm", compiler.x86Text(), quiet, written)) ok = false;
-            if (obj) {
-                CoffResult cr;
-                std::string objPath = base + (assemble ? "-cppparse.obj" : ".obj");   // --assemble keeps <name>.obj for ml64
-                if (writeCoffObject(compiler.x86Text(), objPath, copt.threads, cr)) {
-                    if (!quiet) std::cout << "  wrote " << objPath << "  (" << cr.functions << " functions, " << cr.instructions << " instructions, .text "
-                                          << cr.textBytes << " bytes, .data " << cr.dataBytes << ", .rdata " << cr.rdataBytes << ", "
-                                          << cr.relocations << " relocations, " << cr.symbols << " symbols)\n";
-                } else {
-                    std::cerr << "error: " << objPath << " not written, " << cr.errors.size() << " line(s) could not be encoded:\n";
-                    for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n";
-                    ok = false;
-                }
+            CoffResult cr;
+            std::string objPath = base + (assemble ? "-cppparse.obj" : ".obj");   // --assemble keeps <name>.obj for ml64
+            if (!obj) {
+                // the map needs the real layout: assemble in memory when no object is written
+                std::string bytes;
+                assembleCoff(compiler.x86Text(), copt.threads, bytes, cr);
+            } else if (writeCoffObject(compiler.x86Text(), objPath, copt.threads, cr)) {
+                if (!quiet) std::cout << "  wrote " << objPath << "  (" << cr.functions << " functions, " << cr.instructions << " instructions, .text "
+                                      << cr.textBytes << " bytes, .data " << cr.dataBytes << ", .rdata " << cr.rdataBytes << ", "
+                                      << cr.relocations << " relocations, " << cr.symbols << " symbols)\n";
+            } else {
+                std::cerr << "error: " << objPath << " not written, " << cr.errors.size() << " line(s) could not be encoded:\n";
+                for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n";
+                ok = false;
             }
+            std::string mapObject = obj ? baseName(objPath) : outName + ".asm, assembled in memory (no --obj, no object written)";
+            if (!writeOut(base + ".map", renderObjectMap(cb.title(), mapObject, cr, compiler.symbolNames()), quiet, written)) ok = false;
             if (assemble) {
                 std::string cmd = "ml64 /nologo /c \"/Fo" + base + ".obj\" \"" + base + ".asm\"";
                 if (!quiet) std::cout << "  running " << cmd << "\n";

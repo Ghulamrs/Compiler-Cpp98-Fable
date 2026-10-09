@@ -36,6 +36,28 @@ int Layouts::classSize(const ClassInfo* cls)
     return layout(cls).size;
 }
 
+bool Layouts::opaqueByValue(const Type* t)
+{
+    if (!t) return false;
+    if (t->kind == Type::Array) return opaqueByValue(t->inner);
+    if (t->kind == Type::Class) {
+        if (!t->cls || !t->cls->isDefinition) return false;
+        Lock l(semanticMutex());
+        return layout(t->cls).opaque;
+    }
+    if (t->kind != Type::Unknown) return false;
+    // unresolved names are mostly scalar typedefs (std::size_t, time_t) that the 8 bytes assumed for them
+    // fit; a template instance or a known library class is an object of unknown size
+    if (t->name.find('<') != std::string::npos) return true;
+    static const char* const kClasses[] = { "string", "wstring", "basic_string", "vector", "list", "deque", "map", "multimap",
+                                            "set", "multiset", "pair", "ostream", "istream", "iostream", "ofstream", "ifstream",
+                                            "fstream", "ostringstream", "istringstream", "stringstream", "exception", 0 };
+    std::string n = t->name;
+    if (n.compare(0, 5, "std::") == 0) n = n.substr(5);
+    for (int i = 0; kClasses[i]; ++i) if (n == kClasses[i]) return true;
+    return false;
+}
+
 bool Layouts::hasVtable(const ClassInfo* cls)
 {
     if (!cls || !cls->isDefinition) return false;
@@ -77,6 +99,7 @@ const Layouts::Layout& Layouts::layout(const ClassInfo* cls)
         if (BL.align > L.align) L.align = BL.align;
         offset = (offset + BL.align - 1) / BL.align * BL.align;
         L.bases[base] = offset;
+        if (BL.opaque) L.opaque = true;
         L.order.push_back("+" + intToString(offset) + " base " + base->qualifiedName);
         if (b == 0) L.vtable = BL.vtable; else for (size_t v = 0; v < BL.vtable.size(); ++v) L.vtable.push_back(base->name + "::" + BL.vtable[v]);
         if (BL.vptr) anyBaseVptr = true;
@@ -114,6 +137,7 @@ const Layouts::Layout& Layouts::layout(const ClassInfo* cls)
         Field fld;
         fld.type = m_types.parse(v.type, cls->qualifiedName, cls);
         if (v.isStatic) { fld.isStatic = true; L.fields[v.name] = fld; continue; }
+        if (opaqueByValue(fld.type)) L.opaque = true;
         int size = sizeOf(fld.type), align = alignOf(fld.type);
         if (!v.bitField.empty()) { size = 4; align = 4; }
         if (align > L.align) L.align = align;
@@ -667,7 +691,13 @@ int IrBuilder::call(Expr* e)
             name = "(indirect)";
         }
         in.sub = name + (name == "(indirect)" ? "" : "?");
-        for (size_t a = firstArg; a < e->kids.size(); ++a) { int v = value(e->kids[a]); in.args.push_back(IrOperand::temp(v, m_types.decay(e->kids[a]->type))); }
+        const bool math = callee && callee->kind == Expr::Name && isDoubleMathFunction(name);   // arguments are doubles (xmm0..)
+        for (size_t a = firstArg; a < e->kids.size(); ++a) {
+            int v = value(e->kids[a]);
+            const Type* at = m_types.decay(e->kids[a]->type);
+            if (math && at && at->isArithmetic() && at->kind != Type::Double) { v = convert(v, at, m_types.doubleType(), line); at = m_types.doubleType(); }
+            in.args.push_back(IrOperand::temp(v, at));
+        }
         if (!rt || rt->isUnknown()) in.type = m_types.builtin(Type::Long);
         return emit(in);
     }

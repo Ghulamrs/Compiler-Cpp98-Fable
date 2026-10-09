@@ -9,6 +9,7 @@
 #include "Ir.hpp"
 #include "X86.hpp"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,7 @@ struct BackEndResult {
     std::string log;            // optimisation log lines
     std::string asmText;        // VM64 listing
     std::string x86Text;        // MASM, when x86 was requested
+    std::map<std::string, std::string> symbolNames;   // x86 symbol -> readable name, for the map file
     int  irBefore, irAfter, asmInstructions, spills;
     long tLocal, tInter, tSsa, tLower;
     BackEndResult() : irBefore(0), irAfter(0), asmInstructions(0), spills(0), tLocal(0), tInter(0), tSsa(0), tLower(0) {}

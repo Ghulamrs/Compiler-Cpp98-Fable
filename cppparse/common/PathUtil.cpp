@@ -228,6 +228,16 @@ bool isKnownLibraryName(const std::string& n)
     return libraryNameOrigin(n) != OriginUnknown;
 }
 
+bool isDoubleMathFunction(const std::string& name)
+{
+    // the C90 <math.h> functions whose parameters and result are all double (frexp, modf and ldexp are not)
+    static const char* const kNames[] = { "acos", "asin", "atan", "atan2", "ceil", "cos", "cosh", "exp", "fabs", "floor",
+                                          "fmod", "log", "log10", "pow", "sin", "sinh", "sqrt", "tan", "tanh", 0 };
+    std::string n = name.compare(0, 5, "std::") == 0 ? name.substr(5) : (name.compare(0, 2, "::") == 0 ? name.substr(2) : name);
+    for (int i = 0; kNames[i]; ++i) if (n == kNames[i]) return true;
+    return false;
+}
+
 std::string lastComponent(const std::string& qualified)
 {
     size_t pos = qualified.rfind("::");

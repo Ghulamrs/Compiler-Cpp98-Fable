@@ -59,9 +59,26 @@ struct UnitResult {
     std::vector<Finding> findings;
     std::string          astText;
     IrFunction*          ir;
-    bool                 parseFailed, typeFailed;
-    UnitResult() : ir(0), parseFailed(false), typeFailed(false) {}
+    bool                 parseFailed, typeFailed, opaqueSkipped;
+    UnitResult() : ir(0), parseFailed(false), typeFailed(false), opaqueSkipped(false) {}
 };
+
+// the first use by value of a standard-library class this pipeline does not know (see Layouts::opaqueByValue):
+// such code would be laid out and copied with guessed sizes, so the function is left out instead
+bool findOpaqueUse(const IrFunction& f, Layouts& layouts, std::string& what)
+{
+    for (size_t i = 0; i < f.locals.size(); ++i)
+        if (layouts.opaqueByValue(f.locals[i].type)) { what = (f.locals[i].isParam ? "parameter " : "local ") + f.locals[i].name + " of type " + f.locals[i].type->str(); return true; }
+    if (layouts.opaqueByValue(f.retType)) { what = "returns " + f.retType->str() + " by value"; return true; }
+    for (size_t b = 0; b < f.blocks.size(); ++b)
+        for (size_t k = 0; k < f.blocks[b].insts.size(); ++k) {
+            const IrInst& in = f.blocks[b].insts[k];
+            if (layouts.opaqueByValue(in.type)) { what = "uses " + in.type->str() + " by value"; return true; }
+            if (in.op == IrInst::AddrField && !in.args.empty() && in.args[0].type && in.args[0].type->kind == Type::Pointer &&
+                layouts.opaqueByValue(in.args[0].type->inner)) { what = "accesses a field of " + in.args[0].type->inner->str(); return true; }
+        }
+    return false;
+}
 
 
 // one vtable per polymorphic class, with the IR names of the most derived implementations
@@ -172,6 +189,20 @@ void compileUnit(const CodeBase& cb, TypeTable& types, Layouts& layouts, const s
     IrBuilder builder(cb, types, layouts);
     r.ir = new IrFunction;
     builder.build(ast, *r.ir);
+    std::string what;
+    if (findOpaqueUse(*r.ir, layouts, what)) {
+        Finding f;
+        f.severity = Finding::Info;
+        f.code = "T190";
+        f.file = fn.file;
+        f.line = fn.line;
+        f.message = fn.displayName() + " is outside the version 3 subset and not compiled: " + what;
+        f.detail = "standard-library classes are opaque to version 3; --compile6 compiles them with cppparse's own headers";
+        r.findings.push_back(f);
+        delete r.ir;
+        r.ir = 0;
+        r.opaqueSkipped = true;
+    }
 }
 
 struct FrontJob : public ParallelJob {
@@ -240,6 +271,7 @@ void Compiler::run()
             astOut << r.astText;
             if (r.parseFailed) ++m_summary.parseFailures;
             if (r.typeFailed) ++m_summary.typeFailures;
+            if (r.opaqueSkipped) ++m_summary.functionsSkipped;
             if (r.ir) { irFunctions.push_back(r.ir); byName[r.ir->name] = r.ir; ++m_summary.functionsCompiled; }
         }
         job.units.clear();
@@ -294,7 +326,7 @@ void Compiler::run()
     logOut << br.log;
     irOut << br.irText;
     asmOut << br.asmText;
-    if (m_opt.x86) m_x86 = br.x86Text;
+    if (m_opt.x86) { m_x86 = br.x86Text; m_symbolNames.swap(br.symbolNames); }
     if (m_opt.optLevel == 0) logOut << "(no optimisation requested: use -O1, -O2 or -O3)\n";
     logOut << "\ntotal IR instructions: " << m_summary.irBefore << " -> " << m_summary.irAfter << "\n";
     logOut << "phase times (ms, " << threads << " thread(s)): front end " << tFront << ", local optimisation " << br.tLocal
@@ -315,7 +347,7 @@ void Compiler::summaryLines(std::vector<std::string>& out) const
 {
     out.push_back("Version 3 compile (-O" + intToString(m_opt.optLevel) + "): functions seen " + intToString(m_summary.functionsSeen) +
                   ", compiled " + intToString(m_summary.functionsCompiled) + ", skipped " + intToString(m_summary.functionsSkipped) +
-                  " (templates, function-try-blocks), parse failures " + intToString(m_summary.parseFailures) +
+                  " (templates, function-try-blocks, std:: classes by value), parse failures " + intToString(m_summary.parseFailures) +
                   ", functions with type errors " + intToString(m_summary.typeFailures));
     out.push_back("IR instructions: " + intToString(m_summary.irBefore) + " -> " + intToString(m_summary.irAfter) + " after optimisation;  assembly instructions " +
                   intToString(m_summary.asmInstructions) + ", spilled temporaries " + intToString(m_summary.spills));

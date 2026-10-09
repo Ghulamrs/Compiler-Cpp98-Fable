@@ -41,6 +41,7 @@ Written next to the first input, or into the `-o` directory:
 | `<name>-asm.txt`       | version 3: lowered VM64 assembly                                  |
 | `<name>.asm`           | version 4: x86-64 MASM (Windows x64 ABI); `--assemble` adds `.obj` via ml64 |
 | `<name>.obj`           | version 5: COFF object written by cppparse itself (`--obj`) |
+| `<name>.map`           | object map: sections, every symbol's address, real size and type (see below) |
 | `<name>-report.html`   | the same report as one self-contained page with the diagram      |
 | `<name>-report.pdf`    | the same report as PDF: title page, diagram pages, text pages    |
 | `<name>-diagram.svg`   | the class diagram picture                                       |
@@ -136,6 +137,34 @@ definition or declaration, then all symbols sorted by name, a cross
 reference (every function and global with the places that call or use it),
 the functions and globals never referenced anywhere, and the entry point.
 `<name>-symbols.json` and `-symbols.txt` hold the same symbols for tools.
+
+## Object map
+
+Whenever x86-64 code is generated, `<name>.map` (`<name>6.map` with `--compile6`) describes the object in
+the layout of a Visual Studio linker map (`link /MAP`), built from the COFF writer's own layout. Without `--obj`
+the code is assembled in memory for it and no object is written.
+
+```
+ Start         Length     Name                   Class
+ 0001:00000000 00007031H  .text                  CODE
+ 0002:00000000 00000008H  .data                  DATA
+ 0004-00a9     000012c4H  .text$mn               CODE  COMDAT, 166 section(s)
+
+ Publics by Value
+
+  Address         Size        Type      Symbol                                    Name
+ 0001:0000011c   000002dbH   function  ??0Matrix@mx@@QEAA@HHN@Z                  mx::Matrix::Matrix(int, int, double)
+ 00aa:00000000   00000010H   vtable    ??_7overflow_error@std@@6B@               std::overflow_error::`vftable'
+```
+
+Addresses are `section:offset` in the object (a linker adds the image base when it links). **Size** is the
+number of bytes the encoder produced for the definition, without the alignment padding after it, which a
+Visual Studio map does not show. Types: function, data, vtable, string, constant. The symbol is the name in
+the object (MSVC-decorated with `--msvc-mangling`), followed by its readable name. Publics and static
+(internal-linkage) symbols are listed separately, as in Visual Studio's map; COMDAT sections (inline functions,
+template instances, vtables) are grouped by name. If the assembly cannot be encoded, the map says so and lists
+the lines instead of showing guessed numbers. Tests 8 and 13 check that the sizes fill each section exactly
+and that every address matches `dumpbin /symbols` of the object.
 
 ## Building and testing
 
@@ -264,7 +293,13 @@ instructions for exception regions.
 Subset limits: function-try-blocks, brace initialisers, goto and local
 classes are reported and skipped; standard-library types are opaque and
 never produce findings; calls through unknown functions are emitted as
-opaque calls.
+opaque calls (the `<cmath>` functions that take and return `double`, such
+as `fabs`, `sqrt` and `pow`, are called with `double` arguments and
+results). A function that uses a standard-library class by value
+(`std::vector<double>`, `std::string`, a stream), or a class whose layout
+contains one, is not compiled: its size and field offsets would be
+guesses. It is reported as T190 and counted as skipped; `--compile6`
+compiles such code with cppparse's own headers.
 
 ## Version 4: SSA, template instantiation, x86-64
 

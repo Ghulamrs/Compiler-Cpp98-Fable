@@ -52,6 +52,9 @@ public:
     std::string codeFor(const IrFunction& f, LowerStats& stats);         // safe to call from several threads
     void        appendCode(const std::string& code);
     std::string finish();                       // the complete .asm text
+    // symbol -> readable name ("geom::Circle::area() const", "geom::Shape::`vftable'", "string literal ..."),
+    // for the map file; call after finish()
+    void        describeSymbols(const std::vector<IrFunction*>& functions, std::map<std::string, std::string>& out);
 
 private:
     void emitGlobals();

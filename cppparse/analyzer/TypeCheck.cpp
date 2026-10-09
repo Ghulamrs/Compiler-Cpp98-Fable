@@ -877,6 +877,8 @@ const Type* TypeChecker::checkCall(Expr* e)
             if (e->kids.size() == 2) checkConvert(e->kids[1], t, "T104", "functional cast to " + t->str());
             return t;
         }
+        // a <cmath> function from a header that was not parsed: its result is a double (returned in xmm0)
+        if (callee->kind == Expr::Name && isDoubleMathFunction(callee->text)) return m_types.doubleType();
         return m_types.unknown("call");   // unknown callee: no cascade
     }
     expr(callee);

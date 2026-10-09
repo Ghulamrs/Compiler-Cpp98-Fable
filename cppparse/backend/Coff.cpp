@@ -11,6 +11,7 @@
 #include "Coff.hpp"
 #include "Parallel.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -284,6 +285,7 @@ struct Chunk {
     std::vector<Fixup>                        fixups;
     std::map<std::string, unsigned long>      labels;    // local labels
     std::vector<std::pair<std::string, unsigned long> > symbols;   // named definitions (PROC names, data labels)
+    std::vector<unsigned long>                padStarts;  // where ALIGN padding begins: a data item ends there
     std::vector<std::string>                  errors;
     int                                       instructions;
     Chunk() : instructions(0) {}
@@ -786,6 +788,7 @@ bool Encoder::dataLine(const std::string& raw, int line)
     if (dir == "ALIGN") {
         long n = 0;
         if (di + 1 >= words.size() || !parseLong(words[di + 1], n) || n <= 0) return fail("bad ALIGN", line);
+        if (pos() % static_cast<unsigned long>(n)) m_c.padStarts.push_back(pos());
         while (pos() % static_cast<unsigned long>(n)) byte(0);
         if (!name.empty()) m_c.symbols.push_back(std::make_pair(name, pos()));
         return true;
@@ -897,6 +900,28 @@ const unsigned long kRdataFlags = 0x40500040UL;   // initialized | read | align 
 const unsigned long kCrtFlags   = 0x40400040UL;   // initialized | read | align 8
 const unsigned long kComdat     = 0x00001000UL;   // IMAGE_SCN_LNK_COMDAT
 const int           kSelectAny  = 2;              // IMAGE_COMDAT_SELECT_ANY
+
+// bytes of the s-th definition of a chunk: up to the next definition, the start of ALIGN padding or the end
+// of the chunk, whichever comes first
+unsigned long symbolSize(const Chunk& c, size_t s)
+{
+    const unsigned long start = c.symbols[s].second;
+    unsigned long end = static_cast<unsigned long>(c.bytes.size());
+    for (size_t k = 0; k < c.symbols.size(); ++k)
+        if (c.symbols[k].second > start && c.symbols[k].second < end) end = c.symbols[k].second;
+    for (size_t k = 0; k < c.padStarts.size(); ++k)
+        if (c.padStarts[k] >= start && c.padStarts[k] < end) end = c.padStarts[k];
+    return end - start;
+}
+
+struct SymbolInfoOrder {
+    bool operator()(const CoffSymbolInfo& a, const CoffSymbolInfo& b) const
+    {
+        if (a.section != b.section) return a.section < b.section;
+        if (a.offset != b.offset) return a.offset < b.offset;
+        return a.name < b.name;
+    }
+};
 
 } // namespace
 
@@ -1013,6 +1038,9 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             if (symbolIndex.count(f.name)) { result.errors.push_back("duplicate symbol " + f.name); continue; }
             symbolIndex[f.name] = 0;   // defined; the index is assigned when the table is laid out
             if (blocks[i].comdat) comdatSymbols.back().push_back(f); else plainSymbols.push_back(f);
+            CoffSymbolInfo mi; mi.name = f.name; mi.section = sectionNumber; mi.offset = f.value; mi.size = symbolSize(c, s);
+            mi.isFunction = true; mi.external = f.storageClass == 2;
+            result.symbolList.push_back(mi);
         }
     }
     result.functions = static_cast<int>(blocks.size());
@@ -1039,10 +1067,19 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             if (symbolIndex.count(f.name)) { result.errors.push_back("duplicate symbol " + f.name); continue; }
             symbolIndex[f.name] = 0;
             if (dp.comdat) comdatSymbols.back().push_back(f); else plainSymbols.push_back(f);
+            CoffSymbolInfo mi; mi.name = f.name; mi.section = sectionNumber; mi.offset = f.value; mi.size = symbolSize(c, k);
+            mi.isFunction = false; mi.external = f.storageClass == 2;
+            result.symbolList.push_back(mi);
         }
     }
     for (size_t p = 0; p < pieces.size(); ++p) delete pieces[p];
     pieces.clear();
+    for (size_t s = 0; s < secs.size(); ++s) {
+        CoffSectionInfo si; si.number = static_cast<int>(s + 1); si.name = secs[s].name; si.size = static_cast<unsigned long>(secs[s].bytes.size());
+        si.isCode = secs[s].isCode; si.comdat = (secs[s].characteristics & kComdat) != 0;
+        result.sectionList.push_back(si);
+    }
+    std::stable_sort(result.symbolList.begin(), result.symbolList.end(), SymbolInfoOrder());
 
     // symbol table: the plain section symbols, the plain symbols, each COMDAT section symbol with its symbols, the externals
     const size_t plainSections = crtIndex ? 4 : 3;

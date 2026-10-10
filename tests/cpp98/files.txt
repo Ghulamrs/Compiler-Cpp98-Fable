@@ -1,3 +1,5 @@
 # Sources checked by check.ps1 as C++98. One path per line, relative to the repository root.
 # SemaExpr.cpp: Viable was a local type used as a template argument (std::vector<Viable>)
 cppparse/frontend/SemaExpr.cpp
+# Parser.cpp: Chain was a local type used as a template argument (std::vector<Chain>)
+cppparse/analyzer/Parser.cpp

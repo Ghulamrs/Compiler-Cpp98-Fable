@@ -96,7 +96,15 @@ uses its address only to recognise "this frame was compiled by cppparse, its ran
 REL32 and ADDR64). A COMDAT function's `.pdata`/`.xdata` must go in an *associative* COMDAT section
 (selection 5), so the linker drops them together with the function. cl does the same.
 
-## 5. The frame shape (needed first)
+## 5. The frame shape
+
+**As built (step 1):** no layout change was needed after all. `rsp` never moves in a function body, so the
+unwind codes can describe the whole frame from `rsp` without a frame register. `rbp` is declared as one more
+pushed register (`.pushreg rbp`), `mov rbp, rsp` needs no code of its own, and each xmm save at `[rbp-x]` is
+described as `.savexmm128 xmmN, frameSize-x` (its offset from `rsp` after the prologue). The text below was the
+original plan, kept for reference.
+
+
 
 Windows unwind codes can only describe saves at **positive** offsets from the frame base. Today's
 prologue sets `rbp` first and stores xmm6-15 below it (`movdqu [rbp-x], xmm6`), which the format cannot

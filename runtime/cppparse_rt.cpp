@@ -233,4 +233,36 @@ int cppparse_frame_depth(void)
 
 int cppparse_caught_depth(void) { return g_caughtCount; }
 
+/* for tests of the unwind tables: walks the stack from the caller with RtlVirtualUnwind, as an exception does,
+   counting the frames of the function that starts at 'counted', up to the first frame of the function that starts
+   at 'stop'; there it stores the callee-saved registers as the unwind restored them (rbx rbp rsi rdi r12 r13 r14
+   r15, then the low halves of xmm6..xmm15) and returns the count. -1 when 'stop' is not reached */
+int cppparse_walk_frames(const void* stop, const void* counted, unsigned long long* ints, unsigned long long* xmms)
+{
+    CONTEXT ctx;
+    int frames = 0, i;
+    RtlCaptureContext(&ctx);
+    for (i = 0; i < 1024 && ctx.Rip; ++i) {
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, 0);
+        const char* begin = rf ? (const char*)base + rf->BeginAddress : 0;
+        if (begin && begin == (const char*)stop) {
+            const M128A* x = &ctx.Xmm6;
+            int k;
+            ints[0] = ctx.Rbx; ints[1] = ctx.Rbp; ints[2] = ctx.Rsi; ints[3] = ctx.Rdi;
+            ints[4] = ctx.R12; ints[5] = ctx.R13; ints[6] = ctx.R14; ints[7] = ctx.R15;
+            for (k = 0; k < 10; ++k) xmms[k] = x[k].Low;
+            return frames;
+        }
+        if (begin && begin == (const char*)counted) ++frames;
+        if (!rf) { ctx.Rip = *(DWORD64*)ctx.Rsp; ctx.Rsp += 8; }      /* a leaf without a table entry */
+        else {
+            void* handlerData = 0;
+            DWORD64 establisher = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &handlerData, &establisher, 0);
+        }
+    }
+    return -1;
+}
+
 }

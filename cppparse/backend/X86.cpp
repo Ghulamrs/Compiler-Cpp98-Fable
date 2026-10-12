@@ -168,6 +168,7 @@ private:
     std::string localRef(int local) const { return "[rbp-" + intToString(m_localOffset[static_cast<size_t>(local)]) + "]"; }
     std::string label(int b) const { return m_label + "_B" + intToString(b); }
     void        line(const std::string& s) { m_out << "        " << s << "\n"; ++m_stats.instructions; }
+    void        directive(const std::string& s) { m_out << "        " << s << "\n"; }   // for the assembler, not an instruction
     void        comment(const std::string& s) { m_out << "        ; " << s << "\n"; }
     std::string floatConst(double v);
 
@@ -1132,7 +1133,10 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
 void X86Function::emitBody()
 {
     if (m_f.linkOnce) m_out << ";@comdat any\n";   // read by the COFF writer: the function gets its own COMDAT section
-    m_out << m_label << " PROC\n";
+    // a function with a frame describes its prologue with the MASM unwind directives (.pushreg, .allocstack,
+    // .savexmm128, .endprolog): the assembler turns them into the Windows unwind tables (.xdata, .pdata) through
+    // which a debugger or an exception walks from this function to its caller. A frameless leaf needs none.
+    m_out << m_label << (m_frameless ? " PROC\n" : " PROC FRAME\n");
     m_out << "        ; " << m_f.name << "\n";
     m_out << "        ; frame " << m_frameSize << " bytes";
     for (size_t l = 0; l < m_f.locals.size(); ++l) {
@@ -1151,9 +1155,15 @@ void X86Function::emitBody()
         m_out << m_label << " ENDP\n\n";
         return;
     }
+    // rsp does not move in the body, so the unwind codes describe the frame from rsp alone: rbp is declared as a
+    // pushed register, not as a frame register (whose saves could only lie above it, where ours are not)
     line("push rbp");
+    directive(".pushreg rbp");
     line("mov rbp, rsp");
-    for (std::set<int>::iterator r = m_usedIntRegs.begin(); r != m_usedIntRegs.end(); ++r) line("push " + std::string(kIntRegs[*r]));
+    for (std::set<int>::iterator r = m_usedIntRegs.begin(); r != m_usedIntRegs.end(); ++r) {
+        line("push " + std::string(kIntRegs[*r]));
+        directive(".pushreg " + std::string(kIntRegs[*r]));
+    }
     // the rest of the frame below the pushed registers (the frame size counts them, so rsp stays 16-aligned)
     const int below = m_frameSize - 8 * static_cast<int>(m_usedIntRegs.size());
     if (below >= 4096) {
@@ -1163,7 +1173,13 @@ void X86Function::emitBody()
         line("call __chkstk");
         line("sub rsp, rax");
     } else if (below > 0) line("sub rsp, " + intToString(below));
-    for (std::map<int, int>::iterator r = m_savedFloatOffset.begin(); r != m_savedFloatOffset.end(); ++r) line("movdqu xmmword ptr [rbp-" + intToString(r->second) + "], xmm" + intToString(kFloatRegBase + r->first));
+    if (below > 0) directive(".allocstack " + intToString(below));
+    // [rbp-x] is [rsp+frameSize-x] once the frame is allocated; x is a multiple of 16 and rbp is 16-aligned
+    for (std::map<int, int>::iterator r = m_savedFloatOffset.begin(); r != m_savedFloatOffset.end(); ++r) {
+        line("movdqu xmmword ptr [rbp-" + intToString(r->second) + "], xmm" + intToString(kFloatRegBase + r->first));
+        directive(".savexmm128 xmm" + intToString(kFloatRegBase + r->first) + ", " + intToString(m_frameSize - r->second));
+    }
+    directive(".endprolog");
     // incoming parameters by position
     static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
     for (int p = 0; p < m_f.paramCount; ++p) {

@@ -5,7 +5,10 @@
 //   ModRM = mod(2) reg(3) rm(3); rm=100 means a SIB byte follows; mod=00 rm=101 means RIP+disp32
 //   SIB = scale(2) index(3) base(3); index=100 means no index; base=101 with mod=00 means disp32 and no base
 //   mandatory prefixes 66/F2/F3 go before REX; 0F is the two-byte opcode escape
-// Relocations: IMAGE_REL_AMD64_REL32 (+n when n immediate bytes follow the field), IMAGE_REL_AMD64_ADDR64.
+// Relocations: IMAGE_REL_AMD64_REL32 (+n when n immediate bytes follow the field), IMAGE_REL_AMD64_ADDR64,
+// IMAGE_REL_AMD64_ADDR32NB (the function table in .pdata).
+// Unwind info: a PROC FRAME's prologue directives become its UNWIND_INFO in .xdata and a RUNTIME_FUNCTION entry
+// (begin, end, unwind info) in .pdata, as ml64 writes them; a COMDAT function's go into associative COMDAT sections.
 //
 // Strict C++98.
 #include "Coff.hpp"
@@ -261,7 +264,7 @@ bool parseOperand(const std::string& text, Operand& op, std::string& err)
 }
 
 
-enum { RelAddr64 = 0x0001, RelRel32 = 0x0004 };
+enum { RelAddr64 = 0x0001, RelAddr32Nb = 0x0003, RelRel32 = 0x0004 };   // ADDR32NB: image-relative (.pdata entries)
 
 struct Reloc {
     unsigned long  offset;    // within the section (chunk-relative until layout)
@@ -279,8 +282,19 @@ struct Fixup {                // rel32 to a label of the same function
     unsigned long opcodeAt;   // offset of the first opcode byte (jumps only)
 };
 
+// one prologue step of a PROC FRAME, from its unwind directive: where the instruction before it ends, and what it did
+struct UnwindStep {
+    enum Op { Push, Alloc, SaveXmm };
+    Op            op;
+    int           reg;        // Push: register number; SaveXmm: xmm number
+    unsigned long value;      // Alloc: bytes; SaveXmm: offset from rsp after the prologue
+    unsigned long offset;     // code offset just after the instruction
+};
+
 struct Chunk {
     std::vector<unsigned char>                bytes;
+    std::vector<UnwindStep>                   unwind;     // .pushreg / .allocstack / .savexmm128, in prologue order
+    long                                      prologEnd;  // .endprolog: code offset, -1 when absent
     std::vector<Reloc>                        relocs;
     std::vector<Fixup>                        fixups;
     std::map<std::string, unsigned long>      labels;    // local labels
@@ -289,7 +303,7 @@ struct Chunk {
     unsigned long                             maxAlign;   // the largest ALIGN (or COMDAT marker alignment): the section's alignment
     std::vector<std::string>                  errors;
     int                                       instructions;
-    Chunk() : maxAlign(1), instructions(0) {}
+    Chunk() : prologEnd(-1), maxAlign(1), instructions(0) {}
 };
 
 
@@ -311,6 +325,7 @@ private:
     bool fail(const std::string& what, int line) { m_c.errors.push_back("line " + numText(line) + ": " + what); return false; }
 
     bool instruction(const std::string& mn, std::vector<Operand>& ops, int line);
+    bool unwindDirective(const std::string& mn, const std::vector<std::string>& opText, int line);
     void emitRm(int prefix, const unsigned char* op, int opLen, int regField, const Operand& rm, bool w, int trailing, bool forceRex);
     void rel32(const std::string& label, int line);
     void jump(int opcode, const std::string& label, int line);   // long form now, shortened in finish() when possible
@@ -430,6 +445,8 @@ void Encoder::shrinkJumps()
                 if (m_c.fixups[k].opcodeAt >= end) { m_c.fixups[k].opcodeAt -= removed; m_c.fixups[k].at -= removed; }
             }
             for (size_t r = 0; r < m_c.relocs.size(); ++r) if (m_c.relocs[r].offset >= end) m_c.relocs[r].offset -= removed;
+            for (size_t u = 0; u < m_c.unwind.size(); ++u) if (m_c.unwind[u].offset >= end) m_c.unwind[u].offset -= removed;
+            if (m_c.prologEnd >= static_cast<long>(end)) m_c.prologEnd -= static_cast<long>(removed);
             for (size_t s = 0; s < m_c.symbols.size(); ++s) if (m_c.symbols[s].second >= end) m_c.symbols[s].second -= removed;
             f.at = f.opcodeAt + 1;
             f.shortForm = true;
@@ -474,6 +491,7 @@ bool Encoder::codeLine(const std::string& raw, int line)
     std::string mn = lowerText(sp == std::string::npos ? text : text.substr(0, sp));
     std::vector<std::string> opText;
     if (sp != std::string::npos) splitOperands(text.substr(sp + 1), opText);
+    if (mn[0] == '.') return unwindDirective(mn, opText, line);
     std::vector<Operand> ops(opText.size());
     for (size_t i = 0; i < opText.size(); ++i) {
         std::string err;
@@ -482,6 +500,71 @@ bool Encoder::codeLine(const std::string& raw, int line)
     size_t before = m_c.bytes.size();
     if (!instruction(mn, ops, line)) { m_c.bytes.resize(before); return false; }
     ++m_c.instructions;
+    return true;
+}
+
+// the MASM prologue directives of a PROC FRAME (the subset X86.cpp writes): each one describes the instruction
+// just before it, so it records the current code offset
+bool Encoder::unwindDirective(const std::string& mn, const std::vector<std::string>& opText, int line)
+{
+    if (m_c.prologEnd >= 0) return fail(mn + " after .endprolog", line);
+    if (mn == ".endprolog") {
+        if (!opText.empty()) return fail(".endprolog takes no operands", line);
+        m_c.prologEnd = static_cast<long>(pos());
+        return true;
+    }
+    UnwindStep s;
+    s.offset = pos();
+    s.reg = 0;
+    s.value = 0;
+    int num = 0, size = 0;
+    long v = 0;
+    if (mn == ".pushreg") {
+        if (opText.size() != 1 || !lookupReg(lowerText(opText[0]), num, size) || size != 8) return fail(".pushreg needs a 64-bit register", line);
+        s.op = UnwindStep::Push; s.reg = num;
+    } else if (mn == ".allocstack") {
+        if (opText.size() != 1 || !parseLong(opText[0], v) || v <= 0 || v % 8) return fail(".allocstack needs a positive multiple of 8", line);
+        s.op = UnwindStep::Alloc; s.value = static_cast<unsigned long>(v);
+    } else if (mn == ".savexmm128") {
+        Operand x;
+        std::string err;
+        if (opText.size() != 2 || !parseOperand(opText[0], x, err) || x.kind != Operand::Xmm || !parseLong(opText[1], v) || v < 0 || v % 16)
+            return fail(".savexmm128 needs an xmm register and an offset that is a multiple of 16", line);
+        s.op = UnwindStep::SaveXmm; s.reg = x.reg; s.value = static_cast<unsigned long>(v);
+    } else return fail("unsupported directive " + mn, line);
+    m_c.unwind.push_back(s);
+    return true;
+}
+
+// the UNWIND_INFO of a PROC FRAME (Windows x64 exception handling): version 1, the prologue size, the unwind codes in
+// reverse prologue order (each code slot: code offset, then operation | info << 4; larger values in the slots after
+// it), padded to an even number of slots
+bool buildUnwindInfo(const Chunk& c, std::vector<unsigned char>& out, std::string& err)
+{
+    if (c.prologEnd < 0) { err = "PROC FRAME without .endprolog"; return false; }
+    if (c.prologEnd > 255) { err = "prologue longer than 255 bytes"; return false; }
+    std::vector<unsigned long> slots;   // 16-bit each
+    for (size_t k = c.unwind.size(); k-- > 0;) {
+        const UnwindStep& s = c.unwind[k];
+        const unsigned long at = s.offset;
+        if (s.op == UnwindStep::Push) slots.push_back(at | (static_cast<unsigned long>(s.reg) << 12));                      // UWOP_PUSH_NONVOL
+        else if (s.op == UnwindStep::Alloc) {
+            if (s.value <= 128) slots.push_back(at | (2UL << 8) | (((s.value - 8) / 8) << 12));                             // UWOP_ALLOC_SMALL
+            else if (s.value <= 524280UL) { slots.push_back(at | (1UL << 8)); slots.push_back(s.value / 8); }               // UWOP_ALLOC_LARGE, size/8
+            else { slots.push_back(at | (1UL << 8) | (1UL << 12)); slots.push_back(s.value & 0xFFFFUL); slots.push_back(s.value >> 16); }
+        } else {
+            if (s.value / 16 <= 0xFFFFUL) { slots.push_back(at | (8UL << 8) | (static_cast<unsigned long>(s.reg) << 12)); slots.push_back(s.value / 16); }   // UWOP_SAVE_XMM128
+            else { slots.push_back(at | (9UL << 8) | (static_cast<unsigned long>(s.reg) << 12)); slots.push_back(s.value & 0xFFFFUL); slots.push_back(s.value >> 16); }
+        }
+    }
+    if (slots.size() > 255) { err = "too many unwind codes"; return false; }
+    out.clear();
+    out.push_back(1);                                              // version 1, no handler
+    out.push_back(static_cast<unsigned char>(c.prologEnd));
+    out.push_back(static_cast<unsigned char>(slots.size()));
+    out.push_back(0);                                              // no frame register
+    if (slots.size() % 2) slots.push_back(0);
+    for (size_t k = 0; k < slots.size(); ++k) { out.push_back(static_cast<unsigned char>(slots[k] & 0xFF)); out.push_back(static_cast<unsigned char>((slots[k] >> 8) & 0xFF)); }
     return true;
 }
 
@@ -846,7 +929,9 @@ struct CodeBlock {
     std::vector<std::pair<int, std::string> > lines;
     Chunk chunk;
     bool  comdat;      // one COMDAT section of its own (inline functions, template instantiations)
-    CodeBlock() : comdat(false) {}
+    bool  frame;       // PROC FRAME: gets unwind info (.xdata) and a function table entry (.pdata)
+    std::vector<unsigned char> xdata;
+    CodeBlock() : comdat(false), frame(false) {}
 };
 
 struct EncodeJob : public ParallelJob {
@@ -858,6 +943,9 @@ struct EncodeJob : public ParallelJob {
         b.chunk.symbols.push_back(std::make_pair(b.name, 0UL));
         for (size_t k = 0; k < b.lines.size(); ++k) enc.codeLine(b.lines[k].second, b.lines[k].first);
         enc.finish();
+        std::string err;
+        if (b.frame && !buildUnwindInfo(b.chunk, b.xdata, err)) b.chunk.errors.push_back(b.name + ": " + err);
+        if (!b.frame && (b.chunk.prologEnd >= 0 || !b.chunk.unwind.empty())) b.chunk.errors.push_back(b.name + ": unwind directives in a PROC without FRAME");
     }
 };
 
@@ -868,9 +956,10 @@ struct Section {
     std::vector<unsigned char> bytes;
     std::vector<Reloc>         relocs;
     int                        selection;     // IMAGE_COMDAT_SELECT_* of a COMDAT section, 0 otherwise
+    int                        associated;    // selection 5 (associative): the 1-based section it goes with
     bool                       isCode;
     unsigned long              align;         // the largest alignment its contents ask for (ALIGN, COMDAT marker)
-    Section() : characteristics(0), selection(0), isCode(false), align(1) {}
+    Section() : characteristics(0), selection(0), associated(0), isCode(false), align(1) {}
 };
 
 struct SymbolEntry {
@@ -903,6 +992,8 @@ const unsigned long kRdataFlags = 0x40500040UL;   // initialized | read | align 
 const unsigned long kCrtFlags   = 0x40400040UL;   // initialized | read | align 8
 const unsigned long kComdat     = 0x00001000UL;   // IMAGE_SCN_LNK_COMDAT
 const int           kSelectAny  = 2;              // IMAGE_COMDAT_SELECT_ANY
+const int           kSelectAssociative = 5;       // IMAGE_COMDAT_SELECT_ASSOCIATIVE: kept or dropped with another section
+const unsigned long kUnwindFlags = 0x40300040UL;  // .xdata / .pdata: initialized | read | align 4
 
 // bytes of the s-th definition of a chunk: up to the next definition, the start of ALIGN padding or the end
 // of the chunk, whichever comes first
@@ -962,9 +1053,14 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         std::string text = trimWs(raw);
         if (text.empty()) continue;
         std::istringstream in(text);
-        std::string w0, w1;
-        in >> w0 >> w1;
+        std::string w0, w1, w2;
+        in >> w0 >> w1 >> w2;
         std::string u0 = upperText(w0), u1 = upperText(w1);
+        // the prologue directives of a PROC FRAME belong to its code (the other '.' lines are section switches)
+        if (current && section == 1 && (u0 == ".PUSHREG" || u0 == ".ALLOCSTACK" || u0 == ".SAVEXMM128" || u0 == ".ENDPROLOG")) {
+            current->lines.push_back(std::make_pair(lineNo, text));
+            continue;
+        }
         if (u0 == ".CODE") { section = 1; currentPiece = 0; continue; }
         if (u0 == ".DATA") { section = 2; currentPiece = 0; continue; }
         if (u0 == ".CONST" || u0 == ".RDATA") { section = 3; currentPiece = 0; continue; }
@@ -981,6 +1077,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             blocks.push_back(CodeBlock());
             blocks.back().name = w0;
             blocks.back().comdat = comdatNext;
+            blocks.back().frame = upperText(w2) == "FRAME";
             comdatNext = false;
             comdatAlign = 0;
             current = &blocks.back();
@@ -1022,6 +1119,15 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     secs[2].name = ".rdata"; secs[2].characteristics = kRdataFlags;
     if (plain[4]) { Section s; s.name = ".CRT$XCU"; s.characteristics = kCrtFlags; secs.push_back(s); }
     const size_t crtIndex = plain[4] ? 3 : 0;
+    // the unwind info and function table of the functions in .text (a COMDAT function has its own)
+    bool plainFrames = false;
+    for (size_t i = 0; i < blocks.size(); ++i) if (blocks[i].frame && !blocks[i].comdat) plainFrames = true;
+    size_t xdataIndex = 0, pdataIndex = 0;
+    if (plainFrames) {
+        Section x; x.name = ".xdata"; x.characteristics = kUnwindFlags; xdataIndex = secs.size(); secs.push_back(x);
+        Section p; p.name = ".pdata"; p.characteristics = kUnwindFlags; pdataIndex = secs.size(); secs.push_back(p);
+    }
+    const size_t plainSections = secs.size();
     std::vector<SymbolEntry> symbols;
     std::map<std::string, size_t> symbolIndex;   // name -> index in 'symbols'
     // symbols of a COMDAT section follow its section symbol: collected per section, appended at the end
@@ -1060,6 +1166,40 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             if (blocks[i].comdat) comdatSymbols.back().push_back(f); else plainSymbols.push_back(f);
             CoffSymbolInfo mi; mi.name = f.name; mi.section = sectionNumber; mi.offset = f.value; mi.size = symbolSize(c, s);
             mi.isFunction = true; mi.external = f.storageClass == 2;
+            result.symbolList.push_back(mi);
+        }
+        if (!blocks[i].frame || blocks[i].xdata.empty()) continue;
+        // UNWIND_INFO ($unwind$f) and RUNTIME_FUNCTION ($pdata$f: begin, end, unwind info as image-relative
+        // addresses), named as cl names them; for a COMDAT function in sections that go with its code
+        const std::string& fn = blocks[i].name;
+        const std::string names[2] = { "$unwind$" + fn, "$pdata$" + fn };
+        for (int part = 0; part < 2; ++part) {
+            size_t si;
+            if (blocks[i].comdat) {
+                Section s; s.name = part ? ".pdata" : ".xdata"; s.characteristics = kUnwindFlags | kComdat;
+                s.selection = kSelectAssociative; s.associated = sectionNumber;
+                si = secs.size(); secs.push_back(s);
+                comdatSymbols.push_back(std::vector<SymbolEntry>());
+            } else si = part ? pdataIndex : xdataIndex;
+            Section& sec = secs[si];
+            const unsigned long at = static_cast<unsigned long>(sec.bytes.size());
+            if (part == 0) sec.bytes.insert(sec.bytes.end(), blocks[i].xdata.begin(), blocks[i].xdata.end());
+            else {
+                const unsigned long addend[3] = { 0, static_cast<unsigned long>(c.bytes.size()), 0 };
+                const std::string relocTo[3] = { fn, fn, names[0] };
+                for (int k = 0; k < 3; ++k) {
+                    for (int b = 0; b < 4; ++b) sec.bytes.push_back(static_cast<unsigned char>((addend[k] >> (8 * b)) & 0xFF));
+                    Reloc rl; rl.offset = at + 4 * static_cast<unsigned long>(k); rl.symbol = relocTo[k]; rl.type = RelAddr32Nb;
+                    sec.relocs.push_back(rl);
+                }
+            }
+            SymbolEntry u;
+            u.name = names[part]; u.value = at; u.section = static_cast<int>(si + 1); u.type = 0; u.storageClass = 3; u.isSection = false; u.selection = 0;
+            if (symbolIndex.count(u.name)) { result.errors.push_back("duplicate symbol " + u.name); continue; }
+            symbolIndex[u.name] = 0;
+            if (blocks[i].comdat) comdatSymbols.back().push_back(u); else plainSymbols.push_back(u);
+            CoffSymbolInfo mi; mi.name = u.name; mi.section = u.section; mi.offset = at;
+            mi.size = static_cast<unsigned long>(sec.bytes.size()) - at; mi.isFunction = false; mi.external = false;
             result.symbolList.push_back(mi);
         }
     }
@@ -1113,7 +1253,6 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     std::stable_sort(result.symbolList.begin(), result.symbolList.end(), SymbolInfoOrder());
 
     // symbol table: the plain section symbols, the plain symbols, each COMDAT section symbol with its symbols, the externals
-    const size_t plainSections = crtIndex ? 4 : 3;
     for (size_t s = 0; s < plainSections; ++s) {
         SymbolEntry se; se.name = secs[s].name; se.value = 0; se.section = static_cast<int>(s + 1); se.type = 0; se.storageClass = 3; se.isSection = true; se.selection = 0;
         symbols.push_back(se);
@@ -1192,7 +1331,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             const Section& sec = secs[static_cast<size_t>(s.section - 1)];
             put32(o, static_cast<unsigned long>(sec.bytes.size()));
             put16(o, sec.relocs.size() >= 0xFFFF ? 0xFFFF : static_cast<unsigned long>(sec.relocs.size()));
-            put16(o, 0); put32(o, 0); put16(o, 0); put8(o, s.selection); put8(o, 0); put8(o, 0); put8(o, 0);
+            put16(o, 0); put32(o, 0); put16(o, static_cast<unsigned long>(sec.associated)); put8(o, s.selection); put8(o, 0); put8(o, 0); put8(o, 0);
         }
     }
     unsigned long sl = static_cast<unsigned long>(strings.size());

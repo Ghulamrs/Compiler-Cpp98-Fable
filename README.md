@@ -251,6 +251,26 @@ Tests 8 and 13 check every map they produce (`Test-ObjectMap` in `sandbox/build-
 Test 13 also checks, on the matrix sample, that vtables are typed `vtable` and that COMDAT sections are
 grouped, and on `examples/sample-align` that `g_align64` sits on a 64-byte boundary.
 
+### Unwind tables
+
+Every function with a frame gets the Windows x64 unwind information that cl gives its functions: an
+`UNWIND_INFO` in `.xdata` (`$unwind$f`) and a function table entry in `.pdata` (`$pdata$f`: begin, end and unwind
+info as image-relative addresses). With them, Windows can step back from any point in the function to its
+caller and restore the caller's callee-saved registers. Debuggers, profilers and crash dumps use this, and so
+do exceptions. A frameless leaf function needs none: Windows assumes the return address at `[rsp]` there.
+
+The code generator describes its prologue with the MASM directives (`PROC FRAME`, `.pushreg`, `.allocstack`,
+`.savexmm128`, `.endprolog`), and the COFF writer turns them into the tables as ml64 does. A COMDAT function's
+tables go into associative COMDAT sections, so the linker keeps or drops them with the function. `rsp` does not
+move in a function body, so the tables describe the frame from `rsp` alone. `rbp` is listed as a pushed register,
+not as a frame register.
+
+Checks: test 8 compares every table with the one ml64 builds from the same assembly text, byte for byte.
+`eh.ps1` goes further. An ml64 function sets every callee-saved register (rbx rbp rsi rdi r12-r15, xmm6-xmm15) to
+a pattern and calls cppparse code that recurses with values of its own in those registers, through a frame of
+more than a page. At the bottom, the runtime's `cppparse_walk_frames` walks back with `RtlVirtualUnwind`. It
+must find every cppparse frame, and the registers it restores in the ml64 frame must be the patterns.
+
 ## Building and testing
 
 ```
@@ -291,7 +311,9 @@ of cppparse, and compares the programs' output), `mapcompare.ps1` (builds the ma
 and with `--compile6 -O2 --obj`, links both with `/MAP`, checks cppparse's object maps against the linker's map
 of the same objects (addresses, 16-byte alignment, `f` / `f i` flags) and every function's map size against
 the code bytes `dumpbin /disasm` finds in the object, and lists the functions both compilers emit side by side
-with their exact code sizes (cl's counted from its objects the same way, since `link /MAP` has no size column); `-Lvl` picks cppparse's optimisation level, exit code 1 on any disagreement). The first four: the Visual Studio 2010 solution in
+with their exact code sizes (cl's counted from its objects the same way, since `link /MAP` has no size column); `-Lvl` picks cppparse's optimisation level, exit code 1 on any disagreement), `eh.ps1` (exceptions and
+unwind tables, `examples/sample-eh/` with its driver and an ml64 entry function, at `-O0`..`-O3`; see
+[Unwind tables](#unwind-tables)). The first four: the Visual Studio 2010 solution in
 `examples/sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken

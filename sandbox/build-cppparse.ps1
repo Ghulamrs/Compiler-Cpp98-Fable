@@ -435,6 +435,14 @@ try {
         if ($diff -eq 0 -and $same -gt 100) { Write-Host "  ok   dumpbin disassembly of own3.obj matches ml64's opt3.obj ($same instructions)" }
         else { Write-Host "  FAIL disassembly differs: $same same, $diff different (first differences follow)"; $shown = 0; for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count) -and $shown -lt 8; $i++) { if ($i -ge $a.Count -or $i -ge $b.Count -or $a[$i] -ne $b[$i]) { Write-Host "    [$i] ml64: $($a[$i])   own: $($b[$i])"; $shown++ } }; $failed++ }
     }
+    # the unwind tables (.pdata / .xdata) must agree with the ones ml64 builds from the same prologue directives
+    . "$PSScriptRoot\scripts\unwind.ps1"
+    foreach ($lvl in @(0, 3)) {
+        $ua = Get-UnwindTable "out\x64\opt$lvl.obj"; $ub = Get-UnwindTable "out\x64\own$lvl.obj"
+        $bad = @($ua.Keys | Where-Object { $ua[$_] -ne $ub[$_] }) + @($ub.Keys | Where-Object { -not $ua.ContainsKey($_) })
+        if ($ua.Count -gt 10 -and $bad.Count -eq 0) { Write-Host "  ok   unwind info of own$lvl.obj matches ml64's for all $($ua.Count) functions with a frame" }
+        else { Write-Host "  FAIL unwind info differs from ml64's (ml64 $($ua.Count), own $($ub.Count) entries):"; $bad | Select-Object -First 4 | ForEach-Object { Write-Host "    $_`n      ml64: $($ua[$_])`n      own:  $($ub[$_])" }; $failed++ }
+    }
     # the object map: real sizes, consistent with the sections and with dumpbin's symbol table
     foreach ($lvl in @(0, 3)) {
         $p = @(Test-ObjectMap "out\x64\own$lvl.map" "out\x64\own$lvl.obj")

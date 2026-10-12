@@ -162,7 +162,7 @@ private:
     std::map<long, int> m_tryOffset;      // version 5: try region id -> [rbp-offset] of its setjmp frame
     int                 m_throwSlot;      // [rbp-offset] where a thrown scalar is stored before the call
     std::set<int>       m_usedIntRegs, m_usedFloatRegs;
-    std::map<int, int>  m_savedIntOffset, m_savedFloatOffset;
+    std::map<int, int>  m_savedFloatOffset;   // xmm6..13 are stored in the frame (the integer ones are pushed)
     int                 m_outgoingArgs;
     std::vector<int>    m_clobbers;       // positions that destroy the volatile registers (calls, throws, try regions)
     // an address computed only for the next load or store (addrfield t = base + off; loadmem/storemem [t]): the
@@ -397,7 +397,9 @@ void X86Function::allocate()
 
 void X86Function::layoutFrame()
 {
-    int off = 0;
+    // the callee-saved integer registers are pushed right after rbp, as cl, clang and gcc save them (1 or 2
+    // bytes each instead of a 4 to 8 byte store): they occupy [rbp-8] .. [rbp-8n], the frame continues below
+    int off = 8 * static_cast<int>(m_usedIntRegs.size());
     m_localOffset.assign(m_f.locals.size(), 0);
     for (size_t l = 0; l < m_f.locals.size(); ++l) {
         int size = m_f.locals[l].size > 0 ? m_f.locals[l].size : 8;
@@ -408,7 +410,6 @@ void X86Function::layoutFrame()
     }
     for (std::map<int, Interval>::iterator it = m_intervals.begin(); it != m_intervals.end(); ++it)
         if (it->second.reg < 0) { off = (off + 8 + 7) / 8 * 8; it->second.slot = off; }
-    for (std::set<int>::iterator r = m_usedIntRegs.begin(); r != m_usedIntRegs.end(); ++r) { off = (off + 8 + 7) / 8 * 8; m_savedIntOffset[*r] = off; }
     for (std::set<int>::iterator r = m_usedFloatRegs.begin(); r != m_usedFloatRegs.end(); ++r) { off = (off + 16 + 15) / 16 * 16; m_savedFloatOffset[*r] = off; }
     // version 5: one setjmp frame (jmp_buf plus link, 272 bytes, 16-byte aligned) per try region,
     // and a 16-byte slot for thrown scalars
@@ -489,8 +490,10 @@ std::string X86Function::use(const IrOperand& o, const std::string& scratch)
         return scratch;
     }
     case IrOperand::Imm: {
+        // a non-negative value through the 32-bit register (shorter, clears the upper half); no xor here: an
+        // operand can be materialised between a comparison and the instruction that reads its flags
         const bool u32 = o.type && o.type->isUnsigned && typeSize(o.type) == 4;
-        line("mov " + (u32 ? reg32(scratch) : scratch) + ", " + intToString(static_cast<int>(o.ival)));
+        line("mov " + (u32 || static_cast<int>(o.ival) >= 0 ? reg32(scratch) : scratch) + ", " + intToString(static_cast<int>(o.ival)));
         return scratch;
     }
     case IrOperand::FImm: {
@@ -551,7 +554,6 @@ void X86Function::emitCall(const IrInst& in)
     // shadow space), then the first four are loaded into their registers; stack arguments
     // (a >= 4) are already in place
     static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
-    std::vector<bool> isFloatArg;
     size_t firstArg = 0;
     if (in.sub == "(indirect)" && !in.args.empty()) {
         // args[0] is the function pointer: kept in r10 (volatile, not an argument register)
@@ -559,21 +561,31 @@ void X86Function::emitCall(const IrInst& in)
         if (fp != "r10") line("mov r10, " + fp);
         firstArg = 1;
     }
-    for (size_t a = firstArg; a < in.args.size(); ++a) {
+    // the fifth argument on go to the outgoing area [rsp+8a] (the first four slots are the shadow space)
+    for (size_t a = firstArg + 4; a < in.args.size(); ++a) {
         const IrOperand& o = in.args[a];
-        bool fl = opIsFloat(o);
         int slot = 8 * static_cast<int>(a - firstArg);
-        if (fl) { std::string r = use(o, "xmm4"); line("movsd real8 ptr [rsp+" + intToString(slot) + "], " + r); }
+        if (opIsFloat(o)) { std::string r = use(o, "xmm4"); line("movsd real8 ptr [rsp+" + intToString(slot) + "], " + r); }
         else { std::string r = use(o, "rax"); line("mov qword ptr [rsp+" + intToString(slot) + "], " + r); }
-        isFloatArg.push_back(fl);
     }
-    // a floating-point argument among the first four also goes into its integer register: a variadic callee
-    // (printf, an extern "C" name that does not say it is variadic) reads its arguments from the integer
-    // registers it spills to the home area, as the Microsoft x64 convention requires; any other callee ignores
-    // that register
-    for (size_t a = 0; a < isFloatArg.size() && a < 4; ++a) {
-        if (isFloatArg[a]) line("movsd xmm" + intToString(static_cast<int>(a)) + ", real8 ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "]");
-        line("mov " + std::string(argRegs[a]) + ", qword ptr [rsp+" + intToString(8 * static_cast<int>(a)) + "]");
+    // the first four go straight into their registers. No source can be one of those registers: a value used
+    // by a call lives across it and so never gets a volatile register, and a constant, address or spilled
+    // value is materialised into the argument register itself; loading one argument cannot destroy another.
+    for (size_t a = firstArg; a < in.args.size() && a < firstArg + 4; ++a) {
+        const IrOperand& o = in.args[a];
+        const int k = static_cast<int>(a - firstArg);
+        if (opIsFloat(o)) {
+            const std::string x = "xmm" + intToString(k);
+            std::string r = use(o, x);
+            if (r != x) line("movsd " + x + ", " + r);
+            // also in the integer register: a variadic callee (printf, an extern "C" name that does not say it is
+            // variadic) reads its arguments from the integer registers it spills to the home area, as the
+            // Microsoft x64 convention requires; any other callee ignores that register
+            line("movq " + std::string(argRegs[k]) + ", " + x);
+        } else {
+            std::string r = use(o, argRegs[k]);
+            if (r != argRegs[k]) line("mov " + std::string(argRegs[k]) + ", " + r);
+        }
     }
     if (in.op == IrInst::VCall) {
         line("mov rax, qword ptr [rcx]              ; vptr");
@@ -610,8 +622,13 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     case IrInst::Const: {
         std::string rd = def(in.dst, false, "rax", spill);
         // an unsigned 32-bit constant is zero-extended (mov to the 32-bit register), others sign-extended
+        // shortest form, as cl, clang and gcc load constants: zero by xor (a constant is its own IR instruction,
+        // so no flags are live across it), a non-negative value through the 32-bit register (which clears the
+        // upper half), a negative one sign-extended into the full register
         const bool u32 = in.type && in.type->isUnsigned && typeSize(in.type) == 4;
-        line("mov " + (u32 ? reg32(rd) : rd) + ", " + intToString(static_cast<int>(in.args[0].ival)));
+        const long v = static_cast<long>(static_cast<int>(in.args[0].ival));
+        if (v == 0) line("xor " + reg32(rd) + ", " + reg32(rd));
+        else line("mov " + (u32 || v > 0 ? reg32(rd) : rd) + ", " + intToString(static_cast<int>(v)));
         finish(in.dst, spill, false, rd);
         break;
     }
@@ -671,6 +688,12 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         if (in.op == IrInst::StoreLocal) mem = localRef(in.args[0].id);
         else if (in.op == IrInst::StoreGlobal) { mem = "[" + m_m.globalSymbol(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
         else mem = memOperand(in.args[0]);
+        const bool zeroExtended = in.args[1].type && in.args[1].type->isUnsigned && typeSize(in.args[1].type) == 4 && in.args[1].ival < 0;
+        if (!fl && in.args[1].kind == IrOperand::Imm && !(size == 8 && zeroExtended)) {
+            // a constant is stored directly (a 64-bit slot takes the sign-extended 32-bit immediate)
+            line("mov " + std::string(ptrWord(size)) + " " + mem + ", " + intToString(static_cast<int>(in.args[1].ival)));
+            break;
+        }
         std::string rv = use(in.args[1], fl ? "xmm0" : "rax");
         if (fl) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem + ", " + rv);
         else line("mov " + std::string(ptrWord(size)) + " " + mem + ", " + regSized(rv, size));
@@ -922,14 +945,16 @@ void X86Function::emitBody()
     }
     line("push rbp");
     line("mov rbp, rsp");
-    if (m_frameSize >= 4096) {
+    for (std::set<int>::iterator r = m_usedIntRegs.begin(); r != m_usedIntRegs.end(); ++r) line("push " + std::string(kIntRegs[*r]));
+    // the rest of the frame below the pushed registers (the frame size counts them, so rsp stays 16-aligned)
+    const int below = m_frameSize - 8 * static_cast<int>(m_usedIntRegs.size());
+    if (below >= 4096) {
         // a frame of a page or more is probed page by page, so the stack guard page grows the stack in order
         m_m.useExtern("__chkstk");
-        line("mov eax, " + intToString(m_frameSize));
+        line("mov eax, " + intToString(below));
         line("call __chkstk");
         line("sub rsp, rax");
-    } else line("sub rsp, " + intToString(m_frameSize));
-    for (std::map<int, int>::iterator r = m_savedIntOffset.begin(); r != m_savedIntOffset.end(); ++r) line("mov qword ptr [rbp-" + intToString(r->second) + "], " + std::string(kIntRegs[r->first]));
+    } else if (below > 0) line("sub rsp, " + intToString(below));
     for (std::map<int, int>::iterator r = m_savedFloatOffset.begin(); r != m_savedFloatOffset.end(); ++r) line("movdqu xmmword ptr [rbp-" + intToString(r->second) + "], xmm" + intToString(kFloatRegBase + r->first));
     // incoming parameters by position
     static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
@@ -953,9 +978,16 @@ void X86Function::emitBody()
         for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) emitInst(m_f.blocks[b].insts[i], static_cast<int>(b));
     }
     m_out << m_label << "_exit:\n";
-    for (std::map<int, int>::iterator r = m_savedIntOffset.begin(); r != m_savedIntOffset.end(); ++r) line("mov " + std::string(kIntRegs[r->first]) + ", qword ptr [rbp-" + intToString(r->second) + "]");
     for (std::map<int, int>::iterator r = m_savedFloatOffset.begin(); r != m_savedFloatOffset.end(); ++r) line("movdqu xmm" + intToString(kFloatRegBase + r->first) + ", xmmword ptr [rbp-" + intToString(r->second) + "]");
-    line("leave");
+    if (m_usedIntRegs.empty()) line("leave");
+    else {
+        // rsp back to the pushed registers (a throw may have landed here through longjmp, which restores rbp),
+        // then pop them in reverse order
+        line("lea rsp, [rbp-" + intToString(8 * static_cast<int>(m_usedIntRegs.size())) + "]");
+        std::vector<int> pushed(m_usedIntRegs.begin(), m_usedIntRegs.end());
+        for (size_t k = pushed.size(); k-- > 0;) line("pop " + std::string(kIntRegs[pushed[k]]));
+        line("pop rbp");
+    }
     line("ret");
     // version 5: one dispatch stub per try region: pop the frame, try the catch clauses in order, else rethrow
     for (size_t b = 0; b < m_f.blocks.size(); ++b)

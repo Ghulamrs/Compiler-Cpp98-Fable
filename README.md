@@ -161,9 +161,8 @@ Addresses are `section:offset` in the object (a linker adds the image base when 
 number of bytes the encoder produced for the definition, without the alignment padding after it, which a
 Visual Studio map does not show. Every function starts on a 16-byte boundary, the gap before it filled with
 `int 3` (0xCC), as cl lays out code with `/Od` and `/O2` (with `/O1` and `/Os` cl packs code on 4-byte
-boundaries; cppparse has no size mode). Data is placed at its own alignment, never padded to 16. **Flags** are link's: `f` a function, `f i` an inline one (in a COMDAT
-section of its own: inline functions, template instances; one copy survives linking); data has none, as in
-Visual Studio's map. Types: function, data, vtable, string, constant. The symbol is the name in
+boundaries; cppparse has no size mode). Data is placed at its own alignment, never padded to 16. **Flags** are link's: `f` a function, `f i` an inline one, none for data
+(see *Link's `f` / `i` flags* below). Types: function, data, vtable, string, constant. The symbol is the name in
 the object (MSVC-decorated with `--msvc-mangling`), followed by its readable name. Publics and static
 (internal-linkage) symbols are listed separately, as in Visual Studio's map; COMDAT sections (inline functions,
 template instances, vtables) are grouped by name. The map starts with a time stamp in link's form
@@ -172,6 +171,36 @@ object itself keeps a zero time stamp, so it stays the same from run to run) and
 Name**: every symbol again, public and static, sorted by its readable name, with a Linkage column. Visual
 Studio's map has only the address order. If the assembly cannot be encoded, the map says so and lists
 the lines instead of showing guessed numbers.
+
+### Link's `f` / `i` flags
+
+`link /MAP` marks symbols in its *Publics by Value* and *Static symbols* lists, and cppparse's map does the
+same:
+
+- **`f`**: a function: its symbol has the function type (`0x20`, which the PE format defines as "function");
+- **`f i`**: an *inline* function: one that may legitimately appear in many objects, of which the linker
+  keeps one (inline member functions, template instances, implicitly generated members such as copy
+  constructors);
+- **no flag**: data (variables, constants, vtables, strings).
+
+Microsoft does not document these markers: the `/MAP` page lists the map's contents but never explains `f`
+or `i`. Their meaning was established from cl's own objects. With `/O2` cl puts every function in a COMDAT
+section of its own (`/Gy`), so `i` is not "in a COMDAT section"; it follows the COMDAT's selection, which
+`dumpbin /symbols` shows. In cl's `matrix.obj` of the matrix sample all 31 `f i` functions have selection
+`IMAGE_COMDAT_SELECT_ANY` (duplicates allowed, any one kept) and all 22 plain `f` functions have
+`IMAGE_COMDAT_SELECT_NODUPLICATES`:
+
+```
+f i  ??0Matrix@mx@@QEAA@AEBV01@@Z       Matrix(const Matrix&): implicit copy constructor, "pick any"
+f    ??0Matrix@mx@@QEAA@HHN@Z           Matrix(int, int, double): defined in matrix.cpp, "no duplicates"
+f    ?identity@Matrix@mx@@SA?AV12@H@Z   Matrix::identity(int): defined in matrix.cpp, "no duplicates"
+```
+
+cppparse uses COMDAT sections only for inline functions and template instances, always with "pick any",
+and puts every other function in the plain `.text`. Its rule (a function in `.text` is `f`, one in a COMDAT
+section of its own is `f i`) therefore gives link's answer for every object cppparse writes.
+
+### What the suite checks in a map
 
 Tests 8 and 13 check every map they produce (`Test-ObjectMap` in `sandbox/build-cppparse.ps1`):
 

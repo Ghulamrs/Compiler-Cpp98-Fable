@@ -1043,8 +1043,13 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             secs.push_back(s);
             comdatSymbols.push_back(std::vector<SymbolEntry>());
             target = &secs.back(); base = 0; sectionNumber = static_cast<int>(secs.size());
-        } else { target = &secs[0]; base = static_cast<unsigned long>(secs[0].bytes.size()); sectionNumber = 1; }
-        target->bytes.insert(target->bytes.end(), c.bytes.begin(), c.bytes.end());   // no padding between functions, like ml64
+        } else {
+            // every function starts on a 16-byte boundary, the gap filled with int 3, as cl lays out code for
+            // speed (/Od, /O2): the section's own 16-byte alignment covers the first one and each COMDAT function
+            while (secs[0].bytes.size() % 16) secs[0].bytes.push_back(0xCC);
+            target = &secs[0]; base = static_cast<unsigned long>(secs[0].bytes.size()); sectionNumber = 1;
+        }
+        target->bytes.insert(target->bytes.end(), c.bytes.begin(), c.bytes.end());
         for (size_t r = 0; r < c.relocs.size(); ++r) { Reloc rl = c.relocs[r]; rl.offset += base; target->relocs.push_back(rl); }
         for (size_t s = 0; s < c.symbols.size(); ++s) {
             SymbolEntry f;

@@ -153,13 +153,15 @@ the code is assembled in memory for it and no object is written.
  Publics by Value
 
   Address         Size        Flags  Type      Symbol                                    Name
- 0001:0000011c   000002dbH   f      function  ??0Matrix@mx@@QEAA@HHN@Z                  mx::Matrix::Matrix(int, int, double)
+ 0001:00000120   000002dbH   f      function  ??0Matrix@mx@@QEAA@HHN@Z                  mx::Matrix::Matrix(int, int, double)
  00aa:00000000   00000010H          vtable    ??_7overflow_error@std@@6B@               std::overflow_error::`vftable'
 ```
 
 Addresses are `section:offset` in the object (a linker adds the image base when it links). **Size** is the
 number of bytes the encoder produced for the definition, without the alignment padding after it, which a
-Visual Studio map does not show. **Flags** are link's: `f` a function, `f i` an inline one (in a COMDAT
+Visual Studio map does not show. Every function starts on a 16-byte boundary, the gap before it filled with
+`int 3` (0xCC), as cl lays out code with `/Od` and `/O2` (with `/O1` and `/Os` cl packs code on 4-byte
+boundaries; cppparse has no size mode). Data is placed at its own alignment, never padded to 16. **Flags** are link's: `f` a function, `f i` an inline one (in a COMDAT
 section of its own: inline functions, template instances; one copy survives linking); data has none, as in
 Visual Studio's map. Types: function, data, vtable, string, constant. The symbol is the name in
 the object (MSVC-decorated with `--msvc-mangling`), followed by its readable name. Publics and static
@@ -169,8 +171,9 @@ template instances, vtables) are grouped by name. The map starts with a time sta
 object itself keeps a zero time stamp, so it stays the same from run to run) and ends with **Symbols by
 Name**: every symbol again, public and static, sorted by its readable name, with a Linkage column. Visual
 Studio's map has only the address order. If the assembly cannot be encoded, the map says so and lists
-the lines instead of showing guessed numbers. Tests 8 and 13 check that the sizes fill each section exactly
-and that every address matches `dumpbin /symbols` of the object.
+the lines instead of showing guessed numbers. Tests 8 and 13 check that every function is 16-byte aligned
+with less than 16 bytes of padding before the next one, and that every address matches `dumpbin /symbols` of
+the object.
 
 ## Building and testing
 

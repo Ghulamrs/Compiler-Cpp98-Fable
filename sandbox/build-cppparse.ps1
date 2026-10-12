@@ -86,7 +86,7 @@ try {
     if ($NoTests) { Write-Host "built $exe"; $global:LASTEXITCODE = 0; return }
 
     # checks an object map (<name>.map) against itself and, given the object, against dumpbin's symbol table:
-    # no definition overlaps the next one, the functions fill .text exactly (they are packed without padding),
+    # no definition overlaps the next one, functions start on 16-byte boundaries with under 16 bytes of padding,
     # and every address is the section and offset the object really has. Returns the problems found.
     function Test-ObjectMap([string]$mapPath, [string]$objPath = "") {
         $problems = @()
@@ -126,8 +126,14 @@ try {
                 if ($end -gt $limit) { $problems += "$($list[$i].Name) ends at $end beyond $limit" }
             }
             if ($sections[[int]$g.Name].Name -like '.text*') {
-                $sum = ($list | Measure-Object Size -Sum).Sum
-                if ($sum -ne $sections[[int]$g.Name].Size) { $problems += "section $($g.Name): functions add up to $sum bytes, the section has $($sections[[int]$g.Name].Size)" }
+                # functions start on 16-byte boundaries; the int 3 padding before the next one is under 16 bytes
+                # and the last function ends the section
+                for ($i = 0; $i -lt $list.Count; $i++) {
+                    if ($list[$i].Off % 16 -ne 0) { $problems += "$($list[$i].Name) at $($list[$i].Off) is not 16-byte aligned"; break }
+                    $limit = if ($i + 1 -lt $list.Count) { $list[$i + 1].Off } else { $sections[[int]$g.Name].Size }
+                    $gap = $limit - ($list[$i].Off + $list[$i].Size)
+                    if ($gap -lt 0 -or $gap -gt 15 -or ($i + 1 -eq $list.Count -and $gap -ne 0)) { $problems += "$($list[$i].Name): $gap byte(s) before the next function"; break }
+                }
             }
         }
         if ($objPath -ne "") {
@@ -411,8 +417,18 @@ try {
     # the encoder must agree with ml64: compare the instruction bytes of both objects
     $dumpbin = "$Msvc\bin\Hostx64\x64\dumpbin.exe"
     if (Test-Path $dumpbin) {
-        $a = (& $dumpbin /nologo /disasm:nobytes "out\x64\opt3.obj" | Select-String '^\s+[0-9A-F]{16}:\s' | ForEach-Object { ($_.Line -replace '^\s+[0-9A-F]{16}:\s+', '') -replace '\s+', ' ' })
-        $b = (& $dumpbin /nologo /disasm:nobytes "out\x64\own3.obj" | Select-String '^\s+[0-9A-F]{16}:\s' | ForEach-Object { ($_.Line -replace '^\s+[0-9A-F]{16}:\s+', '') -replace '\s+', ' ' })
+        # dumpbin prints a jump's absolute target; our functions start on 16-byte boundaries (int 3 between them)
+        # and ml64's are packed, so a jump is compared by its distance from the instruction instead
+        $disasm = {
+            param($obj)
+            & $dumpbin /nologo /disasm:nobytes $obj | Select-String '^\s+([0-9A-F]{16}):\s+(.*)$' | ForEach-Object {
+                $at = [Convert]::ToInt64($_.Matches[0].Groups[1].Value, 16); $text = $_.Matches[0].Groups[2].Value -replace '\s+', ' '
+                if ($text -match '^(j\w+) ([0-9A-F]{16})$') { $text = "$($Matches[1]) .{0:+#;-#;+0}" -f ([Convert]::ToInt64($Matches[2], 16) - $at) }
+                $text
+            }
+        }
+        $a = & $disasm "out\x64\opt3.obj"
+        $b = & $disasm "out\x64\own3.obj"
         $a = $a | Where-Object { $_ -ne 'int 3' }; $b = $b | Where-Object { $_ -ne 'int 3' }
         $same = 0; $diff = 0
         for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) { if ($i -lt $a.Count -and $i -lt $b.Count -and $a[$i] -eq $b[$i]) { $same++ } else { $diff++ } }
@@ -422,7 +438,7 @@ try {
     # the object map: real sizes, consistent with the sections and with dumpbin's symbol table
     foreach ($lvl in @(0, 3)) {
         $p = @(Test-ObjectMap "out\x64\own$lvl.map" "out\x64\own$lvl.obj")
-        if ($p.Count -eq 0) { Write-Host "  ok   own$lvl.map: sizes fill the sections, addresses match dumpbin /symbols" }
+        if ($p.Count -eq 0) { Write-Host "  ok   own$lvl.map: functions 16-aligned, sizes consistent, addresses match dumpbin /symbols" }
         else { Write-Host "  FAIL own$lvl.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed COFF check(s) failed" }
@@ -544,7 +560,7 @@ try {
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   v6driver$lvl.exe: all results correct (-O$lvl, version 6 front end)" }
         else { Write-Host "  FAIL v6driver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
         $p = @(Test-ObjectMap "out\x64\v6o${lvl}6.map" $obj)
-        if ($p.Count -eq 0) { Write-Host "  ok   v6o${lvl}6.map: sizes fill the sections, addresses match dumpbin /symbols" }
+        if ($p.Count -eq 0) { Write-Host "  ok   v6o${lvl}6.map: functions 16-aligned, sizes consistent, addresses match dumpbin /symbols" }
         else { Write-Host "  FAIL v6o${lvl}6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
     }
     # a map with vtables and COMDAT sections: the matrix sample through the version 6 pipeline
@@ -555,7 +571,7 @@ try {
     $mtx = if (Test-Path "out\x64\mtx6.map") { Get-Content "out\x64\mtx6.map" -Raw } else { "" }
     if ($mtx -match 'vtable\s+\S+\s+\S+::`vftable''' -and $mtx -notmatch '(?m)data\s+\S+\s+\S+::`vftable''') { Write-Host "  ok   mtx6.map: vtables typed as vtable" } else { $p += "vtables not typed as vtable" }
     if ($mtx -match '(?m)^ [0-9a-f]{4}-[0-9a-f]{4}\s+[0-9a-f]{8}H  \.text\$mn\s+CODE  COMDAT, \d+ section') { Write-Host "  ok   mtx6.map: COMDAT sections grouped" } else { $p += "COMDAT sections not grouped" }
-    if ($p.Count -eq 0) { Write-Host "  ok   mtx6.map: sizes fill the sections, addresses match dumpbin /symbols" }
+    if ($p.Count -eq 0) { Write-Host "  ok   mtx6.map: functions 16-aligned, sizes consistent, addresses match dumpbin /symbols" }
     else { Write-Host "  FAIL mtx6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
     # #pragma pack and __declspec(align(N)): cppparse's layouts and globals against a cl-compiled driver that
     # checks every size and offset with cl's own, reads the globals, and checks their alignment
@@ -572,7 +588,7 @@ try {
         $p = @(Test-ObjectMap "out\x64\align${lvl}6.map" "out\x64\align${lvl}6.obj")
         $am = Get-Content "out\x64\align${lvl}6.map" -Raw
         if ($am -notmatch '(?m)^ 0002:[0-9a-f]{6}[048c]0   [0-9a-f]{8}H   .{3}    data\s+\?g_align64@@3NA') { $p += "g_align64 not at a 64-byte offset in the map" }
-        if ($p.Count -eq 0) { Write-Host "  ok   align${lvl}6.map: sizes fill the sections, addresses match dumpbin, g_align64 64-aligned" }
+        if ($p.Count -eq 0) { Write-Host "  ok   align${lvl}6.map: functions 16-aligned, sizes consistent, addresses match dumpbin, g_align64 64-aligned" }
         else { Write-Host "  FAIL align${lvl}6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed version 6 compile check(s) failed" }

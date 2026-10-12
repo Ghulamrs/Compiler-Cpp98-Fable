@@ -1,6 +1,6 @@
 # Design: table-based exceptions (2026-10-12)
 
-Status: proposal. Nothing here is implemented yet. The setjmp model stays the default until every
+Status: steps 1-3 implemented (unwind tables, runtime walker, `--eh=table`). The setjmp model stays the default until every
 step below has passed the full suite.
 
 ## 1. The problem in one paragraph

@@ -295,6 +295,7 @@ struct Chunk {
     std::vector<unsigned char>                bytes;
     std::vector<UnwindStep>                   unwind;     // .pushreg / .allocstack / .savexmm128, in prologue order
     long                                      prologEnd;  // .endprolog: code offset, -1 when absent
+    std::vector<std::vector<std::string> >    ehRanges;   // .ehrange begin, end, landing pad (labels of this function)
     std::vector<Reloc>                        relocs;
     std::vector<Fixup>                        fixups;
     std::map<std::string, unsigned long>      labels;    // local labels
@@ -507,6 +508,12 @@ bool Encoder::codeLine(const std::string& raw, int line)
 // just before it, so it records the current code offset
 bool Encoder::unwindDirective(const std::string& mn, const std::vector<std::string>& opText, int line)
 {
+    if (mn == ".ehrange") {
+        // a code range of a try region and its landing pad, for the language-specific data after the handler
+        if (opText.size() != 3) return fail(".ehrange needs a begin label, an end label and a landing pad", line);
+        m_c.ehRanges.push_back(opText);
+        return true;
+    }
     if (m_c.prologEnd >= 0) return fail(mn + " after .endprolog", line);
     if (mn == ".endprolog") {
         if (!opText.empty()) return fail(".endprolog takes no operands", line);
@@ -536,10 +543,15 @@ bool Encoder::unwindDirective(const std::string& mn, const std::vector<std::stri
     return true;
 }
 
+const unsigned long kEhMagic = 0x58505043UL;   // "CPPX": the range table that follows the handler is cppparse's
+
 // the UNWIND_INFO of a PROC FRAME (Windows x64 exception handling): version 1, the prologue size, the unwind codes in
 // reverse prologue order (each code slot: code offset, then operation | info << 4; larger values in the slots after
-// it), padded to an even number of slots
-bool buildUnwindInfo(const Chunk& c, std::vector<unsigned char>& out, std::string& err)
+// it), padded to an even number of slots. With a handler (PROC FRAME:handler): flag EHANDLER, the handler's address,
+// then cppparse's range table: "CPPX", the count, and per range its begin, end and landing pad. Every address is
+// image-relative (ADDR32NB); 'relocs' gets them, at offsets within 'out', against 'fn' or the handler
+bool buildUnwindInfo(const Chunk& c, const std::string& fn, const std::string& handler, std::vector<unsigned char>& out,
+                     std::vector<Reloc>& relocs, std::string& err)
 {
     if (c.prologEnd < 0) { err = "PROC FRAME without .endprolog"; return false; }
     if (c.prologEnd > 255) { err = "prologue longer than 255 bytes"; return false; }
@@ -559,12 +571,31 @@ bool buildUnwindInfo(const Chunk& c, std::vector<unsigned char>& out, std::strin
     }
     if (slots.size() > 255) { err = "too many unwind codes"; return false; }
     out.clear();
-    out.push_back(1);                                              // version 1, no handler
+    relocs.clear();
+    out.push_back(static_cast<unsigned char>(handler.empty() ? 1 : 1 | (1 << 3)));   // version 1, UNW_FLAG_EHANDLER
     out.push_back(static_cast<unsigned char>(c.prologEnd));
     out.push_back(static_cast<unsigned char>(slots.size()));
     out.push_back(0);                                              // no frame register
     if (slots.size() % 2) slots.push_back(0);
     for (size_t k = 0; k < slots.size(); ++k) { out.push_back(static_cast<unsigned char>(slots[k] & 0xFF)); out.push_back(static_cast<unsigned char>((slots[k] >> 8) & 0xFF)); }
+    if (handler.empty()) {
+        if (!c.ehRanges.empty()) { err = ".ehrange in a PROC FRAME without a handler"; return false; }
+        return true;
+    }
+    std::vector<std::pair<std::string, unsigned long> > fields;   // symbol (empty: a plain value) and value / addend
+    fields.push_back(std::make_pair(handler, 0UL));
+    fields.push_back(std::make_pair(std::string(), kEhMagic));
+    fields.push_back(std::make_pair(std::string(), static_cast<unsigned long>(c.ehRanges.size())));
+    for (size_t r = 0; r < c.ehRanges.size(); ++r)
+        for (int k = 0; k < 3; ++k) {
+            std::map<std::string, unsigned long>::const_iterator l = c.labels.find(c.ehRanges[r][static_cast<size_t>(k)]);
+            if (l == c.labels.end()) { err = ".ehrange label " + c.ehRanges[r][static_cast<size_t>(k)] + " is not defined"; return false; }
+            fields.push_back(std::make_pair(fn, l->second));
+        }
+    for (size_t f = 0; f < fields.size(); ++f) {
+        if (!fields[f].first.empty()) { Reloc rl; rl.offset = static_cast<unsigned long>(out.size()); rl.symbol = fields[f].first; rl.type = RelAddr32Nb; relocs.push_back(rl); }
+        for (int b = 0; b < 4; ++b) out.push_back(static_cast<unsigned char>((fields[f].second >> (8 * b)) & 0xFF));
+    }
     return true;
 }
 
@@ -602,6 +633,7 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         if (mn == "ud2") { byte(0x0F); byte(0x0B); return true; }
         return fail("unknown instruction " + mn, line);
     }
+    if (mn == "int" && n == 1 && ops[0].kind == Operand::Imm && ops[0].imm == 3) { byte(0xCC); return true; }   // ml64's spelling
     const Operand& a = ops[0];
     const Operand* b = n > 1 ? &ops[1] : 0;
     bool mixed = false;
@@ -930,7 +962,9 @@ struct CodeBlock {
     Chunk chunk;
     bool  comdat;      // one COMDAT section of its own (inline functions, template instantiations)
     bool  frame;       // PROC FRAME: gets unwind info (.xdata) and a function table entry (.pdata)
+    std::string handler;   // PROC FRAME:handler, empty without one
     std::vector<unsigned char> xdata;
+    std::vector<Reloc> xdataRelocs;
     CodeBlock() : comdat(false), frame(false) {}
 };
 
@@ -944,8 +978,8 @@ struct EncodeJob : public ParallelJob {
         for (size_t k = 0; k < b.lines.size(); ++k) enc.codeLine(b.lines[k].second, b.lines[k].first);
         enc.finish();
         std::string err;
-        if (b.frame && !buildUnwindInfo(b.chunk, b.xdata, err)) b.chunk.errors.push_back(b.name + ": " + err);
-        if (!b.frame && (b.chunk.prologEnd >= 0 || !b.chunk.unwind.empty())) b.chunk.errors.push_back(b.name + ": unwind directives in a PROC without FRAME");
+        if (b.frame && !buildUnwindInfo(b.chunk, b.name, b.handler, b.xdata, b.xdataRelocs, err)) b.chunk.errors.push_back(b.name + ": " + err);
+        if (!b.frame && (b.chunk.prologEnd >= 0 || !b.chunk.unwind.empty() || !b.chunk.ehRanges.empty())) b.chunk.errors.push_back(b.name + ": unwind directives in a PROC without FRAME");
     }
 };
 
@@ -1042,6 +1076,10 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         lineStart = nl == std::string::npos ? masmText.size() + 1 : nl + 1;
         ++lineNo;
         std::string marker = trimWs(raw);
+        if (marker.compare(0, 10, ";@ehrange ") == 0 && current) {   // a try range of the current PROC FRAME (a comment to ml64)
+            current->lines.push_back(std::make_pair(lineNo, ".ehrange " + marker.substr(10)));
+            continue;
+        }
         if (marker.compare(0, 8, ";@comdat") == 0) {
             comdatNext = true;
             size_t al = marker.find(" align ");                  // ";@comdat any align 32": the item's section alignment
@@ -1077,7 +1115,9 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             blocks.push_back(CodeBlock());
             blocks.back().name = w0;
             blocks.back().comdat = comdatNext;
-            blocks.back().frame = upperText(w2) == "FRAME";
+            blocks.back().frame = upperText(w2.substr(0, 5)) == "FRAME" && (w2.size() == 5 || w2[5] == ':');
+            if (blocks.back().frame && w2.size() > 6) blocks.back().handler = w2.substr(6);
+            if (!blocks.back().handler.empty() && externSet.insert(blocks.back().handler).second) externs.push_back(blocks.back().handler);
             comdatNext = false;
             comdatAlign = 0;
             current = &blocks.back();
@@ -1183,7 +1223,10 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             } else si = part ? pdataIndex : xdataIndex;
             Section& sec = secs[si];
             const unsigned long at = static_cast<unsigned long>(sec.bytes.size());
-            if (part == 0) sec.bytes.insert(sec.bytes.end(), blocks[i].xdata.begin(), blocks[i].xdata.end());
+            if (part == 0) {
+                sec.bytes.insert(sec.bytes.end(), blocks[i].xdata.begin(), blocks[i].xdata.end());
+                for (size_t r = 0; r < blocks[i].xdataRelocs.size(); ++r) { Reloc rl = blocks[i].xdataRelocs[r]; rl.offset += at; sec.relocs.push_back(rl); }
+            }
             else {
                 const unsigned long addend[3] = { 0, static_cast<unsigned long>(c.bytes.size()), 0 };
                 const std::string relocTo[3] = { fn, fn, names[0] };

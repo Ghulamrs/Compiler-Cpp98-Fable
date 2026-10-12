@@ -1,8 +1,12 @@
 # eh.ps1 - unwind tables and exceptions of cppparse-compiled code (examples\sample-eh, driver and ml64 entry in
-# examples\sample-eh-driver). For each of -O0..-O3: probe.cpp is compiled by cppparse --compile6 --obj, entry.asm
-# by ml64, the driver and the runtime by cl; the program must print ALL OK.
-#   unwind walk: from inside nested cppparse frames, RtlVirtualUnwind must find every frame and restore the
-#   callee-saved registers (rbx rbp rsi rdi r12-r15, xmm6-xmm15) that an ml64 function set before calling in
+# examples\sample-eh-driver).
+#   reference: probe.cpp and probe-mix.cpp compiled by cl /O2 /EHa (C++ exceptions of MSVC)
+#   then for each exception model (sjlj: setjmp frames, table: --eh=table, and both mixed: probe.cpp with one model,
+#   probe-mix.cpp with the other) and each of -O0..-O3, the two probe files compiled by cppparse --compile6 --obj
+# Each program must print ALL OK, and its output must equal the reference:
+#   unwind walk: from inside nested frames, RtlVirtualUnwind must find every frame and restore the callee-saved
+#   registers (rbx rbp rsi rdi r12-r15, xmm6-xmm15) that an ml64 function set before calling in
+#   exceptions: the results of the eh* functions and the number of destructors run
 # Exit code 1 when anything fails.
 param([string]$Compiler = "")
 . "$PSScriptRoot\toolset.ps1"
@@ -11,26 +15,56 @@ Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
 $ml64 = "$Msvc\bin\Hostx64\x64\ml64.exe"
 $out = "out\eh"
+$src = "..\examples\sample-eh"
+$drv = "..\examples\sample-eh-driver"
 New-Item -ItemType Directory -Force $out | Out-Null
 $failed = 0
 function Report([string]$name, [bool]$ok, [string]$detail = "") {
     if ($ok) { Write-Host "  ok   $name" } else { Write-Host "  FAIL $name"; if ($detail) { Write-Host $detail }; $script:failed++ }
 }
+function Normalize([string]$t) { return ($t -replace "`r`n", "`n").TrimEnd() }
 
 Write-Host "=== exceptions and unwind tables (sample-eh) ==="
-$msg = & $cl /nologo /c /EHsc /W3 "/Fo$out\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" 2>&1 | Out-String
-Report "runtime compiled" ($LASTEXITCODE -eq 0) $msg
-$msg = & $ml64 /nologo /c "/Fo$out\entry.obj" "..\examples\sample-eh-driver\entry.asm" 2>&1 | Out-String
+$msg = & $cl /nologo /c /EHsc /W4 /WX "/Fo$out\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" 2>&1 | Out-String
+Report "runtime compiled (/W4 /WX)" ($LASTEXITCODE -eq 0) $msg
+$msg = & $ml64 /nologo /c "/Fo$out\entry.obj" "$drv\entry.asm" 2>&1 | Out-String
 Report "entry.asm assembled by ml64" ($LASTEXITCODE -eq 0) $msg
-foreach ($lvl in 0, 1, 2, 3) {
-    $dir = "$out\O$lvl"
-    New-Item -ItemType Directory -Force $dir | Out-Null
-    $msg = & $Exe --compile6 "-O$lvl" --obj --msvc-mangling -q -I ..\include -I .. -o $dir -n probe "..\examples\sample-eh\probe.cpp" 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$dir\probe6.obj")) { Report "-O$lvl compile" $false $msg; continue }
-    $msg = & $cl /nologo /EHsc /W4 /WX "/Fo$dir\" "/Fe$dir\eh.exe" "..\examples\sample-eh-driver\driver-eh.cpp" "$dir\probe6.obj" "$out\entry.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { Report "-O$lvl link" $false $msg; continue }
-    $run = & "$dir\eh.exe" 2>&1 | Out-String
-    Report "-O${lvl}: $((($run -split "`n") | Where-Object { $_ -match 'unwind walk' }) -join '' )".Trim() ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') $run
+
+New-Item -ItemType Directory -Force "$out\cl" | Out-Null
+# /EHa: cl 19.52 (preview) with /EHsc or /EHs at /O1 and above crashes on a throw out of a recursion whose frames
+# have destructors (deep() below; a 6-line program reproduces it, clang -O2 and cl /EHa run it correctly)
+$msg = & $cl /nologo /EHa /W4 /O2 "/Fo$out\cl\" "/Fe$out\cl\eh.exe" "$drv\driver-eh.cpp" "$src\probe.cpp" "$src\probe-mix.cpp" "$out\entry.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) { Report "cl reference build" $false $msg; exit 1 }
+$reference = Normalize (& "$out\cl\eh.exe" 2>&1 | Out-String)
+Report "cl reference build runs, ALL OK" ($LASTEXITCODE -eq 0 -and $reference -match 'ALL OK') $reference
+
+# model of probe.cpp, model of probe-mix.cpp
+$models = [ordered]@{ "sjlj" = @("--eh=sjlj", "--eh=sjlj"); "table" = @("--eh=table", "--eh=table"); "table+sjlj" = @("--eh=table", "--eh=sjlj"); "sjlj+table" = @("--eh=sjlj", "--eh=table") }
+foreach ($m in $models.Keys) {
+    foreach ($lvl in 0, 1, 2, 3) {
+        $dir = "$out\$($m -replace '\+', '-')-O$lvl"
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        $ok = $true
+        foreach ($k in 0, 1) {
+            $name = @("probe", "probe-mix")[$k]
+            $msg = & $Exe --compile6 "-O$lvl" --obj --msvc-mangling $models[$m][$k] -q -I ..\include -I .. -o $dir -n $name "$src\$name.cpp" 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$dir\${name}6.obj")) { Report "$m -O$lvl compile $name" $false $msg; $ok = $false }
+        }
+        if (-not $ok) { continue }
+        $msg = & $cl /nologo /EHsc /W4 /WX "/Fo$dir\" "/Fe$dir\eh.exe" "$drv\driver-eh.cpp" "$dir\probe6.obj" "$dir\probe-mix6.obj" "$out\entry.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Report "$m -O$lvl link" $false $msg; continue }
+        $p = Start-Process -FilePath "$dir\eh.exe" -NoNewWindow -PassThru -RedirectStandardOutput "$dir\eh.out" -RedirectStandardError "$dir\eh.err"
+        $null = $p.Handle
+        if (-not $p.WaitForExit(60000)) { $p.Kill(); Report "$m -O$lvl" $false "TIMEOUT"; continue }
+        $run = Normalize ((Get-Content "$dir\eh.out" -Raw) + (Get-Content "$dir\eh.err" -Raw))
+        $same = $run -eq $reference
+        $detail = ""
+        if (-not $same) {
+            $a = $run -split "`n"; $b = $reference -split "`n"
+            for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) { if ($a[$i] -ne $b[$i]) { $detail = "       line $($i + 1): got '$($a[$i])', cl '$($b[$i])'"; break } }
+        }
+        Report "$m -O${lvl}: output equals cl's (exit $($p.ExitCode))" ($p.ExitCode -eq 0 -and $same) $detail
+    }
 }
 if ($failed) { Write-Host "eh: $failed check(s) failed"; exit 1 }
 Write-Host "eh: all checks passed"

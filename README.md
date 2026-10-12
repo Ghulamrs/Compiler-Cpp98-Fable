@@ -265,11 +265,33 @@ tables go into associative COMDAT sections, so the linker keeps or drops them wi
 move in a function body, so the tables describe the frame from `rsp` alone. `rbp` is listed as a pushed register,
 not as a frame register.
 
+**Table-based exceptions (`--eh=table`).** A try region, or a cleanup region for destructors, costs no code
+on the normal path: no frame to push, no `setjmp`, no pop at the exits. The function's unwind info names the
+runtime's `cppparse_eh_handler`, followed by cppparse's range table: `CPPX`, a count, then for each range its
+begin, end and landing pad. The landing pad is the region's dispatch stub; the code generator marks the ranges
+with `;@ehrange` lines, which are comments to ml64. `throw` walks the stack with the unwind tables
+(`RtlLookupFunctionEntry`, `RtlVirtualUnwind`). It enters the first landing pad whose range holds a frame's call
+site with `RtlRestoreContext`, so that frame gets its callee-saved registers back as they were at the call. The
+same walk also finds the setjmp frames of the default model (`--eh=sjlj`): it longjmps to one once it has passed
+the stack frame that holds it. Both models can therefore be mixed in one program. A handler body is a region of
+its own: an exception that leaves it has the runtime release the exception the handler held
+(`cppparse_catch_unwind`), unless it is that same exception (`throw;`). The design and its steps are in
+[docs/design-table-exceptions.md](docs/design-table-exceptions.md).
+
 Checks: test 8 compares every table with the one ml64 builds from the same assembly text, byte for byte.
 `eh.ps1` goes further. An ml64 function sets every callee-saved register (rbx rbp rsi rdi r12-r15, xmm6-xmm15) to
 a pattern and calls cppparse code that recurses with values of its own in those registers, through a frame of
 more than a page. At the bottom, the runtime's `cppparse_walk_frames` walks back with `RtlVirtualUnwind`. It
 must find every cppparse frame, and the registers it restores in the ml64 frame must be the patterns.
+`eh.ps1` then runs the exception cases of `probe.cpp`:
+- throw and catch by class, base class, `int` and `double`;
+- destructors in the frames in between, nested regions, rethrow, a throw from a handler;
+- a frame of more than a page, locals kept across a throw, a loop that throws on every other iteration;
+- a throw across a second file (`probe-mix.cpp`).
+
+These run in four models (setjmp, table, and each mixed with the other in `probe-mix.cpp`) at `-O0` to `-O3`.
+Each output must equal the cl build's. That reference is built with `/EHa`, because cl 19.52 (preview)
+miscompiles a throw out of a recursion with destructors under `/EHsc` at `/O1` and above.
 
 ## Building and testing
 

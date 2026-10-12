@@ -85,11 +85,14 @@ function Get-CodeBytes([string[]]$objs) {
     $bytes = @{}
     foreach ($obj in $objs) {
         $cur = $null
+        $int3 = 0   # int 3 bytes since the last other instruction: inside the function (after a call that does not
+                    # return) when more code follows, padding otherwise
         foreach ($l in (& "$Msvc\bin\Hostx64\x64\dumpbin.exe" /nologo /disasm $obj)) {
-            if ($l -match '^(\S+)( \(.*\))?:\s*$') { $cur = $Matches[1]; if (-not $bytes.ContainsKey($cur)) { $bytes[$cur] = 0 } else { $cur = $null }; continue }
+            if ($l -match '^(\S+)( \(.*\))?:\s*$') { $cur = $Matches[1]; $int3 = 0; if (-not $bytes.ContainsKey($cur)) { $bytes[$cur] = 0 } else { $cur = $null }; continue }
             if (-not $cur) { continue }
             if ($l -match '^\s+[0-9A-F]{16}: ([0-9A-F]{2}(?: [0-9A-F]{2})*)(?:\s{2,}(.*))?$') {
-                if (($Matches[2] -replace '\s+', ' ').Trim() -ne 'int 3') { $bytes[$cur] += ($Matches[1] -split ' ').Count }
+                if (($Matches[2] -replace '\s+', ' ').Trim() -eq 'int 3') { $int3++ }
+                else { $bytes[$cur] += ($Matches[1] -split ' ').Count + $int3; $int3 = 0 }
             } elseif ($l -match '^\s+([0-9A-F]{2}(?: [0-9A-F]{2})*)\s*$') { $bytes[$cur] += ($Matches[1] -split ' ').Count }
         }
     }

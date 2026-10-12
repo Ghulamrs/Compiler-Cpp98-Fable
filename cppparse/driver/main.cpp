@@ -86,6 +86,8 @@ void usage()
         "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
         "  --obj            version 5: write <name>.obj with cppparse's own COFF writer (no ml64 needed)\n"
         "  --msvc-mangling  version 5: MSVC-compatible decorated names (?square@@YAHH@Z) so MSVC code links with plain C++ declarations\n"
+        "  --eh=table|sjlj  try regions as unwind range tables with landing pads (no code on the normal path), or as\n"
+        "                   setjmp frames (the default)\n"
         "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling;\n"
         "                   never more than the number of files read)\n"
         "  -E              version 6: preprocess the input files only and print the result (like cl /EP)\n"
@@ -209,6 +211,8 @@ int main(int argc, char* argv[])
         else if (a == "--assemble") assemble = true;
         else if (a == "--obj") obj = true;
         else if (a == "--msvc-mangling") copt.msvcNames = true;
+        else if (a == "--eh=table") copt.tableEh = true;
+        else if (a == "--eh=sjlj") copt.tableEh = false;
         else if (a == "-E" || a == "--preprocess") preprocessOnly = true;
         else if (a == "--parse6") parse6 = true;
         else if (a == "--sema6") { parse6 = true; sema6 = true; }
@@ -311,6 +315,7 @@ int main(int argc, char* argv[])
                     IrGen gen(program, types);
                     std::vector<IrFunction*> functions;
                     X86Module x86(copt.msvcNames);
+                    x86.setTableExceptions(copt.tableEh);
                     unsigned long unitId = 2166136261UL;   // FNV-1a of the input path: this unit's anonymous namespace id
                     for (size_t k = 0; k < inputs[i].size(); ++k) unitId = (unitId ^ static_cast<unsigned char>(inputs[i][k])) * 16777619UL;
                     setMangleUnitId(unitId & 0xFFFFFFFFUL);

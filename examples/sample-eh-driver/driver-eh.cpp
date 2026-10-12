@@ -1,14 +1,26 @@
-// driver-eh.cpp - compiled by cl, linked with cppparse's probe.obj, entry.obj (ml64) and the runtime
-// (sandbox\scripts\eh.ps1).
+// driver-eh.cpp - compiled by cl, linked with the probe objects (cppparse's, or cl's for the reference), entry.obj
+// (ml64) and the runtime (sandbox\scripts\eh.ps1).
 // Unwind tables: probe_entry fills the callee-saved registers with patterns and calls probeBig, which recurses
 // through probeDeep; at the bottom, probe_report walks the stack back to probe_entry with RtlVirtualUnwind. Every
-// cppparse frame on the way must be found, and the registers restored in probe_entry's frame must be the patterns.
+// probeDeep frame on the way must be found, and the registers restored in probe_entry's frame must be the patterns.
+// Exceptions: the eh* functions print their results; the output must equal the cl build's.
 #include <stdio.h>
 
 extern "C" int probe_entry(int n, int (*fn)(int));
 extern "C" int cppparse_walk_frames(const void* stop, const void* counted, unsigned long long* ints, unsigned long long* xmms);
+extern "C" int cppparse_frame_depth();
+extern "C" int cppparse_caught_depth();
 int probeDeep(int n, double x);
 int probeBig(int n);
+int ehBasic(int n);
+int ehDeep(int n);
+int ehLocals(int n);
+int ehNested(int n);
+int ehFromHandler(int n);
+int ehBig(int n);
+int ehLoop(int n);
+int ehMixed(int n);
+extern int g_destroyed;
 
 static int g_walked = -2;
 static unsigned long long g_ints[8], g_xmms[10];
@@ -38,6 +50,7 @@ static void check(const char* what, unsigned long long got, unsigned long long e
 
 int main()
 {
+    setvbuf(stdout, 0, _IONBF, 0);   // a crash keeps what was printed before it
     const int depth = 12;
     const int result = probe_entry(depth, &probeBig);
     check("result of probeBig", (unsigned long long)result, (unsigned long long)(refDeep(depth, 0.5) + depth % 64 + 5999 % 64));
@@ -52,6 +65,18 @@ int main()
         check(xmmNames[i], g_xmms[i], b * 0x0101010101010101ULL);
     }
     printf("unwind walk: %d probeDeep frames, %d registers checked\n", g_walked, 18);
+
+    for (int n = -1; n <= 5; ++n) printf("ehBasic(%d) = %d\n", n, ehBasic(n));
+    printf("ehDeep(10) = %d\n", ehDeep(10));
+    printf("ehLocals(20) = %d\n", ehLocals(20));
+    for (int n = 0; n <= 5; ++n) printf("ehNested(%d) = %d\n", n, ehNested(n));
+    printf("ehFromHandler(41) = %d\n", ehFromHandler(41));
+    printf("ehBig(0) = %d, ehBig(99) = %d\n", ehBig(0), ehBig(99));
+    printf("ehLoop(1000) = %d\n", ehLoop(1000));
+    printf("ehMixed(0) = %d, ehMixed(21) = %d\n", ehMixed(0), ehMixed(21));
+    printf("destructors: %d\n", g_destroyed);
+    check("try frames left", (unsigned long long)cppparse_frame_depth(), 0);
+    check("caught exceptions left", (unsigned long long)cppparse_caught_depth(), 0);
     printf(failures ? "FAILED\n" : "ALL OK\n");
     return failures ? 1 : 0;
 }

@@ -42,6 +42,9 @@ struct IrGlobal {
 class X86Module {
 public:
     explicit X86Module(bool msvcNames = false);
+    // try regions as range tables with landing pads (--eh=table) instead of setjmp frames
+    void        setTableExceptions(bool on) { m_tableEh = on; }
+    bool        tableExceptions() const { return m_tableEh; }
     void        addVtable(const IrVtable& v) { m_vtables.push_back(v); }
     void        addGlobal(const IrGlobal& g) { m_globals.push_back(g); }
     void        addInitializer(const std::string& irName) { m_initializers.push_back(irName); }   // run by the CRT before main
@@ -71,6 +74,7 @@ private:
     std::set<std::string>    m_globalsUsed;     // mangled global names referenced
     Mutex                    m_mutex;           // guards the pools above while functions are generated in parallel
     bool                               m_msvc;
+    bool                               m_tableEh;
     std::map<std::string, std::string> m_functionNames;   // IR function name -> decorated name (read-only while generating)
     std::map<std::string, std::string> m_globalNames;     // qualified variable name -> decorated name
     std::set<std::string>              m_dataSymbols;     // symbols already made PUBLIC in .data

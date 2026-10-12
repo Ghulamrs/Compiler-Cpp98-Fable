@@ -1846,11 +1846,45 @@ void IrGen::stmt(cxx::Stmt* s)
                     IrInst st = make(IrInst::StoreLocal, refT, h->loc.line); st.args.push_back(IrOperand::local(slot, oldType(refT))); st.args.push_back(IrOperand::temp(ev, oldType(m_semaTypes.pointer(ct)))); emit(st);
                 }
             }
+            // an exception that leaves the handler ends the one it handles: the body is a region of its own, whose
+            // landing pad has the runtime release the handled exception (unless it is the one leaving, a "throw;")
+            // and passes the new one on
+            const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+            const int handledSlot = newLocal("catch.handled", vp, false);
+            { LValue hs; hs.kind = LValue::Local; hs.local = handledSlot; hs.type = vp; store(hs, ev, vp, h->loc.line); }
+            const int hid = m_tryCount++;
+            const int unwind = m_out->newBlock("catch.unwind");
+            const int hbody = m_out->newBlock("catch.body");
+            IrInst htb = make(IrInst::TryBegin, 0, h->loc.line);
+            htb.extra = hid;
+            htb.args.push_back(IrOperand::block(unwind));
+            emit(htb);
+            br(hbody, h->loc.line);
+            m_block = hbody;
             m_tryStack.push_back(-1);
+            m_tryStack.push_back(hid);
             stmt(h->kids[0]);
             m_tryStack.pop_back();
-            if (!terminated()) emit(make(IrInst::CatchEnd, 0, h->loc.line));
+            m_tryStack.pop_back();
+            if (!terminated()) {
+                IrInst hte = make(IrInst::TryEnd, 0, h->loc.line);
+                hte.extra = hid;
+                emit(hte);
+                emit(make(IrInst::CatchEnd, 0, h->loc.line));
+            }
             br(join, h->loc.line);
+            m_block = unwind;
+            IrInst ucp = make(IrInst::CatchParam, vp, h->loc.line);
+            ucp.sub = "...";
+            emit(ucp);
+            IrInst ld = make(IrInst::LoadLocal, vp, h->loc.line);
+            ld.args.push_back(IrOperand::local(handledSlot, oldType(vp)));
+            const int handled = emit(ld);
+            IrInst rel = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), h->loc.line);
+            rel.sub = "cppparse_catch_unwind";
+            rel.args.push_back(IrOperand::temp(handled, oldType(vp)));
+            emit(rel);
+            emit(make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), h->loc.line));
         }
         m_block = join;
         return;

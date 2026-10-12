@@ -130,7 +130,7 @@ namespace {
 
 class X86Function {
 public:
-    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false), m_firstSpills(0)
+    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false), m_firstSpills(0), m_tableEh(false), m_openRegion(-1)
     { for (int p = 0; p < 4; ++p) m_lastParamLoad[p] = -1; }
     std::string run();
 
@@ -214,7 +214,78 @@ private:
     bool writesArgReg(const IrInst& in, int p) const;   // may the code for 'in' overwrite parameter p's register?
     std::set<int>       m_returnDirect;   // temps computed straight into rax for the return that follows
     int                 m_firstSpills;    // spills counted by the first allocation (a second one replaces them)
+    // table-based exceptions (--eh=table): a try region costs no code; the code it covers is listed as address
+    // ranges in the function's unwind info, each with the landing pad (the dispatch stub of its innermost region)
+    // where the runtime resumes this frame when an exception passes through a call in that range
+    bool computeRegions();                       // false when the regions are not properly nested along every path
+    void setRegions(const std::vector<long>& now);   // closes / opens a range where the innermost region changes
+    struct EhRange { std::string begin, end; long region; };
+    bool                m_tableEh;
+    std::vector<std::vector<long> > m_regionIn;  // regions active on entry to each block, innermost last
+    std::map<long, std::vector<long> > m_regionOuter;   // region -> the regions active at its trybegin
+    std::vector<long>   m_regionNow;
+    std::vector<EhRange> m_ranges;
+    long                m_openRegion;            // innermost region of the open range, -1 when none is open
 };
+
+bool X86Function::computeRegions()
+{
+    const size_t n = m_f.blocks.size();
+    m_regionIn.assign(n, std::vector<long>());
+    std::vector<bool> seen(n, false);
+    std::vector<int> work;
+    bool ok = true;
+    seen[0] = true;
+    work.push_back(0);
+    while (!work.empty() && ok) {
+        const int b = work.back();
+        work.pop_back();
+        std::vector<long> cur = m_regionIn[static_cast<size_t>(b)];
+        const IrBlock& blk = m_f.blocks[static_cast<size_t>(b)];
+        for (size_t i = 0; i < blk.insts.size() && ok; ++i) {
+            const IrInst& in = blk.insts[i];
+            std::vector<int> targets;
+            if (in.op == IrInst::TryBegin) {
+                m_regionOuter[in.extra] = cur;
+                for (size_t a = 0; a < in.args.size(); ++a) if (in.args[a].kind == IrOperand::Block) targets.push_back(in.args[a].id);
+            } else if (in.op == IrInst::Br || in.op == IrInst::CondBr) {
+                for (size_t a = 0; a < in.args.size(); ++a) if (in.args[a].kind == IrOperand::Block) targets.push_back(in.args[a].id);
+            }
+            // the handlers of a region run in the regions around it; a branch keeps the current ones
+            for (size_t t = 0; t < targets.size(); ++t) {
+                const size_t h = static_cast<size_t>(targets[t]);
+                if (h >= n) { ok = false; break; }
+                if (!seen[h]) { seen[h] = true; m_regionIn[h] = cur; work.push_back(targets[t]); }
+                else if (m_regionIn[h] != cur) ok = false;
+            }
+            if (in.op == IrInst::TryBegin) cur.push_back(in.extra);
+            else if (in.op == IrInst::TryEnd) {
+                if (cur.empty() || cur.back() != in.extra) ok = false;
+                else cur.pop_back();
+            }
+        }
+    }
+    return ok;
+}
+
+void X86Function::setRegions(const std::vector<long>& now)
+{
+    m_regionNow = now;
+    const long inner = now.empty() ? -1 : now.back();
+    if (inner == m_openRegion) return;
+    if (m_openRegion >= 0) {
+        m_ranges.back().end = m_label + "_R" + intToString(static_cast<int>(m_ranges.size())) + "e";
+        m_out << m_ranges.back().end << ":\n";
+    }
+    m_openRegion = inner;
+    if (inner >= 0) {
+        EhRange r;
+        r.begin = m_label + "_R" + intToString(static_cast<int>(m_ranges.size()) + 1) + "b";
+        r.region = inner;
+        m_ranges.push_back(r);
+        m_out << r.begin << ":\n";
+    }
+}
 
 void X86Function::computeIntervals()
 {
@@ -604,7 +675,7 @@ void X86Function::layoutFrame()
     for (size_t b = 0; b < m_f.blocks.size(); ++b)
         for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
             const IrInst& in = m_f.blocks[b].insts[i];
-            if (in.op == IrInst::TryBegin) { off = (off + kTryFrameSize + 15) / 16 * 16; m_tryOffset[in.extra] = off; }
+            if (in.op == IrInst::TryBegin && !m_tableEh) { off = (off + kTryFrameSize + 15) / 16 * 16; m_tryOffset[in.extra] = off; }
             else if (in.op == IrInst::Throw && !in.args.empty() && m_throwSlot == 0) { off = (off + 16 + 15) / 16 * 16; m_throwSlot = off; }
         }
     int outgoing = 32 + 8 * m_outgoingArgs;       // shadow space plus stack arguments
@@ -1097,6 +1168,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         break;
     }
     case IrInst::TryBegin: {
+        if (m_tableEh) { std::vector<long> now = m_regionNow; now.push_back(in.extra); setRegions(now); break; }
         // register the frame, then _setjmp(frame, NULL): 0 now, 1 when a throw lands here
         std::string fr = "[rbp-" + intToString(m_tryOffset[in.extra]) + "]";
         m_m.useExtern("cppparse_push_frame");
@@ -1111,6 +1183,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         break;
     }
     case IrInst::TryEnd: {
+        if (m_tableEh) { std::vector<long> now = m_regionNow; if (!now.empty()) now.pop_back(); setRegions(now); break; }
         m_m.useExtern("cppparse_pop_frame");
         line("lea rcx, [rbp-" + intToString(m_tryOffset[in.extra]) + "]");
         line("call cppparse_pop_frame");
@@ -1136,7 +1209,9 @@ void X86Function::emitBody()
     // a function with a frame describes its prologue with the MASM unwind directives (.pushreg, .allocstack,
     // .savexmm128, .endprolog): the assembler turns them into the Windows unwind tables (.xdata, .pdata) through
     // which a debugger or an exception walks from this function to its caller. A frameless leaf needs none.
-    m_out << m_label << (m_frameless ? " PROC\n" : " PROC FRAME\n");
+    // With table-based try regions the unwind info also names the runtime's handler, followed by the ranges.
+    if (m_tableEh) m_m.useExtern("cppparse_eh_handler");
+    m_out << m_label << (m_frameless ? " PROC\n" : m_tableEh ? " PROC FRAME:cppparse_eh_handler\n" : " PROC FRAME\n");
     m_out << "        ; " << m_f.name << "\n";
     m_out << "        ; frame " << m_frameSize << " bytes";
     for (size_t l = 0; l < m_f.locals.size(); ++l) {
@@ -1199,8 +1274,10 @@ void X86Function::emitBody()
     }
     for (size_t b = 0; b < m_f.blocks.size(); ++b) {
         m_out << label(static_cast<int>(b)) << ":" << (m_f.blocks[b].label.empty() ? "" : "        ; " + m_f.blocks[b].label) << "\n";
+        if (m_tableEh) setRegions(m_regionIn[b]);
         for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) emitInst(m_f.blocks[b].insts[i], static_cast<int>(b));
     }
+    if (m_tableEh) setRegions(std::vector<long>());
     m_out << m_label << "_exit:\n";
     for (std::map<int, int>::iterator r = m_savedFloatOffset.begin(); r != m_savedFloatOffset.end(); ++r) line("movdqu xmm" + intToString(kFloatRegBase + r->first) + ", xmmword ptr [rbp-" + intToString(r->second) + "]");
     if (m_usedIntRegs.empty()) line("leave");
@@ -1213,17 +1290,22 @@ void X86Function::emitBody()
         line("pop rbp");
     }
     line("ret");
-    // version 5: one dispatch stub per try region: pop the frame, try the catch clauses in order, else rethrow
+    // version 5: one dispatch stub per try region: pop the frame, try the catch clauses in order, else rethrow.
+    // With tables the stub is the region's landing pad, and runs in the regions around the region (a rethrow
+    // from it reaches the next outer landing pad)
     for (size_t b = 0; b < m_f.blocks.size(); ++b)
         for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
             const IrInst& in = m_f.blocks[b].insts[i];
             if (in.op != IrInst::TryBegin) continue;
             m_out << m_label << "_T" << in.extra << ":        ; handlers of try region " << in.extra << "\n";
-            m_m.useExtern("cppparse_pop_frame");
             m_m.useExtern("cppparse_match");
             m_m.useExtern("cppparse_rethrow");
-            line("lea rcx, [rbp-" + intToString(m_tryOffset[in.extra]) + "]");
-            line("call cppparse_pop_frame");
+            if (m_tableEh) setRegions(m_regionOuter[in.extra]);
+            else {
+                m_m.useExtern("cppparse_pop_frame");
+                line("lea rcx, [rbp-" + intToString(m_tryOffset[in.extra]) + "]");
+                line("call cppparse_pop_frame");
+            }
             bool catchAll = false;
             for (size_t h = 0; h < in.args.size() && !catchAll; ++h) {
                 int hb = in.args[h].id;
@@ -1236,8 +1318,19 @@ void X86Function::emitBody()
                 line("test eax, eax");
                 line("jne " + label(hb) + "        ; catch (" + ctype + ")");
             }
-            if (!catchAll) line("call cppparse_rethrow            ; no clause matched: outer frame");
+            if (!catchAll) {
+                line("call cppparse_rethrow            ; no clause matched: outer frame");
+                // the call does not return; int 3 keeps its return address inside this function, where the stack walk
+                // of the exception looks it up (as cl and clang end a function with a call that does not return)
+                line("int 3");
+            }
         }
+    if (m_tableEh) {
+        setRegions(std::vector<long>());
+        // read by the COFF writer (a comment to ml64): code range, landing pad
+        for (size_t r = 0; r < m_ranges.size(); ++r)
+            m_out << ";@ehrange " << m_ranges[r].begin << ", " << m_ranges[r].end << ", " << m_label << "_T" << m_ranges[r].region << "\n";
+    }
     m_out << m_label << " ENDP\n\n";
 }
 
@@ -1251,6 +1344,13 @@ std::string X86Function::run()
     m_firstSpills = m_stats.spills - spillsBefore;
     coalesce();
     reallocateAroundCoalesced();
+    if (m_m.tableExceptions()) {
+        bool hasTry = false;
+        for (size_t b = 0; b < m_f.blocks.size() && !hasTry; ++b)
+            for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) if (m_f.blocks[b].insts[i].op == IrInst::TryBegin) { hasTry = true; break; }
+        // regions that are not nested the same way on every path keep the setjmp frames (the runtime handles both)
+        m_tableEh = hasTry && computeRegions();
+    }
     layoutFrame();
     decideFrame();
     if (m_frameless) { m_frameSize = 0; m_stats.frameSize = 0; }
@@ -1260,7 +1360,7 @@ std::string X86Function::run()
 
 // ---- module ---------------------------------------------------------------------------------
 
-X86Module::X86Module(bool msvcNames) : m_msvc(msvcNames) {}
+X86Module::X86Module(bool msvcNames) : m_msvc(msvcNames), m_tableEh(false) {}
 
 void X86Module::addFunction(const IrFunction& f, LowerStats& stats) { appendCode(codeFor(f, stats)); }
 

@@ -159,9 +159,8 @@ the code is assembled in memory for it and no object is written.
 
 Addresses are `section:offset` in the object (a linker adds the image base when it links). **Size** is the
 number of bytes the encoder produced for the definition, without the alignment padding after it, which a
-Visual Studio map does not show. Every function starts on a 16-byte boundary, the gap before it filled with
-`int 3` (0xCC), as cl lays out code with `/Od` and `/O2` (with `/O1` and `/Os` cl packs code on 4-byte
-boundaries; cppparse has no size mode). Data is placed at its own alignment, never padded to 16. **Flags** are link's: `f` a function, `f i` an inline one, none for data
+Visual Studio map does not show. Every function starts on a 16-byte boundary and data at its own alignment
+(see *Alignment of functions and data* below). **Flags** are link's: `f` a function, `f i` an inline one, none for data
 (see *Link's `f` / `i` flags* below). Types: function, data, vtable, string, constant. The symbol is the name in
 the object (MSVC-decorated with `--msvc-mangling`), followed by its readable name. Publics and static
 (internal-linkage) symbols are listed separately, as in Visual Studio's map; COMDAT sections (inline functions,
@@ -171,6 +170,43 @@ object itself keeps a zero time stamp, so it stays the same from run to run) and
 Name**: every symbol again, public and static, sorted by its readable name, with a Linkage column. Visual
 Studio's map has only the address order. If the assembly cannot be encoded, the map says so and lists
 the lines instead of showing guessed numbers.
+
+### Alignment of functions and data
+
+**Functions.** Microsoft's documentation never says that functions are 16-byte aligned: the PE format only
+defines the section flags (`IMAGE_SCN_ALIGN_16BYTES`: "Align data on a 16-byte boundary. Valid only for object
+files."), `/ALIGN` sets the alignment of whole image sections (default 4 KB), and `/Gy` puts each function in a
+COMDAT section of its own without mentioning alignment. The alignment comes from the compiler: cl marks every
+function's section (`.text$mn`) with an alignment flag, and the linker starts each section on that boundary,
+filling the gap with `int 3` (0xCC). The flag depends on the optimisation option, as measured with cl 14.52
+(`dumpbin /headers` of the object, addresses from `link /MAP`):
+
+| cl option | `.text$mn` flag | function addresses |
+|---|---|---|
+| `/Od`, `/O2`, `/Ot` | 16 byte align | every function on a 16-byte boundary |
+| `/O1`, `/Os` | 4 byte align | 4-byte boundaries (offsets 0, 4, 8, 12 seen) |
+
+Exceptions under `/O2`: exception-handling funclets (`__catch$...`) share a section and are not aligned, and
+much of the C runtime library is not built this way (in the matrix program 482 of 736 functions are 16-aligned
+overall, 139 of 144 in the program's own code, the other 5 being `catch` funclets). No directive changes a
+function's alignment: there is no `#pragma align` in MSVC (cl warns `C4068: unknown pragma 'align'` and ignores
+it), and `__declspec(align(N))` or `alignas(N)` on a function is rejected (`C2024: 'alignas' attribute applies to
+variables, data members and tag types only`).
+
+**Data** is placed at its natural alignment, as the x64 ABI recommends (`char` 1, `short` 2, `int` and `float` 4,
+`double`, pointers and `__int64` 8, `__m128` 16; a structure takes its largest member's), never padded to 16 by
+default. `__declspec(align(N))` and `alignas(N)` raise a variable's or a type's alignment. `#pragma pack` and
+`/Zp` change only the packing of members inside a structure, union or class, not where a variable or a
+function is placed. Measured in one object: `char` globals at consecutive bytes, a `double` on an 8-byte
+boundary, `__declspec(align(32)) int` on a 32-byte and `alignas(64) int` on a 64-byte boundary; in the matrix
+program `double` constants (`__real@...`) on 8-byte and 16-byte SSE constants (`__xmm@...`) on 16-byte
+boundaries.
+
+**cppparse** follows cl's speed and debug layout: every function in `.text` starts on a 16-byte boundary with
+`int 3` before it, and COMDAT functions have 16-byte aligned sections of their own (cppparse has no size mode,
+so there is no 4-byte packing). Data is placed at its type's or declared alignment (`__declspec(align(N))`,
+`#pragma pack` for members), at least the natural boundary of its size up to 8 bytes, as cl does. The map's
+sizes stay the encoded bytes; the padding shows as the gap before the next function.
 
 ### Link's `f` / `i` flags
 

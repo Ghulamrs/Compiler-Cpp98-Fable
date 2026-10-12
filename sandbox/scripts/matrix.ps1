@@ -20,8 +20,13 @@ $oracleDir = "..\examples\sample-matrix-driver"
 $failed = 0
 
 function Run([string]$exe) {
-    $text = & $exe 2>&1 | Out-String
-    return @{ Code = $LASTEXITCODE; Text = ($text -replace "`r`n", "`n").TrimEnd() + "`n" }
+    # at most 60 seconds: a miscompiled loop must fail the check, not stop the run
+    $outFile = "$exe.out"
+    $p = Start-Process -FilePath $exe -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError "$exe.err"
+    $null = $p.Handle   # keeps the process handle so that ExitCode is available after the exit
+    if (-not $p.WaitForExit(60000)) { $p.Kill(); return @{ Code = -1; Text = "TIMEOUT after 60 s; output so far:`n" + (Get-Content $outFile -Raw) } }
+    $text = (Get-Content $outFile -Raw) + (Get-Content "$exe.err" -Raw)
+    return @{ Code = $p.ExitCode; Text = ($text -replace "`r`n", "`n").TrimEnd() + "`n" }
 }
 function Report([string]$name, [bool]$ok, [string]$detail = "") {
     if ($ok) { Write-Host "  ok   $name" } else { Write-Host "  FAIL $name"; if ($detail) { Write-Host $detail }; $script:failed++ }

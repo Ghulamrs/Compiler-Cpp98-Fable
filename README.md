@@ -171,9 +171,20 @@ template instances, vtables) are grouped by name. The map starts with a time sta
 object itself keeps a zero time stamp, so it stays the same from run to run) and ends with **Symbols by
 Name**: every symbol again, public and static, sorted by its readable name, with a Linkage column. Visual
 Studio's map has only the address order. If the assembly cannot be encoded, the map says so and lists
-the lines instead of showing guessed numbers. Tests 8 and 13 check that every function is 16-byte aligned
-with less than 16 bytes of padding before the next one, and that every address matches `dumpbin /symbols` of
-the object.
+the lines instead of showing guessed numbers.
+
+Tests 8 and 13 check every map they produce (`Test-ObjectMap` in `sandbox/build-cppparse.ps1`):
+
+- **addresses**: every symbol's `section:offset` is the one `dumpbin /symbols` reports for the object;
+- **sizes**: no definition runs into the next one; every function starts on a 16-byte boundary with less
+  than 16 bytes of padding before the next, and the last one ends its section;
+- **flags**: a function in the object's own `.text` is `f`, a function in a COMDAT section of its own
+  (absent from the section table, listed only in its group) is `f i`, and data has no flags;
+- **Symbols by Name**: the list repeats exactly the symbols of the address lists, with the same address,
+  size and flags, in ascending order of readable name.
+
+Test 13 also checks, on the matrix sample, that vtables are typed `vtable` and that COMDAT sections are
+grouped, and on `examples/sample-align` that `g_align64` sits on a 64-byte boundary.
 
 ## Building and testing
 

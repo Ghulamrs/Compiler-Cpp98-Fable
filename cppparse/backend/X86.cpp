@@ -16,10 +16,13 @@ namespace {
 // the integer registers the allocator hands out: first the callee-saved ones (a function saves those it uses),
 // then the volatile r8..r11, which no instruction sequence uses as a scratch register except around a call or
 // a throw: a value that lives across none of those can sit there without being saved
-const char* const kIntRegs[] = { "rbx", "rsi", "rdi", "r12", "r13", "r14", "r15", "r8", "r9", "r10", "r11" };
+// (rcx, rdx and rax are never handed out by the allocator: the coalescing step after it gives a parameter its
+// incoming rcx / rdx and a returned value rax when nothing writes them meanwhile)
+const char* const kIntRegs[] = { "rbx", "rsi", "rdi", "r12", "r13", "r14", "r15", "r8", "r9", "r10", "r11", "rcx", "rdx", "rax" };
 const int kIntRegCount = 7;          // callee-saved: indexes 0..6
 const int kVolatileRegBase = 7;      // volatile: indexes 7..10
 const int kVolatileRegCount = 4;
+const int kRcx = 11, kRdx = 12, kRax = 13;
 const int kFloatRegBase = 6;     // xmm6 .. xmm13
 const int kFloatRegCount = 8;
 const int kTryFrameSize = 272;   // sizeof(jmp_buf) on x64 (256) plus the frame link
@@ -116,12 +119,13 @@ namespace {
 
 class X86Function {
 public:
-    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false)
+    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false), m_firstSpills(0)
     { for (int p = 0; p < 4; ++p) m_lastParamLoad[p] = -1; }
     std::string run();
 
 private:
-    struct Interval { int temp; int start, end; bool isFloat; int reg; int slot; Interval() : temp(-1), start(1 << 30), end(-1), isFloat(false), reg(-1), slot(0) {} };
+    // fixed: the register was settled by coalescing; a second allocation keeps it and works around it
+    struct Interval { int temp; int start, end; bool isFloat; int reg; int slot; bool fixed; Interval() : temp(-1), start(1 << 30), end(-1), isFloat(false), reg(-1), slot(0), fixed(false) {} };
     struct ByStart { bool operator()(const Interval* a, const Interval* b) const { return a->start != b->start ? a->start < b->start : a->temp < b->temp; } };
 
     void computeIntervals();
@@ -178,6 +182,15 @@ private:
     int                 m_lastParamLoad[4];   // position of the last of them reading parameter p's register, -1 if none
     bool                m_frameless;      // no calls, nothing in memory, no saved registers: no frame at all
     void decideFrame();
+    // after allocation: a parameter stays in its incoming register and a returned value is computed in rax when
+    // nothing writes those registers meanwhile, which saves the copies
+    void coalesce();
+    void reallocateAroundCoalesced();
+    bool canStayInArgReg(int t, int p) const;
+    bool inRegister(const IrOperand& o) const;
+    bool writesArgReg(const IrInst& in, int p) const;   // may the code for 'in' overwrite parameter p's register?
+    std::set<int>       m_returnDirect;   // temps computed straight into rax for the return that follows
+    int                 m_firstSpills;    // spills counted by the first allocation (a second one replaces them)
 };
 
 void X86Function::computeIntervals()
@@ -339,6 +352,138 @@ void X86Function::decideFrame()
     m_frameless = true;
 }
 
+bool X86Function::inRegister(const IrOperand& o) const
+{
+    if (o.kind != IrOperand::Temp) return false;
+    std::map<int, Interval>::const_iterator it = m_intervals.find(o.id);
+    return it != m_intervals.end() && it->second.reg >= 0;
+}
+
+// does the code emitted for 'in' write rcx (p = 0) or rdx (p = 1), the scratch registers of its sequences? The
+// rules follow emitInst: an operand not in a register is materialised in rdx (rcx for an index), division uses
+// both, a shift by a variable count uses cl, and calls, throws and try operations destroy every volatile register
+bool X86Function::writesArgReg(const IrInst& in, int p) const
+{
+    switch (in.op) {
+    case IrInst::Call: case IrInst::VCall: case IrInst::Throw: case IrInst::TryBegin: case IrInst::TryEnd:
+    case IrInst::CatchParam: case IrInst::CatchEnd:
+        return true;
+    case IrInst::Bin: {
+        const std::string& s = in.sub;
+        if (s == "sdiv" || s == "udiv" || s == "srem" || s == "urem") return true;
+        if (s == "shl" || s == "ashr" || s == "lshr") return p == 0 && in.args[1].kind != IrOperand::Imm;
+        if (s[0] == 'f') return false;                                   // floating point: xmm registers only
+        if (p != 1) return false;
+        if (!inRegister(in.args[1])) return true;                        // b materialised in rdx
+        std::map<int, Interval>::const_iterator d = m_intervals.find(in.dst), b = m_intervals.find(in.args[1].id);
+        return d != m_intervals.end() && b != m_intervals.end() && d->second.reg == b->second.reg;   // "mov rdx, b"
+    }
+    case IrInst::Cmp: return p == 1 && in.sub[0] != 'f' && !inRegister(in.args[1]);
+    case IrInst::Copy: return p == 1 && !tempIsFloat(in.dst) && !inRegister(in.args[0]);
+    case IrInst::AddrField: return p == 1 && !m_folded.count(in.dst) && !inRegister(in.args[0]);
+    case IrInst::AddrIndex: return p == 1 ? !inRegister(in.args[0]) : !inRegister(in.args[1]);
+    case IrInst::LoadMem: case IrInst::StoreMem: {
+        if (p != 1) return false;
+        const IrOperand& a = in.args[0];
+        if (a.kind == IrOperand::Temp && m_folded.count(a.id)) return !inRegister(m_folded.find(a.id)->second.base);
+        return !inRegister(a);
+    }
+    default: return false;
+    }
+}
+
+// may parameter p's value (temp t) live in its argument register? Nothing during its lifetime may write that
+// register, and no other value may hold it
+bool X86Function::canStayInArgReg(int t, int p) const
+{
+    static const int argIdx[4] = { kRcx, kRdx, kVolatileRegBase, kVolatileRegBase + 1 };
+    std::map<int, Interval>::const_iterator it = m_intervals.find(t);
+    if (it == m_intervals.end()) return false;
+    const Interval& iv = it->second;
+    for (int k = iv.start; k <= iv.end; ++k) {
+        const IrInst& at = m_f.blocks[static_cast<size_t>(m_linear[static_cast<size_t>(k)].first)].insts[static_cast<size_t>(m_linear[static_cast<size_t>(k)].second)];
+        if (p < 2) { if (writesArgReg(at, p)) return false; }
+        else for (size_t c = 0; c < m_clobbers.size(); ++c) if (m_clobbers[c] == k) return false;
+    }
+    for (std::map<int, Interval>::const_iterator o = m_intervals.begin(); o != m_intervals.end(); ++o)
+        if (o->first != t && o->second.reg == argIdx[p] && o->second.start <= iv.end && o->second.end >= iv.start) return false;
+    return true;
+}
+
+void X86Function::coalesce()
+{
+    m_returnDirect.clear();
+    if (m_f.hasTry) return;   // longjmp restores only the callee-saved registers
+    // a parameter's value stays in its argument register (rcx, rdx, r8, r9) when nothing writes it meanwhile
+    static const int argIdx[4] = { kRcx, kRdx, kVolatileRegBase, kVolatileRegBase + 1 };
+    for (int i = 0; i < m_prefixEnd; ++i) {
+        const IrInst& in = m_f.blocks[0].insts[static_cast<size_t>(i)];
+        const int p = in.args[0].id;
+        if (p >= 4 || in.dst < 0 || !m_paramInReg[static_cast<size_t>(p)]) continue;
+        std::map<int, Interval>::iterator it = m_intervals.find(in.dst);
+        if (it == m_intervals.end() || it->second.isFloat || it->second.reg < 0) continue;
+        // (an r8 / r9 parameter that the allocator already put there stays: nothing to settle)
+        if (it->second.reg != argIdx[p] && canStayInArgReg(in.dst, p)) { it->second.reg = argIdx[p]; it->second.fixed = true; }
+    }
+    // a value computed by the instruction just before its return, and used only there, is computed in rax
+    std::map<int, int> uses;
+    for (size_t p = 0; p < m_linear.size(); ++p) {
+        const IrInst& in = m_f.blocks[static_cast<size_t>(m_linear[p].first)].insts[static_cast<size_t>(m_linear[p].second)];
+        for (size_t a = 0; a < in.args.size(); ++a) if (in.args[a].kind == IrOperand::Temp) ++uses[in.args[a].id];
+    }
+    for (size_t p = 1; p < m_linear.size(); ++p) {
+        const IrInst& in = m_f.blocks[static_cast<size_t>(m_linear[p].first)].insts[static_cast<size_t>(m_linear[p].second)];
+        if (in.op != IrInst::Ret || in.args.empty() || in.args[0].kind != IrOperand::Temp) continue;
+        if (m_linear[p - 1].first != m_linear[p].first) continue;          // defined in the same block, just before
+        const int v = in.args[0].id;
+        std::map<int, Interval>::iterator it = m_intervals.find(v);
+        if (it == m_intervals.end() || it->second.isFloat || it->second.reg < 0 || uses[v] != 1) continue;
+        if (it->second.start != static_cast<int>(p) - 1 || it->second.end != static_cast<int>(p)) continue;
+        const IrInst& def = m_f.blocks[static_cast<size_t>(m_linear[p - 1].first)].insts[static_cast<size_t>(m_linear[p - 1].second)];
+        if (def.dst != v || def.op == IrInst::Phi) continue;
+        it->second.reg = kRax;
+        it->second.fixed = true;
+        m_returnDirect.insert(v);
+    }
+    // only the callee-saved registers still in use are saved
+    m_usedIntRegs.clear();
+    for (std::map<int, Interval>::const_iterator it = m_intervals.begin(); it != m_intervals.end(); ++it)
+        if (!it->second.isFloat && it->second.reg >= 0 && it->second.reg < kIntRegCount) m_usedIntRegs.insert(it->second.reg);
+}
+
+// the registers freed by coalescing (a parameter's first register, before it stayed in rcx) go to the other
+// values: allocate again around the settled ones. Then the settled parameters are checked again (a value spilled
+// now would be materialised in rdx); if one no longer fits, the first allocation is kept.
+void X86Function::reallocateAroundCoalesced()
+{
+    bool any = false;
+    for (std::map<int, Interval>::const_iterator it = m_intervals.begin(); it != m_intervals.end(); ++it) if (it->second.fixed) any = true;
+    if (any) {
+        const std::map<int, Interval> settled = m_intervals;
+        const int spillsSettled = m_stats.spills;
+        for (std::map<int, Interval>::iterator it = m_intervals.begin(); it != m_intervals.end(); ++it) if (!it->second.fixed) it->second.reg = -1;
+        m_usedIntRegs.clear();
+        m_usedFloatRegs.clear();
+        m_stats.spills -= m_firstSpills;
+        allocate();
+        bool ok = true;
+        for (int i = 0; i < m_prefixEnd && ok; ++i) {
+            const IrInst& in = m_f.blocks[0].insts[static_cast<size_t>(i)];
+            std::map<int, Interval>::const_iterator it = m_intervals.find(in.dst);
+            if (in.dst >= 0 && it != m_intervals.end() && it->second.fixed && it->second.reg != kRax) ok = canStayInArgReg(in.dst, in.args[0].id);
+        }
+        if (!ok) { m_intervals = settled; m_stats.spills = spillsSettled; }
+    }
+    // the callee-saved registers still in use are the ones saved
+    m_usedIntRegs.clear();
+    m_usedFloatRegs.clear();
+    for (std::map<int, Interval>::const_iterator it = m_intervals.begin(); it != m_intervals.end(); ++it) {
+        if (it->second.reg < 0) continue;
+        if (it->second.isFloat) m_usedFloatRegs.insert(it->second.reg);
+        else if (it->second.reg < kIntRegCount) m_usedIntRegs.insert(it->second.reg);
+    }
+}
+
 void X86Function::allocate()
 {
     // callee-saved registers survive calls, so intervals need no call-crossing treatment
@@ -356,9 +501,16 @@ void X86Function::allocate()
         Interval* iv = order[k];
         for (size_t a = 0; a < active.size();) {
             if (active[a]->end < iv->start) {
-                if (active[a]->reg >= 0) { if (active[a]->isFloat) fltFree[active[a]->reg] = true; else intFree[active[a]->reg] = true; }
+                if (active[a]->reg >= 0 && (active[a]->isFloat || active[a]->reg < kIntRegCount + kVolatileRegCount)) {
+                    if (active[a]->isFloat) fltFree[active[a]->reg] = true; else intFree[active[a]->reg] = true;
+                }
                 active.erase(active.begin() + static_cast<long>(a));
             } else ++a;
+        }
+        if (iv->fixed) {
+            // settled by coalescing: rcx / rdx / rax are outside the pool; r8 / r9 are taken for its lifetime
+            if (iv->reg >= 0 && iv->reg < kIntRegCount + kVolatileRegCount) { intFree[iv->reg] = false; active.push_back(iv); }
+            continue;
         }
         bool clobbered = false;
         for (size_t c = 0; c < m_clobbers.size() && !clobbered; ++c) clobbered = m_clobbers[c] >= iv->start && m_clobbers[c] <= iv->end;
@@ -385,7 +537,7 @@ void X86Function::allocate()
         Interval* victim = 0;
         for (size_t a = 0; a < active.size(); ++a) {
             Interval* v = active[a];
-            if (v->isFloat != iv->isFloat || v->reg < 0) continue;
+            if (v->isFloat != iv->isFloat || v->reg < 0 || v->fixed) continue;
             if (!iv->isFloat && v->reg >= kVolatileRegBase &&
                 (!mayUseVolatile || (v->reg == kVolatileRegBase && r8Busy) || (v->reg == kVolatileRegBase + 1 && r9Busy))) continue;
             if (!victim || v->end > victim->end) victim = v;
@@ -662,7 +814,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
             } else {
                 const std::string src = argRegs[p];
                 const bool zero = in.type && (in.type->isUnsigned || in.type->kind == Type::Bool);
-                if (size == 8) line("mov " + rd + ", " + src + "      ; param " + m_f.locals[static_cast<size_t>(p)].name);
+                if (size == 8) { if (rd != src) line("mov " + rd + ", " + src + "      ; param " + m_f.locals[static_cast<size_t>(p)].name); }
                 else if (size == 4) line((zero ? "mov " + reg32(rd) + ", " + reg32(src) : "movsxd " + rd + ", " + reg32(src)) + "      ; param " + m_f.locals[static_cast<size_t>(p)].name);
                 else line(std::string(zero ? "movzx " : "movsx ") + rd + ", " + regSized(src, size) + "      ; param " + m_f.locals[static_cast<size_t>(p)].name);
             }
@@ -675,6 +827,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         else mem = memOperand(in.args[0]);
         std::string rd = def(in.dst, dstFloat, dstFloat ? "xmm0" : "rax", spill);
         if (dstFloat) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + rd + ", " + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem);
+        else if (size == 4 && m_returnDirect.count(in.dst)) line("mov eax, dword ptr " + mem);   // returned as is: only eax counts
         else if (size == 8) line("mov " + rd + ", qword ptr " + mem);
         else if (size == 4) line(std::string(in.type && in.type->isUnsigned ? "mov " + reg32(rd) : "movsxd " + rd) + ", dword ptr " + mem);
         else line(std::string(in.type && (in.type->isUnsigned || in.type->kind == Type::Bool) ? "movzx " : "movsx ") + rd + ", " + ptrWord(size) + " " + mem);
@@ -1022,7 +1175,11 @@ std::string X86Function::run()
     m_label = m_m.symbol(m_f.name);
     analyzeParams();
     computeIntervals();
+    const int spillsBefore = m_stats.spills;
     allocate();
+    m_firstSpills = m_stats.spills - spillsBefore;
+    coalesce();
+    reallocateAroundCoalesced();
     layoutFrame();
     decideFrame();
     if (m_frameless) { m_frameSize = 0; m_stats.frameSize = 0; }

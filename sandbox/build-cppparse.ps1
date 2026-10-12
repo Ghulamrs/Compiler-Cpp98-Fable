@@ -304,7 +304,9 @@ try {
     New-Item -ItemType Directory -Force "out\opt" | Out-Null
     $failed = 0
     foreach ($lvl in 0..3) {
-        & $exe -o "out\opt" -n "opt$lvl" "-O$lvl" --text-only "..\examples\sample-opt"
+        # --eh=sjlj: test 6 assembles this text with ml64, which keeps the ;@ehrange lines of table regions as
+        # comments (their range table would be missing); test 8 compares its objects with the same model
+        & $exe -o "out\opt" -n "opt$lvl" "-O$lvl" --eh=sjlj --text-only "..\examples\sample-opt"
         if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on sample-opt at -O$lvl" }
         $h = Get-Content "out\opt\opt$lvl-health.txt" -Raw
         if ($h -match ": (error|warning|info) T1\d\d: ") { Write-Host "  FAIL sample-opt produced type findings at -O$lvl"; $failed++ }
@@ -401,18 +403,22 @@ try {
 
     Write-Host "=== Test 8: version 5 COFF writer (--obj, link with the driver, run) ==="
     $failed = 0
+    # own<lvl>: setjmp regions, compared with ml64's objects of test 6 below; owntab<lvl>: the default table regions
+    foreach ($variant in @(@("own", "--eh=sjlj"), @("owntab", "--eh=table"))) {
     foreach ($lvl in @(0, 3)) {
+        $nm = "$($variant[0])$lvl"
         $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-        $out = & $exe "-O$lvl" --obj -q -o out\x64 -n "own$lvl" "..\examples\sample-opt" 2>&1 | Out-String
+        $out = & $exe "-O$lvl" $variant[1] --obj -q -o out\x64 -n $nm "..\examples\sample-opt" 2>&1 | Out-String
         $ErrorActionPreference = $eap
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path "out\x64\own$lvl.obj")) { Write-Host "  FAIL --obj at -O$lvl :"; Write-Host $out; $failed++; continue }
-        Write-Host "  ok   own COFF writer produced own$lvl.obj (-O$lvl)"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\owndriver$lvl.exe" "..\examples\sample-opt-driver\driver.cpp" "out\x64\own$lvl.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with own$lvl.obj:"; Write-Host $clOut; $failed++; continue }
-        Write-Host "  ok   linked own$lvl.obj with the MSVC-compiled driver"
-        $run = & ".\out\x64\owndriver$lvl.exe" 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   owndriver$lvl.exe: all results correct (-O$lvl, cppparse .obj)" }
-        else { Write-Host "  FAIL owndriver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path "out\x64\$nm.obj")) { Write-Host "  FAIL --obj at -O$lvl $($variant[1]):"; Write-Host $out; $failed++; continue }
+        Write-Host "  ok   own COFF writer produced $nm.obj (-O$lvl $($variant[1]))"
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\${nm}driver.exe" "..\examples\sample-opt-driver\driver.cpp" "out\x64\$nm.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with $nm.obj:"; Write-Host $clOut; $failed++; continue }
+        Write-Host "  ok   linked $nm.obj with the MSVC-compiled driver"
+        $run = & ".\out\x64\${nm}driver.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   ${nm}driver.exe: all results correct (-O$lvl $($variant[1]), cppparse .obj)" }
+        else { Write-Host "  FAIL ${nm}driver.exe (-O$lvl):"; Write-Host $run; $failed++ }
+    }
     }
     # the encoder must agree with ml64: compare the instruction bytes of both objects
     $dumpbin = "$Msvc\bin\Hostx64\x64\dumpbin.exe"

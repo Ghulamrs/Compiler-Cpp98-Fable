@@ -1,7 +1,10 @@
 # Design: table-based exceptions (2026-10-12)
 
-Status: steps 1-3 implemented (unwind tables, runtime walker, `--eh=table`). The setjmp model stays the default until every
-step below has passed the full suite.
+Status: done (2026-10-12), steps 1-5. Table mode is the default; `--eh=sjlj` keeps the setjmp model.
+Results on the matrix sample at -O2: 278.6 ms and 70,053 bytes of code (setjmp model: 295.1 ms, 75,607 bytes).
+In the map comparison, cppparse's code is 1.57 times cl's for the 43 functions both compilers emit (1.71 with setjmp).
+Not done, as planned: the optimiser still keeps what handlers read in memory and runs no GVN in functions with
+regions. Lifting that needs an exception edge from every call to its landing pad (section 7).
 
 ## 1. The problem in one paragraph
 

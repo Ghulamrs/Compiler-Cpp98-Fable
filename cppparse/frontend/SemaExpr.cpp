@@ -56,7 +56,9 @@ void foldWide(cxx::Expr* e, const std::string& op, long a, long b, bool isUnsign
     else if (op == "^") r = ux ^ uy;
     else ok = false;
     const long long s = static_cast<long long>(r);
-    e->semaConst = ok && static_cast<long long>(static_cast<long>(s)) == s;
+    // the range is spelled out: a round trip through long tests 32 bits only where long is 32 bits (MSVC), and on
+    // an LP64 host it would accept every value, which the IR then truncates (npos / 2 became -1 on macOS)
+    e->semaConst = ok && s >= -2147483647LL - 1 && s <= 2147483647LL;
     e->semaValue = e->semaConst ? static_cast<long>(s) : 0;
 }
 

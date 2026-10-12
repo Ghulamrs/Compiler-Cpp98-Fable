@@ -1,0 +1,17 @@
+# macOS Finder metadata and Python caches
+.DS_Store
+__pycache__/
+
+# MSVC build outputs
+*.exe
+*.obj
+*.pdb
+*.ilk
+.vs/
+*.vcxproj.user
+
+# cppparse build and test outputs (the sandbox scripts write here)
+sandbox/obj/
+sandbox/out/
+sandbox/vs/
+sandbox/debug/

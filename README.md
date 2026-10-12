@@ -287,7 +287,10 @@ sources with cppparse and links `cppparse-self.exe`), `mix.ps1` (builds a
 layout-compatible reference with cl against cppparse's headers and swaps
 cppparse's objects in one unit at a time), `cprog.ps1` (builds the multi-file
 C sample `examples/sample-c/` with cl as C and as C++ and with each generation
-of cppparse, and compares the programs' output). The first four: the Visual Studio 2010 solution in
+of cppparse, and compares the programs' output), `mapcompare.ps1` (builds the matrix sample with `cl /O2`
+and with `--compile6 -O2 --obj`, links both with `/MAP`, checks cppparse's object maps against the linker's map
+of the same objects (addresses, 16-byte alignment, sizes, `f` / `f i` flags) and lists the functions both
+compilers emit side by side; `-Lvl` picks cppparse's optimisation level, exit code 1 on any disagreement). The first four: the Visual Studio 2010 solution in
 `examples/sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken

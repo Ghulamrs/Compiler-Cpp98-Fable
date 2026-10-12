@@ -130,7 +130,7 @@ namespace {
 
 class X86Function {
 public:
-    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false), m_firstSpills(0), m_tableEh(false), m_openRegion(-1)
+    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false), m_firstSpills(0), m_tableEh(false), m_tableRegs(false), m_openRegion(-1)
     { for (int p = 0; p < 4; ++p) m_lastParamLoad[p] = -1; }
     std::string run();
 
@@ -221,6 +221,7 @@ private:
     void setRegions(const std::vector<long>& now);   // closes / opens a range where the innermost region changes
     struct EhRange { std::string begin, end; long region; };
     bool                m_tableEh;
+    bool                m_tableRegs;             // table regions whose handlers take nothing in registers: all registers
     std::vector<std::vector<long> > m_regionIn;  // regions active on entry to each block, innermost last
     std::map<long, std::vector<long> > m_regionOuter;   // region -> the regions active at its trybegin
     std::vector<long>   m_regionNow;
@@ -349,8 +350,9 @@ void X86Function::computeIntervals()
             int n = static_cast<int>(in.args.size());
             if (n - 4 > m_outgoingArgs) m_outgoingArgs = n - 4;
         }
-        if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Throw || in.op == IrInst::TryBegin ||
-            in.op == IrInst::TryEnd || in.op == IrInst::CatchParam || in.op == IrInst::CatchEnd) m_clobbers.push_back(pos);
+        // (a table region's trybegin / tryend are no code at all)
+        if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Throw || in.op == IrInst::CatchParam || in.op == IrInst::CatchEnd ||
+            ((in.op == IrInst::TryBegin || in.op == IrInst::TryEnd) && !m_tableEh)) m_clobbers.push_back(pos);
     }
     // a use that precedes every definition in linear order is reached through a backward edge: the value is
     // live from the start of the using block (after SSA, copies of a phi's operands create such uses)
@@ -520,7 +522,7 @@ bool X86Function::canStayInArgReg(int t, int p) const
 void X86Function::coalesce()
 {
     m_returnDirect.clear();
-    if (m_f.hasTry) return;   // longjmp restores only the callee-saved registers
+    if (m_f.hasTry && !m_tableRegs) return;   // longjmp restores only the callee-saved registers
     // a parameter's value stays in its argument register (rcx, rdx, r8, r9) when nothing writes it meanwhile
     static const int argIdx[4] = { kRcx, kRdx, kVolatileRegBase, kVolatileRegBase + 1 };
     for (int i = 0; i < m_prefixEnd; ++i) {
@@ -602,8 +604,9 @@ void X86Function::allocate()
     for (int i = 0; i < kIntRegCount + kVolatileRegCount; ++i) intFree[i] = true;
     for (int i = 0; i < kFloatRegCount; ++i) fltFree[i] = true;
     // a volatile register may hold a value that no call, throw or try operation interrupts; setjmp/longjmp
-    // restore only the callee-saved registers, so a function with try regions keeps to those
-    const bool volatileOk = !m_f.hasTry;
+    // restore only the callee-saved registers, so a function with try regions keeps to those (unless its regions
+    // are tables: see run())
+    const bool volatileOk = !m_f.hasTry || m_tableRegs;
     for (size_t k = 0; k < order.size(); ++k) {
         Interval* iv = order[k];
         for (size_t a = 0; a < active.size();) {
@@ -1337,6 +1340,27 @@ void X86Function::emitBody()
 std::string X86Function::run()
 {
     m_label = m_m.symbol(m_f.name);
+    if (m_m.tableExceptions() && m_f.hasTry) {
+        std::vector<int> handlers;
+        for (size_t b = 0; b < m_f.blocks.size(); ++b)
+            for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+                const IrInst& in = m_f.blocks[b].insts[i];
+                if (in.op != IrInst::TryBegin) continue;
+                for (size_t a = 0; a < in.args.size(); ++a) if (in.args[a].kind == IrOperand::Block) handlers.push_back(in.args[a].id);
+            }
+        // regions that are not nested the same way on every path keep the setjmp frames (the runtime handles both)
+        m_tableEh = !handlers.empty() && computeRegions();
+        // a landing pad finds every register as it was at the call that threw, so the setjmp rules (callee-saved
+        // registers only, no coalescing) are not needed, as long as a handler takes no value in a register from
+        // the code before it (the optimiser keeps what handlers read in memory; checked here all the same)
+        if (m_tableEh) {
+            std::vector<std::set<int> > liveIn, liveOut;
+            m_f.computeLiveness(liveIn, liveOut);
+            m_tableRegs = true;
+            for (size_t h = 0; h < handlers.size(); ++h)
+                if (handlers[h] >= 0 && static_cast<size_t>(handlers[h]) < liveIn.size() && !liveIn[static_cast<size_t>(handlers[h])].empty()) m_tableRegs = false;
+        }
+    }
     analyzeParams();
     computeIntervals();
     const int spillsBefore = m_stats.spills;
@@ -1344,13 +1368,6 @@ std::string X86Function::run()
     m_firstSpills = m_stats.spills - spillsBefore;
     coalesce();
     reallocateAroundCoalesced();
-    if (m_m.tableExceptions()) {
-        bool hasTry = false;
-        for (size_t b = 0; b < m_f.blocks.size() && !hasTry; ++b)
-            for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) if (m_f.blocks[b].insts[i].op == IrInst::TryBegin) { hasTry = true; break; }
-        // regions that are not nested the same way on every path keep the setjmp frames (the runtime handles both)
-        m_tableEh = hasTry && computeRegions();
-    }
     layoutFrame();
     decideFrame();
     if (m_frameless) { m_frameSize = 0; m_stats.frameSize = 0; }

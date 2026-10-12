@@ -289,8 +289,9 @@ cppparse's objects in one unit at a time), `cprog.ps1` (builds the multi-file
 C sample `examples/sample-c/` with cl as C and as C++ and with each generation
 of cppparse, and compares the programs' output), `mapcompare.ps1` (builds the matrix sample with `cl /O2`
 and with `--compile6 -O2 --obj`, links both with `/MAP`, checks cppparse's object maps against the linker's map
-of the same objects (addresses, 16-byte alignment, sizes, `f` / `f i` flags) and lists the functions both
-compilers emit side by side; `-Lvl` picks cppparse's optimisation level, exit code 1 on any disagreement). The first four: the Visual Studio 2010 solution in
+of the same objects (addresses, 16-byte alignment, `f` / `f i` flags) and every function's map size against
+the code bytes `dumpbin /disasm` finds in the object, and lists the functions both compilers emit side by side
+with their exact code sizes (cl's counted from its objects the same way, since `link /MAP` has no size column); `-Lvl` picks cppparse's optimisation level, exit code 1 on any disagreement). The first four: the Visual Studio 2010 solution in
 `examples/sample/` with checks on the report, symbols and map, the `cpp` folder
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken

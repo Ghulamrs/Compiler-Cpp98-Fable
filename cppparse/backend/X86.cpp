@@ -116,7 +116,8 @@ namespace {
 
 class X86Function {
 public:
-    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0) {}
+    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false)
+    { for (int p = 0; p < 4; ++p) m_lastParamLoad[p] = -1; }
     std::string run();
 
 private:
@@ -168,6 +169,15 @@ private:
     // instruction uses [base+off] directly and t gets no register
     struct Folded { IrOperand base; long offset; };
     std::map<int, Folded> m_folded;
+    // a register parameter that is only read, by loads at the very start of the function (before anything can
+    // overwrite its argument register), is used straight from that register and never stored to the frame
+    void analyzeParams();
+    std::vector<bool>   m_paramInReg;
+    std::vector<bool>   m_paramUsed;
+    int                 m_prefixEnd;      // instructions [0, m_prefixEnd) of block 0 are those loads
+    int                 m_lastParamLoad[4];   // position of the last of them reading parameter p's register, -1 if none
+    bool                m_frameless;      // no calls, nothing in memory, no saved registers: no frame at all
+    void decideFrame();
 };
 
 void X86Function::computeIntervals()
@@ -266,6 +276,69 @@ void X86Function::computeIntervals()
         }
 }
 
+void X86Function::analyzeParams()
+{
+    const size_t n = static_cast<size_t>(m_f.paramCount);
+    m_paramInReg.assign(n, false);
+    m_paramUsed.assign(n, false);
+    m_prefixEnd = 0;
+    if (m_f.blocks.empty()) return;
+    const std::vector<IrInst>& entry = m_f.blocks[0].insts;
+    // the leading loads of parameters: nothing before them can overwrite an argument register
+    while (static_cast<size_t>(m_prefixEnd) < entry.size()) {
+        const IrInst& in = entry[static_cast<size_t>(m_prefixEnd)];
+        if (in.op != IrInst::LoadLocal || in.args.empty() || in.args[0].kind != IrOperand::Local || in.args[0].id >= m_f.paramCount) break;
+        ++m_prefixEnd;
+    }
+    for (size_t p = 0; p < n && p < 4; ++p) {
+        const IrLocal& l = m_f.locals[p];
+        const Type* t = l.type;
+        const bool scalar = t && t->kind != Type::Class && t->kind != Type::Array && t->kind != Type::Unknown && t->kind != Type::Void;
+        m_paramInReg[p] = scalar && !l.addressTaken;
+    }
+    // a jump back to the entry block would read the registers again after the body has used them
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t s = 0; s < m_f.blocks[b].succs.size(); ++s)
+            if (m_f.blocks[b].succs[s] == 0) { m_paramInReg.assign(n, false); m_prefixEnd = 0; }
+    for (int p = 0; p < 4; ++p) m_lastParamLoad[p] = -1;
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            for (size_t a = 0; a < in.args.size(); ++a) {
+                if (in.args[a].kind != IrOperand::Local || in.args[a].id < 0 || in.args[a].id >= m_f.paramCount) continue;
+                const size_t p = static_cast<size_t>(in.args[a].id);
+                m_paramUsed[p] = true;
+                const bool prefixLoad = b == 0 && static_cast<int>(i) < m_prefixEnd && in.op == IrInst::LoadLocal && a == 0;
+                if (!prefixLoad) m_paramInReg[p] = false;
+            }
+        }
+    // block 0 starts at linear position 0, so a prefix index is also its position
+    for (int i = 0; i < m_prefixEnd; ++i) {
+        const int p = m_f.blocks[0].insts[static_cast<size_t>(i)].args[0].id;
+        if (p < 4 && m_paramInReg[static_cast<size_t>(p)]) m_lastParamLoad[p] = i;
+    }
+}
+
+void X86Function::decideFrame()
+{
+    m_frameless = false;
+    if (!m_calls.empty() || !m_clobbers.empty() || !m_usedIntRegs.empty() || !m_usedFloatRegs.empty()) return;
+    for (std::map<int, Interval>::const_iterator it = m_intervals.begin(); it != m_intervals.end(); ++it)
+        if (it->second.reg < 0) return;                                   // a spilled value lives in the frame
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            for (size_t a = 0; a < in.args.size(); ++a) {
+                if (in.args[a].kind != IrOperand::Local) continue;
+                const int l = in.args[a].id;
+                if (l >= 0 && l < m_f.paramCount && m_paramInReg[static_cast<size_t>(l)]) continue;   // read from its register
+                return;                                                   // a local in memory
+            }
+        }
+    for (size_t p = 0; p < m_paramInReg.size(); ++p) if (m_paramUsed[p] && !m_paramInReg[p]) return;
+    m_frameless = true;
+}
+
 void X86Function::allocate()
 {
     // callee-saved registers survive calls, so intervals need no call-crossing treatment
@@ -290,10 +363,15 @@ void X86Function::allocate()
         bool clobbered = false;
         for (size_t c = 0; c < m_clobbers.size() && !clobbered; ++c) clobbered = m_clobbers[c] >= iv->start && m_clobbers[c] <= iv->end;
         const bool mayUseVolatile = volatileOk && !iv->isFloat && !clobbered;
+        // r8 and r9 carry the third and fourth parameters until their last load at the start: a value defined
+        // before that load must not overwrite them (the load itself may: "movsxd r8, r8d")
+        const bool r8Busy = iv->start < m_lastParamLoad[2], r9Busy = iv->start < m_lastParamLoad[3];
         int got = -1;
         if (iv->isFloat) { for (int r = 0; r < kFloatRegCount; ++r) if (fltFree[r]) { got = r; break; } }
         else {
-            if (mayUseVolatile) for (int r = kVolatileRegBase; r < kVolatileRegBase + kVolatileRegCount; ++r) if (intFree[r]) { got = r; break; }
+            if (mayUseVolatile)
+                for (int r = kVolatileRegBase; r < kVolatileRegBase + kVolatileRegCount; ++r)
+                    if (intFree[r] && !(r == kVolatileRegBase && r8Busy) && !(r == kVolatileRegBase + 1 && r9Busy)) { got = r; break; }
             if (got < 0) for (int r = 0; r < kIntRegCount; ++r) if (intFree[r]) { got = r; break; }
         }
         if (got >= 0) {
@@ -308,7 +386,8 @@ void X86Function::allocate()
         for (size_t a = 0; a < active.size(); ++a) {
             Interval* v = active[a];
             if (v->isFloat != iv->isFloat || v->reg < 0) continue;
-            if (!iv->isFloat && v->reg >= kVolatileRegBase && !mayUseVolatile) continue;
+            if (!iv->isFloat && v->reg >= kVolatileRegBase &&
+                (!mayUseVolatile || (v->reg == kVolatileRegBase && r8Busy) || (v->reg == kVolatileRegBase + 1 && r9Busy))) continue;
             if (!victim || v->end > victim->end) victim = v;
         }
         if (victim && victim->end > iv->end) { iv->reg = victim->reg; victim->reg = -1; ++m_stats.spills; active.push_back(iv); }
@@ -553,6 +632,26 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     }
     case IrInst::LoadLocal: case IrInst::LoadGlobal: case IrInst::LoadMem: {
         int size = typeSize(in.type);
+        if (in.op == IrInst::LoadLocal && in.args[0].id >= 0 && in.args[0].id < m_f.paramCount && m_paramInReg[static_cast<size_t>(in.args[0].id)]) {
+            // the parameter is still in its argument register; narrow integers are extended as a load would
+            // (the caller defines only the low bytes). A spilled destination goes through rax / xmm5, which
+            // hold no parameter.
+            static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
+            const int p = in.args[0].id;
+            std::string rd = def(in.dst, dstFloat, dstFloat ? "xmm5" : "rax", spill);
+            if (dstFloat) {
+                const std::string src = "xmm" + intToString(p);
+                if (rd != src) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + rd + ", " + src + "      ; param " + m_f.locals[static_cast<size_t>(p)].name);
+            } else {
+                const std::string src = argRegs[p];
+                const bool zero = in.type && (in.type->isUnsigned || in.type->kind == Type::Bool);
+                if (size == 8) line("mov " + rd + ", " + src + "      ; param " + m_f.locals[static_cast<size_t>(p)].name);
+                else if (size == 4) line((zero ? "mov " + reg32(rd) + ", " + reg32(src) : "movsxd " + rd + ", " + reg32(src)) + "      ; param " + m_f.locals[static_cast<size_t>(p)].name);
+                else line(std::string(zero ? "movzx " : "movsx ") + rd + ", " + regSized(src, size) + "      ; param " + m_f.locals[static_cast<size_t>(p)].name);
+            }
+            finish(in.dst, spill, dstFloat, rd);
+            break;
+        }
         std::string mem;
         if (in.op == IrInst::LoadLocal) mem = localRef(in.args[0].id);
         else if (in.op == IrInst::LoadGlobal) { mem = "[" + m_m.globalSymbol(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
@@ -810,6 +909,17 @@ void X86Function::emitBody()
         m_out << (l ? ", " : ": ") << m_f.locals[l].name << "@[rbp-" << m_localOffset[l] << "]";
     }
     m_out << "\n";
+    if (m_frameless) {
+        // nothing lives in memory and nothing is called: no frame, the parameters stay in their registers
+        for (size_t b = 0; b < m_f.blocks.size(); ++b) {
+            m_out << label(static_cast<int>(b)) << ":" << (m_f.blocks[b].label.empty() ? "" : "        ; " + m_f.blocks[b].label) << "\n";
+            for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) emitInst(m_f.blocks[b].insts[i], static_cast<int>(b));
+        }
+        m_out << m_label << "_exit:\n";
+        line("ret");
+        m_out << m_label << " ENDP\n\n";
+        return;
+    }
     line("push rbp");
     line("mov rbp, rsp");
     if (m_frameSize >= 4096) {
@@ -824,6 +934,8 @@ void X86Function::emitBody()
     // incoming parameters by position
     static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
     for (int p = 0; p < m_f.paramCount; ++p) {
+        // a parameter read straight from its register, or never read at all, needs no copy in the frame
+        if (m_paramInReg[static_cast<size_t>(p)] || !m_paramUsed[static_cast<size_t>(p)]) continue;
         const IrLocal& l = m_f.locals[static_cast<size_t>(p)];
         bool fl = isFloatType(l.type);
         int size = l.type && l.type->kind != Type::Reference && l.type->kind != Type::Class ? typeSize(l.type) : 8;
@@ -876,9 +988,12 @@ void X86Function::emitBody()
 std::string X86Function::run()
 {
     m_label = m_m.symbol(m_f.name);
+    analyzeParams();
     computeIntervals();
     allocate();
     layoutFrame();
+    decideFrame();
+    if (m_frameless) { m_frameSize = 0; m_stats.frameSize = 0; }
     emitBody();
     return m_out.str();
 }

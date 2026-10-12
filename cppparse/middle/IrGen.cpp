@@ -1902,9 +1902,14 @@ void IrGen::prologue(Symbol* fn)
         int slot = newLocal("this", m_semaTypes.pointer(ct), false);
         m_out->locals[static_cast<size_t>(slot)].isParam = true;
         m_out->locals[static_cast<size_t>(slot)].isThis = true;
+        m_out->locals[static_cast<size_t>(slot)].nonNull = true;
     }
     m_sretSlot = -1;
-    if (sret) { m_sretSlot = newLocal("sret", m_semaTypes.pointer(rt), false); m_out->locals[static_cast<size_t>(m_sretSlot)].isParam = true; }
+    if (sret) {
+        m_sretSlot = newLocal("sret", m_semaTypes.pointer(rt), false);
+        m_out->locals[static_cast<size_t>(m_sretSlot)].isParam = true;
+        m_out->locals[static_cast<size_t>(m_sretSlot)].nonNull = true;
+    }
     std::vector<std::pair<int, const sema::Type*> > byValue;   // class objects the callee owns
     for (size_t p = 0; p < fn->params.size(); ++p) {
         Symbol* ps = fn->params[p];
@@ -1912,6 +1917,7 @@ void IrGen::prologue(Symbol* fn)
         if (isClassType(pt) && !isReference(pt)) pt = m_semaTypes.pointer(pt);   // objects arrive by address
         int slot = newLocal(ps->name.empty() ? "arg" + numText(static_cast<long>(p)) : ps->name, pt, false);
         m_out->locals[static_cast<size_t>(slot)].isParam = true;
+        m_out->locals[static_cast<size_t>(slot)].nonNull = isReference(ps->type) || isClassType(ps->type);
         m_slots[ps] = slot;
         if (isClassType(ps->type) && !isReference(ps->type)) {
             byValue.push_back(std::make_pair(slot, ps->type));

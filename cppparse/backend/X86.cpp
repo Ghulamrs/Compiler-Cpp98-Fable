@@ -58,6 +58,17 @@ std::string regSized(const std::string& r, int size)
     return r;
 }
 
+// the opposite condition: an exact complement on the flags (unordered floating-point compares included)
+std::string invertCc(const std::string& cc)
+{
+    if (cc == "e") return "ne";   if (cc == "ne") return "e";
+    if (cc == "l") return "ge";   if (cc == "ge") return "l";
+    if (cc == "le") return "g";   if (cc == "g") return "le";
+    if (cc == "b") return "ae";   if (cc == "ae") return "b";
+    if (cc == "be") return "a";   if (cc == "a") return "be";
+    return cc == "s" ? "ns" : "s";
+}
+
 const char* ptrWord(int size)
 {
     if (size == 1) return "byte ptr";
@@ -144,6 +155,14 @@ private:
 
     std::string use(const IrOperand& o, const std::string& scratch);     // materialise into a register name
     std::string memOperand(const IrOperand& addr);                        // "[reg]", or "[base+offset]" for a folded address
+    // can this operand be an instruction's immediate? (a 32-bit constant; an unsigned 32-bit one with the top bit
+    // set would be sign-extended in a 64-bit operation, so it stays in a register there)
+    bool immediateOperand(const IrOperand& o, int opSize) const
+    {
+        if (o.kind != IrOperand::Imm) return false;
+        const bool u32 = o.type && o.type->isUnsigned && typeSize(o.type) == 4;
+        return !(u32 && static_cast<int>(o.ival) < 0 && opSize == 8);
+    }
     std::string def(int temp, bool isFloat, const std::string& scratch, int& spill);
     void        finish(int temp, int spill, bool isFloat, const std::string& reg);
     std::string localRef(int local) const { return "[rbp-" + intToString(m_localOffset[static_cast<size_t>(local)]) + "]"; }
@@ -173,6 +192,9 @@ private:
     // instruction uses [base+off] directly and t gets no register
     struct Folded { IrOperand base; long offset; };
     std::map<int, Folded> m_folded;
+    // a comparison whose result only steers the next conditional branch: cmp + jcc, no setcc / test
+    std::set<int>       m_fusedCmp;
+    std::string         m_pendingCc;      // the condition code of the comparison just emitted for the branch
     // a register parameter that is only read, by loads at the very start of the function (before anything can
     // overwrite its argument register), is used straight from that register and never stored to the frame
     void analyzeParams();
@@ -220,16 +242,24 @@ void X86Function::computeIntervals()
             Folded f; f.base = in.args[0]; f.offset = in.extra;
             m_folded[in.dst] = f;
         }
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t i = 0; i + 1 < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            const IrInst& next = m_f.blocks[b].insts[i + 1];
+            if (in.op == IrInst::Cmp && in.dst >= 0 && useCount[in.dst] == 1 && next.op == IrInst::CondBr &&
+                !next.args.empty() && next.args[0].kind == IrOperand::Temp && next.args[0].id == in.dst) m_fusedCmp.insert(in.dst);
+        }
     std::map<int, int> firstDef;                       // temp -> linear position of its first definition
     std::vector<std::pair<int, int> > uses;             // (temp, position)
     for (size_t p = 0; p < m_linear.size(); ++p) {
         const IrInst& in = m_f.blocks[static_cast<size_t>(m_linear[p].first)].insts[static_cast<size_t>(m_linear[p].second)];
         int pos = static_cast<int>(p);
-        if (in.dst >= 0 && !m_folded.count(in.dst)) { Interval& iv = m_intervals[in.dst]; iv.temp = in.dst; iv.isFloat = isFloatType(in.type); if (pos < iv.start) iv.start = pos; if (pos > iv.end) iv.end = pos; if (!firstDef.count(in.dst)) firstDef[in.dst] = pos; }
+        if (in.dst >= 0 && !m_folded.count(in.dst) && !m_fusedCmp.count(in.dst)) { Interval& iv = m_intervals[in.dst]; iv.temp = in.dst; iv.isFloat = isFloatType(in.type); if (pos < iv.start) iv.start = pos; if (pos > iv.end) iv.end = pos; if (!firstDef.count(in.dst)) firstDef[in.dst] = pos; }
         for (size_t a = 0; a < in.args.size(); ++a) {
             if (in.args[a].kind != IrOperand::Temp) continue;
             int t = in.args[a].id;
             const IrOperand* op = &in.args[a];
+            if (m_fusedCmp.count(t)) continue;           // the branch reads the flags, not a register
             if (m_folded.count(t)) {                    // a folded address: its base is what this instruction reads
                 op = &m_folded[t].base;
                 if (op->kind != IrOperand::Temp) continue;
@@ -374,11 +404,16 @@ bool X86Function::writesArgReg(const IrInst& in, int p) const
         if (s == "shl" || s == "ashr" || s == "lshr") return p == 0 && in.args[1].kind != IrOperand::Imm;
         if (s[0] == 'f') return false;                                   // floating point: xmm registers only
         if (p != 1) return false;
+        if (immediateOperand(in.args[1], typeSize(in.type))) return false;   // encoded in the instruction
         if (!inRegister(in.args[1])) return true;                        // b materialised in rdx
         std::map<int, Interval>::const_iterator d = m_intervals.find(in.dst), b = m_intervals.find(in.args[1].id);
         return d != m_intervals.end() && b != m_intervals.end() && d->second.reg == b->second.reg;   // "mov rdx, b"
     }
-    case IrInst::Cmp: return p == 1 && in.sub[0] != 'f' && !inRegister(in.args[1]);
+    case IrInst::Cmp: {
+        if (p != 1 || in.sub[0] == 'f' || inRegister(in.args[1])) return false;
+        const int size = typeSize(in.args[0].type ? in.args[0].type : m_f.typeOf(in.args[0].kind == IrOperand::Temp ? in.args[0].id : -1));
+        return !immediateOperand(in.args[1], size);
+    }
     case IrInst::Copy: return p == 1 && !tempIsFloat(in.dst) && !inRegister(in.args[0]);
     case IrInst::AddrField: return p == 1 && !m_folded.count(in.dst) && !inRegister(in.args[0]);
     case IrInst::AddrIndex: return p == 1 ? !inRegister(in.args[0]) : !inRegister(in.args[1]);
@@ -909,9 +944,20 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
             finish(in.dst, spill, false, rd);
             break;
         }
+        std::string mn = s == "add" ? "add" : s == "sub" ? "sub" : s == "mul" ? "imul" : s == "and" ? "and" : s == "or" ? "or" : "xor";
+        if (immediateOperand(in.args[1], typeSize(in.type))) {
+            // a constant second operand is encoded in the instruction, as cl, clang and gcc do: add rd, 1
+            std::string a = use(in.args[0], "rax");
+            std::string rd = def(in.dst, false, "rax", spill);
+            const std::string imm = intToString(static_cast<int>(in.args[1].ival));
+            if (mn == "imul") line("imul " + rd + ", " + a + ", " + imm);
+            else { if (rd != a) line("mov " + rd + ", " + a); line(mn + " " + rd + ", " + imm); }
+            extend(rd, in.type);
+            finish(in.dst, spill, false, rd);
+            break;
+        }
         std::string a = use(in.args[0], "rax"), b = use(in.args[1], "rdx");
         std::string rd = def(in.dst, false, "rax", spill);
-        std::string mn = s == "add" ? "add" : s == "sub" ? "sub" : s == "mul" ? "imul" : s == "and" ? "and" : s == "or" ? "or" : "xor";
         if (rd == b && rd != a) { if (mn == "add" || mn == "imul" || mn == "and" || mn == "or" || mn == "xor") std::swap(a, b); else { line("mov rdx, " + b); b = "rdx"; } }
         if (rd != a) line("mov " + rd + ", " + a);
         line(mn + " " + rd + ", " + b);
@@ -947,11 +993,14 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
             line("ucomisd " + a + ", " + b);
             cc = s == "eq" ? "e" : s == "ne" ? "ne" : s == "gt" ? "a" : "ae";
         } else {
-            std::string a = use(in.args[0], "rax"), b = use(in.args[1], "rdx");
             int size = typeSize(in.args[0].type ? in.args[0].type : m_f.typeOf(in.args[0].kind == IrOperand::Temp ? in.args[0].id : -1));
-            line("cmp " + regSized(a, size) + ", " + regSized(b, size));
+            std::string a = use(in.args[0], "rax");
+            const bool imm = immediateOperand(in.args[1], size);
+            std::string b = imm ? intToString(static_cast<int>(in.args[1].ival)) : use(in.args[1], "rdx");
+            line("cmp " + regSized(a, size) + ", " + (imm ? b : regSized(b, size)));
             cc = s == "eq" ? "e" : s == "ne" ? "ne" : s == "slt" ? "l" : s == "sle" ? "le" : s == "sgt" ? "g" : s == "sge" ? "ge" : s == "ult" ? "b" : s == "ule" ? "be" : s == "ugt" ? "a" : "ae";
         }
+        if (m_fusedCmp.count(in.dst)) { m_pendingCc = cc; break; }   // the next instruction branches on the flags
         std::string rd = def(in.dst, false, "rax", spill);
         line("set" + cc + " " + reg8(rd));
         line("movzx " + reg32(rd) + ", " + reg8(rd));
@@ -1000,10 +1049,16 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     case IrInst::Call: case IrInst::VCall: emitCall(in); break;
     case IrInst::Br: if (in.args[0].id != blockIndex + 1) line("jmp " + label(in.args[0].id)); break;
     case IrInst::CondBr: {
-        std::string rc = use(in.args[0], "rax");
-        line("test " + reg32(rc) + ", " + reg32(rc));
-        line("jne " + label(in.args[1].id));
-        if (in.args[2].id != blockIndex + 1) line("jmp " + label(in.args[2].id));
+        // the condition: the flags of the comparison just emitted (fused), or a 0/1 value tested here
+        std::string cc = "ne";
+        if (in.args[0].kind == IrOperand::Temp && m_fusedCmp.count(in.args[0].id)) cc = m_pendingCc;
+        else { std::string rc = use(in.args[0], "rax"); line("test " + reg32(rc) + ", " + reg32(rc)); }
+        const int t = in.args[1].id, f = in.args[2].id;
+        if (t == blockIndex + 1) line("j" + invertCc(cc) + " " + label(f));   // fall through into the true block
+        else {
+            line("j" + cc + " " + label(t));
+            if (f != blockIndex + 1) line("jmp " + label(f));
+        }
         break;
     }
     case IrInst::Ret: {

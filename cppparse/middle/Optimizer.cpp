@@ -648,12 +648,56 @@ int Optimizer::simplifyCfg(IrFunction& f)
     return changes;
 }
 
+namespace {
+
+bool isFloatingType(const Type* t) { return t && (t->kind == Type::Float || t->kind == Type::Double); }
+
+// an address that is valid for the whole function: a field (of a field ...) of *this, of an object a reference
+// parameter refers to, or of a local object. A load from it may be done early without risk of a fault.
+bool dereferenceable(const IrFunction& f, const IrOperand& o, const std::map<int, IrInst>& defs, int depth)
+{
+    if (o.kind != IrOperand::Temp || depth > 8) return false;
+    std::map<int, IrInst>::const_iterator d = defs.find(o.id);
+    if (d == defs.end()) return false;
+    const IrInst& in = d->second;
+    if (in.op == IrInst::AddrField || in.op == IrInst::Copy) return !in.args.empty() && dereferenceable(f, in.args[0], defs, depth + 1);
+    if (in.op == IrInst::AddrLocal) return true;
+    if (in.op == IrInst::LoadLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local) {
+        const int id = in.args[0].id;
+        const IrLocal& l = f.locals[static_cast<size_t>(id)];
+        if (l.isParam) return l.isThis || l.nonNull || (l.type && l.type->kind == Type::Reference);
+        // a local assigned exactly once, from such an address (an inlined call's copy of 'this' or of a reference)
+        if (l.addressTaken) return false;
+        const IrOperand* value = 0;
+        int stores = 0;
+        for (size_t b = 0; b < f.blocks.size(); ++b)
+            for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+                const IrInst& s = f.blocks[b].insts[i];
+                if (s.op == IrInst::StoreLocal && s.args.size() == 2 && s.args[0].kind == IrOperand::Local && s.args[0].id == id) { ++stores; value = &s.args[1]; }
+            }
+        return stores == 1 && dereferenceable(f, *value, defs, depth + 1);
+    }
+    return false;
+}
+
+} // namespace
+
 int Optimizer::licm(IrFunction& f)
 {
     int changes = 0;
     f.computeCfg();
     std::vector<LoopInfo> loops;
     naturalLoops(f, loops);
+    // every temp's defining instruction (temps are assigned once before SSA), for the dereferenceability test;
+    // copies, since hoisting moves instructions between blocks
+    std::map<int, IrInst> defs;
+    for (size_t b = 0; b < f.blocks.size(); ++b)
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i)
+            if (f.blocks[b].insts[i].dst >= 0) {
+                const int d = f.blocks[b].insts[i].dst;
+                if (defs.count(d)) defs[d] = IrInst();   // a temp assigned twice is not trusted (a Nop proves nothing)
+                else defs[d] = f.blocks[b].insts[i];
+            }
     for (size_t L = 0; L < loops.size(); ++L) {
         LoopInfo& loop = loops[L];
         std::set<int> inLoop(loop.blocks.begin(), loop.blocks.end());
@@ -661,13 +705,18 @@ int Optimizer::licm(IrFunction& f)
         std::set<int> loopTemps;
         std::set<int> modifiedLocals;
         bool hasCall = false;
+        bool onlyFloatStores = true;   // every store in the loop writes a double / float (C++ aliasing: no int or pointer)
         for (size_t k = 0; k < loop.blocks.size(); ++k) {
             const IrBlock& blk = f.blocks[static_cast<size_t>(loop.blocks[k])];
             for (size_t i = 0; i < blk.insts.size(); ++i) {
                 const IrInst& in = blk.insts[i];
                 if (in.dst >= 0) loopTemps.insert(in.dst);
                 if ((in.op == IrInst::StoreLocal || in.op == IrInst::AddrLocal) && !in.args.empty() && in.args[0].kind == IrOperand::Local) modifiedLocals.insert(in.args[0].id);
-                if (in.op == IrInst::Call || in.op == IrInst::VCall) hasCall = true;
+                if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Throw || in.op == IrInst::TryBegin ||
+                    in.op == IrInst::TryEnd || in.op == IrInst::CatchParam || in.op == IrInst::CatchEnd) hasCall = true;
+                if ((in.op == IrInst::StoreMem || in.op == IrInst::StoreGlobal ||
+                     (in.op == IrInst::StoreLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local && f.locals[static_cast<size_t>(in.args[0].id)].addressTaken)) &&
+                    !isFloatingType(in.type)) onlyFloatStores = false;
             }
         }
         // preheader: the unique predecessor of the header outside the loop
@@ -686,9 +735,14 @@ int Optimizer::licm(IrFunction& f)
                 IrBlock& blk = f.blocks[static_cast<size_t>(loop.blocks[k])];
                 for (size_t i = 0; i < blk.insts.size(); ++i) {
                     IrInst& in = blk.insts[i];
-                    bool candidate = in.pure() && in.dst >= 0 && in.op != IrInst::Copy;
+                    // never a phi: its value depends on the edge it is entered by, even when every argument is a constant
+                    bool candidate = in.pure() && in.dst >= 0 && in.op != IrInst::Copy && in.op != IrInst::Phi;
                     if (in.op == IrInst::LoadLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local && !modifiedLocals.count(in.args[0].id) &&
                         !f.locals[static_cast<size_t>(in.args[0].id)].addressTaken && !hasCall) candidate = true;
+                    // an int or pointer field the loop cannot change (no call, only floating-point stores) at an
+                    // address that cannot fault: b.cols(), the data pointer of a vector member
+                    if (in.op == IrInst::LoadMem && in.dst >= 0 && !hasCall && onlyFloatStores && in.type && !isFloatingType(in.type) &&
+                        !in.args.empty() && dereferenceable(f, in.args[0], defs, 0)) candidate = true;
                     if (!candidate) continue;
                     bool invariant = true;
                     for (size_t a = 0; a < in.args.size(); ++a)
@@ -984,6 +1038,8 @@ void Optimizer::runInterprocedural(IrFunction& f, std::vector<std::string>& log)
     // and 66% larger; 8 everywhere slower than no change
     int n = inlineCalls(f, 8, 24); if (n) log.push_back("    inlining (small functions): " + intToString(n));
     level1(f, log);
+    // the code inlined into a loop brings loop-invariant work with it (b.cols(), i * cols, data pointers)
+    if (n) { int h = licm(f); if (h) { log.push_back("    loop-invariant code motion after inlining: " + intToString(h)); level1(f, log); } }
     if (m_level >= 3) {
         n = inlineCalls(f, 40, 40); if (n) log.push_back("    inlining (larger functions): " + intToString(n));
         n = unrollLoops(f, 8, 40); if (n) log.push_back("    loop unrolling: " + intToString(n));
@@ -1139,6 +1195,17 @@ void Optimizer::runSsa(IrFunction& f, std::vector<std::string>& log, std::string
             n = deadCode(f);       c += n; if (n) log.push_back("    [ssa] dead code elimination: " + intToString(n));
             n = simplifyCfg(f);    c += n; if (n) log.push_back("    [ssa] branch folding / block merging: " + intToString(n));
             if (!c) break;
+        }
+        if (m_level >= 2) {
+            // in SSA form a value is assigned once, so invariance is exact: what inlining stored into a local copy
+            // in every iteration (the callee's 'this') is now the value from outside the loop it always was
+            int h = licm(f);
+            if (h) {
+                log.push_back("    [ssa] loop-invariant code motion: " + intToString(h));
+                int n;
+                n = copyPropagation(f); if (n) log.push_back("    [ssa] copy-propagation: " + intToString(n));
+                n = deadCode(f);        if (n) log.push_back("    [ssa] dead code elimination: " + intToString(n));
+            }
         }
         if (ssaForm) *ssaForm = printIr(f);
         fromSsa(f, ss);

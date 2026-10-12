@@ -97,7 +97,9 @@ struct IrLocal {
     bool        addressTaken;
     bool        isParam;
     bool        isThis;
-    IrLocal() : type(0), size(8), align(8), addressTaken(false), isParam(false), isThis(false) {}
+    bool        nonNull;     // a parameter that always holds a valid address: this, a reference, an object passed by
+                             // address, the hidden result pointer (loads through it cannot fault)
+    IrLocal() : type(0), size(8), align(8), addressTaken(false), isParam(false), isThis(false), nonNull(false) {}
 };
 
 struct IrFunction {

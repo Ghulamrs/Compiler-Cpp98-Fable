@@ -13,8 +13,13 @@ namespace cppparse {
 
 namespace {
 
-const char* const kIntRegs[] = { "rbx", "rsi", "rdi", "r12", "r13", "r14", "r15" };
-const int kIntRegCount = 7;
+// the integer registers the allocator hands out: first the callee-saved ones (a function saves those it uses),
+// then the volatile r8..r11, which no instruction sequence uses as a scratch register except around a call or
+// a throw: a value that lives across none of those can sit there without being saved
+const char* const kIntRegs[] = { "rbx", "rsi", "rdi", "r12", "r13", "r14", "r15", "r8", "r9", "r10", "r11" };
+const int kIntRegCount = 7;          // callee-saved: indexes 0..6
+const int kVolatileRegBase = 7;      // volatile: indexes 7..10
+const int kVolatileRegCount = 4;
 const int kFloatRegBase = 6;     // xmm6 .. xmm13
 const int kFloatRegCount = 8;
 const int kTryFrameSize = 272;   // sizeof(jmp_buf) on x64 (256) plus the frame link
@@ -133,6 +138,7 @@ private:
     bool isSingle(const Type* t) const { return t && t->kind == Type::Float; }
 
     std::string use(const IrOperand& o, const std::string& scratch);     // materialise into a register name
+    std::string memOperand(const IrOperand& addr);                        // "[reg]", or "[base+offset]" for a folded address
     std::string def(int temp, bool isFloat, const std::string& scratch, int& spill);
     void        finish(int temp, int spill, bool isFloat, const std::string& reg);
     std::string localRef(int local) const { return "[rbp-" + intToString(m_localOffset[static_cast<size_t>(local)]) + "]"; }
@@ -157,6 +163,11 @@ private:
     std::set<int>       m_usedIntRegs, m_usedFloatRegs;
     std::map<int, int>  m_savedIntOffset, m_savedFloatOffset;
     int                 m_outgoingArgs;
+    std::vector<int>    m_clobbers;       // positions that destroy the volatile registers (calls, throws, try regions)
+    // an address computed only for the next load or store (addrfield t = base + off; loadmem/storemem [t]): the
+    // instruction uses [base+off] directly and t gets no register
+    struct Folded { IrOperand base; long offset; };
+    std::map<int, Folded> m_folded;
 };
 
 void X86Function::computeIntervals()
@@ -170,26 +181,51 @@ void X86Function::computeIntervals()
         m_blockEnd[b] = k - 1;
     }
     m_outgoingArgs = 0;
+    // addresses used only by the next instruction's load or store are folded into its memory operand
+    std::map<int, int> useCount;
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i)
+            for (size_t a = 0; a < m_f.blocks[b].insts[i].args.size(); ++a)
+                if (m_f.blocks[b].insts[i].args[a].kind == IrOperand::Temp) ++useCount[m_f.blocks[b].insts[i].args[a].id];
+    for (size_t b = 0; b < m_f.blocks.size(); ++b)
+        for (size_t i = 0; i + 1 < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            const IrInst& next = m_f.blocks[b].insts[i + 1];
+            if (in.op != IrInst::AddrField || in.dst < 0 || in.args.empty() || useCount[in.dst] != 1) continue;
+            if (next.args.empty() || next.args[0].kind != IrOperand::Temp || next.args[0].id != in.dst) continue;
+            if (next.op != IrInst::LoadMem && !(next.op == IrInst::StoreMem && next.args.size() == 2)) continue;
+            Folded f; f.base = in.args[0]; f.offset = in.extra;
+            m_folded[in.dst] = f;
+        }
     std::map<int, int> firstDef;                       // temp -> linear position of its first definition
     std::vector<std::pair<int, int> > uses;             // (temp, position)
     for (size_t p = 0; p < m_linear.size(); ++p) {
         const IrInst& in = m_f.blocks[static_cast<size_t>(m_linear[p].first)].insts[static_cast<size_t>(m_linear[p].second)];
         int pos = static_cast<int>(p);
-        if (in.dst >= 0) { Interval& iv = m_intervals[in.dst]; iv.temp = in.dst; iv.isFloat = isFloatType(in.type); if (pos < iv.start) iv.start = pos; if (pos > iv.end) iv.end = pos; if (!firstDef.count(in.dst)) firstDef[in.dst] = pos; }
+        if (in.dst >= 0 && !m_folded.count(in.dst)) { Interval& iv = m_intervals[in.dst]; iv.temp = in.dst; iv.isFloat = isFloatType(in.type); if (pos < iv.start) iv.start = pos; if (pos > iv.end) iv.end = pos; if (!firstDef.count(in.dst)) firstDef[in.dst] = pos; }
         for (size_t a = 0; a < in.args.size(); ++a) {
             if (in.args[a].kind != IrOperand::Temp) continue;
-            Interval& iv = m_intervals[in.args[a].id];
-            iv.temp = in.args[a].id;
+            int t = in.args[a].id;
+            const IrOperand* op = &in.args[a];
+            if (m_folded.count(t)) {                    // a folded address: its base is what this instruction reads
+                op = &m_folded[t].base;
+                if (op->kind != IrOperand::Temp) continue;
+                t = op->id;
+            }
+            Interval& iv = m_intervals[t];
+            iv.temp = t;
             if (iv.start > pos) iv.start = pos;
             if (pos > iv.end) iv.end = pos;
-            if (in.args[a].type && isFloatType(in.args[a].type)) iv.isFloat = true;
-            uses.push_back(std::make_pair(in.args[a].id, pos));
+            if (op->type && isFloatType(op->type)) iv.isFloat = true;
+            uses.push_back(std::make_pair(t, pos));
         }
         if (in.op == IrInst::Call || in.op == IrInst::VCall) {
             m_calls.push_back(pos);
             int n = static_cast<int>(in.args.size());
             if (n - 4 > m_outgoingArgs) m_outgoingArgs = n - 4;
         }
+        if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Throw || in.op == IrInst::TryBegin ||
+            in.op == IrInst::TryEnd || in.op == IrInst::CatchParam || in.op == IrInst::CatchEnd) m_clobbers.push_back(pos);
     }
     // a use that precedes every definition in linear order is reached through a backward edge: the value is
     // live from the start of the using block (after SSA, copies of a phi's operands create such uses)
@@ -237,9 +273,12 @@ void X86Function::allocate()
     for (std::map<int, Interval>::iterator it = m_intervals.begin(); it != m_intervals.end(); ++it) order.push_back(&it->second);
     std::sort(order.begin(), order.end(), ByStart());
     std::vector<Interval*> active;
-    bool intFree[kIntRegCount], fltFree[kFloatRegCount];
-    for (int i = 0; i < kIntRegCount; ++i) intFree[i] = true;
+    bool intFree[kIntRegCount + kVolatileRegCount], fltFree[kFloatRegCount];
+    for (int i = 0; i < kIntRegCount + kVolatileRegCount; ++i) intFree[i] = true;
     for (int i = 0; i < kFloatRegCount; ++i) fltFree[i] = true;
+    // a volatile register may hold a value that no call, throw or try operation interrupts; setjmp/longjmp
+    // restore only the callee-saved registers, so a function with try regions keeps to those
+    const bool volatileOk = !m_f.hasTry;
     for (size_t k = 0; k < order.size(); ++k) {
         Interval* iv = order[k];
         for (size_t a = 0; a < active.size();) {
@@ -248,14 +287,30 @@ void X86Function::allocate()
                 active.erase(active.begin() + static_cast<long>(a));
             } else ++a;
         }
-        bool* freeRegs = iv->isFloat ? fltFree : intFree;
-        int n = iv->isFloat ? kFloatRegCount : kIntRegCount;
+        bool clobbered = false;
+        for (size_t c = 0; c < m_clobbers.size() && !clobbered; ++c) clobbered = m_clobbers[c] >= iv->start && m_clobbers[c] <= iv->end;
+        const bool mayUseVolatile = volatileOk && !iv->isFloat && !clobbered;
         int got = -1;
-        for (int r = 0; r < n; ++r) if (freeRegs[r]) { got = r; break; }
-        if (got >= 0) { iv->reg = got; freeRegs[got] = false; active.push_back(iv); (iv->isFloat ? m_usedFloatRegs : m_usedIntRegs).insert(got); continue; }
+        if (iv->isFloat) { for (int r = 0; r < kFloatRegCount; ++r) if (fltFree[r]) { got = r; break; } }
+        else {
+            if (mayUseVolatile) for (int r = kVolatileRegBase; r < kVolatileRegBase + kVolatileRegCount; ++r) if (intFree[r]) { got = r; break; }
+            if (got < 0) for (int r = 0; r < kIntRegCount; ++r) if (intFree[r]) { got = r; break; }
+        }
+        if (got >= 0) {
+            iv->reg = got;
+            (iv->isFloat ? fltFree : intFree)[got] = false;
+            active.push_back(iv);
+            if (iv->isFloat) m_usedFloatRegs.insert(got); else if (got < kIntRegCount) m_usedIntRegs.insert(got);   // only callee-saved ones are saved
+            continue;
+        }
+        // no register free: take the one of the value that lives longest, if this one fits it
         Interval* victim = 0;
-        for (size_t a = 0; a < active.size(); ++a)
-            if (active[a]->isFloat == iv->isFloat && active[a]->reg >= 0 && (!victim || active[a]->end > victim->end)) victim = active[a];
+        for (size_t a = 0; a < active.size(); ++a) {
+            Interval* v = active[a];
+            if (v->isFloat != iv->isFloat || v->reg < 0) continue;
+            if (!iv->isFloat && v->reg >= kVolatileRegBase && !mayUseVolatile) continue;
+            if (!victim || v->end > victim->end) victim = v;
+        }
         if (victim && victim->end > iv->end) { iv->reg = victim->reg; victim->reg = -1; ++m_stats.spills; active.push_back(iv); }
         else { iv->reg = -1; ++m_stats.spills; }
     }
@@ -370,6 +425,15 @@ std::string X86Function::use(const IrOperand& o, const std::string& scratch)
     case IrOperand::Str: { line("lea " + scratch + ", " + m_m.stringLabel(o.name)); return scratch; }
     default: return scratch;
     }
+}
+
+std::string X86Function::memOperand(const IrOperand& addr)
+{
+    if (addr.kind == IrOperand::Temp) {
+        std::map<int, Folded>::const_iterator f = m_folded.find(addr.id);
+        if (f != m_folded.end()) return "[" + use(f->second.base, "rdx") + "+" + intToString(static_cast<int>(f->second.offset)) + "]";
+    }
+    return "[" + use(addr, "rdx") + "]";
 }
 
 std::string X86Function::def(int temp, bool isFloat, const std::string& scratch, int& spill)
@@ -492,7 +556,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         std::string mem;
         if (in.op == IrInst::LoadLocal) mem = localRef(in.args[0].id);
         else if (in.op == IrInst::LoadGlobal) { mem = "[" + m_m.globalSymbol(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
-        else mem = "[" + use(in.args[0], "rdx") + "]";
+        else mem = memOperand(in.args[0]);
         std::string rd = def(in.dst, dstFloat, dstFloat ? "xmm0" : "rax", spill);
         if (dstFloat) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + rd + ", " + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem);
         else if (size == 8) line("mov " + rd + ", qword ptr " + mem);
@@ -507,7 +571,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         std::string mem;
         if (in.op == IrInst::StoreLocal) mem = localRef(in.args[0].id);
         else if (in.op == IrInst::StoreGlobal) { mem = "[" + m_m.globalSymbol(in.args[0].name) + "]"; m_m.useGlobal(in.args[0].name); }
-        else mem = "[" + use(in.args[0], "rdx") + "]";
+        else mem = memOperand(in.args[0]);
         std::string rv = use(in.args[1], fl ? "xmm0" : "rax");
         if (fl) line(std::string(isSingle(in.type) ? "movss " : "movsd ") + (isSingle(in.type) ? "real4 ptr " : "real8 ptr ") + mem + ", " + rv);
         else line("mov " + std::string(ptrWord(size)) + " " + mem + ", " + regSized(rv, size));
@@ -515,7 +579,9 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     }
     case IrInst::AddrLocal: { std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", " + localRef(in.args[0].id)); finish(in.dst, spill, false, rd); break; }
     case IrInst::AddrGlobal: { std::string rd = def(in.dst, false, "rax", spill); m_m.useGlobal(in.args[0].name); line("lea " + rd + ", " + m_m.globalSymbol(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
-    case IrInst::AddrField: { std::string rb = use(in.args[0], "rdx"); std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", [" + rb + "+" + intToString(static_cast<int>(in.extra)) + "]      ; " + in.sub); finish(in.dst, spill, false, rd); break; }
+    case IrInst::AddrField: {
+        if (in.dst >= 0 && m_folded.count(in.dst)) break;   // the next load or store uses [base+offset] itself
+        std::string rb = use(in.args[0], "rdx"); std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", [" + rb + "+" + intToString(static_cast<int>(in.extra)) + "]      ; " + in.sub); finish(in.dst, spill, false, rd); break; }
     case IrInst::AddrIndex: {
         std::string rb = use(in.args[0], "rdx");
         std::string ri = use(in.args[1], "rcx");
@@ -672,7 +738,8 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
             if (fl && r != "xmm0") line("movsd xmm0, " + r);
             else if (!fl && r != "rax") line("mov rax, " + r);
         }
-        line("jmp " + m_label + "_exit");
+        // the exit code follows the last instruction of the last block: no jump needed there
+        if (m_f.blocks.back().insts.empty() || &in != &m_f.blocks.back().insts.back()) line("jmp " + m_label + "_exit");
         break;
     }
     case IrInst::Throw: {

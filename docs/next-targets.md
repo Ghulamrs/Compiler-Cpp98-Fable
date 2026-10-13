@@ -20,6 +20,9 @@ the default), with the items found since. Each was reproduced with a small progr
 - 23 (plan 9): bit-fields laid out as MSVC does (units of the declared type's size, zero-width and unnamed
   bit-fields) and read and written by mask and shift (IrGen loadBits/storeBits); members of anonymous unions
   and structs are named in the enclosing class (Sema declareAnonymousMember). Covered by sample-layout.
+- 23 (plan 10): the polymorphic bases are laid out first; the first one is the primary base at offset 0, whose
+  vptr the class shares and whose vtable it extends (Sema.cpp layoutClass, completeClass). Covered by
+  sample-layout, with virtual calls made by cl on objects built by cppparse and the other way round.
 - Lazy instantiation of class template member bodies (MatrixTest.cpp's first blocker).
 - README "known limit" (untyped library results): with the headers included the version 6 front end types
   `strtod` and `std::string::size`; the paragraph describes the legacy self-compile.
@@ -38,11 +41,11 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | 5 | `using namespace std; printf(...)` ambiguous: candidates not deduplicated (SemaExpr.cpp:390-444) | false error | small | front end |
 | 6 | 21: global destructors never registered with atexit (IrGen.cpp genInitializer) | never run | small-medium | back end |
 | 7 | 18, callee side: variadic prologue does not home rdx/r8/r9; no stdarg.h | garbage | medium | back end |
-| 10 | 23: polymorphic base not first: own vptr, not moved first (Sema.cpp:1080, 1093, 1155) | wrong layout | medium | layout |
 | 11 | MatrixTest.cpp: injected class name with arguments (Sema.cpp:368-379); a redeclared function template is a second candidate (Sema.cpp:1033); member templates do not see the enclosing parameters (SemaExpr.cpp:544-572) | does not compile | small-medium | front end |
 | 12 | 21: constant pointer tables initialised dynamically in .data, not .rdata with relocations | start-up order | medium | back end |
 | 13 | 20: static locals PUBLIC with a non-MSVC name (IrGen.cpp:1584) | duplicated in mixed links | small | back end |
 | 14 | 23: virtual bases laid out inline, no vbptr | wrong values | large | layout (later) |
+| 16 | a second polymorphic base (`D : PA, PB`) gets no secondary vtable: D's override of a PB function is not reached through a PB* (needs a vtable per polymorphic base subobject and this-adjusting thunks) | wrong call | medium | layout |
 | 15 | 22: `_MSC_VER`, `_MT`, `_CPPUNWIND` not predefined (common/Target.cpp) | by choice so far | small | decision |
 
 ## Deferred

@@ -745,7 +745,12 @@ and its bits fit, and a zero-width bit-field closes the unit when it
 follows a bit-field; loads mask and shift the unit (sign-extending a
 signed field) and stores merge into it. The members of an anonymous
 union or struct in a class are members of the class, placed at the
-unnamed member that holds them. Test 13 links
+unnamed member that holds them. The polymorphic bases are placed first: the
+first one is at offset 0 and the class shares its vptr and extends its
+vtable (`DP : NP, PB` with a virtual PB is 24 bytes, PB at 0, NP at 16).
+A second polymorphic base keeps its own vtable: overriding one of its
+functions needs a secondary vtable with this-adjusting thunks, not done
+yet. Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment;
 `examples/sample-layout/` does the same for MSVC's class layout rules at

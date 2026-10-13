@@ -1125,13 +1125,22 @@ void Sema::layoutClass(Symbol* cls)
     // MSVC's empty bases: a base takes its size without the byte an empty class is given (nvSize), so an empty
     // base takes no space; a byte of padding separates a base that ends with a zero-sized subobject from a
     // following base that leads with one (E, E2 { int w; }: E at 0, E2 at 1, w at 4)
+    // MSVC places the polymorphic bases first, in declaration order, then the others: the first polymorphic base
+    // (the primary base) is at offset 0 and the class shares its vptr (NP, PB { virtual }: PB at 0, NP after it)
+    std::vector<size_t> baseOrder;
+    for (size_t pass = 0; pass < 2; ++pass)
+        for (size_t b = 0; b < cls->bases.size(); ++b) {
+            Symbol* bc = cls->bases[b].cls;
+            if (!bc) continue;
+            if (!bc->layoutDone) layoutClass(bc);
+            if (bc->isPolymorphic == (pass == 0)) baseOrder.push_back(b);
+        }
     const Symbol* prev = 0;
     bool leadsZero = false, endsZero = false;
-    for (size_t b = 0; b < cls->bases.size(); ++b) {
+    for (size_t k = 0; k < baseOrder.size(); ++k) {
+        const size_t b = baseOrder[k];
         Symbol* bc = cls->bases[b].cls;
-        if (!bc) continue;
-        if (!bc->layoutDone) layoutClass(bc);
-        if (b == 0 && bc->isPolymorphic) vptr = true;        // share the primary base's vptr
+        if (k == 0 && bc->isPolymorphic) vptr = true;        // share the primary base's vptr
         int a = pack > 0 && bc->align > pack ? pack : bc->align;
         if (bc->declAlign > a) a = bc->declAlign;
         if (bc->declAlign > floor) floor = bc->declAlign;
@@ -1261,8 +1270,8 @@ void Sema::completeClass(Symbol* cls)
     }
     if (cls->isDependentContext) return;
     layoutClass(cls);
-    // vtable: the primary base's table first, then overrides and new virtuals
-    if (!cls->bases.empty() && cls->bases[0].cls) cls->vtable = cls->bases[0].cls->vtable;
+    // vtable: the primary base's table first (the first polymorphic base, at offset 0), then overrides and new virtuals
+    for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->bases[b].cls && cls->bases[b].cls->isPolymorphic) { cls->vtable = cls->bases[b].cls->vtable; break; }
     for (size_t i = 0; i < cls->members->order.size(); ++i) {
         Symbol* m = cls->members->order[i];
         if (m->kind != Symbol::Function || m->isStatic) continue;

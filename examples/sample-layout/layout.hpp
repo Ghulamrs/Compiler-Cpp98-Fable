@@ -1,6 +1,7 @@
 // layout.hpp - class layouts shared by the unit cppparse compiles (layout.cpp) and the driver cl compiles
-// (sample-layout-driver): MSVC's placement of empty bases, bit-fields and anonymous unions and structs. Both sides evaluate the same
-// expressions (LAYOUT_VALUES); the driver compares cppparse's results with its own.
+// (sample-layout-driver): MSVC's placement of empty bases, bit-fields, anonymous unions and structs, and
+// polymorphic bases. Both sides evaluate the same expressions (LAYOUT_VALUES); the driver compares cppparse's
+// results with its own.
 // Strict C++98.
 #ifndef SAMPLE_LAYOUT_HPP_INCLUDED
 #define SAMPLE_LAYOUT_HPP_INCLUDED
@@ -75,6 +76,15 @@ struct AUC {
     int twice() const { return iv * 2; }                                    // an anonymous member named in a member function
 };
 
+// ---- a polymorphic base that is not first ------------------------------------------------------------
+// MSVC lays out the polymorphic bases first: the first one is at offset 0, the class shares its vptr and
+// extends its vtable; the other bases follow in declaration order.
+struct NP { int x; };
+struct PB { PB(); virtual int f() const; int y; };
+struct DP : NP, PB { DP(); int f() const; int z; };                        // PB at 0, NP at 16, z at 20, size 24
+struct DQ : NP, E, PB { DQ(); virtual int g() const; char q; };            // PB at 0, NP at 16, E and q at 20
+struct DR : DQ { DR(); int g() const; int f() const; char r; };            // r at 24, size 32
+
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \
     X(sizeof(EM)) X(LAYOUT_FIELD(EM, w)) X(LAYOUT_BASE(EM, E2)) \
@@ -96,7 +106,10 @@ struct AUC {
     X(offsetof(BF9, c)) X(sizeof(BF10)) X(sizeof(BFP)) X(sizeof(BFAgg)) \
     X(sizeof(AU)) X(offsetof(AU, i)) X(offsetof(AU, dd)) X(offsetof(AU, z)) X(sizeof(US)) X(offsetof(US, b)) \
     X(offsetof(US, q)) X(sizeof(AN)) X(offsetof(AN, lo)) X(offsetof(AN, hi)) X(offsetof(AN, all)) X(offsetof(AN, gc)) \
-    X(sizeof(AUC)) X(LAYOUT_FIELD(AUC, iv)) X(LAYOUT_FIELD(AUC, fv))
+    X(sizeof(AUC)) X(LAYOUT_FIELD(AUC, iv)) X(LAYOUT_FIELD(AUC, fv)) \
+    X(sizeof(DP)) X(LAYOUT_BASE(DP, NP)) X(LAYOUT_BASE(DP, PB)) X(LAYOUT_FIELD(DP, z)) \
+    X(sizeof(DQ)) X(LAYOUT_BASE(DQ, NP)) X(LAYOUT_BASE(DQ, E)) X(LAYOUT_BASE(DQ, PB)) X(LAYOUT_FIELD(DQ, q)) \
+    X(sizeof(DR)) X(LAYOUT_BASE(DR, NP)) X(LAYOUT_BASE(DR, PB)) X(LAYOUT_FIELD(DR, r))
 
 // the value of the k-th expression of LAYOUT_VALUES as cppparse computes it; -1 past the end
 int layoutValue(int k);
@@ -121,5 +134,10 @@ void fillBits(BF2* p, int a, int b, int c);    // stores through the bit-fields 
 long readBits(const BF2* p, int which);        // reads them back: 0 a, 1 b, 2 c
 long bitOps(BF6* p);                           // compound assignment, ++, -- and the value of an assignment
 long readBf7(const BF7* p, int which);         // 0 a, 1 b, 2 c
+
+// polymorphic classes: constructed and called by cppparse's code, called virtually by the driver
+int  polyCall(const PB* p);                    // p->f()
+int  polyCallG(const DQ& q);                   // q.g()
+int  polyX(const NP* p);                       // p->x
 
 #endif

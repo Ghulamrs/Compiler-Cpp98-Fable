@@ -109,3 +109,28 @@ long readBf7(const BF7* p, int which)
     }
     return -99;
 }
+
+PB::PB() : y(2) {}
+int PB::f() const { return y; }
+DP::DP() : z(3) { x = 1; }
+int DP::f() const { return x * 100 + y * 10 + z; }
+DQ::DQ() : q('q') { x = 4; y = 5; }
+int DQ::g() const { return x + y + q; }
+DR::DR() : r(7) {}
+int DR::g() const { return 1000 + r; }
+int DR::f() const { return 2000 + x; }
+
+int polyCall(const PB* p)
+{
+    return p->f();
+}
+
+int polyCallG(const DQ& q)
+{
+    return q.g();
+}
+
+int polyX(const NP* p)
+{
+    return p->x;
+}

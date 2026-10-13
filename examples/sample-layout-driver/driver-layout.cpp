@@ -87,6 +87,22 @@ int main()
     expect("BF7 b read by cppparse", readBf7(&b7, 1), -4);
     expect("BF7 c read by cppparse", readBf7(&b7, 2), -5);
 
+    printf("polymorphic bases\n");
+    DP dp; DQ dq; DR dr;
+    const PB& pdp = dp; const PB& pdq = dq; const PB& pdr = dr;
+    expect("dp.x, dp.y, dp.z", dp.x * 100 + dp.y * 10 + dp.z, 123);
+    expect("dp f() through cl's PB&", pdp.f(), 123);
+    expect("dq f() through cl's PB&", pdq.f(), 5);
+    expect("dr f() through cl's PB&", pdr.f(), 2004);
+    expect("dq g() called by cl", dq.g(), 4 + 5 + 'q');
+    expect("dr g() through cl's DQ&", static_cast<const DQ&>(dr).g(), 1007);
+    expect("polyCall(&dp)", polyCall(&dp), 123);
+    expect("polyCall(&dr)", polyCall(&dr), 2004);
+    expect("polyCallG(dr)", polyCallG(dr), 1007);
+    expect("polyX(&dp)", polyX(&dp), 1);
+    expect("polyX(&dr)", polyX(&dr), 4);
+    expect("dr.r", dr.r, 7);
+
     if (failures) { printf("%d FAILED\n", failures); return 1; }
     printf("ALL OK\n");
     return 0;

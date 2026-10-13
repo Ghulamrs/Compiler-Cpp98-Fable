@@ -897,7 +897,9 @@ expression (a temporary bound to a reference lives as long as the
 reference; one that a `?:` result refers to is destroyed under its
 flag). Copies go through the class's own members: the copy constructor
 for initialisation, by-value arguments (the callee owns and destroys
-its copy, as MSVC does) and return values (constructor calls and calls
+its copy, as MSVC does, destroying its by-value parameters left to
+right as cl does; arguments are still evaluated left to right, cl goes
+right to left) and return values (constructor calls and calls
 returning the class build the result in place), the copy assignment
 operator for `a = b`; implicit copy constructors, assignments and
 destructors are generated memberwise (bases first). Arrays of objects

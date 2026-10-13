@@ -2565,6 +2565,7 @@ void IrGen::prologue(Symbol* fn)
         m_out->locals[static_cast<size_t>(m_sretSlot)].nonNull = true;
     }
     std::vector<std::pair<int, const sema::Type*> > byValue;   // class objects the callee owns
+    std::vector<Symbol*> byValueParam;                          // their parameters
     std::vector<std::pair<int, Symbol*> > inRegister;           // small class objects that arrive as an integer
     for (size_t p = 0; p < fn->params.size(); ++p) {
         Symbol* ps = fn->params[p];
@@ -2582,6 +2583,7 @@ void IrGen::prologue(Symbol* fn)
         m_slots[ps] = slot;
         if (isClassType(ps->type) && !isReference(ps->type)) {
             byValue.push_back(std::make_pair(slot, ps->type));
+            byValueParam.push_back(ps);
             ps->type = m_semaTypes.reference(ps->type);   // reads go through the pointer
         }
     }
@@ -2620,6 +2622,7 @@ void IrGen::prologue(Symbol* fn)
         store(pl, addr, pl.type, fn->loc.line);
         m_slots[ps] = ptr;
         byValue.push_back(std::make_pair(ptr, ps->type));
+        byValueParam.push_back(ps);
         ps->type = m_semaTypes.reference(ps->type);
     }
     if (m_retReg) {
@@ -2632,8 +2635,10 @@ void IrGen::prologue(Symbol* fn)
         LValue pl; pl.kind = LValue::Local; pl.local = m_sretSlot; pl.type = m_semaTypes.pointer(rt);
         store(pl, addr, pl.type, fn->loc.line);
     }
-    for (size_t i = 0; i < byValue.size(); ++i)
-        if (needsDtor(byValue[i].second)) registerCleanup(byValue[i].first, byValue[i].second, true, 0, fn->loc.line);
+    // the callee destroys its by-value parameters left to right, as cl does: registered from the last one
+    for (size_t p = fn->params.size(); p-- > 0;)
+        for (size_t i = 0; i < byValue.size(); ++i)
+            if (byValueParam[i] == fn->params[p] && needsDtor(byValue[i].second)) registerCleanup(byValue[i].first, byValue[i].second, true, 0, fn->loc.line);
 }
 
 void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)

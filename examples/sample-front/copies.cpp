@@ -80,6 +80,10 @@ struct Maker {
 };
 template <class T> T tmake(const T& p) { T t(p.val + 1); std::printf("  tmake\n"); return t; }
 
+// an NRVO local named in its own initializer: at -O2 the result object itself (cl /O2: self == &r)
+struct Self { int x; int pad[4]; Self* self; Self(Self* p) : x(7), self(p) {} Self(const Self& o) : x(o.x), self(o.self) { std::printf("  Self copy\n"); } ~Self() { std::printf("  ~Self\n"); } };
+Self selfRef() { Self a = &a; return a; }
+
 struct Holder {
     V m; W w;
     Holder(int v) : m(mkV(v)), w(W(v + 1)) { std::printf("  Holder\n"); }
@@ -133,6 +137,8 @@ int main()
     { Holder h(32); std::printf("  holder V%d\n", h.m.id); }
     { Holder h(D(33), 34); std::printf("  holder V%d\n", h.m.id); }
     { int k = takeV(V(36)); Holder h(mkV(35), k); std::printf("  holder V%d\n", h.m.id); }
+    section("7 self-referring NRVO local");
+    { Self r = selfRef(); std::printf("  self %d %d\n", r.x, (int)(r.self == &r)); }
     section("end");
     return 0;
 }

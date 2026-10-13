@@ -2085,9 +2085,10 @@ void IrGen::localDecl(cxx::Decl* d)
             const sema::Type* vt = var->type;
             LValue sl; sl.kind = LValue::Local; sl.local = m_sretSlot; sl.type = m_semaTypes.pointer(vt);
             LValue rl; rl.kind = LValue::Mem; rl.addr = load(sl, sl.type, line); rl.type = vt;
-            initObject(rl, vt, var, id, line);
+            // the name is in scope in its own initializer (A a = &a): reads go through the hidden pointer
             m_slots[var] = m_sretSlot;
-            var->type = m_semaTypes.reference(vt);   // reads go through the hidden pointer
+            var->type = m_semaTypes.reference(vt);
+            initObject(rl, vt, var, id, line);
             if (needsDtor(vt)) registerCleanup(m_sretSlot, vt, true, 2, line);
             endFullExpr(line);
             continue;
@@ -2960,7 +2961,7 @@ Symbol* IrGen::namedResult(Symbol* fn, cxx::Stmt* body)
         if (!v || (var && v != var)) return 0;
         var = v;
     }
-    if (var->isStatic || !var->type || isReference(var->type) || m_semaTypes.unqualified(var->type) != rt) return 0;
+    if (!var->isLocal || var->isStatic || !var->type || isReference(var->type) || m_semaTypes.unqualified(var->type) != rt) return 0;
     for (size_t i = 0; i < body->kids.size(); ++i) {
         cxx::Stmt* k = body->kids[i];
         if (k->kind != cxx::Stmt::DeclStmt || !k->decl || k->decl->kind != cxx::Decl::Simple) continue;

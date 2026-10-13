@@ -68,25 +68,26 @@ foreach ($m in $models.Keys) {
     }
 }
 
-# terminate.cpp, a whole program: an exception leaving a destructor run by the stack unwinding calls terminate; the
-# standard output and the exit code (abort) must equal cl's
-$tdir = "$out\terminate"
-New-Item -ItemType Directory -Force "$tdir\cl" | Out-Null
-$msg = & $cl /nologo /EHsc /Zc:implicitNoexcept- /O2 "/Fo$tdir\cl\" "/Fe$tdir\cl\terminate.exe" "$src\terminate.cpp" 2>&1 | Out-String
-if ($LASTEXITCODE -ne 0) { Report "terminate: cl reference build" $false $msg }
-else {
-    $tref = Normalize (& "$tdir\cl\terminate.exe" 2>$null | Out-String)
+# whole programs that must call terminate; the standard output and the exit code (abort) must equal cl's:
+#   terminate.cpp: an exception leaving a destructor run by the stack unwinding
+#   terminate-catch.cpp: a copy constructor that throws while it initializes a by-value catch parameter
+foreach ($tn in "terminate", "terminate-catch") {
+    $tdir = "$out\$tn"
+    New-Item -ItemType Directory -Force "$tdir\cl" | Out-Null
+    $msg = & $cl /nologo /EHsc /Zc:implicitNoexcept- /O2 "/Fo$tdir\cl\" "/Fe$tdir\cl\$tn.exe" "$src\$tn.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Report "${tn}: cl reference build" $false $msg; continue }
+    $tref = Normalize (& "$tdir\cl\$tn.exe" 2>$null | Out-String)
     $tcode = $LASTEXITCODE
     foreach ($m in "--eh=table", "--eh=sjlj") {
         foreach ($lvl in 0, 2) {
             $d = "$tdir\$($m.Substring(5))-O$lvl"
             New-Item -ItemType Directory -Force $d | Out-Null
-            $msg = & $Exe --compile6 "-O$lvl" --obj --msvc-mangling $m -q -I ..\include -I .. -o $d -n terminate "$src\terminate.cpp" 2>&1 | Out-String
-            if ($LASTEXITCODE -ne 0) { Report "terminate $m -O$lvl compile" $false $msg; continue }
-            $msg = & $link /nologo "/OUT:$d\terminate.exe" "$d\terminate6.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
-            if ($LASTEXITCODE -ne 0) { Report "terminate $m -O$lvl link" $false $msg; continue }
-            $run = Normalize (& "$d\terminate.exe" 2>$null | Out-String)
-            Report "terminate $m -O${lvl}: output and exit code equal cl's ($LASTEXITCODE)" ($run -eq $tref -and $LASTEXITCODE -eq $tcode -and $tcode -ne 0) "       got '$run' exit $LASTEXITCODE, cl '$tref' exit $tcode"
+            $msg = & $Exe --compile6 "-O$lvl" --obj --msvc-mangling $m -q -I ..\include -I .. -o $d -n $tn "$src\$tn.cpp" 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { Report "$tn $m -O$lvl compile" $false $msg; continue }
+            $msg = & $link /nologo "/OUT:$d\$tn.exe" "$d\${tn}6.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { Report "$tn $m -O$lvl link" $false $msg; continue }
+            $run = Normalize (& "$d\$tn.exe" 2>$null | Out-String)
+            Report "$tn $m -O${lvl}: output and exit code equal cl's ($LASTEXITCODE)" ($run -eq $tref -and $LASTEXITCODE -eq $tcode -and $tcode -ne 0) "       got '$run' exit $LASTEXITCODE, cl '$tref' exit $tcode"
         }
     }
 }

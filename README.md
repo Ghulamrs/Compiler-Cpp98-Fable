@@ -298,7 +298,8 @@ Each output must equal the cl build's. That reference is built with `/EHa`, beca
 miscompiles a throw out of a recursion with destructors under `/EHsc` at `/O1` and above, and with
 `/Zc:implicitNoexcept-`, C++98's destructors that may throw. `terminate.cpp`, a whole program, checks that an
 exception leaving a destructor run by the stack unwinding calls terminate (the output and the exit code of cl's
-build, table and setjmp models at `-O0` and `-O2`).
+build, table and setjmp models at `-O0` and `-O2`); so does `terminate-catch.cpp` for a copy constructor that
+throws while it initializes a by-value catch parameter.
 
 ## Building and testing
 
@@ -930,7 +931,7 @@ for `new T[n]`, after destroying the elements built) throws frees the
 memory through the matching operator delete, the class's or the global
 one; a placement new frees nothing. `catch (T x)` copy-constructs the
 handler's object from the thrown one and destroys it when the handler
-ends. `throw obj`
+ends (a copy constructor that throws there calls terminate). `throw obj`
 copy-constructs the exception object into heap storage that the
 runtime owns (`cppparse_throw_owned`) and destroys with the class's
 destructor when the handler ends. The driver `examples/sample-life-driver/

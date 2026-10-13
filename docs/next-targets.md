@@ -42,7 +42,8 @@ the default), with the items found since. Each was reproduced with a small progr
 - 21, the throwing constructor: `new T` frees through the class's `operator delete` (or the global one, `::new`
   the global one) when the constructor or initializer throws; placement new frees nothing (registerFree). ehArrays.
 - 14c, catch by value: `catch (D x)` copy-constructs the handler's object from the thrown one and destroys it when
-  the handler ends (also on return, break, continue and a throw out of the handler). eh.ps1: ehCatchValue.
+  the handler ends (also on return, break, continue and a throw out of the handler). eh.ps1: ehCatchValue. A copy
+  constructor that throws while it initializes the parameter calls terminate, as cl (terminate-catch.cpp).
 - 16 (plan 16): a second polymorphic base gets a secondary vftable (`??_7D@@6BPB@@@`), with MSVC's this adjustors
   and adjustor thunks (`?f@D@@WBA@EAAHXZ`) (Sema.cpp completeClass, IrGen.cpp storeVptr/callFunction/prologue,
   X86.cpp addThunk); calls through every base, by both compilers, are in sample-layout.
@@ -149,10 +150,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 
 ## Other known limits (found by the reviews of 2026-10-13)
 
-- A copy constructor that throws while it initializes a by-value catch parameter: C++98 15.5.1 and cl call terminate;
-  cppparse lets the new exception go on from the handler (unhandled, it aborts too, with the runtime's message;
-  caught further out, it differs). Repro: `struct E { int v; E(int x) : v(x) {} E(const E& o) : v(o.v) { throw 6; } };`
-  then `try { try { throw E(4); } catch (E e) {} } catch (int) { puts("caught"); }`: cl aborts, cppparse prints.
 - Calls through pointers to members (`(obj.*pmf)(x)`, `(p->*pmf)(x)`) are rejected by sema (an error, not wrong code).
 - A float literal with an `f` suffix is converted decimal -> double -> float, which differs from cl's direct
   decimal -> float rounding when the double is exactly halfway between two floats. The folder

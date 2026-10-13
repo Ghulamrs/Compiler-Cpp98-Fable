@@ -145,6 +145,8 @@ private:
     void endFullExpr(int line, size_t from = 0);
     void keepTemporaries(size_t from);
     void handlerCleanups(size_t mark, int line);
+    int  beginTerminateRegion(int& term, int line);
+    void endTerminateRegion(int tid, int term, int line);
     int  registerFree(int ptr, sema::Symbol* cls, bool array, int count, int line);
     void clearFlag(int index, int line);
     void returnSequence(int line);

@@ -1352,8 +1352,20 @@ void IrGen::keepTemporaries(size_t from)
 void IrGen::handlerCleanups(size_t mark, int line)
 {
     if (m_flagged.size() <= mark) return;
+    int term = -1;
+    const int tid = beginTerminateRegion(term, line);
+    ++m_inPad;   // no cleanups are registered meanwhile: m_flagged is being walked
+    for (size_t i = m_flagged.size(); i > mark; --i) runCleanup(m_flagged[i - 1], true, line);
+    --m_inPad;
+    endTerminateRegion(tid, term, line);
+}
+
+// a region whose handler calls terminate (code that runs while an exception is being handled: the destructors
+// of a landing pad, the copy of a by-value catch parameter); 'term' receives its handler block
+int IrGen::beginTerminateRegion(int& term, int line)
+{
     const int tid = m_tryCount++;
-    const int term = m_out->newBlock("unwind.terminate");
+    term = m_out->newBlock("unwind.terminate");
     const int body = m_out->newBlock("unwind.cleanups");
     IrInst tb = make(IrInst::TryBegin, 0, line);
     tb.extra = tid;
@@ -1362,9 +1374,11 @@ void IrGen::handlerCleanups(size_t mark, int line)
     br(body, line);
     m_block = body;
     m_tryStack.push_back(tid);
-    ++m_inPad;   // no cleanups are registered meanwhile: m_flagged is being walked
-    for (size_t i = m_flagged.size(); i > mark; --i) runCleanup(m_flagged[i - 1], true, line);
-    --m_inPad;
+    return tid;
+}
+
+void IrGen::endTerminateRegion(int tid, int term, int line)
+{
     m_tryStack.pop_back();
     if (!terminated()) { IrInst te = make(IrInst::TryEnd, 0, line); te.extra = tid; emit(te); }
     const int after = m_block;
@@ -2476,7 +2490,11 @@ void IrGen::stmt(cxx::Stmt* s)
                     int slot = newLocal(var->name, var->type, true);
                     m_slots[var] = slot;
                     LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = ct;
+                    // a copy constructor that throws here calls terminate (C++98 15.5.1), as cl does
+                    int term = -1;
+                    const int tid = beginTerminateRegion(term, h->loc.line);
                     copyConstruct(ct, addressOf(lv, h->loc.line), ev, h->loc.line);
+                    endTerminateRegion(tid, term, h->loc.line);
                     if (needsDtor(ct)) registerCleanup(slot, ct, false, 0, h->loc.line);
                 } else if (ct->kind != sema::Type::Class && !isReference(var->type)) {
                     int slot = newLocal(var->name, var->type, false);

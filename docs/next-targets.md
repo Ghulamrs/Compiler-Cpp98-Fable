@@ -17,6 +17,8 @@ the default), with the items found since. Each was reproduced with a small progr
 - Lazy instantiation of class template member bodies (MatrixTest.cpp's first blocker).
 - README "known limit" (untyped library results): with the headers included the version 6 front end types
   `strtod` and `std::string::size`; the paragraph describes the legacy self-compile.
+- 4 (plan 1): a unit with syntax or semantic errors is not compiled: no object, `.asm` or map (stale ones removed),
+  exit code 1 (main.cpp); test 17, `examples/sample-front/errors.cpp`.
 
 ## Plan
 
@@ -25,7 +27,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 
 | # | Item | Effect today | Size | Lane |
 |---|---|---|---|---|
-| 1 | 4: object written after errors (driver/main.cpp:313) | broken objects reach the linker | small | front end |
 | 2 | 19: stack-passed float parameter homed with movsd (X86.cpp:1274) | wrong value | small | back end |
 | 3 | 3: sizeof of an incomplete type accepted, sizeof(T&) = 8 (SemaExpr.cpp:1256) | silent 8 | small | front end |
 | 4 | a local variable does not hide a function template (CxxParser.cpp:211-217) | wrong result | small-medium | front end |

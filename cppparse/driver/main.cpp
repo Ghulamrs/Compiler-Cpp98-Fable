@@ -51,6 +51,7 @@
 #include "Symbols.hpp"
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -128,6 +129,14 @@ bool writeOut(const std::string& path, const std::string& content, bool quiet, s
     written.push_back(path + "  (" + intToString(static_cast<int>(content.size() / 1024)) + " KB)");
     if (!quiet) std::cout << "  wrote " << path << "\n";
     return true;
+}
+
+// a unit that is not compiled leaves no object, listing or map: one of an earlier run would be taken for its own
+void removeUnitOutputs(const std::string& base)
+{
+    std::remove((base + "6.obj").c_str());
+    std::remove((base + "6.asm").c_str());
+    std::remove((base + "6.map").c_str());
 }
 
 } // namespace
@@ -310,7 +319,13 @@ int main(int argc, char* argv[])
                 std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
                 std::vector<std::string> written;
                 if (!outDir.empty() || !outName.empty()) writeOut(base + "-sym6.txt", sema.dumpSymbols(), quiet, written);
-                if (compile6) {
+                if (compile6 && errors + sema.errorCount() > 0) {
+                    // a unit with syntax or semantic errors is not compiled, as cl does: an object built on
+                    // unresolved names and error types would reach the linker
+                    std::cout << "  compile6: not compiled, " << (errors + sema.errorCount()) << " error(s)\n";
+                    removeUnitOutputs(base);
+                }
+                else if (compile6) {
                     // version 6 stage 4: IR from the analysed tree, then the shared back end
                     IrGen gen(program, types);
                     std::vector<IrFunction*> functions;
@@ -333,6 +348,7 @@ int main(int argc, char* argv[])
                                           << "(" << (*held)[h].loc.line << "): " << (*held)[h].code << ": " << (*held)[h].message << "\n";
                         }
                         totalErrors += static_cast<int>(bad.size());
+                        removeUnitOutputs(base);
                         for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
                         continue;
                     }

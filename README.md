@@ -304,8 +304,10 @@ Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend`
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
-`obj/debug`. `-NoTests` stops after the build. The test groups (16 as of
-version 6) run against whichever configuration was built.
+`obj/debug`. `-NoTests` stops after the build. The test groups (17 as of
+version 6) run against whichever configuration was built. Test 17 holds the
+front-end regressions of `examples/sample-front/`: units that must be
+rejected with their diagnostics and no object.
 
 A Visual Studio 2022 solution does the same build inside the IDE:
 `cpp\cppparse.sln` with the project `cppparse\cppparse.vcxproj` (x64,
@@ -605,7 +607,9 @@ Every target also has `__cplusplus=199711L`, `__cppparse__=6` and `__STDC__=1`. 
 predefined: code under them is MSVC's alone. The Linux sizes and macros agree with
 `clang --target=x86_64-linux-gnu`, which will be the reference for the Linux back end as cl is for Windows.
 `--compile6` refuses a target without a back end, and stops at a missing include file instead of compiling
-against undeclared names (the analysis modes only warn).
+against undeclared names (the analysis modes only warn). A unit with syntax or semantic errors is not compiled
+either, as with cl: the errors are listed, the exit code is 1, and no object, `.asm` or map is written (one left
+by an earlier run is removed; test 17 checks this on `examples/sample-front/errors.cpp`).
 
 The host is a different matter from the target: cppparse's own sources are strict C++98, and every call outside
 the standard library sits behind `#ifdef _WIN32` with a standard fallback. `common/Parallel.cpp` uses Windows
@@ -936,7 +940,7 @@ difference fails the script, and the summary says how many units the
 self-built compiler compiles exactly as the MSVC-built one (all 36). The
 stage takes about three minutes (`-SkipBootstrap` leaves it out).
 `build-cppparse.ps1 -Exe sandbox/out/selfhost/cppparse-self.exe` skips the
-MSVC build and runs all 16 test groups with the self-built compiler. That
+MSVC build and runs all test groups with the self-built compiler. That
 exercised the old pipeline (`analyzer/`), folder mode, the reports and the worker
 threads in self-built code for the first time and found these defects:
 static locals were initialised under a plain guard byte, so two workers

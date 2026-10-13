@@ -689,6 +689,27 @@ try {
     if ($failed -ne 0) { throw "$failed self-hosting check(s) failed" }
 
     Write-Host ""
+    Write-Host "=== Test 17: version 6 front end (sample-front: rejected units, lookup and sizeof against cl) ==="
+    $failed = 0
+    # units with errors: each must report its diagnostics, exit non-zero and leave no object, listing or map
+    # (a stale object of an earlier run is put in place first: it must be removed, not taken for the result)
+    $rejects = @(
+        @{ unit = "errors"; expect = @("error S103: call to undeclared function 'undeclared_fn'", "error S101: undeclared identifier 'nosuchvar'") }
+    )
+    foreach ($r in $rejects) {
+        $nm = "front-$($r.unit)"
+        foreach ($sfx in @("6.obj", "6.asm", "6.map")) { "stale" | Out-File -Encoding ascii "out\x64\$nm$sfx" }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\$($r.unit).cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        $missing = @($r.expect | Where-Object { -not $c6.Contains($_) })
+        $left = @(@("6.obj", "6.asm", "6.map") | Where-Object { Test-Path "out\x64\$nm$_" })
+        if ($rc -ne 0 -and $missing.Count -eq 0 -and $left.Count -eq 0) { Write-Host "  ok   $($r.unit).cpp: errors reported, exit code $rc, no object, listing or map" }
+        else { Write-Host "  FAIL $($r.unit).cpp (exit $rc, missing diagnostics: $($missing -join ' | '), left behind: $($left -join ', ')):"; Write-Host $c6; $failed++ }
+    }
+    if ($failed -ne 0) { throw "$failed front-end check(s) failed" }
+
+    Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"
     $global:LASTEXITCODE = 0

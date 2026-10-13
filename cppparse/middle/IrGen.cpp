@@ -1968,6 +1968,7 @@ void IrGen::localDecl(cxx::Decl* d)
         cxx::InitDeclarator& id = d->declarators[i];
         Symbol* var = id.decl ? id.decl->semaSym : 0;
         if (!var || var->kind != Symbol::Variable) continue;
+        if (!var->isLocal) continue;   // a block-scope extern declaration: the namespace's variable, built there
         if (var->isStatic) {
             // a static local is a global of this module; an initializer that is not a constant runs on the first pass
             const int line = id.decl->loc.line;

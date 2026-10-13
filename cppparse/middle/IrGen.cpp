@@ -152,6 +152,33 @@ bool IrGen::virtualBasePath(Symbol* derived, Symbol* base, int& index, int& rest
     return false;
 }
 
+void IrGen::unsupported(int line, const std::string& what)
+{
+    m_unsupported.push_back("line " + numText(static_cast<long>(line)) + ": " + what);
+}
+
+// a class some class in the program has as a virtual base
+bool IrGen::isVirtualBaseAnywhere(Symbol* cls) const
+{
+    for (size_t i = 0; i < m_prog.symbols.size(); ++i) {
+        const Symbol* s = m_prog.symbols[i];
+        if (s->kind != Symbol::Class) continue;
+        for (size_t v = 0; v < s->vbases.size(); ++v) if (s->vbases[v] == cls) return true;
+    }
+    return false;
+}
+
+// .* and ->* on a class with virtual bases: cl's member pointers into virtual bases carry a vbtable index (S132)
+void IrGen::memberPointerCheck(cxx::Expr* e)
+{
+    if (e->kind != cxx::Expr::Binary || (e->text != ".*" && e->text != "->*") || e->kids.empty()) return;
+    const sema::Type* ot = m_semaTypes.unref(exprType(e->kids[0]));
+    if (ot && ot->kind == sema::Type::Pointer) ot = ot->inner;
+    ot = ot ? m_semaTypes.unqualified(ot) : 0;
+    if (ot && ot->kind == sema::Type::Class && hasVbases(ot->decl))
+        unsupported(e->loc.line, "pointer to member of '" + ot->decl->qualifiedName() + "', a class with virtual bases, is not supported yet by --compile6");
+}
+
 // MSVC's conversion to a virtual base: the vbptr's table holds the base's distance from the vbptr
 int IrGen::toBase(int addr, Symbol* derived, Symbol* base, int line)
 {
@@ -159,7 +186,7 @@ int IrGen::toBase(int addr, Symbol* derived, Symbol* base, int line)
     const sema::Type* bp = m_semaTypes.pointer(m_semaTypes.classType(base));
     int off = 0, index = 0, rest = 0;
     if (baseOffset(derived, base, off)) return off ? offsetAddress(addr, dp, bp, off, line) : addr;
-    if (!virtualBasePath(derived, base, index, rest)) return addr;
+    if (!virtualBasePath(derived, base, index, rest)) { unsupported(line, "internal error: no path from '" + derived->qualifiedName() + "' to its base '" + base->qualifiedName() + "'"); return addr; }
     const sema::Type* it = m_semaTypes.basic(sema::Type::Int);
     const sema::Type* ip = m_semaTypes.pointer(it);
     const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Char));
@@ -437,6 +464,12 @@ int IrGen::convert(int temp, const sema::Type* from, const sema::Type* to, int l
             const bool viaVbase = !baseOffset(fc->decl, tc->decl, off) && virtualBasePath(fc->decl, tc->decl, index, rest);
             if (baseOffset(fc->decl, tc->decl, off) && off > 0) delta = off;                 // derived to base
             else if (baseOffset(tc->decl, fc->decl, off) && off > 0) delta = -off;           // base to derived (static_cast)
+            int dummyIndex = 0, dummyRest = 0;
+            if (!viaVbase && !baseOffset(tc->decl, fc->decl, off) && virtualBasePath(tc->decl, fc->decl, dummyIndex, dummyRest)) {
+                // ill-formed (cl C2635): a virtual base cannot be converted down to the derived class
+                unsupported(line, "cannot convert from '" + fc->decl->qualifiedName() + "' to '" + tc->decl->qualifiedName() + "': '" + fc->decl->qualifiedName() + "' is a virtual base");
+                return temp;
+            }
             if (viaVbase) {
                 // through the vbtable; a null pointer stays null
                 const sema::Type* fp = from->kind == sema::Type::Pointer ? from : m_semaTypes.pointer(from);
@@ -575,6 +608,7 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
     LValue lv;
     lv.type = m_semaTypes.unref(exprType(e));
     const int line = e->loc.line;
+    memberPointerCheck(e);
     switch (e->kind) {
     case cxx::Expr::Name: {
         Symbol* s = e->semaSym;
@@ -777,7 +811,9 @@ int IrGen::argument(cxx::Expr* a, const sema::Type* pt, int line)
         const sema::Type* tu = m_semaTypes.unqualified(target);
         bool converted = isClassType(target) && (at->kind != sema::Type::Class || (at != tu && !(at->decl && tu->decl && isBaseOf(at->decl, tu->decl))));
         LValue al;
-        if (!converted) al = lvalue(a);
+        // a class prvalue built by a constructor is evaluated once, below (V& bound to D())
+        const bool built = isClassType(exprType(a)) && !a->semaLvalue && a->semaSym && a->semaSym->kind == Symbol::Function && a->semaSym->isConstructor;
+        if (!converted && !built) al = lvalue(a);
         if (converted || al.kind == LValue::None || (a->semaSym && a->semaSym->kind == Symbol::Function && a->kind == cxx::Expr::Call && !a->semaLvalue && !isClassType(exprType(a)))) {
             // bind a temporary
             if (isClassType(exprType(a)) && al.kind == LValue::None) return convert(value(a), m_semaTypes.pointer(m_semaTypes.unref(exprType(a))), m_semaTypes.pointer(target), line);
@@ -1145,8 +1181,10 @@ int IrGen::materialize(cxx::Expr* e, const sema::Type* t, int dst, int line)
         return call(x, dst);
     if (!sameClass && u->kind == sema::Type::Class && u->decl && xt->kind == sema::Type::Class && xt->decl && isBaseOf(xt->decl, u->decl)) {
         // an object of a derived class: its base part is copied (slicing)
-        LValue xl = lvalue(e);
-        int src = xl.kind == LValue::None ? value(e) : addressOf(xl, line);
+        // a prvalue is evaluated once (value: a temporary destroyed at the end of the full-expression)
+        int src;
+        if (x->semaLvalue) { LValue xl = lvalue(e); src = xl.kind == LValue::None ? value(e) : addressOf(xl, line); }
+        else src = value(e);
         copyConstruct(u, dst, convert(src, m_semaTypes.pointer(xt), m_semaTypes.pointer(u), line), line);
         return dst;
     }
@@ -1472,6 +1510,7 @@ int IrGen::value(cxx::Expr* e)
 {
     if (!e) return -1;
     const int line = e->loc.line;
+    memberPointerCheck(e);
     const sema::Type* t = m_semaTypes.unref(exprType(e));
     if (e->semaConst && e->kind != cxx::Expr::Call && e->kind != cxx::Expr::Assign && (t->isIntegral() || t->kind == sema::Type::NullPtr || t->isPointer()) && e->kind != cxx::Expr::StringLit)
         return constant(e->semaValue, t->kind == sema::Type::NullPtr ? m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)) : t, line);
@@ -1775,7 +1814,7 @@ int IrGen::value(cxx::Expr* e)
                 materialize(e->kids[0], tt, obj, line);
                 endFullExpr(line);
                 in.args.push_back(IrOperand::temp(obj, oldType(tt)));
-                Symbol* dtor = needsDtor(tt) ? findSpecial(tt->decl, '~') : 0;
+                Symbol* dtor = needsDtor(tt) ? (hasVbases(tt->decl) ? vbaseDestructor(tt->decl) : findSpecial(tt->decl, '~')) : 0;   // a complete object: ??_D with virtual bases
                 if (dtor) { need(dtor); IrInst fa = make(IrInst::AddrGlobal, 0, line); fa.type = m_types.function(oldType(m_semaTypes.basic(sema::Type::Void))); fa.args.push_back(IrOperand::global(irName(dtor), fa.type)); in.args.push_back(IrOperand::temp(emit(fa), fa.type)); }
                 else in.args.push_back(IrOperand::imm(0, oldType(m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)))));
             } else {
@@ -1873,7 +1912,7 @@ void IrGen::initObject(const LValue& lv, const sema::Type* t, Symbol* var, cxx::
         bool sameClass = src && isClassType(exprType(src)) && m_semaTypes.unqualified(m_semaTypes.unref(exprType(src))) == u;
         if (id.init.kind == cxx::Initializer::Assign && src) {
             if (sameClass) { materialize(src, u, addr, line); return; }
-            if (src->semaSym && src->semaSym->kind == Symbol::Function && src->semaSym->isConstructor) { construct(src->semaSym, addr, id.init.args, 0, line); return; }
+            if (src->semaSym && src->semaSym->kind == Symbol::Function && src->semaSym->isConstructor && src->semaSym->ownerClass == u->decl) { construct(src->semaSym, addr, id.init.args, 0, line); return; }   // not a derived class's constructor (V v = D())
             if (var->initCtor) { construct(var->initCtor, addr, id.init.args, 0, line); return; }
             materialize(src, u, addr, line);
             return;
@@ -2307,6 +2346,13 @@ void IrGen::stmt(cxx::Stmt* s)
             Symbol* var = 0;
             if (h->decl && !h->decl->declarators.empty() && h->decl->declarators[0].decl) var = h->decl->declarators[0].decl->semaSym;
             const sema::Type* ct = var ? m_semaTypes.unqualified(m_semaTypes.unref(var->type)) : 0;
+            {
+                // a handler for a class used as a virtual base would need the thrown object's vbptr to find its
+                // subobject: refused (S132)
+                const sema::Type* hc = ct && ct->kind == sema::Type::Pointer ? m_semaTypes.unqualified(ct->inner) : ct;
+                if (hc && hc->kind == sema::Type::Class && hc->decl && isVirtualBaseAnywhere(hc->decl))
+                    unsupported(h->loc.line, "catching '" + hc->decl->qualifiedName() + "', a virtual base class, is not supported yet by --compile6");
+            }
             if (h->catchAll) cp.sub = "...";
             else if (ct && ct->kind == sema::Type::Class && ct->decl) cp.sub = ct->decl->qualifiedName();
             else if (ct) cp.sub = ct->text();

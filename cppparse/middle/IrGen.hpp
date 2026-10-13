@@ -77,7 +77,12 @@ private:
         bool              unwindOnly;  // a member built by a constructor: destroyed only when the body throws
         bool              baseSubobject;   // a base part: destroyed without its virtual bases
         std::string       abortGuard;  // a static local's initializer: its guard global, handed to _Init_thread_abort
-        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false) {}
+        int               restIndex;   // >= 0: the elements [0, index) of the array at slot (viaPointer), this local the index
+        int               freeKind;    // 1: frees the object whose address slot holds, 2: the array whose cookie it holds
+        sema::Symbol*     freeCls;     // the class whose operator delete frees it (0: the global one)
+        int               countSlot;   // freeKind 2: the local holding the element count
+        bool              noCookie;    // freeKind 2: an array without a cookie (a sized operator delete[] gets count * size)
+        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false), restIndex(-1), freeKind(0), freeCls(0), countSlot(-1), noCookie(false) {}
     };
     struct ExitThunk {                 // destroys a global or static local at exit; registered with atexit once it is built
         sema::Symbol*     fn;
@@ -144,6 +149,10 @@ private:
     void endFullExpr(int line, size_t from = 0);
     void keepTemporaries(size_t from);
     void handlerCleanups(size_t mark, int line);
+    int  beginTerminateRegion(int& term, int line);
+    void endTerminateRegion(int tid, int term, int line);
+    int  registerFree(int ptr, sema::Symbol* cls, bool array, int count, int line);
+    void clearFlag(int index, int line);
     void returnSequence(int line);
     void finishFunction(int line);
     void scopedStmt(cxx::Stmt* s, int line);
@@ -166,6 +175,7 @@ private:
     void prologue(sema::Symbol* fn);
     void constructorInit(sema::Symbol* fn, cxx::Decl* def);
     void destructorCleanup(sema::Symbol* fn);
+    void destructorParts(sema::Symbol* fn);
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
     static std::string vtableName(const sema::Symbol* cls, size_t t);
     // MSVC's vector deleting destructor of a virtual destructor (what its vtable slot holds): with bit 1 of its
@@ -175,7 +185,7 @@ private:
     void genDeletingDestructors();
     sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth, const char* name = "operator delete", size_t maxParams = 2) const;
     bool freeObject(sema::Symbol* cls, int p, int line);
-    void freeArray(sema::Symbol* cls, int cookie, int count, int line);
+    void freeArray(sema::Symbol* cls, int cookie, int count, int line, bool hasCookie = true);
     void need(sema::Symbol* fn);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
     int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);
@@ -255,6 +265,8 @@ private:
     int                        m_staticCount;
     int                        m_guardCount;    // guarded static locals so far in the function (cl's $TSS<n>)
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block
+    std::vector<std::set<std::string> > m_handlerLabels;   // the labels inside each catch handler being generated
+    static void collectLabels(const cxx::Stmt* s, std::set<std::string>& out);
 
     IrFunction*                m_out;
     sema::Symbol*              m_fn;
@@ -285,6 +297,8 @@ private:
     void      gotoExit(const JumpState& from, const JumpState& to, const std::string& label);
     std::vector<Cleanup>       m_temps;         // temporaries of the current full expression
     std::vector<Cleanup>       m_flagged;       // every cleanup of the function, for the unwind handlers
+    std::vector<int>           m_dtorParts;     // a destructor: its members and bases (indexes into m_flagged)
+    int                        m_inPad;         // > 0 while a landing pad is generated: no cleanups are registered
     int                        m_unwindId;      // the function's catch-all region
     int                        m_bodyBlock;
 };

@@ -11,6 +11,8 @@
 // that throws on every other iteration. mixMiddle (probe-mix.cpp) may be compiled with the other model.
 // Strict C++98.
 
+#include <stdlib.h>
+
 extern "C" int probe_report(int depth);   // in the driver: walks the stack, returns 1000
 
 double g_probeSink = 0.0;
@@ -256,4 +258,140 @@ void ehNestedLoops(int n)
         try { eh_note("a%d ", k); throwIf(k); eh_note("b%d ", k); throwIf(k + 1); } catch (int e) { eh_note("caught %d\n", e); }
     }
     eh_note("end\n", n);
+}
+
+// ---- destructors that throw (C++98 allows it; the cl reference is built with /Zc:implicitNoexcept-) ----
+// The members and bases of a destructor that throws are still destroyed, the exception reaches the handler; a delete
+// whose destructor throws does not free (as cl); delete[] and arrays at scope exit destroy the remaining elements;
+// a new-expression whose constructor throws frees through the matching operator delete
+
+long g_dlog = 0;   // the destructors run, one digit each, newest last
+int g_frees = 0, g_arrFrees = 0, g_ids = 0;
+
+struct DA { virtual ~DA(); static void* operator new(size_t n) { return malloc(n); } static void operator delete(void* p) { ++g_frees; free(p); } };
+DA::~DA() { g_dlog = g_dlog * 10 + 1; }
+struct DM { ~DM() { g_dlog = g_dlog * 10 + 2; } };
+struct DB : DA { DM m; };
+struct DD : DB { ~DD() { g_dlog = g_dlog * 10 + 3; throw 7; } };
+struct DP { DM m; ~DP() { g_dlog = g_dlog * 10 + 4; throw 8; } };
+struct DT { DM m; DP p; };   // implicit destructor: p's throws, m is still destroyed
+
+int ehDtorThrow(int k)
+{
+    g_dlog = 0; g_frees = 0;
+    int r = 0;
+    try {
+        if (k == 0) delete (DB*)new DD;
+        else if (k == 1) { DD d; }
+        else if (k == 2) { DP p; }
+        else if (k == 3) delete new DP;
+        else { DT t; }
+    } catch (int x) { r = x; }
+    return static_cast<int>(g_dlog) * 1000 + r * 10 + g_frees;
+}
+
+struct AV { int i; AV(); virtual ~AV() { g_dlog = g_dlog * 10 + i; if (i == 3) throw 1; }
+    static void* operator new[](size_t s) { return malloc(s); } static void operator delete[](void* p) { ++g_arrFrees; free(p); } };
+AV::AV() : i(++g_ids) {}
+struct AN { int i; AN(); ~AN() { g_dlog = g_dlog * 10 + i; if (i == 3) throw 2; }
+    static void* operator new[](size_t s) { return malloc(s); } static void operator delete[](void* p) { ++g_arrFrees; free(p); } };
+AN::AN() : i(++g_ids) {}
+struct AC { int i; AC() : i(++g_ids) { if (i == 4) throw 3; } ~AC() { g_dlog = g_dlog * 10 + i; }
+    static void* operator new[](size_t s) { return malloc(s); } static void operator delete[](void* p) { ++g_arrFrees; free(p); } };
+struct NT { NT() { throw 4; } static void* operator new(size_t s) { return malloc(s); } static void operator delete(void* p) { ++g_frees; free(p); } };
+struct NM { AC a[3]; NM() { throw 6; } };   // a member array: built, then destroyed when the body throws
+
+int ehArrays(int k)
+{
+    g_dlog = 0; g_ids = 0; g_arrFrees = 0; g_frees = 0;
+    int r = 0;
+    try {
+        if (k == 0) { AV* p = new AV[5]; delete[] p; }
+        else if (k == 1) { AN* q = new AN[5]; delete[] q; }
+        else if (k == 2) { AN a[5]; }
+        else if (k == 3) new AC[6];
+        else if (k == 4) new NT;
+        else { NM m; }
+    } catch (int x) { r = x; }
+    return static_cast<int>(g_dlog) * 1000 + r * 100 + g_arrFrees * 10 + g_frees;
+}
+
+// catch by value: the handler's object is copy-constructed from the thrown one and destroyed when the handler ends
+int g_copies = 0, g_live = 0;
+struct CV { int v; CV(int x) : v(x) { ++g_live; } CV(const CV& o) : v(o.v + 100) { ++g_copies; ++g_live; } ~CV() { --g_live; } };
+
+int catchValue(int k)
+{
+    try {
+        throw CV(k);
+    } catch (CV x) {
+        x.v += 1;
+        if (k == 2) return x.v * 100 + g_copies * 10 + g_live;
+        if (k == 3) throw 5;
+        return x.v;
+    }
+}
+
+int ehCatchValue(int k)
+{
+    g_copies = 0;
+    int r;
+    try { r = catchValue(k); } catch (int x) { r = x; }
+    return r * 1000 + g_copies * 10 + g_live;
+}
+
+// a class without destructor (no cookie) and a sized operator delete[]: new P[3] whose second constructor throws
+// frees through it with count * size
+int g_pn = 0, g_psize = 0;
+struct PS { int id; PS() : id(g_pn++) { if (id == 1) throw 9; }
+    static void* operator new[](size_t s) { return malloc(s); } static void operator delete[](void* p, size_t s) { g_psize = static_cast<int>(s); free(p); } };
+
+int ehNoCookie()
+{
+    g_pn = 0; g_psize = 0;
+    int r = 0;
+    try { PS* p = new PS[3]; delete[] p; } catch (int x) { r = x; }
+    return r * 100 + g_psize;
+}
+
+// leaving a by-value handler with an exception: its parameter is destroyed before the exception it handles
+struct HB { int v; HB(int x) : v(x) {} HB(const HB& o) : v(o.v + 10) {} ~HB() { g_dlog = g_dlog * 100 + v; } };
+
+int ehHandlerOrder()
+{
+    g_dlog = 0;
+    int r = 0;
+    try {
+        try { throw HB(9); } catch (HB b) {
+            try { throw HB(4); } catch (HB c) { r = c.v; }
+            throw 5;
+        }
+    } catch (int e) { r = r * 10 + e; }
+    return static_cast<int>(g_dlog % 1000000) * 1000 + r;
+}
+
+// catching a base that is not the first: the handler gets that base subobject, by reference and by value
+struct XP { int pad; XP() : pad(5) {} };
+struct MB : XP, HB { MB() : HB(7) {} };
+
+int ehCatchBase(int byValue)
+{
+    g_dlog = 0;
+    int r = 0;
+    if (byValue) { try { throw MB(); } catch (HB b) { r = b.v; } }
+    else { try { throw MB(); } catch (HB& b) { r = b.v; } }
+    return r * 1000 + static_cast<int>(g_dlog % 1000);
+}
+
+// temporaries of a full-expression whose destructor throws: the others are still destroyed, the throwing one is
+// not destroyed again by the unwind handler (the flag is cleared before the destructor runs)
+int g_tbad = -1;
+struct TT { int v; TT(int x) : v(x) {} ~TT() { g_dlog = g_dlog * 10 + v; if (v == g_tbad) throw v; } int get() const { return v; } };
+
+int ehTempDtor(int k)
+{
+    g_dlog = 0; g_tbad = k;
+    int r = 0;
+    try { r = TT(1).get() + TT(2).get(); } catch (int e) { r = 100 + e; }
+    return static_cast<int>(g_dlog) * 1000 + r;
 }

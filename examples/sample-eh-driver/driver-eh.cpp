@@ -22,6 +22,13 @@ int ehLoop(int n);
 int ehMixed(int n);
 void ehCatchLoop(int n);
 void ehNestedLoops(int n);
+int ehDtorThrow(int k);
+int ehArrays(int k);
+int ehCatchValue(int k);
+int ehNoCookie();
+int ehHandlerOrder();
+int ehCatchBase(int byValue);
+int ehTempDtor(int k);
 extern int g_destroyed;
 
 static int g_walked = -2;
@@ -90,6 +97,13 @@ int main()
     g_notes = 0;
     ehNestedLoops(5);
     printf("ehNestedLoops(5): notes %08x\n", g_notes);
+    for (int k = 0; k <= 4; ++k) printf("ehDtorThrow(%d) = %d\n", k, ehDtorThrow(k));
+    for (int k = 0; k <= 5; ++k) printf("ehArrays(%d) = %d\n", k, ehArrays(k));
+    for (int k = 1; k <= 3; ++k) printf("ehCatchValue(%d) = %d\n", k, ehCatchValue(k));
+    printf("ehNoCookie() = %d\n", ehNoCookie());
+    printf("ehHandlerOrder() = %d\n", ehHandlerOrder());
+    printf("ehCatchBase(0) = %d, ehCatchBase(1) = %d\n", ehCatchBase(0), ehCatchBase(1));
+    for (int k = 1; k <= 3; ++k) printf("ehTempDtor(%d) = %d\n", k, ehTempDtor(k));
     printf("destructors: %d\n", g_destroyed);
     check("try frames left", (unsigned long long)cppparse_frame_depth(), 0);
     check("caught exceptions left", (unsigned long long)cppparse_caught_depth(), 0);

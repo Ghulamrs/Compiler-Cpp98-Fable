@@ -290,11 +290,19 @@ must find every cppparse frame, and the registers it restores in the ml64 frame 
 - throw and catch by class, base class, `int` and `double`;
 - destructors in the frames in between, nested regions, rethrow, a throw from a handler;
 - a frame of more than a page, locals kept across a throw, a loop that throws on every other iteration;
-- a throw across a second file (`probe-mix.cpp`).
+- a throw across a second file (`probe-mix.cpp`);
+- destructors that throw (C++98 allows it): through `delete` of a base pointer, of a stack object, of a member,
+  of an element in `delete[]` and of an array at scope exit, and a constructor that throws in `new T` and `new T[n]`
+  (ehDtorThrow, ehArrays);
+- `catch (T x)` by value: the handler's copy is copy-constructed and destroyed (ehCatchValue).
 
 These run in four models (setjmp, table, and each mixed with the other in `probe-mix.cpp`) at `-O0` to `-O3`.
 Each output must equal the cl build's. That reference is built with `/EHa`, because cl 19.52 (preview)
-miscompiles a throw out of a recursion with destructors under `/EHsc` at `/O1` and above.
+miscompiles a throw out of a recursion with destructors under `/EHsc` at `/O1` and above, and with
+`/Zc:implicitNoexcept-`, C++98's destructors that may throw. `terminate.cpp`, a whole program, checks that an
+exception leaving a destructor run by the stack unwinding calls terminate (the output and the exit code of cl's
+build, table and setjmp models at `-O0` and `-O2`); so does `terminate-catch.cpp` for a copy constructor that
+throws while it initializes a by-value catch parameter.
 
 ## Building and testing
 
@@ -922,7 +930,26 @@ gets a catch-all try region around its body whose handler destroys the
 objects whose flag is still set and rethrows, so destructors run while
 an exception unwinds through the function; a user `try` destroys the
 objects built inside it at a handler entry; a constructor whose body
-throws destroys the members and bases it already built. `throw obj`
+throws destroys the members and bases it already built. Destructors may
+throw, as C++98 allows and cl (with `/Zc:implicitNoexcept-`) does: a
+destructor's members and bases are cleanups of its body, so they are
+destroyed when it throws, and the exception goes on to the handler (a
+flag is cleared before its destructor runs, so a throwing destructor is
+not run again); an element destructor that throws in `delete[]` or at
+the end of an array's scope leaves the elements before it destroyed,
+newest first; a `delete` whose destructor throws does not free, as cl.
+An exception leaving a destructor that the unwinding itself runs calls
+terminate (each landing pad's destructors are a region whose handler is
+`cppparse_terminate`). A new-expression whose constructor (an element's,
+for `new T[n]`, after destroying the elements built) throws frees the
+memory through the matching operator delete, the class's or the global
+one; a placement new frees nothing. `catch (T x)` copy-constructs the
+handler's object from the thrown one and destroys it when the handler
+ends (a copy constructor that throws there calls terminate); an
+exception leaving the handler destroys its objects before the handled
+exception is released. A handler for a base class that is not the first
+gets that base subobject (the throw descriptor gives each base's
+offset). A goto out of a handler is refused (S132). `throw obj`
 copy-constructs the exception object into heap storage that the
 runtime owns (`cppparse_throw_owned`) and destroys with the class's
 destructor when the handler ends. The driver `examples/sample-life-driver/

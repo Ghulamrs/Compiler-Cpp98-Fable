@@ -807,7 +807,11 @@ refused with S130 (test 17, `examples/sample-front/vbase.cpp`): polymorphic
 classes with virtual bases (the vfptr inside the virtual base, vtordisp),
 empty or over-aligned virtual bases, `#pragma pack`,
 and vbtables whose names need a path of several bases; `--sema6` and the
-reports accept them.
+reports accept them. S132 (found while generating code, no object
+written; `examples/sample-front/vbase-refused.cpp`) refuses a `catch` of
+a class used as a virtual base, `.*`/`->*` on a class with virtual bases
+and a cast from a virtual base down to a derived class (ill-formed, cl's
+C2635).
 Likewise an override with a covariant return
 type whose conversion moves the pointer (`CD* self()` over `SB* self()`
 with SB at 16 in CD) would need cl's return-adjusting thunk: S131

@@ -408,6 +408,15 @@ int main(int argc, char* argv[])
                     setMangleUnitId(unitId & 0xFFFFFFFFUL);
                     gen.registerMetadata(x86, copt.msvcNames);   // first: it queues the vtable members and the dynamic initialisers
                     gen.generate(functions);
+                    if (!gen.unsupported().empty()) {
+                        // constructs with virtual bases that would compile to wrong code: nothing is written (S132)
+                        const std::vector<std::string>& bad = gen.unsupported();
+                        for (size_t k = 0; k < bad.size(); ++k) std::cout << "  " << inputs[i] << ": error S132: " << bad[k] << "\n";
+                        totalErrors += static_cast<int>(bad.size());
+                        removeUnitOutputs(base);
+                        for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
+                        continue;
+                    }
                     if (!gen.failedMembersUsed().empty()) {
                         // a member of a class template instantiation whose body has errors is needed after all
                         // (an implicit call sema does not see): its held-back diagnostics are real, nothing is written

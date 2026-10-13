@@ -51,6 +51,8 @@ public:
     // members of class template instantiations whose bodies had errors (Symbol::instantiationFailed) that the
     // generated code needs all the same, e.g. through an implicit destructor call: the unit cannot be compiled
     const std::vector<sema::Symbol*>& failedMembersUsed() const { return m_failedUsed; }
+    // constructs with virtual bases --compile6 cannot generate correctly (S132): "line: message"
+    const std::vector<std::string>& unsupported() const { return m_unsupported; }
 
 private:
     struct LValue {
@@ -97,6 +99,8 @@ private:
     bool isBaseOf(sema::Symbol* derived, sema::Symbol* base) const { int o = 0, i = 0, r = 0; return baseOffset(derived, base, o) || virtualBasePath(derived, base, i, r); }
     static bool hasVbases(const sema::Symbol* cls) { return cls && !cls->vbases.empty(); }
     int  toBase(int addr, sema::Symbol* derived, sema::Symbol* base, int line);
+    bool isVirtualBaseAnywhere(sema::Symbol* cls) const;
+    void memberPointerCheck(cxx::Expr* e);
     static std::string vbtableName(const sema::Symbol* cls, size_t t);
     void storeVbptrs(sema::Symbol* cls, int objAddr, int line);
     sema::Symbol* vbaseDestructor(sema::Symbol* cls);   // cl's ??_D: the destructor of a complete object
@@ -233,7 +237,9 @@ private:
     std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtors;   // class -> its vbase destructor (??_D)
     std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtorOf;  // vbase destructor -> its class
     int                        m_ctorFlag;      // the "most derived" flag the next constructor call passes (1, 0 for a base)
-    int                        m_vbFlagSlot;    // the constructor's own flag parameter, or -1
+    int                        m_vbFlagSlot;
+    std::vector<std::string>   m_unsupported;
+    void unsupported(int line, const std::string& what);    // the constructor's own flag parameter, or -1
     int                        m_staticCount;
     int                        m_guardCount;    // guarded static locals so far in the function (cl's $TSS<n>)
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block

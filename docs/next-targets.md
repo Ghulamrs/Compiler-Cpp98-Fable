@@ -14,6 +14,15 @@ the default), with the items found since. Each was reproduced with a small progr
   namespace carries a per-unit id); an out-of-class `inline` definition is `f i`.
 - 22, partly: a missing include is fatal; an undeclared function is error S103.
 - 23, partly: a class used before its layout is done and array fields of class type are laid out as cl does.
+- 5 (plan 8): empty bases laid out as MSVC does: no space for an empty base, a padding byte between
+  zero-sized subobjects, an empty base at the end on the last byte (Sema.cpp layoutClass); test 13 runs
+  examples/sample-layout against a cl-compiled driver at -O0..-O3.
+- 23 (plan 9): bit-fields laid out as MSVC does (units of the declared type's size, zero-width and unnamed
+  bit-fields) and read and written by mask and shift (IrGen loadBits/storeBits); members of anonymous unions
+  and structs are named in the enclosing class (Sema declareAnonymousMember). Covered by sample-layout.
+- 23 (plan 10): the polymorphic bases are laid out first; the first one is the primary base at offset 0, whose
+  vptr the class shares and whose vtable it extends (Sema.cpp layoutClass, completeClass). Covered by
+  sample-layout, with virtual calls made by cl on objects built by cppparse and the other way round.
 - Lazy instantiation of class template member bodies (MatrixTest.cpp's first blocker).
 - 19, stack-passed float parameters: a `float` after the fourth parameter is homed with movss into its 4-byte
   slot, and the copy goes through xmm5, not xmm0 (which still held the first parameter at -O2) (X86.cpp).
@@ -54,11 +63,9 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 
 | # | Item | Effect today | Size | Lane |
 |---|---|---|---|---|
-| 8 | 5: empty base takes a byte (Sema.cpp:1076-1088) | wrong size | small | layout |
-| 9 | 23: bit-fields ignored; anonymous union/struct members cannot be named | wrong size, false error | medium | layout |
-| 10 | 23: polymorphic base not first: own vptr, not moved first (Sema.cpp:1080, 1093, 1155) | wrong layout | medium | layout |
 | 14 | 23: virtual bases laid out inline, no vbptr | wrong values | large | layout (later) |
 | 15 | 22: `_MSC_VER`, `_MT`, `_CPPUNWIND` not predefined (common/Target.cpp) | by choice so far | small | decision |
+| 16 | a second polymorphic base (`D : PA, PB`) gets no secondary vtable: D's override of a PB function is not reached through a PB* (needs a vtable per polymorphic base subobject and this-adjusting thunks) | wrong call | medium | layout |
 
 ## Deferred
 

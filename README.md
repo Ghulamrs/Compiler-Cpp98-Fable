@@ -742,9 +742,28 @@ inherited by classes that contain such a member); `alignas` is C++11 and
 not accepted. Globals are placed at their alignment (at least the
 natural boundary of their size, up to 8 bytes, as cl does), and a data
 section is marked with the largest alignment it holds (S129 warns that
-`__declspec(align)` on a local variable is ignored). Test 13 links
+`__declspec(align)` on a local variable is ignored). Empty bases follow
+MSVC without `__declspec(empty_bases)`: an empty base takes no space
+(`struct EB : E { int w; }` is 4 bytes, w at 0), a byte of padding
+separates a base ending with a zero-sized subobject from a following base
+that leads with one (`EM : E, E2 { int w; }` is 8, w at 4), and an empty
+base left at the end of a class sits on its last byte. Bit-fields are laid
+out as cl does: a bit-field takes a unit of its declared type's size, the
+next one shares it (from the low bit up) when its type has the same size
+and its bits fit, and a zero-width bit-field closes the unit when it
+follows a bit-field; loads mask and shift the unit (sign-extending a
+signed field) and stores merge into it. The members of an anonymous
+union or struct in a class are members of the class, placed at the
+unnamed member that holds them. The polymorphic bases are placed first: the
+first one is at offset 0 and the class shares its vptr and extends its
+vtable (`DP : NP, PB` with a virtual PB is 24 bytes, PB at 0, NP at 16).
+A second polymorphic base keeps its own vtable: overriding one of its
+functions needs a secondary vtable with this-adjusting thunks, not done
+yet. Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
-size and offset with cl's and checks the globals' values and alignment. Class templates are instantiated from the syntax tree
+size and offset with cl's and checks the globals' values and alignment;
+`examples/sample-layout/` does the same for MSVC's class layout rules at
+-O0 to -O3, with objects written by one compiler and read by the other. Class templates are instantiated from the syntax tree
 with the parameters bound in an instantiation scope (defaults, partial
 specialisations, out-of-line members); inside an instantiation the
 template's name alone is the injected class name, and with arguments

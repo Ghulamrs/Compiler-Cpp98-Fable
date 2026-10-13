@@ -119,7 +119,12 @@ struct Symbol {
     std::vector<BaseClass>   bases;
     bool          isDefinition, isStruct, isUnion, isPolymorphic, isAbstract, layoutDone;
     int           size, align;
+    // MSVC's empty-base rules: the size without the byte an empty class is given (0 for an empty class), and
+    // whether the class starts / ends with a zero-sized subobject (see Sema::layoutClass)
+    int           nvSize;
+    bool          leadsWithZeroSized, endsWithZeroSized;
     std::vector<Symbol*>     fields;      // non-static data members in order (offset in Symbol::offset)
+    std::vector<Symbol*>     unnamedBitFields;   // ": n" members, not named and not initialised: laid out before fields[index]
     std::vector<Symbol*>     vtable;      // virtual functions in slot order (including inherited)
     int           vptrOffset;             // -1 when no vptr
     cxx::ClassDecl* classAst;
@@ -141,6 +146,11 @@ struct Symbol {
     bool          hasConstValue;
     long          constValue;
     int           declAlign;              // __declspec(align(N)) on a variable or field (0: none)
+    int           bitWidth, bitOffset;    // bit-field: its width (-1: not a bit-field) and first bit in the unit at offset
+    // a member of an anonymous union or struct, seen as a member of the enclosing class: the unnamed member
+    // holding the anonymous object and the member of it this symbol names (offset = anonHost's + anonOf's)
+    Symbol*       anonHost;
+    Symbol*       anonOf;
     // templates
     cxx::Decl*    templateAst;            // the template declaration (Decl::Template)
     std::vector<Symbol*>     templateParams;
@@ -242,6 +252,7 @@ private:
     void   declareSimple(cxx::Decl* d, Scope* in, cxx::Access access);
     Symbol* declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::DeclSpec& spec, Scope* in, cxx::Access access, const Type* ft, const std::vector<Symbol*>& params);
     Symbol* declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Symbol* existing);
+    void   declareAnonymousMember(Symbol* anon, Scope* in, cxx::Access access);
     Symbol* declareEnum(cxx::EnumDecl* e, Scope* in, cxx::Access access);
     void   declareTemplate(cxx::Decl* d, Scope* in, cxx::Access access);
     void   completeClass(Symbol* cls);          // layout, vtable, implicit members

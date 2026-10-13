@@ -222,11 +222,13 @@ const Type* TypeTable::arithmeticResult(const Type* a, const Type* b)
 
 Symbol::Symbol()
     : kind(Variable), scope(0), type(0), access(cxx::AccessPublic), members(0), isDefinition(false), isStruct(false), isUnion(false),
-      isPolymorphic(false), isAbstract(false), layoutDone(false), size(0), align(1), vptrOffset(-1), classAst(0),
+      isPolymorphic(false), isAbstract(false), layoutDone(false), size(0), align(1), nvSize(0),
+      leadsWithZeroSized(false), endsWithZeroSized(false), vptrOffset(-1), classAst(0),
       isVirtual(false), isPureVirtual(false), isStatic(false), isExtern(false), isInline(false), isExplicit(false), isConstructor(false),
       isDestructor(false), isConversion(false), isOperator(false), isFriendDecl(false), hasBody(false), isExternC(false),
       definition(0), declAst(0), body(0), vtableSlot(-1), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
-      isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), templateAst(0), instantiatedFrom(0),
+      isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), bitWidth(-1), bitOffset(0),
+      anonHost(0), anonOf(0), templateAst(0), instantiatedFrom(0),
       isDependentContext(false), isImplicitInstantiation(false), isLazyInstantiation(false), instantiationFailed(false), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
       hasCopyAssign(false), hasDefaultCtor(false) {}
 
@@ -643,7 +645,11 @@ void Sema::declare(cxx::Decl* d, Scope* in, cxx::Access access)
         for (size_t i = 0; i < all.size(); ++i) in->add(all[i]);
         break;
     }
-    case cxx::Decl::Class: d->semaSym = declareClass(d->classDef, in, access, 0); break;
+    case cxx::Decl::Class:
+        d->semaSym = declareClass(d->classDef, in, access, 0);
+        // "union { int i; double d; };" in a class: an unnamed member whose members belong to the class
+        if (in->kind == Scope::Class && d->classDef->name.parts.empty() && d->classDef->isDefinition) declareAnonymousMember(d->semaSym, in, access);
+        break;
     case cxx::Decl::Enum: d->semaSym = declareEnum(d->enumDef, in, access); break;
     case cxx::Decl::Simple: declareSimple(d, in, access); break;
     case cxx::Decl::Function: {
@@ -759,6 +765,28 @@ Symbol* Sema::declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Sym
     m_currentClass = savedClass;
     completeClass(cls);
     return cls;
+}
+
+// an anonymous union or struct inside a class: an unnamed member of that type holds it, and every member of it
+// (nested anonymous members included) is named in the class by a symbol placed at the same bytes and bits;
+// layoutClass sets the offsets once the unnamed member has its own
+void Sema::declareAnonymousMember(Symbol* anon, Scope* in, cxx::Access access)
+{
+    Symbol* owner = in->owner;
+    if (!owner || !anon || !anon->members) return;
+    Symbol* host = m_prog.newSymbol(Symbol::Variable, "", 0);
+    host->type = anon->type; host->loc = anon->loc; host->access = access; host->isMember = true; host->ownerClass = owner;
+    host->isDefinition = true; host->isDependentContext = owner->isDependentContext;
+    host->index = static_cast<int>(owner->fields.size());
+    owner->fields.push_back(host);
+    for (size_t i = 0; i < anon->members->order.size(); ++i) {
+        Symbol* m = anon->members->order[i];
+        if (m->kind != Symbol::Variable || !m->isMember || m->isStatic || m->name.empty()) continue;
+        Symbol* p = m_prog.newSymbol(Symbol::Variable, m->name, in);
+        p->type = m->type; p->loc = m->loc; p->access = access; p->isMember = true; p->ownerClass = owner; p->isMutable = m->isMutable;
+        p->isDefinition = true; p->isDependentContext = owner->isDependentContext; p->declAst = m->declAst; p->index = -1;
+        p->bitWidth = m->bitWidth; p->bitOffset = m->bitOffset; p->anonHost = host; p->anonOf = m;
+    }
 }
 
 namespace {
@@ -960,6 +988,26 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
             if (fn) { if (id.pureVirtual) { fn->isPureVirtual = true; fn->isVirtual = true; } if (d->spec.isFriend) fn->isFriendDecl = true; }
             continue;
         }
+        // a bit-field: its width is a constant; an unnamed one (": n") only shapes the layout
+        long width = -1;
+        if (dcl->bitfield && in->kind == Scope::Class && in->owner) {
+            if (!in->owner->isDependentContext) {
+                expr(dcl->bitfield, in);
+                const int bits = 8 * m_types.sizeOf(t);
+                if (!t->isIntegral()) error(dcl->loc, "S105", "bit-field '" + name + "' must have an integral or enumeration type");
+                else if (!constantValue(dcl->bitfield, width)) { error(dcl->loc, "S114", "bit-field width is not a constant"); width = -1; }
+                else if (width < 0 || width > bits || (width == 0 && !name.empty())) { error(dcl->loc, "S114", "bit-field width " + intToString(static_cast<int>(width)) + " is out of range for " + t->text()); width = -1; }
+            }
+            if (name.empty()) {
+                if (width >= 0) {
+                    Symbol* u = m_prog.newSymbol(Symbol::Variable, "", 0);
+                    u->type = t; u->loc = dcl->loc; u->isMember = true; u->ownerClass = in->owner; u->bitWidth = static_cast<int>(width);
+                    u->index = static_cast<int>(in->owner->fields.size());
+                    in->owner->unnamedBitFields.push_back(u);
+                }
+                continue;
+            }
+        }
         // variable, field or static member
         Scope* target = in;
         Symbol* var = 0;
@@ -987,6 +1035,7 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
             var->isDefinition = var->isDefinition || !d->spec.isExtern;
         }
         dcl->semaSym = var;
+        if (width >= 0 && var->isMember && !var->isStatic) var->bitWidth = static_cast<int>(width);
         if (d->spec.align > var->declAlign) var->declAlign = d->spec.align;
         if (!var->declAst || id.init.kind != cxx::Initializer::None) var->declAst = d;   // the declaration carrying the initializer
         if (id.init.kind != cxx::Initializer::None) {
@@ -1162,17 +1211,35 @@ void Sema::layoutClass(Symbol* cls)
     int floor = cls->classAst ? cls->classAst->declAlign : 0;
     int off = 0, align = 1;
     bool vptr = false;
-    for (size_t b = 0; b < cls->bases.size(); ++b) {
+    // MSVC's empty bases: a base takes its size without the byte an empty class is given (nvSize), so an empty
+    // base takes no space; a byte of padding separates a base that ends with a zero-sized subobject from a
+    // following base that leads with one (E, E2 { int w; }: E at 0, E2 at 1, w at 4)
+    // MSVC places the polymorphic bases first, in declaration order, then the others: the first polymorphic base
+    // (the primary base) is at offset 0 and the class shares its vptr (NP, PB { virtual }: PB at 0, NP after it)
+    std::vector<size_t> baseOrder;
+    for (size_t pass = 0; pass < 2; ++pass)
+        for (size_t b = 0; b < cls->bases.size(); ++b) {
+            Symbol* bc = cls->bases[b].cls;
+            if (!bc) continue;
+            if (!bc->layoutDone) layoutClass(bc);
+            if (bc->isPolymorphic == (pass == 0)) baseOrder.push_back(b);
+        }
+    const Symbol* prev = 0;
+    bool leadsZero = false, endsZero = false;
+    for (size_t k = 0; k < baseOrder.size(); ++k) {
+        const size_t b = baseOrder[k];
         Symbol* bc = cls->bases[b].cls;
-        if (!bc) continue;
-        if (!bc->layoutDone) layoutClass(bc);
-        if (b == 0 && bc->isPolymorphic) vptr = true;        // share the primary base's vptr
+        if (k == 0 && bc->isPolymorphic) vptr = true;        // share the primary base's vptr
         int a = pack > 0 && bc->align > pack ? pack : bc->align;
         if (bc->declAlign > a) a = bc->declAlign;
         if (bc->declAlign > floor) floor = bc->declAlign;
+        if (prev && prev->endsWithZeroSized && bc->leadsWithZeroSized) ++off;
+        if (!prev) leadsZero = bc->leadsWithZeroSized;
         off = (off + a - 1) / a * a;
         cls->bases[b].offset = off;
-        off += bc->size;
+        off += bc->nvSize;
+        endsZero = bc->endsWithZeroSized;
+        prev = bc;
         if (a > align) align = a;
     }
     bool ownVirtuals = false;
@@ -1187,25 +1254,77 @@ void Sema::layoutClass(Symbol* cls)
         const int va = pack > 0 && pack < 8 ? pack : 8;
         if (align < va) align = va;
     } else if (vptr) cls->vptrOffset = 0;
-    for (size_t f = 0; f < cls->fields.size(); ++f) {
-        Symbol* fld = cls->fields[f];
+    // the members in declaration order, unnamed bit-fields included
+    std::vector<Symbol*> members;
+    for (size_t f = 0, u = 0; f <= cls->fields.size(); ++f) {
+        for (; u < cls->unnamedBitFields.size() && cls->unnamedBitFields[u]->index <= static_cast<int>(f); ++u) members.push_back(cls->unnamedBitFields[u]);
+        if (f < cls->fields.size()) members.push_back(cls->fields[f]);
+    }
+    // MSVC's bit-fields: a bit-field takes a unit of its declared type's size, at that type's alignment; the
+    // next one shares the unit, from the low bit up, when its type has the same size and its bits fit. A
+    // zero-width bit-field ends the unit and aligns to its type, and is ignored unless it follows a bit-field.
+    // In a union, bit-fields are at offset 0 and do not raise the alignment.
+    bool inUnit = false;                 // the previous member is a bit-field of width > 0
+    int unitSize = 0, bitsLeft = 0;
+    for (size_t f = 0; f < members.size(); ++f) {
+        Symbol* fld = members[f];
         const Type* ft = fld->type;
         const Type* elem = ft;
         while (elem && elem->kind == Type::Array) elem = elem->inner;
         if (elem && elem->kind == Type::Class && elem->decl && !elem->decl->layoutDone) layoutClass(elem->decl);
+        if (elem && elem->kind == Type::Class && elem->decl) endsZero = elem->decl->endsWithZeroSized;   // a member of class type has its full size
         int s = m_types.sizeOf(ft), a = m_types.alignOf(ft);
         if (ft->kind == Type::Reference) { s = 8; a = 8; }
         if (pack > 0 && a > pack) a = pack;
         const int need = fld->declAlign > declaredFloor(ft) ? fld->declAlign : declaredFloor(ft);
         if (need > a) a = need;
         if (need > floor) floor = need;
+        if (fld->bitWidth >= 0) {
+            fld->bitOffset = 0;
+            if (fld->bitWidth == 0) {
+                if (!inUnit) { fld->offset = cls->isUnion ? 0 : off; continue; }
+                inUnit = false;
+                if (cls->isUnion) { fld->offset = 0; if (s > off) off = s; continue; }
+                off = (off + a - 1) / a * a; fld->offset = off;
+                if (a > align) align = a;
+                continue;
+            }
+            if (!cls->isUnion && inUnit && unitSize == s && fld->bitWidth <= bitsLeft) {
+                fld->offset = off - s;
+                fld->bitOffset = 8 * s - bitsLeft;
+                bitsLeft -= fld->bitWidth;
+                continue;
+            }
+            inUnit = true; unitSize = s;
+            if (cls->isUnion) { fld->offset = 0; if (s > off) off = s; continue; }
+            off = (off + a - 1) / a * a; fld->offset = off; off += s;
+            bitsLeft = 8 * s - fld->bitWidth;
+            if (a > align) align = a;
+            continue;
+        }
+        inUnit = false;
         if (cls->isUnion) { fld->offset = 0; if (s > off) off = s; }
         else { off = (off + a - 1) / a * a; fld->offset = off; off += s; }
         if (a > align) align = a;
     }
     if (floor > align) align = floor;
-    if (off == 0) off = 1;
-    cls->size = (off + align - 1) / align * align;
+    cls->nvSize = (off + align - 1) / align * align;
+    cls->size = cls->nvSize;
+    if (cls->size == 0) {
+        // an empty class: size 1 as a complete object, nothing as a base; it leads and ends with itself
+        cls->size = 1;
+        leadsZero = endsZero = true;
+    }
+    cls->leadsWithZeroSized = leadsZero;
+    cls->endsWithZeroSized = endsZero;
+    // an empty base left at the very end of the class sits on its last byte (D8, E {}: E at 7, size 8)
+    for (size_t b = 0; b < cls->bases.size(); ++b)
+        if (cls->bases[b].cls && cls->bases[b].cls->nvSize == 0 && cls->bases[b].offset >= cls->size) cls->bases[b].offset = cls->size - 1;
+    // the members of anonymous unions and structs, now that the unnamed members holding them are placed
+    for (size_t i = 0; i < cls->members->order.size(); ++i) {
+        Symbol* m = cls->members->order[i];
+        if (m->kind == Symbol::Variable && m->anonHost && m->anonOf) { m->offset = m->anonHost->offset + m->anonOf->offset; m->bitOffset = m->anonOf->bitOffset; }
+    }
     cls->align = align;
     cls->declAlign = floor;
     cls->layoutDone = true;
@@ -1240,8 +1359,8 @@ void Sema::completeClass(Symbol* cls)
     }
     if (cls->isDependentContext) return;
     layoutClass(cls);
-    // vtable: the primary base's table first, then overrides and new virtuals
-    if (!cls->bases.empty() && cls->bases[0].cls) cls->vtable = cls->bases[0].cls->vtable;
+    // vtable: the primary base's table first (the first polymorphic base, at offset 0), then overrides and new virtuals
+    for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->bases[b].cls && cls->bases[b].cls->isPolymorphic) { cls->vtable = cls->bases[b].cls->vtable; break; }
     for (size_t i = 0; i < cls->members->order.size(); ++i) {
         Symbol* m = cls->members->order[i];
         if (m->kind != Symbol::Function || m->isStatic) continue;

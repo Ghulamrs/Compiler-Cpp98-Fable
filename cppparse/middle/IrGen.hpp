@@ -59,7 +59,9 @@ private:
         std::string global;
         int         addr;
         const sema::Type* type;      // the object's sema type (unreferenced)
-        LValue() : kind(None), local(-1), addr(-1), type(0) {}
+        int         bitWidth;        // a bit-field (Mem only): its width (0: not a bit-field) and first bit in the unit at addr
+        int         bitOffset;
+        LValue() : kind(None), local(-1), addr(-1), type(0), bitWidth(0), bitOffset(0) {}
     };
     struct LoopTargets { int breakBlock, continueBlock; size_t tryDepth, cleanupDepth; };
     struct Cleanup {
@@ -81,6 +83,9 @@ private:
     const Type* oldType(const sema::Type* t);
     const ClassInfo* classInfo(sema::Symbol* cls);
     int  sizeOf(const sema::Type* t) const { return m_semaTypes.sizeOf(t); }
+    // the bytes a trivial copy moves: none for an empty class, whose byte may belong to a member of the
+    // derived object when it is a base subobject (MSVC places empty bases over other members)
+    int  copySize(const sema::Type* t) const { return t && t->kind == sema::Type::Class && t->decl && t->decl->layoutDone && t->decl->nvSize == 0 ? 0 : sizeOf(t); }
     int  alignOf(const sema::Type* t) const { return m_semaTypes.alignOf(t); }
     bool isClassType(const sema::Type* t) const { t = m_semaTypes.unref(t); return t && t->kind == sema::Type::Class; }
     bool baseOffset(sema::Symbol* derived, sema::Symbol* base, int& offset, int depth = 0) const;
@@ -94,6 +99,10 @@ private:
     bool needsDefaultCtor(const sema::Type* t, int depth = 0) const;
     void callSpecial(sema::Symbol* fn, int thisPtr, int argPtr, int line);
     void copyBytes(int dst, int src, int size, int line);
+    void bitField(LValue& lv, const sema::Symbol* field) const;   // marks lv as the bit-field field (when it is one)
+    int  loadBits(const LValue& lv, const sema::Type* t, int line);
+    void storeBits(const LValue& lv, int temp, const sema::Type* t, int line);
+    int  bitConstant(unsigned long long v, const sema::Type* t, int line);
     void copyConstruct(const sema::Type* t, int dst, int src, int line);
     void copyAssign(const sema::Type* t, int dst, int src, int line);
     void constructDefault(const sema::Type* t, int addr, int line);

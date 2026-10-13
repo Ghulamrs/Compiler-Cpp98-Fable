@@ -250,6 +250,7 @@ int IrGen::load(const LValue& lv, const sema::Type* t, int line)
 {
     const sema::Type* u = m_semaTypes.unref(t);
     if (u && (u->kind == sema::Type::Class || u->kind == sema::Type::Array)) return addressOf(lv, line);
+    if (lv.bitWidth > 0 && lv.kind == LValue::Mem) return loadBits(lv, u, line);
     if (lv.kind == LValue::Local) { IrInst in = make(IrInst::LoadLocal, u, line); in.args.push_back(IrOperand::local(lv.local, oldType(u))); return emit(in); }
     if (lv.kind == LValue::Global) { IrInst in = make(IrInst::LoadGlobal, u, line); in.args.push_back(IrOperand::global(lv.global, oldType(u))); return emit(in); }
     if (lv.kind == LValue::Mem) { IrInst in = make(IrInst::LoadMem, u, line); in.args.push_back(IrOperand::temp(lv.addr, oldType(m_semaTypes.pointer(u)))); return emit(in); }
@@ -269,10 +270,86 @@ void IrGen::store(const LValue& lv, int temp, const sema::Type* t, int line)
         emit(c);
         return;
     }
+    if (lv.bitWidth > 0 && lv.kind == LValue::Mem) { storeBits(lv, temp, u, line); return; }
     if (lv.kind == LValue::Local) { IrInst in = make(IrInst::StoreLocal, u, line); in.args.push_back(IrOperand::local(lv.local, oldType(u))); in.args.push_back(IrOperand::temp(temp, oldType(u))); emit(in); return; }
     if (lv.kind == LValue::Global) { IrInst in = make(IrInst::StoreGlobal, u, line); in.args.push_back(IrOperand::global(lv.global, oldType(u))); in.args.push_back(IrOperand::temp(temp, oldType(u))); emit(in); return; }
     if (lv.kind == LValue::Mem) { IrInst in = make(IrInst::StoreMem, u, line); in.args.push_back(IrOperand::temp(lv.addr, oldType(m_semaTypes.pointer(u)))); in.args.push_back(IrOperand::temp(temp, oldType(u))); emit(in); return; }
     m_notes.push_back("L" + numText(line) + ": store to a non-lvalue was dropped");
+}
+
+// ---- bit-fields: the unit (the declared type's size, at the field's offset) is read and written whole ----
+
+void IrGen::bitField(LValue& lv, const Symbol* field) const
+{
+    if (!field || field->bitWidth <= 0 || lv.kind != LValue::Mem) return;
+    lv.bitWidth = field->bitWidth;
+    lv.bitOffset = field->bitOffset;
+}
+
+// a constant of the 32- or 64-bit unsigned type t; IR immediates are 32-bit and sign-extended, so a 64-bit
+// value outside that range is put together from pieces
+int IrGen::bitConstant(unsigned long long v, const sema::Type* t, int line)
+{
+    if (sizeOf(t) < 8) return constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(v))), t, line);
+    const long long sv = static_cast<long long>(v);
+    if (sv >= -2147483647LL - 1 && sv <= 2147483647LL) return constant(static_cast<long>(sv), t, line);
+    const unsigned long lo = static_cast<unsigned long>(v & 0xFFFFFFFFULL);
+    int hi = binary("<<", constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(v >> 32))), t, line), t, constant(32, t, line), t, t, line);
+    int mid = binary("<<", constant(static_cast<long>(lo >> 16), t, line), t, constant(16, t, line), t, t, line);
+    int r = binary("|", hi, t, mid, t, t, line);
+    return binary("|", r, t, constant(static_cast<long>(lo & 0xFFFFUL), t, line), t, t, line);
+}
+
+namespace {
+
+// the unsigned integer type of a bit-field's unit, and the 32- or 64-bit types its bits are worked in
+sema::Type::Kind unitKind(int size) { return size == 1 ? sema::Type::UChar : size == 2 ? sema::Type::UShort : size == 8 ? sema::Type::ULongLong : sema::Type::UInt; }
+
+} // namespace
+
+int IrGen::loadBits(const LValue& lv, const sema::Type* t, int line)
+{
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    const sema::Type* unit = m_semaTypes.basic(unitKind(sizeOf(u)));
+    const int bits = sizeOf(u) == 8 ? 64 : 32;
+    const sema::Type* wu = m_semaTypes.basic(bits == 64 ? sema::Type::ULongLong : sema::Type::UInt);
+    const sema::Type* ws = m_semaTypes.basic(bits == 64 ? sema::Type::LongLong : sema::Type::Int);
+    IrInst in = make(IrInst::LoadMem, unit, line);
+    in.args.push_back(IrOperand::temp(lv.addr, oldType(m_semaTypes.pointer(unit))));
+    int x = convert(emit(in), unit, wu, line);
+    if (!u->isUnsigned()) {
+        // signed: the field's top bit to the top, then an arithmetic shift down
+        x = convert(x, wu, ws, line);
+        const int up = bits - lv.bitOffset - lv.bitWidth;
+        if (up > 0) x = binary("<<", x, ws, constant(up, ws, line), ws, ws, line);
+        if (lv.bitWidth < bits) x = binary(">>", x, ws, constant(bits - lv.bitWidth, ws, line), ws, ws, line);
+        return convert(x, ws, u, line);
+    }
+    if (lv.bitOffset > 0) x = binary(">>", x, wu, constant(lv.bitOffset, wu, line), wu, wu, line);
+    if (lv.bitWidth < bits) x = binary("&", x, wu, bitConstant((1ULL << lv.bitWidth) - 1, wu, line), wu, wu, line);
+    return convert(x, wu, u, line);
+}
+
+void IrGen::storeBits(const LValue& lv, int temp, const sema::Type* t, int line)
+{
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    const sema::Type* unit = m_semaTypes.basic(unitKind(sizeOf(u)));
+    const int bits = sizeOf(u) == 8 ? 64 : 32;
+    const sema::Type* wu = m_semaTypes.basic(bits == 64 ? sema::Type::ULongLong : sema::Type::UInt);
+    const unsigned long long all = bits == 64 ? ~0ULL : 0xFFFFFFFFULL;
+    const unsigned long long field = (lv.bitWidth >= 64 ? all : ((1ULL << lv.bitWidth) - 1) << lv.bitOffset) & all;
+    const sema::Type* pu = m_semaTypes.pointer(unit);
+    IrInst ld = make(IrInst::LoadMem, unit, line);
+    ld.args.push_back(IrOperand::temp(lv.addr, oldType(pu)));
+    int old = binary("&", convert(emit(ld), unit, wu, line), wu, bitConstant(~field & all, wu, line), wu, wu, line);
+    int v = convert(temp, u, wu, line);
+    if (lv.bitOffset > 0) v = binary("<<", v, wu, constant(lv.bitOffset, wu, line), wu, wu, line);
+    v = binary("&", v, wu, bitConstant(field, wu, line), wu, wu, line);
+    int merged = convert(binary("|", old, wu, v, wu, wu, line), wu, unit, line);
+    IrInst st = make(IrInst::StoreMem, unit, line);
+    st.args.push_back(IrOperand::temp(lv.addr, oldType(pu)));
+    st.args.push_back(IrOperand::temp(merged, oldType(unit)));
+    emit(st);
 }
 
 int IrGen::toBool(int temp, const sema::Type* t, int line)
@@ -466,6 +543,7 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
             in.args.push_back(IrOperand::temp(self, m_out->locals[0].type));
             if (isReference(s->type)) { IrInst ld = make(IrInst::LoadMem, m_semaTypes.pointer(s->type->inner), line); ld.args.push_back(IrOperand::temp(emit(in), oldType(m_semaTypes.pointer(s->type)))); lv.kind = LValue::Mem; lv.addr = emit(ld); lv.type = s->type->inner; return lv; }
             lv.kind = LValue::Mem; lv.addr = emit(in);
+            bitField(lv, s);
             return lv;
         }
         lv.kind = LValue::Global; lv.global = s->qualifiedName();
@@ -495,6 +573,7 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
         in.args.push_back(IrOperand::temp(base, oldType(m_semaTypes.pointer(objT))));
         lv.kind = LValue::Mem; lv.addr = emit(in);
         if (isReference(s->type)) { IrInst ld = make(IrInst::LoadMem, m_semaTypes.pointer(s->type->inner), line); ld.args.push_back(IrOperand::temp(lv.addr, oldType(m_semaTypes.pointer(s->type)))); lv.addr = emit(ld); lv.type = s->type->inner; }
+        bitField(lv, s);
         return lv;
     }
     case cxx::Expr::Index: {
@@ -826,7 +905,7 @@ void IrGen::copyConstruct(const sema::Type* t, int dst, int src, int line)
     }
     Symbol* ctor = u->kind == sema::Type::Class && needsCopyCtor(u) ? findSpecial(u->decl, 'c') : 0;
     if (ctor) callSpecial(ctor, dst, src, line);
-    else copyBytes(dst, src, sizeOf(u), line);
+    else copyBytes(dst, src, copySize(u), line);
 }
 
 void IrGen::copyAssign(const sema::Type* t, int dst, int src, int line)
@@ -845,7 +924,7 @@ void IrGen::copyAssign(const sema::Type* t, int dst, int src, int line)
     }
     Symbol* op = u->kind == sema::Type::Class && needsCopyAssign(u) ? findSpecial(u->decl, 'a') : 0;
     if (op) callSpecial(op, dst, src, line);
-    else copyBytes(dst, src, sizeOf(u), line);
+    else copyBytes(dst, src, copySize(u), line);
 }
 
 void IrGen::constructDefault(const sema::Type* t, int addr, int line)
@@ -1272,7 +1351,7 @@ int IrGen::value(cxx::Expr* e)
             int one = constant(1, ot->kind == sema::Type::Pointer ? m_semaTypes.basic(sema::Type::Int) : ot, line);
             int nv = binary(op == "++" ? "+" : "-", cur, ot, one, ot->kind == sema::Type::Pointer ? m_semaTypes.basic(sema::Type::Int) : ot, ot, line);
             store(lv, nv, ot, line);
-            return nv;
+            return lv.bitWidth > 0 ? load(lv, ot, line) : nv;     // a bit-field holds the value cut to its width
         }
         int v = value(e->kids[0]);
         const sema::Type* ot = m_semaTypes.decay(exprType(e->kids[0]));
@@ -1344,7 +1423,7 @@ int IrGen::value(cxx::Expr* e)
             } else rv = binary(bop, cur, lt, r, exprType(e->kids[1]), lt, line);
         }
         store(lv, rv, lt, line);
-        return rv;
+        return lv.bitWidth > 0 ? load(lv, lt, line) : rv;         // a bit-field holds the value cut to its width
     }
     case cxx::Expr::Cond: {
         const sema::Type* ct = m_semaTypes.unqualified(t);
@@ -1508,6 +1587,7 @@ void IrGen::initAggregate(const sema::Type* t, int addr, const std::vector<cxx::
         if (x->kind == cxx::Expr::InitList) { initAggregate(et, eaddr, x->kids, false, line); continue; }
         if (isClassType(et)) { materialize(x, et, eaddr, line); continue; }
         LValue el; el.kind = LValue::Mem; el.addr = eaddr; el.type = et;
+        if (u->kind == sema::Type::Class) bitField(el, u->decl->fields[i]);
         store(el, convert(value(x), exprType(x), et, line), et, line);
     }
 }
@@ -2079,8 +2159,23 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
         if (!mi) continue;
         int faddr = emit(fa);
         LValue fl; fl.kind = LValue::Mem; fl.addr = faddr; fl.type = fu;
+        bitField(fl, fld);
         if (mi->args.empty()) { store(fl, constant(0, fu, mi->loc.line), fu, mi->loc.line); continue; }   // member(): value-initialised
         store(fl, convert(value(mi->args[0]), exprType(mi->args[0]), fu, mi->loc.line), fu, mi->loc.line);
+        endFullExpr(mi->loc.line);
+    }
+    // a member of an anonymous union or struct named in the initializer list ("X() : tag(1), iv(0)")
+    if (def && cls->members) for (size_t i = 0; i < cls->members->order.size(); ++i) {
+        Symbol* m = cls->members->order[i];
+        if (m->kind != Symbol::Variable || !m->anonHost || isReference(m->type) || isClassType(m->type)) continue;
+        cxx::MemInit* mi = 0;
+        for (size_t k = 0; k < def->memInits.size(); ++k) if (def->memInits[k].name.parts.size() == 1 && def->memInits[k].name.last() == m->name) mi = &def->memInits[k];
+        if (!mi) continue;
+        const sema::Type* fu = m_semaTypes.unqualified(m->type);
+        IrInst fa = make(IrInst::AddrField, m_semaTypes.pointer(fu), mi->loc.line); fa.sub = m->name; fa.extra = m->offset; fa.args.push_back(IrOperand::temp(self, m_out->locals[0].type));
+        LValue fl; fl.kind = LValue::Mem; fl.addr = emit(fa); fl.type = fu;
+        bitField(fl, m);
+        store(fl, mi->args.empty() ? constant(0, fu, mi->loc.line) : convert(value(mi->args[0]), exprType(mi->args[0]), fu, mi->loc.line), fu, mi->loc.line);
         endFullExpr(mi->loc.line);
     }
 }

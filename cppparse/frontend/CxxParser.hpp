@@ -92,6 +92,7 @@ private:
 
     // declarations
     Decl* declaration(bool inClass, Access& access);
+    bool  memberDeclarator(Declarator& d, bool inClass);
     Decl* simpleOrFunction(bool inClass, const DeclSpec& spec, Loc at, bool firstDeclaratorParsed, Declarator* first);
     bool  declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef);
     bool  declarator(Declarator& d, bool abstractAllowed, bool nameRequired, bool inParams);

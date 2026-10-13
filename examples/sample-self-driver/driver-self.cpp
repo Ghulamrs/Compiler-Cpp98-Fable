@@ -31,6 +31,23 @@ float stackFloats(float a, float b, float c, float d, float e, float f, float g)
 int exitOrder();
 int varargs();
 double sumMixed(int n, ...);
+int bumpShared();
+
+// also in self.cpp: the linker keeps one copy of the function and one of its static local, whose names must be
+// cl's, or cppparse's code (with the call inlined at -O2) counts in a variable of its own
+inline int sharedCounter()
+{
+    static int n = 0;
+    return ++n;
+}
+
+static long sharedInline()
+{
+    int a = sharedCounter();
+    int b = bumpShared();
+    int c = sharedCounter();
+    return a * 100 + b * 10 + c;
+}
 
 static int g_failures = 0;
 
@@ -106,6 +123,7 @@ int main()
     check("stackFloats()", floatsOnStack(), 70001);
     check("varargs()", varargs(), 110100805);
     check("sumMixed() called by cl", static_cast<long>(sumMixed(7, 1.0, 2, 3.0, 4, 5.0, 6, 7.0) * 10), 12160);
+    check("inline static shared with cl", sharedInline(), 123);
     check("exitOrder() before exit", exitOrder(), 99);   // nothing destroyed yet; the order is printed after main
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;

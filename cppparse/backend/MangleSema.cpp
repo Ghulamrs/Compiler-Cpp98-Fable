@@ -13,8 +13,10 @@ class SemaMangler {
 public:
     std::string function(const sema::Symbol& f);
     std::string variable(const sema::Symbol& v);
+    std::string staticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
     std::string vtable(const sema::Symbol& c);
 private:
+    std::string storageType(const sema::Type* t);
     std::string number(long v);
     std::string name(const std::string& component);
     std::string symbolName(const sema::Symbol* s);
@@ -275,7 +277,31 @@ std::string SemaMangler::variable(const sema::Symbol& v)
     out += "@";
     if (v.isMember) out += v.access == cxx::AccessPrivate ? "0" : v.access == cxx::AccessProtected ? "1" : "2";
     else out += "3";
-    const sema::Type* t = v.type;
+    out += storageType(v.type);
+    return out;
+}
+
+// as cl spells a static local: the name, then a scope made of the block's number and the function's own
+// decorated name (whose names join this name's back-reference table; a C function is "?name@@9"), then
+// storage class 4 and the type as for a global
+std::string SemaMangler::staticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator)
+{
+    std::string out = "?";
+    out += name(v.name);
+    out += "?";
+    out += number(discriminator);
+    std::string f = function(fn);
+    if (f.empty() || f[0] != '?') f = "?" + f + "@@9";
+    out += "?" + f + "@";
+    out += "4";
+    out += storageType(v.type);
+    return out;
+}
+
+// the type part of a variable's name: "HA", "PEBDEB", "PAPEAUItem@1@A", ...
+std::string SemaMangler::storageType(const sema::Type* t)
+{
+    std::string out;
     if (t && (t->kind == sema::Type::Pointer || t->kind == sema::Type::Reference)) {
         // "int* p" -> "PEAHEA": the pointer, then its own __ptr64 and the pointee's qualifiers again
         out += type(t);
@@ -324,6 +350,7 @@ unsigned long g_mangleUnitId = 0;
 void setMangleUnitId(unsigned long id) { g_mangleUnitId = id; }
 
 std::string msvcMangleVariableSymbol(const sema::Symbol& v) { SemaMangler m; return m.variable(v); }
+std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator) { SemaMangler m; return m.staticLocal(v, fn, discriminator); }
 std::string msvcMangleVtableSymbol(const sema::Symbol& c) { SemaMangler m; return m.vtable(c); }
 
 } // namespace cppparse

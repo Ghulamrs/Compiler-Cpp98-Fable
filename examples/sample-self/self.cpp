@@ -497,3 +497,11 @@ int varargs()
     int r = static_cast<int>(a * 100) + static_cast<int>(scaled(0.5, 3, 10, 20, 30)) + n * 1000000;
     return r + (std::strcmp(buf, "42-2.50-ok") == 0 ? 100000000 : 0);
 }
+
+inline int sharedCounter()                 // the driver defines it too: one variable for both compilers' copies
+{
+    static int n = 0;
+    return ++n;
+}
+
+int bumpShared() { return sharedCounter(); }

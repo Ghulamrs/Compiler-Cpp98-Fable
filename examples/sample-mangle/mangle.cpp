@@ -86,4 +86,17 @@ int useAll()
     return static_cast<int>(b.text().size()) + Box::count;
 }
 
+// static locals: cl's names, the function's body being block 2; internal unless the function is inline
+int counterA() { static int n = 0; return ++n; }
+inline int sharedInline() { static int shared = 5; static const char* const s = "x"; static Item it; return ++shared + *s + it.v; }
+extern "C" int cStatic() { static long cn = 1; return static_cast<int>(cn++); }
+struct WithStatic { int m() { static Item::Kind k = Item::Large; return k; } };
+template <class T> struct Holder2 { static T* get() { static T t; return &t; } };
+
+int useStatics()
+{
+    WithStatic w;
+    return counterA() + sharedInline() + cStatic() + w.m() + Holder2<Item>::get()->v;
+}
+
 }

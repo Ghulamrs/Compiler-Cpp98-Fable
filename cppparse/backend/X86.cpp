@@ -103,12 +103,13 @@ std::string X86Module::symbol(const std::string& irName)
 
 std::string X86Module::globalSymbol(const std::string& name)
 {
-    if (name.find('(') != std::string::npos) return symbol(name);                              // address of a function
-    if (startsWith(name, "vtable@")) return m_msvc ? msvcMangleVtable(name.substr(7)) : "vtable_" + mangle(name.substr(7));
+    // first: a static local's IR name ("f(int)::n#0") contains its function's parentheses
     if (m_msvc) {
         std::map<std::string, std::string>::const_iterator it = m_globalNames.find(name);
         if (it != m_globalNames.end()) return it->second;
     }
+    if (name.find('(') != std::string::npos) return symbol(name);                              // address of a function
+    if (startsWith(name, "vtable@")) return m_msvc ? msvcMangleVtable(name.substr(7)) : "vtable_" + mangle(name.substr(7));
     return "g_" + mangle(name);
 }
 

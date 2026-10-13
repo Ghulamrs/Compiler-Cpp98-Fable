@@ -186,6 +186,7 @@ private:
     std::vector<ExitThunk>     m_exitThunks;       // destructor thunks registered with atexit; generated after the functions
     size_t                     m_exitThunksDone;
     X86Module*                 m_x86;              // receives the globals that static locals become
+    bool                       m_msvcNames;        // --msvc-mangling: static locals get cl's decorated names
     std::map<sema::Symbol*, std::string> m_staticNames;   // static local -> its global's IR name
     int                        m_staticCount;
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block

@@ -974,7 +974,14 @@ its prologue fills from `rcx`, `rdx`, `r8` and `r9` (a named `float` or
 `double` from its XMM register), so the `va_start`/`va_arg` of
 `include/cstdarg` walk the unnamed arguments as MSVC's `vadefs.h` does
 (`sumMixed`, called by cppparse code and by the driver, and a list passed
-on to `vsprintf`).
+on to `vsprintf`); with `--msvc-mangling` a static local has cl's name
+(`?n@?1??counterA@@YAHXZ@4HA`: block 2 is the function's body, a C
+function is `?name@@9`) and is internal unless its function is inline,
+when every unit's copy is one COMDAT, so a cl-built and a cppparse-built
+copy of an inline function count in the same variable (`sharedCounter`;
+test 15 compares the names and linkage of `sample-mangle`'s static locals
+with cl's). A static in a nested block gets a unique block number, not
+always the one cl gives it.
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

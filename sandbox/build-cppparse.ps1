@@ -654,7 +654,7 @@ try {
         else { Write-Host "  FAIL std::cout produced no output"; $failed++ }
     }
     # the version 6 mangler against cl on library types: every decorated name cl defines or references must be
-    # spelled identically by cppparse (cl's own helpers are left out: deleting destructors, RTTI, sized delete)
+    # spelled identically by cppparse (cl's own helpers are left out: deleting destructors, RTTI, sized delete, and its string literal names)
     $clOut = & $cl /nologo /c /EHsc /W3 /Od /X /I..\include "/Foout\x64\mangle_cl.obj" "..\examples\sample-mangle\mangle.cpp" 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-mangle\mangle.cpp" }
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
@@ -662,11 +662,20 @@ try {
     $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
     if ($rc -ne 0 -or -not (Test-Path "out\x64\mangle6.obj") -or $c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL --compile6 of sample-mangle:"; Write-Host $c6; $failed++ }
     else {
-        $clSyms = & $dumpbin /nologo /symbols "out\x64\mangle_cl.obj" | Select-String 'External\s+\| \?' | ForEach-Object { ($_.Line -replace '^.*\| ', '') -replace ' \(.*$', '' } | Where-Object { $_ -notmatch '^\?\?_[GER7]|^\?\?3@YAXPEAX_K@Z$' } | Sort-Object -Unique
+        $clSyms = & $dumpbin /nologo /symbols "out\x64\mangle_cl.obj" | Select-String 'External\s+\| \?' | ForEach-Object { ($_.Line -replace '^.*\| ', '') -replace ' \(.*$', '' } | Where-Object { $_ -notmatch '^\?\?_[GER7C]|^\?\?3@YAXPEAX_K@Z$' } | Sort-Object -Unique
         $ourSyms = & $dumpbin /nologo /symbols "out\x64\mangle6.obj" | Select-String 'External\s+\| \?' | ForEach-Object { ($_.Line -replace '^.*\| ', '') -replace ' \(.*$', '' } | Sort-Object -Unique
         $missing = @($clSyms | Where-Object { $ourSyms -notcontains $_ })
         if ($missing.Count -eq 0 -and $clSyms.Count -gt 100) { Write-Host "  ok   sample-mangle: all $($clSyms.Count) decorated names cl uses are spelled identically by the version 6 mangler" }
         else { Write-Host "  FAIL sample-mangle: $($missing.Count) of $($clSyms.Count) decorated names differ from cl's:"; $missing | Select-Object -First 30 | ForEach-Object { Write-Host "    cl: $_" }; $failed++ }
+        # static locals ("?n@?1??counterA@@YAHXZ@4HA"): the same name and the same linkage, Static unless the
+        # function is inline (then External, one COMDAT for every unit); cl's unwind funclets ("?dtor$0@?0??...") are not
+        # variables
+        $localPattern = '(External|Static)\s+\| (\?[^?@ $]+@\?[0-9A-P]+@?\?\?\S+)'
+        $clLocals = @(& $dumpbin /nologo /symbols "out\x64\mangle_cl.obj" | Select-String $localPattern | ForEach-Object { "$($_.Matches[0].Groups[1].Value) $($_.Matches[0].Groups[2].Value)" } | Sort-Object -Unique)
+        $ourLocals = @(& $dumpbin /nologo /symbols "out\x64\mangle6.obj" | Select-String $localPattern | ForEach-Object { "$($_.Matches[0].Groups[1].Value) $($_.Matches[0].Groups[2].Value)" } | Sort-Object -Unique)
+        $missing = @($clLocals | Where-Object { $ourLocals -notcontains $_ })
+        if ($missing.Count -eq 0 -and $clLocals.Count -ge 6) { Write-Host "  ok   sample-mangle: all $($clLocals.Count) static locals have cl's names and linkage" }
+        else { Write-Host "  FAIL sample-mangle: $($missing.Count) of $($clLocals.Count) static locals differ from cl's:"; $missing | ForEach-Object { Write-Host "    cl: $_" }; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed standard library check(s) failed" }
 
@@ -683,7 +692,7 @@ try {
         $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\selfdriver$lvl.exe" "..\examples\sample-self-driver\driver-self.cpp" $obj "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the self-hosting driver:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\selfdriver$lvl.exe" 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   selfdriver$lvl.exe: all 22 self-hosting checks correct (-O$lvl)" }
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   selfdriver$lvl.exe: all 23 self-hosting checks correct (-O$lvl)" }
         else { Write-Host "  FAIL selfdriver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
         # after main: a global and a static local with destructors, destroyed newest first through atexit
         if ($run -match 'destructors at exit: cba') { Write-Host "  ok   selfdriver$lvl.exe: globals and static locals destroyed at exit in reverse order (-O$lvl)" }

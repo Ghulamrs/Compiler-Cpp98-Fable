@@ -32,7 +32,7 @@ bool hasInternalLinkage(const sema::Symbol* s)
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
     : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_tryCount(0),
-      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_staticCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
+      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_staticCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
 {
@@ -1583,13 +1583,29 @@ void IrGen::localDecl(cxx::Decl* d)
             // emits the same symbol (the global is then a COMDAT like the function)
             std::string gname = m_out->name + "::" + var->name + "#" + numText(m_staticCount++);
             m_staticNames[var] = gname;
+            if (m_msvcNames && m_x86) {
+                // cl numbers the blocks of a function; the body is 2. A nested block gets 2 plus its position
+                // among the function's blocks: unique within the function, though not always cl's number
+                long block = 2;
+                if (var->scope && !(var->scope->parent && var->scope->parent->kind == Scope::Function)) {
+                    long k = 0;
+                    for (size_t si = 0; si < m_prog.scopes.size(); ++si) {
+                        const Scope* sc = m_prog.scopes[si];
+                        if (sc->kind != Scope::Block || sc->owner != var->scope->owner) continue;
+                        if (sc == var->scope) { block = 2 + k; break; }
+                        ++k;
+                    }
+                }
+                m_x86->registerGlobalName(gname, msvcMangleStaticLocal(*var, *m_fn, block));
+            }
             const sema::Type* vt = m_semaTypes.unqualified(m_semaTypes.unref(var->type));
             IrGlobal g;
             g.name = gname;
             g.size = isReference(var->type) ? 8 : (sizeOf(vt) > 0 ? sizeOf(vt) : 8);   // a reference is a pointer slot
             g.isFloat = !isReference(var->type) && vt->isFloating();
             g.linkOnce = m_out->linkOnce;
-            g.internal = m_out->internal;
+            // internal unless the function is inline: then every unit's copy is one COMDAT the linker picks, as cl's
+            g.internal = !g.linkOnce;
             g.align = isReference(var->type) ? 8 : alignOf(vt);
             if (var->declAlign > g.align) g.align = var->declAlign;
             bool scalarConstant = id.init.kind != cxx::Initializer::None && id.init.args.size() == 1 && id.init.args[0]->semaConst && vt->isScalar() && !isReference(var->type) && !vt->isFloating();
@@ -1604,7 +1620,7 @@ void IrGen::localDecl(cxx::Decl* d)
                 guard.size = 1;
                 guard.isFloat = false;
                 guard.linkOnce = m_out->linkOnce;
-                guard.internal = m_out->internal;
+                guard.internal = !guard.linkOnce;
                 if (m_x86) m_x86->addGlobal(guard);
                 LValue gl; gl.kind = LValue::Global; gl.global = guard.name; gl.type = b;
                 // thread-safe as cl's: a clear guard leads to the runtime's lock, which says whether this
@@ -2187,6 +2203,7 @@ void IrGen::drainQueue()
 void IrGen::registerMetadata(X86Module& x86, bool msvc)
 {
     m_x86 = &x86;
+    m_msvcNames = msvc;
     for (size_t i = 0; i < m_prog.symbols.size(); ++i) {
         Symbol* s = m_prog.symbols[i];
         if (s->kind == Symbol::Class && s->isDefinition && s->isPolymorphic && !s->isDependentContext && s->layoutDone) {

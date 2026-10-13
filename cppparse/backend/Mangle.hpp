@@ -40,6 +40,8 @@ std::string msvcMangleSymbol(const sema::Symbol& fn);
 void        setMangleUnitId(unsigned long id);
 extern unsigned long g_mangleUnitId;
 std::string msvcMangleVariableSymbol(const sema::Symbol& v);
+// a static local: "?n@?1??counterA@@YAHXZ@4HA", the variable in block <discriminator> (2: the function's body)
+std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
 std::string msvcMangleVtableSymbol(const sema::Symbol& c);
 
 } // namespace cppparse

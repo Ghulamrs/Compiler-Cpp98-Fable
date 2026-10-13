@@ -741,6 +741,17 @@ Symbol* Sema::declareEnum(cxx::EnumDecl* e, Scope* in, cxx::Access access)
     return en;
 }
 
+// where 'target' occurs among the bases of 'from' (transitively): reached through a virtual base or not
+static void baseOccurrences(const Symbol* from, const Symbol* target, bool throughVirtual, bool& nonVirtual, bool& virt, int depth)
+{
+    if (!from || depth > 32) return;
+    for (size_t b = 0; b < from->bases.size(); ++b) {
+        const bool v = throughVirtual || from->bases[b].isVirtual;
+        if (from->bases[b].cls == target) (v ? virt : nonVirtual) = true;
+        baseOccurrences(from->bases[b].cls, target, v, nonVirtual, virt, depth + 1);
+    }
+}
+
 Symbol* Sema::declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Symbol* existing)
 {
     Scope* target = in;
@@ -782,6 +793,21 @@ Symbol* Sema::declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Sym
             // a dependent base: members are looked up at instantiation time
         } else if (bt->kind != Type::Error) error(c->bases[b].loc, "S113", "base '" + c->bases[b].name.text() + "' is not a class");
     }
+    // a direct base that is also a base of another direct base, as cl reports it: an error (C2584) when the
+    // direct one comes first and only one of the two is virtual, else a warning (C4584) when the direct one is not
+    // virtual; nothing when both are virtual (one shared subobject) or for a later virtual direct base
+    for (size_t i = 0; i < cls->bases.size(); ++i)
+        for (size_t j = 0; j < cls->bases.size(); ++j) {
+            if (i == j || !cls->bases[i].cls || !cls->bases[j].cls) continue;
+            bool nonVirtual = false, virt = false;
+            baseOccurrences(cls->bases[j].cls, cls->bases[i].cls, false, nonVirtual, virt, 0);
+            if (!nonVirtual && !virt) continue;
+            const bool direct = cls->bases[i].isVirtual, indirect = virt && !nonVirtual;
+            if (direct && indirect) continue;
+            const std::string d = cls->bases[i].cls->qualifiedName(), o = cls->bases[j].cls->qualifiedName();
+            if (i < j && direct != indirect) error(c->loc, "S141", "'" + cls->qualifiedName() + "': direct base '" + d + "' is inaccessible; already a base of '" + o + "' (cl C2584)");
+            else if (!direct) warning(c->loc, "S142", "'" + cls->qualifiedName() + "': base-class '" + d + "' is already a base-class of '" + o + "' (cl C4584)");
+        }
     // members: the class is complete for member function bodies, which are analysed later
     Symbol* savedClass = m_currentClass;
     m_currentClass = cls;

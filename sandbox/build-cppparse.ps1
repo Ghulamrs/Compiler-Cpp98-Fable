@@ -758,7 +758,8 @@ try {
         @{ unit = "vbase-refused"; expect = @("error S132: line 8: cannot convert from 'V' to 'D': 'V' is a virtual base", "error S132: line 9: pointer to member of 'D', a class with virtual bases", "error S132: line 10: catching 'V', a virtual base class") },
         @{ unit = "covariant"; expect = @("error S131: 'CD::self' overrides 'SB::self' with a covariant return type") },
         @{ unit = "memptr-refused"; expect = @("error S132: line 9: '->*' (pointer to member) is not supported yet", "error S132: line 10: a value of pointer to member type 'int P::*'", "error S132: line 11: a value of pointer to member type 'int Q::*'") },
-        @{ unit = "memptr-field"; expect = @("error S132: 'Holder::field' is a pointer to member") }
+        @{ unit = "memptr-field"; expect = @("error S132: 'Holder::field' is a pointer to member") },
+        @{ unit = "ambiguous-base"; expect = @("(8): error S141: 'F': direct base 'V' is inaccessible; already a base of 'W'", "(9): error S141: 'H2': direct base 'V' is inaccessible; already a base of 'WV'", "(10): error S141: 'H5': direct base 'V' is inaccessible; already a base of 'X'", "(11): warning S142: 'G2': base-class 'V' is already a base-class of 'W'", "(12): warning S142: 'H3': base-class 'V' is already a base-class of 'WV'") }
     )
     foreach ($r in $rejects) {
         $nm = "front-$($r.unit)"

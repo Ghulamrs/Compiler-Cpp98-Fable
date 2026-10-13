@@ -191,6 +191,8 @@ private:
     void   stmt(cxx::Stmt* s);
     int    labelBlock(const std::string& name);
     void   localDecl(cxx::Decl* d);
+    int    conditionDecl(cxx::Decl* d, const sema::Type*& t, int line);
+    void   declLoop(cxx::Stmt* s, int cb, int next, int xb, int line);
     void   initObject(const LValue& lv, const sema::Type* t, sema::Symbol* var, cxx::InitDeclarator& id, int line);
     void   abiResult(IrInst& r, int line);
     void   initAggregate(const sema::Type* t, int addr, const std::vector<cxx::Expr*>& elems, bool zeroRest, int line);

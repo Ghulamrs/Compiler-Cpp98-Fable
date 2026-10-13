@@ -1958,6 +1958,59 @@ void IrGen::scopedStmt(cxx::Stmt* s, int line)
     closeScope(line);
 }
 
+// a declaration as the condition of if, while, for or switch: the variable is built (in the scope the caller
+// opened) and its value returned, a class object's through its conversion function; t receives the value's type
+int IrGen::conditionDecl(cxx::Decl* d, const sema::Type*& t, int line)
+{
+    localDecl(d);
+    Symbol* v = d->declarators.empty() || !d->declarators[0].decl ? 0 : d->declarators[0].decl->semaSym;
+    t = m_semaTypes.basic(sema::Type::Int);
+    if (!v || m_slots.find(v) == m_slots.end()) return constant(0, t, line);
+    LValue lv; lv.kind = LValue::Local; lv.local = m_slots[v]; lv.type = m_semaTypes.unref(v->type);
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(v->type));
+    if (u && u->kind == sema::Type::Class && u->decl && u->decl->members) {
+        Symbol* conv = 0;
+        const std::vector<Symbol*>& ms = u->decl->members->order;
+        for (size_t i = 0; i < ms.size() && !conv; ++i)
+            if (ms[i]->kind == Symbol::Function && ms[i]->isConversion && ms[i]->type && ms[i]->type->inner && ms[i]->type->inner->isScalar()) conv = ms[i];
+        if (!conv) { m_notes.push_back("L" + numText(line) + ": no conversion of the condition's " + u->decl->qualifiedName()); return constant(0, t, line); }
+        std::vector<cxx::Expr*> none;
+        int obj = isReference(v->type) ? load(lv, v->type, line) : addressOf(lv, line);
+        obj = adjustThis(conv, obj, u, line);
+        t = conv->type->inner;
+        return callFunction(conv, obj, -1, none, 0, true, line);
+    }
+    t = lv.type;
+    return load(lv, v->type, line);
+}
+
+// a loop whose condition declares a variable: the variable is built from the condition on every pass and
+// destroyed at the end of each pass, when the condition is false, and on break and continue (as cl does). The
+// body and a break reach the latch, which destroys it and repeats (to next) while the condition held
+void IrGen::declLoop(cxx::Stmt* s, int cb, int next, int xb, int line)
+{
+    const sema::Type* b = m_semaTypes.basic(sema::Type::Bool);
+    const int bb = m_out->newBlock("loop.body"), latch = m_out->newBlock("loop.latch"), brk = m_out->newBlock("loop.break");
+    const int ok = newLocal("cond.ok", b, false);
+    LValue okl; okl.kind = LValue::Local; okl.local = ok; okl.type = b;
+    m_block = cb;
+    openScope();
+    const sema::Type* t = 0;
+    int c = toBool(conditionDecl(s->decl, t, line), t, line);
+    endFullExpr(line);
+    store(okl, c, b, line);
+    condbr(c, bb, latch, line);
+    LoopTargets lt; lt.breakBlock = brk; lt.continueBlock = latch; lt.tryDepth = m_tryStack.size(); lt.cleanupDepth = m_cleanups.size(); m_loops.push_back(lt);
+    m_block = bb; scopedStmt(s->kids.empty() ? 0 : s->kids[0], line); br(latch, line);
+    m_loops.pop_back();
+    m_block = brk; store(okl, constant(0, b, line), b, line); br(latch, line);
+    m_block = latch;
+    closeScope(line);
+    int again = load(okl, b, line);
+    condbr(again, next, xb, line);
+    m_block = xb;
+}
+
 void IrGen::stmt(cxx::Stmt* s)
 {
     if (!s) return;
@@ -1970,7 +2023,7 @@ void IrGen::stmt(cxx::Stmt* s)
     case cxx::Stmt::If: {
         int tb = m_out->newBlock("if.then"), eb = s->kids.size() > 1 ? m_out->newBlock("if.else") : -1, join = m_out->newBlock("if.end");
         openScope();   // a condition variable lives through both branches
-        if (s->decl) { localDecl(s->decl); Symbol* v = s->decl->declarators[0].decl->semaSym; LValue lv; lv.kind = LValue::Local; lv.local = m_slots[v]; lv.type = v->type; condbr(toBool(load(lv, v->type, line), v->type, line), tb, eb >= 0 ? eb : join, line); }
+        if (s->decl) { const sema::Type* t = 0; int c = toBool(conditionDecl(s->decl, t, line), t, line); endFullExpr(line); condbr(c, tb, eb >= 0 ? eb : join, line); }
         else condition(s->expr, tb, eb >= 0 ? eb : join);
         m_block = tb; scopedStmt(s->kids[0], line); br(join, line);
         if (eb >= 0) { m_block = eb; scopedStmt(s->kids[1], line); br(join, line); }
@@ -1979,6 +2032,12 @@ void IrGen::stmt(cxx::Stmt* s)
         return;
     }
     case cxx::Stmt::While: {
+        if (s->decl) {
+            int dc = m_out->newBlock("while.cond"), dx = m_out->newBlock("while.end");
+            br(dc, line);
+            declLoop(s, dc, dc, dx, line);
+            return;
+        }
         int cb = m_out->newBlock("while.cond"), bb = m_out->newBlock("while.body"), xb = m_out->newBlock("while.end");
         br(cb, line);
         m_block = cb; condition(s->expr, bb, xb);
@@ -2001,11 +2060,19 @@ void IrGen::stmt(cxx::Stmt* s)
     case cxx::Stmt::For: {
         openScope();   // the init-statement's variables live until the loop ends
         if (s->init) stmt(s->init);
+        if (s->decl) {
+            int cb = m_out->newBlock("for.cond"), sb = m_out->newBlock("for.step"), xb = m_out->newBlock("for.end");
+            br(cb, line);
+            declLoop(s, cb, sb, xb, line);
+            m_block = sb; if (s->expr2) { value(s->expr2); endFullExpr(line); } br(cb, line);
+            m_block = xb;
+            closeScope(line);
+            return;
+        }
         int cb = m_out->newBlock("for.cond"), bb = m_out->newBlock("for.body"), sb = m_out->newBlock("for.step"), xb = m_out->newBlock("for.end");
         br(cb, line);
         m_block = cb;
-        if (s->decl) { localDecl(s->decl); Symbol* v = s->decl->declarators[0].decl->semaSym; LValue lv; lv.kind = LValue::Local; lv.local = m_slots[v]; lv.type = v->type; condbr(toBool(load(lv, v->type, line), v->type, line), bb, xb, line); }
-        else if (s->expr) condition(s->expr, bb, xb); else br(bb, line);
+        if (s->expr) condition(s->expr, bb, xb); else br(bb, line);
         LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = sb; lt.tryDepth = m_tryStack.size(); lt.cleanupDepth = m_cleanups.size(); m_loops.push_back(lt);
         m_block = bb; scopedStmt(s->kids[0], line); br(sb, line);
         m_loops.pop_back();
@@ -2015,10 +2082,19 @@ void IrGen::stmt(cxx::Stmt* s)
         return;
     }
     case cxx::Stmt::Switch: {
-        int v = value(s->expr);
-        endFullExpr(line);
-        openScope();
-        const sema::Type* vt = m_semaTypes.unqualified(m_semaTypes.decay(exprType(s->expr)));
+        int v;
+        const sema::Type* st;   // the controlling value's type
+        if (s->decl) {          // "switch (int y = ...)": y lives through the body
+            openScope();
+            v = conditionDecl(s->decl, st, line);
+            endFullExpr(line);
+        } else {
+            v = value(s->expr);
+            st = exprType(s->expr);
+            endFullExpr(line);
+            openScope();
+        }
+        const sema::Type* vt = m_semaTypes.unqualified(m_semaTypes.decay(st));
         if (!vt->isIntegral()) vt = m_semaTypes.basic(sema::Type::Int);
         cxx::Stmt* body = s->kids[0];
         std::vector<cxx::Stmt*> items;
@@ -2041,7 +2117,7 @@ void IrGen::stmt(cxx::Stmt* s)
             if (flat[i]->kind != cxx::Stmt::Case) continue;
             int cv = constant(flat[i]->expr->semaValue, vt, flat[i]->loc.line);
             IrInst c = make(IrInst::Cmp, m_semaTypes.basic(sema::Type::Bool), flat[i]->loc.line); c.sub = "eq";
-            c.args.push_back(IrOperand::temp(convert(v, exprType(s->expr), vt, line), oldType(vt))); c.args.push_back(IrOperand::temp(cv, oldType(vt)));
+            c.args.push_back(IrOperand::temp(convert(v, st, vt, line), oldType(vt))); c.args.push_back(IrOperand::temp(cv, oldType(vt)));
             int cond = emit(c);
             int next = m_out->newBlock("switch.test");
             condbr(cond, labelBlock[flat[i]], next, flat[i]->loc.line);

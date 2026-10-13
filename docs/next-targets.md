@@ -115,8 +115,11 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   `delete` through a base pointer skips the base destructors, and one from a stack object's destructor is not
   caught at all ("unhandled exception of type int"). Repro: review-v w.cpp.
 - Calls through pointers to members (`(obj.*pmf)(x)`, `(p->*pmf)(x)`) are rejected by sema (an error, not wrong code).
-- A `while` whose condition declares a variable crashes `--compile6` (access violation, with or without
-  `--msvc-mangling`, -O0 and -O2). Repro: `int f(int k){int r=0; while (int y = k--) { r += y; } return r;}`.
+- A float literal with an `f` suffix is converted decimal -> double -> float (IrGen::foldArith and the
+  assembler's REAL4), which can differ from cl's direct decimal -> float rounding in rare halfway cases: a
+  decimal just above a midpoint between two floats whose double is the midpoint itself. Repro (checked):
+  `float* hf() { static float h = 1.000000059604644775390625000000001f; return &h; }` (1 + 2^-24 plus a
+  little): cl stores 0x3F800001, cppparse rounds the double's tie to even, 0x3F800000.
 
 ## Code size against cl /O2 (analysis of the matrix sample, 2026-10-13)
 

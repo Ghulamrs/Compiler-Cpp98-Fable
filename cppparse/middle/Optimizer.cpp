@@ -4,6 +4,7 @@
 #include "Ssa.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <set>
 
 namespace cppparse {
@@ -108,6 +109,14 @@ bool foldWideInt(const std::string& sub, long a, long b, long& out)
 bool isWideInt(const Type* t)
 {
     return t && t->kind != Type::Double && t->builtinSize() == 8;
+}
+
+// is the sign bit of d set (-0.0 included)?
+bool signBit(double d)
+{
+    unsigned char bytes[sizeof(double)];
+    std::memcpy(bytes, &d, sizeof(double));
+    return (bytes[sizeof(double) - 1] & 0x80) != 0;   // little-endian: the sign is in the last byte
 }
 
 double foldFloat(const std::string& sub, double x, double y, bool& ok, bool& isCmp, long& cmp)
@@ -470,8 +479,10 @@ int Optimizer::algebraic(IrFunction& f)
             if (s == "mul" && xImm && isPow2(x.ival) && x.ival > 1) { in.sub = "shl"; long k = log2of(x.ival); x = y; y = IrOperand::imm(k, in.type); ++changes; continue; }
             if (s == "udiv" && yImm && isPow2(y.ival) && y.ival > 1) { in.sub = "lshr"; y.ival = log2of(y.ival); ++changes; continue; }
             if (s == "urem" && yImm && isPow2(y.ival) && y.ival > 1) { in.sub = "and"; y.ival = y.ival - 1; ++changes; continue; }
-            if (s == "fmul" && y.kind == IrOperand::FImm && y.fval == 1.0) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
-            if (s == "fadd" && y.kind == IrOperand::FImm && y.fval == 0.0) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
+            // floating point: only the identities exact under IEEE for every x (signed zeros, NaN, infinities):
+            // x * 1, x / 1, x - (+0) and x + (-0). Not x + 0 (-0 + 0 is +0), x * 0, x - x, 0 - x
+            if ((s == "fmul" || s == "fdiv") && y.kind == IrOperand::FImm && y.fval == 1.0) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
+            if ((s == "fadd" || s == "fsub") && y.kind == IrOperand::FImm && y.fval == 0.0 && signBit(y.fval) == (s == "fadd")) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
         }
     return changes;
 }

@@ -245,7 +245,7 @@ int simplifyPhis(IrFunction& f)
                 const IrOperand& o = in.args[a];
                 if (o.kind == IrOperand::Temp && o.id == in.dst) continue;
                 if (!any) { only = o; any = true; continue; }
-                bool eq = o.kind == only.kind && ((o.kind == IrOperand::Temp && o.id == only.id) || (o.kind == IrOperand::Imm && o.ival == only.ival) || (o.kind == IrOperand::FImm && o.fval == only.fval));
+                bool eq = o.kind == only.kind && ((o.kind == IrOperand::Temp && o.id == only.id) || (o.kind == IrOperand::Imm && o.ival == only.ival) || (o.kind == IrOperand::FImm && o.str() == only.str()));   // exact: -0.0 is not 0.0
                 if (!eq) { same = false; break; }
             }
             if (!any || !same) continue;

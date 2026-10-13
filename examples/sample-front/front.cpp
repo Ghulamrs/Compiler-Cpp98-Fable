@@ -270,6 +270,30 @@ void comparisons()
                 fNotNeIf(fnan, fnan), fAnd(fnan, 1), fAnd(fnz, 1), dCond(nan), dCond(nz), dEqIf(2, 2), dNeIf(2, 2));
     std::printf("fp folded conditions: %d %d %d %d\n", (bool)-0.0, -0.0 == 0.0, (bool)-0.0f, fIf(-0.0f) + dCond(-0.0));
 }
+
+// algebraic identities kept only where exact under IEEE: x * 1, x / 1, x - 0.0 and x + (-0.0); x + 0.0 of -0.0 is
+// +0.0, x * 0 is -0.0 for a negative x, x - x and x == x are not for NaN. Constants are values, not their
+// 6-digit spelling (0.1 and 0.1000001 differ) and -0.0 is not 0.0
+double addZero(double x) { return x + 0.0; }
+double subZero(double x) { return x - 0.0; }
+double mulOne(double x) { return x * 1.0; }
+double mulZero(double x) { return x * 0.0; }
+double zeroSub(double x) { return 0.0 - x; }
+double divOne(double x) { return x / 1.0; }
+double selfSub(double x) { return x - x; }
+bool selfEq(double x) { return x == x; }
+bool selfNe(double x) { return x != x; }
+float fAddZero(float x) { return x + 0.0f; }
+double nearConstants(double x) { double a = x + 0.1; double b = x + 0.1000001; return b - a; }
+double signedZeros(bool c) { double r; if (c) r = 0.0; else r = -0.0; return r; }
+void identities()
+{
+    double nan = vzero / vzero, nz = -vzero;
+    std::printf("fp identities: %016llx %016llx %016llx %016llx %016llx %016llx %d %d %d %08x\n", bitsD(addZero(nz)), bitsD(subZero(nz)), bitsD(mulOne(nz)),
+                bitsD(mulZero(-3.0)), bitsD(zeroSub(0.0)), bitsD(divOne(nz)), selfSub(nan) != selfSub(nan), selfEq(nan), selfNe(nan), bitsF(fAddZero(-0.0f)));
+    std::printf("fp folded identities: %016llx %016llx %016llx %016llx %016llx\n", bitsD(addZero(-0.0)), bitsD(-0.0 + 0.0), bitsD(nearConstants(1.0)),
+                bitsD(signedZeros(true)), bitsD(signedZeros(false)));
+}
 }
 
 int main()
@@ -286,6 +310,7 @@ int main()
     foldedGlobals();
     fp::longDouble();
     fp::comparisons();
+    fp::identities();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

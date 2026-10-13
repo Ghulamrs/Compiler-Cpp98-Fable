@@ -2,6 +2,7 @@
 // cppparse --compile6 with its own headers and driven by examples/sample-self-driver/driver-self.cpp
 // (built with MSVC). Every function returns a number the driver compares with cl's result.
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
@@ -421,4 +422,30 @@ double stackDoubles(double a, double b, double c, double d, double e, double f, 
 float stackFloats(float a, float b, float c, float d, float e, float f, float g)
 {
     return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7;
+}
+
+namespace {
+
+char g_exitOrder[8];
+int g_exitCount = 0;
+
+struct AtExit {
+    char tag;
+    explicit AtExit(char t) : tag(t) {}
+    ~AtExit()
+    {
+        g_exitOrder[g_exitCount++] = tag;
+        if (tag == 'a') std::printf("  destructors at exit: %s\n", g_exitOrder);   // the build script checks the order
+    }
+};
+
+AtExit g_first('a');
+AtExit g_second('b');
+
+}
+
+int exitOrder()                            // globals and static locals are destroyed after main, newest first
+{
+    static AtExit third('c');
+    return g_exitCount * 100 + third.tag;
 }

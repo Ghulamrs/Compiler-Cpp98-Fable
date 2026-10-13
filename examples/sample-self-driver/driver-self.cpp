@@ -28,6 +28,7 @@ int nestedStatics();
 int wideConstants();
 double stackDoubles(double a, double b, double c, double d, double e, double f, double g);
 float stackFloats(float a, float b, float c, float d, float e, float f, float g);
+int exitOrder();
 
 static int g_failures = 0;
 
@@ -101,6 +102,7 @@ int main()
     check("nestedStatics()", nestedStatics(), 1005);
     check("wideConstants()", wideConstants(), 1415111);
     check("stackFloats()", floatsOnStack(), 70001);
+    check("exitOrder() before exit", exitOrder(), 99);   // nothing destroyed yet; the order is printed after main
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

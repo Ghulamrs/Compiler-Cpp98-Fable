@@ -71,6 +71,11 @@ private:
         bool              unwindOnly;  // a member built by a constructor: destroyed only when the body throws
         Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false) {}
     };
+    struct ExitThunk {                 // destroys a global or static local at exit; registered with atexit once it is built
+        sema::Symbol*     fn;
+        std::string       global;      // the object's IR name
+        const sema::Type* type;
+    };
 
     // types
     const Type* oldType(const sema::Type* t);
@@ -113,6 +118,9 @@ private:
     void genFunction(sema::Symbol* fn);
     void genImplicit(sema::Symbol* fn);
     void genInitializer();
+    void registerAtExit(const std::string& global, const sema::Type* t, int line);
+    void genExitThunks();
+    void drainQueue();
     void prologue(sema::Symbol* fn);
     void constructorInit(sema::Symbol* fn, cxx::Decl* def);
     void destructorCleanup(sema::Symbol* fn);
@@ -175,6 +183,8 @@ private:
     int                        m_generated;
     std::vector<sema::Symbol*> m_dynamicGlobals;   // globals built by the module's initialiser, in declaration order
     sema::Symbol*              m_initSymbol;
+    std::vector<ExitThunk>     m_exitThunks;       // destructor thunks registered with atexit; generated after the functions
+    size_t                     m_exitThunksDone;
     X86Module*                 m_x86;              // receives the globals that static locals become
     std::map<sema::Symbol*, std::string> m_staticNames;   // static local -> its global's IR name
     int                        m_staticCount;

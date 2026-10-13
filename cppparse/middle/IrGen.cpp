@@ -32,7 +32,7 @@ bool hasInternalLinkage(const sema::Symbol* s)
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
     : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_tryCount(0),
-      m_initSymbol(0), m_x86(0), m_staticCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
+      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_staticCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
 {
@@ -1595,7 +1595,8 @@ void IrGen::localDecl(cxx::Decl* d)
             bool scalarConstant = id.init.kind != cxx::Initializer::None && id.init.args.size() == 1 && id.init.args[0]->semaConst && vt->isScalar() && !isReference(var->type) && !vt->isFloating();
             if (scalarConstant) g.init = numText(id.init.args[0]->semaValue);
             if (m_x86) m_x86->addGlobal(g);
-            bool needsCode = !scalarConstant && (id.init.kind != cxx::Initializer::None || needsDefaultCtor(vt));
+            const bool destroyed = !isReference(var->type) && needsDtor(vt);   // registered with atexit once built
+            bool needsCode = !scalarConstant && (id.init.kind != cxx::Initializer::None || needsDefaultCtor(vt) || destroyed);
             if (needsCode) {
                 const sema::Type* b = m_semaTypes.basic(sema::Type::Bool);
                 IrGlobal guard;
@@ -1620,6 +1621,7 @@ void IrGen::localDecl(cxx::Decl* d)
                 LValue lv; lv.kind = LValue::Global; lv.global = gname; lv.type = m_semaTypes.unref(var->type);
                 initObject(lv, var->type, var, id, line);
                 endFullExpr(line);
+                if (destroyed) registerAtExit(gname, lv.type, line);
                 IrInst leave = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
                 leave.sub = "cppparse_static_leave";
                 leave.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(b))));
@@ -2160,6 +2162,18 @@ void IrGen::generate(std::vector<IrFunction*>& out)
         if (s->kind == Symbol::Function && s->hasBody && s->definition && !s->isDependentContext && !(s->ownerClass && s->ownerClass->isDependentContext)
             && !s->isLazyInstantiation) m_queue.push_back(s);   // template instantiations: only through need()
     }
+    drainQueue();
+    genInitializer();
+    // the destructor thunks call destructors that may not be generated yet, and those may build static locals
+    // that register further thunks
+    while (m_exitThunksDone < m_exitThunks.size()) {
+        genExitThunks();
+        drainQueue();
+    }
+}
+
+void IrGen::drainQueue()
+{
     for (size_t i = 0; i < m_queue.size(); ++i) {
         Symbol* fn = m_queue[i];
         if (m_done.count(fn)) continue;
@@ -2167,7 +2181,6 @@ void IrGen::generate(std::vector<IrFunction*>& out)
         if (fn->isImplicit) genImplicit(fn);
         else genFunction(fn);
     }
-    genInitializer();
 }
 
 void IrGen::registerMetadata(X86Module& x86, bool msvc)
@@ -2239,10 +2252,52 @@ void IrGen::genInitializer()
         if (id) initObject(lv, g->type, g, *id, line);
         else constructDefault(g->type, addressOf(lv, line), line);
         endFullExpr(line);
+        if (!isReference(g->type) && needsDtor(g->type)) registerAtExit(lv.global, lv.type, line);
     }
     returnSequence(m_initSymbol->loc.line);
     emit(make(IrInst::Ret, 0, m_initSymbol->loc.line));
     finishFunction(m_initSymbol->loc.line);
+}
+
+// as cl does: once an object with a destructor is built, an internal thunk that destroys it is registered with
+// atexit, so the objects are destroyed after main in the reverse order of their construction
+void IrGen::registerAtExit(const std::string& global, const sema::Type* t, int line)
+{
+    ExitThunk x;
+    // a C++ name ("cppparse_atexit_0()"), so that its address and its definition get the same symbol; internal:
+    // a static local of an inline function registers the thunk of the unit that built it
+    x.fn = m_prog.newSymbol(Symbol::Function, "cppparse_atexit_" + numText(static_cast<long>(m_exitThunks.size())), m_prog.global);
+    x.fn->type = m_semaTypes.function(m_semaTypes.basic(sema::Type::Void), std::vector<const sema::Type*>(), false, false);
+    x.fn->isStatic = true;
+    x.fn->hasBody = true;
+    x.fn->loc.line = line;
+    x.global = global;
+    x.type = t;
+    m_exitThunks.push_back(x);
+    IrInst fa = make(IrInst::AddrGlobal, 0, line);
+    fa.type = m_types.function(oldType(m_semaTypes.basic(sema::Type::Void)));
+    fa.args.push_back(IrOperand::global(irName(x.fn), fa.type));
+    IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Int), line);
+    in.sub = "atexit";
+    in.args.push_back(IrOperand::temp(emit(fa), fa.type));
+    emit(in);
+}
+
+void IrGen::genExitThunks()
+{
+    for (; m_exitThunksDone < m_exitThunks.size(); ++m_exitThunksDone) {
+        const ExitThunk x = m_exitThunks[m_exitThunksDone];
+        const int line = x.fn->loc.line;
+        m_out = new IrFunction;
+        m_fn = x.fn;
+        m_slots.clear(); m_loops.clear(); m_tryStack.clear(); m_tryCount = 0;
+        prologue(x.fn);
+        LValue lv; lv.kind = LValue::Global; lv.global = x.global; lv.type = x.type;
+        destroy(x.type, addressOf(lv, line), line, false);
+        returnSequence(line);
+        emit(make(IrInst::Ret, 0, line));
+        finishFunction(line);
+    }
 }
 
 } // namespace cppparse

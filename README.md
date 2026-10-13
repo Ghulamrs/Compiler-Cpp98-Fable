@@ -821,7 +821,8 @@ section of its own (selection "any") by the COFF writer, vtables
 likewise, static const members with a constant initialiser are folded
 rather than emitted, and globals that need construction are built by a
 per-module initialiser registered in `.CRT$XCU`, so the C runtime runs
-it before `main`. The library exposed a long list of compiler defects
+it before `main` (and registers their destructors with `atexit`). The
+library exposed a long list of compiler defects
 that are now fixed: per-instantiation copies of template syntax trees,
 using-declarations, parameter names that are also type names, base
 class type names in derived bodies, qualified lookup from nested classes,
@@ -963,7 +964,11 @@ Since then test 16 also checks the items fixed from
 [docs/next-targets.md](docs/next-targets.md): a `float` or `double` parameter
 passed on the stack is homed in its own size through xmm5, so it neither
 overwrites the frame slot next to it nor the first parameter still in xmm0
-(`stackFloats`, called by the cl-built driver).
+(`stackFloats`, called by the cl-built driver); globals and static locals
+with a destructor are destroyed after `main`, newest first: once one is
+built, the module initialiser (or the guarded first pass of a static local)
+registers an internal thunk `cppparse_atexit_<n>` that destroys it with
+`atexit`, as cl does (the driver's output must end in the order `cba`).
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

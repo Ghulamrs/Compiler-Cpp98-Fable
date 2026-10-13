@@ -280,3 +280,22 @@ AV* makeAVArray(int n) { return new AV[n]; }
 AW* makeAWArray(int n) { return new AW[n]; }
 void deleteAVArray(AV* p) { delete[] p; }
 void deleteAWArray(AW* p) { delete[] p; }
+
+long g_tnNew = 0, g_tnDel = 0, g_tnLog = 0;
+int  g_tnNext = 0;
+TN::TN() : t(++g_tnNext) {}
+TN::~TN() { g_tnLog = g_tnLog * 10 + t; }
+void* TN::operator new(size_t n) { g_tnNew = (long)n; return malloc(n); }
+void* TN::operator new[](size_t n) { g_tnNew = (long)n; return malloc(n); }
+void TN::operator delete(void* p, size_t n) { g_tnDel = (long)n; free(p); }
+void TN::operator delete[](void* p, size_t n) { g_tnDel = (long)n; free(p); }
+TM::TM() : m(t + 5) {}
+TM::~TM() { g_tnLog = g_tnLog * 10 + m % 10; }
+TN* makeTN() { return new TN; }
+TN* makeTNArray(int n) { return new TN[n]; }
+TM* makeTMArray(int n) { return new TM[n]; }
+void deleteTN(TN* p) { delete p; }
+void deleteTNArray(TN* p) { delete[] p; }
+void deleteTMArray(TM* p) { delete[] p; }
+TN* makeTNGlobal() { return ::new TN; }
+void deleteTNGlobal(TN* p) { ::delete p; }

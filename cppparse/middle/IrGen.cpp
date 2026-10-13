@@ -1576,6 +1576,10 @@ int IrGen::value(cxx::Expr* e)
         const sema::Type* elem = pt->kind == sema::Type::Pointer ? pt->inner : pt;
         bool isArray = e->type && e->type->decl && !e->type->decl->parts.empty() && e->type->decl->parts.back().kind == cxx::DeclaratorPart::Array;
         IrInst n = make(IrInst::Call, pt, line);
+        // the class's own operator new / new[] (its own or inherited, as lookup finds it), unless ::new
+        Symbol* classNew = !e->globalScope && e->placement.empty() && isClassType(elem) && elem->decl
+            ? classOperatorDelete(elem->decl, 0, isArray ? "operator new[]" : "operator new", 1) : 0;
+        if (classNew) need(classNew);
         if (isArray) {
             cxx::Expr* countExpr = e->type->decl->parts.back().arraySize;
             const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
@@ -1583,7 +1587,7 @@ int IrGen::value(cxx::Expr* e)
             int bytes = binary("*", count, lng, constant(sizeOf(elem) > 0 ? sizeOf(elem) : 1, lng, line), lng, lng, line);
             bool header = needsDtor(elem);   // the element count is kept in front of the elements for delete[]
             if (header) bytes = binary("+", bytes, lng, constant(8, lng, line), lng, lng, line);   // an 8-byte cookie, as MSVC
-            n.sub = "__new_array";
+            n.sub = classNew ? irName(classNew) : std::string("__new_array");
             n.args.push_back(IrOperand::temp(bytes, oldType(lng)));
             int p = emit(n);
             if (header) {
@@ -1601,8 +1605,8 @@ int IrGen::value(cxx::Expr* e)
             p = convert(value(e->placement[0]), m_semaTypes.decay(exprType(e->placement[0])), pt, line);
             for (size_t k = 1; k < e->placement.size(); ++k) value(e->placement[k]);
         } else {
-            n.sub = "__new";
-            n.args.push_back(IrOperand::imm(sizeOf(elem) > 0 ? sizeOf(elem) : 1, m_types.intType()));
+            n.sub = classNew ? irName(classNew) : std::string("__new");
+            n.args.push_back(IrOperand::imm(sizeOf(elem) > 0 ? sizeOf(elem) : 1, classNew ? oldType(m_semaTypes.sizeType()) : m_types.intType()));
             p = emit(n);
         }
         if (e->semaSym && e->semaSym->isConstructor) construct(e->semaSym, p, e->kids, 0, line);
@@ -1672,10 +1676,17 @@ int IrGen::value(cxx::Expr* e)
             IrInst hd = make(IrInst::AddrIndex, pt, line); hd.extra = 1; hd.args.push_back(IrOperand::temp(p, oldType(pt))); hd.args.push_back(IrOperand::imm(-8, oldType(lng)));
             int header = emit(hd);
             LValue hl; hl.kind = LValue::Mem; hl.addr = header; hl.type = lng;
-            forEachElement(pt->inner, p, load(hl, lng, line), false, line);
+            const int count = load(hl, lng, line);
+            forEachElement(pt->inner, p, count, false, line);
             p = header;
+            if (isClassType(pt->inner) && pt->inner->decl && !e->globalScope) {
+                // from the cookie through the class's operator delete[] (count * size + 8), as cl
+                freeArray(pt->inner->decl, header, count, line);
+                if (xb >= 0) { br(xb, line); m_block = xb; }
+                return constant(0, m_semaTypes.basic(sema::Type::Int), line);
+            }
         }
-        if (e->arrayDelete || pt->kind != sema::Type::Pointer || !isClassType(pt->inner) || !freeObject(pt->inner->decl, p, line)) {
+        if (e->arrayDelete || pt->kind != sema::Type::Pointer || !isClassType(pt->inner) || e->globalScope || !freeObject(pt->inner->decl, p, line)) {
             IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
             in.sub = e->arrayDelete ? "__delete_array" : "__delete";
             in.args.push_back(IrOperand::temp(p, oldType(pt)));
@@ -2594,12 +2605,12 @@ void IrGen::drainQueue()
 }
 
 // the class-specific operator delete (or delete[]) of cls (its own or a base's, as lookup finds it), or 0
-Symbol* IrGen::classOperatorDelete(Symbol* cls, int depth, const char* name) const
+Symbol* IrGen::classOperatorDelete(Symbol* cls, int depth, const char* name, size_t maxParams) const
 {
     if (!cls || !cls->members || depth > 32) return 0;
     const std::vector<Symbol*>* v = cls->members->find(name);
-    if (v) for (size_t i = 0; i < v->size(); ++i) if ((*v)[i]->kind == Symbol::Function && !(*v)[i]->params.empty() && (*v)[i]->params.size() <= 2) return (*v)[i];
-    for (size_t b = 0; b < cls->bases.size(); ++b) { Symbol* d = classOperatorDelete(cls->bases[b].cls, depth + 1, name); if (d) return d; }
+    if (v) for (size_t i = 0; i < v->size(); ++i) if ((*v)[i]->kind == Symbol::Function && !(*v)[i]->params.empty() && (*v)[i]->params.size() <= maxParams) return (*v)[i];
+    for (size_t b = 0; b < cls->bases.size(); ++b) { Symbol* d = classOperatorDelete(cls->bases[b].cls, depth + 1, name, maxParams); if (d) return d; }
     return 0;
 }
 

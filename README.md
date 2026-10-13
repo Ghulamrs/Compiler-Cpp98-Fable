@@ -789,7 +789,11 @@ tables name `??_E` as a weak external that falls back to its `??_G`;
 cppparse emits only `??_E`). It frees through the class's own `operator
 delete` (`operator delete[]`, given count * size + 8) when lookup in the
 complete class finds one (with the complete object's size for the
-two-parameter form), as a non-virtual `delete` does. A
+two-parameter form), as a non-virtual `delete` does. A new-expression
+calls the class's own (or inherited) `operator new` / `operator new[]`
+with cl's size (count * size + 8 when the array has a cookie), and
+`delete[]` frees an array with a cookie through the class's `operator
+delete[]`; `::new` and `::delete` use the global ones. A
 destructor stores its own class's vptrs on entry, as a constructor does
 after its bases, so a virtual call made while a base part is built or
 destroyed reaches that base's function. Virtual base classes are not laid

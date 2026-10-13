@@ -130,6 +130,21 @@ AV*  makeAVArray(int n);                       // new AV[n] by cppparse
 AW*  makeAWArray(int n);
 void deleteAVArray(AV* p);                     // delete[] p by cppparse
 void deleteAWArray(AW* p);
+// class-specific operator new, new[], delete and delete[] (TM inherits them): new-expressions of both compilers
+// call them with cl's sizes (count * size + 8 for an array with a cookie); ::new and ::delete bypass them
+struct TN { TN(); ~TN(); static void* operator new(size_t n); static void* operator new[](size_t n);
+            static void operator delete(void* p, size_t n); static void operator delete[](void* p, size_t n); int t; };
+struct TM : TN { TM(); ~TM(); int m; };
+extern long g_tnNew, g_tnDel, g_tnLog;         // the sizes the operators were given; the destructors' digits
+extern int  g_tnNext;
+TN*  makeTN();
+TN*  makeTNArray(int n);
+TM*  makeTMArray(int n);
+void deleteTN(TN* p);
+void deleteTNArray(TN* p);
+void deleteTMArray(TM* p);
+TN*  makeTNGlobal();                           // ::new TN
+void deleteTNGlobal(TN* p);                    // ::delete p
 
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \

@@ -293,6 +293,44 @@ int main()
         expect("AW deleted by cl through AV* (flags 1)", g_avLog, 61);
     }
 
+    printf("class-specific operator new, new[], delete, delete[]\n");
+    {
+        const long tn = (long)sizeof(TN), tm = (long)sizeof(TM);
+        g_tnNew = g_tnDel = 0;
+        TN* a = makeTN();
+        expect("TN::operator new size, new by cppparse", g_tnNew, tn);
+        delete a;
+        expect("TN::operator delete size, delete by cl", g_tnDel, tn);
+        g_tnNew = g_tnDel = 0;
+        deleteTN(new TN);
+        expect("TN::operator new size, new by cl", g_tnNew, tn);
+        expect("TN::operator delete size, delete by cppparse", g_tnDel, tn);
+        g_tnNew = g_tnDel = 0; g_tnNext = 0; g_tnLog = 0;
+        a = makeTNArray(3);
+        expect("TN::operator new[] size, new[] by cppparse", g_tnNew, 3 * tn + 8);
+        delete[] a;
+        expect("TN array of cppparse deleted by cl: order", g_tnLog, 321);
+        expect("TN::operator delete[] size, delete[] by cl", g_tnDel, 3 * tn + 8);
+        g_tnNew = g_tnDel = 0; g_tnNext = 0; g_tnLog = 0;
+        deleteTNArray(new TN[3]);
+        expect("TN::operator new[] size, new[] by cl", g_tnNew, 3 * tn + 8);
+        expect("TN array of cl deleted by cppparse: order", g_tnLog, 321);
+        expect("TN::operator delete[] size, delete[] by cppparse", g_tnDel, 3 * tn + 8);
+        g_tnNew = g_tnDel = 0; g_tnNext = 0; g_tnLog = 0;
+        TM* b = makeTMArray(2);
+        expect("inherited operator new[] size, new[] by cppparse", g_tnNew, 2 * tm + 8);
+        delete[] b;
+        expect("TM array of cppparse deleted by cl: order", g_tnLog, 7261);
+        expect("inherited operator delete[] size, delete[] by cl", g_tnDel, 2 * tm + 8);
+        g_tnNew = g_tnDel = 0; g_tnNext = 0; g_tnLog = 0;
+        deleteTMArray(new TM[2]);
+        expect("inherited operator new[] size, new[] by cl", g_tnNew, 2 * tm + 8);
+        expect("TM array of cl deleted by cppparse: order", g_tnLog, 7261);
+        expect("inherited operator delete[] size, delete[] by cppparse", g_tnDel, 2 * tm + 8);
+        g_tnNew = g_tnDel = 0;
+        deleteTNGlobal(makeTNGlobal());
+        expect("::new and ::delete bypass TN's operators", g_tnNew + g_tnDel, 0);
+    }
     if (failures) { printf("%d FAILED\n", failures); return 1; }
     printf("ALL OK\n");
     return 0;

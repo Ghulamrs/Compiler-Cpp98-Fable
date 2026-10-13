@@ -152,7 +152,7 @@ private:
     // it, and frees it when bit 0 is set; made on first use, generated after the other functions
     std::string deletingDestructor(sema::Symbol* dtor, X86Module& x86, bool msvc);
     void genDeletingDestructors();
-    sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth, const char* name = "operator delete") const;
+    sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth, const char* name = "operator delete", size_t maxParams = 2) const;
     bool freeObject(sema::Symbol* cls, int p, int line);
     void freeArray(sema::Symbol* cls, int cookie, int count, int line);
     void need(sema::Symbol* fn);

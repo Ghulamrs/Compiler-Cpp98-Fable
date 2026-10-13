@@ -62,6 +62,7 @@ std::string regSized(const std::string& r, int size)
 std::string invertCc(const std::string& cc)
 {
     if (cc == "e") return "ne";   if (cc == "ne") return "e";
+    if (cc == "fe") return "fne"; if (cc == "fne") return "fe";   // floating ==, != : the parity flag decides unordered
     if (cc == "l") return "ge";   if (cc == "ge") return "l";
     if (cc == "le") return "g";   if (cc == "g") return "le";
     if (cc == "b") return "ae";   if (cc == "ae") return "b";
@@ -131,7 +132,7 @@ namespace {
 
 class X86Function {
 public:
-    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false), m_firstSpills(0), m_tableEh(false), m_tableRegs(false), m_openRegion(-1)
+    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false), m_firstSpills(0), m_tableEh(false), m_tableRegs(false), m_openRegion(-1), m_parityLabels(0)
     { for (int p = 0; p < 4; ++p) m_lastParamLoad[p] = -1; }
     std::string run();
 
@@ -202,6 +203,7 @@ private:
     // a comparison whose result only steers the next conditional branch: cmp + jcc, no setcc / test
     std::set<int>       m_fusedCmp;
     std::string         m_pendingCc;      // the condition code of the comparison just emitted for the branch
+    int                 m_parityLabels;   // the local labels of the setcc sequences of floating ==, != (_P1, _P2...)
     // a register parameter that is only read, by loads at the very start of the function (before anything can
     // overwrite its argument register), is used straight from that register and never stored to the frame
     void analyzeParams();
@@ -1111,10 +1113,23 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         std::string s = fl ? in.sub.substr(1) : in.sub;
         if (fl) {
             std::string a = use(in.args[0], "xmm0"), b = use(in.args[1], "xmm1");
-            // ucomisd sets CF/ZF like unsigned compares: use above/below conditions
+            // ucomiss / ucomisd (by the operands' type) set CF/ZF like unsigned compares: above/below conditions,
+            // which are false when unordered (ZF = PF = CF = 1); == and != also test PF: NaN compares unequal
+            const Type* at = in.args[0].type ? in.args[0].type : m_f.typeOf(in.args[0].kind == IrOperand::Temp ? in.args[0].id : -1);
             if (s == "lt" || s == "le") { std::swap(a, b); s = (s == "lt") ? "gt" : "ge"; }
-            line("ucomisd " + a + ", " + b);
-            cc = s == "eq" ? "e" : s == "ne" ? "ne" : s == "gt" ? "a" : "ae";
+            line(std::string(isSingle(at) ? "ucomiss " : "ucomisd ") + a + ", " + b);
+            cc = s == "eq" ? "fe" : s == "ne" ? "fne" : s == "gt" ? "a" : "ae";
+            if (!m_fusedCmp.count(in.dst) && (cc == "fe" || cc == "fne")) {
+                // rd = unordered (PF) ? the != result : ZF's; mov leaves the flags alone
+                std::string rd = def(in.dst, false, "rax", spill);
+                const std::string skip = m_label + "_P" + intToString(++m_parityLabels);
+                line("mov " + reg32(rd) + ", " + (cc == "fne" ? "1" : "0"));
+                line("jp " + skip);
+                line(std::string(cc == "fne" ? "setne " : "sete ") + reg8(rd));
+                m_out << skip << ":\n";
+                finish(in.dst, spill, false, rd);
+                break;
+            }
         } else {
             int size = typeSize(in.args[0].type ? in.args[0].type : m_f.typeOf(in.args[0].kind == IrOperand::Temp ? in.args[0].id : -1));
             std::string a = use(in.args[0], "rax");
@@ -1177,6 +1192,17 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         if (in.args[0].kind == IrOperand::Temp && m_fusedCmp.count(in.args[0].id)) cc = m_pendingCc;
         else { std::string rc = use(in.args[0], "rax"); line("test " + reg32(rc) + ", " + reg32(rc)); }
         const int t = in.args[1].id, f = in.args[2].id;
+        if (cc == "fe" || cc == "fne") {
+            // floating == / !=: unordered (PF) is false for ==, true for !=, whatever ZF says
+            const bool eq = cc == "fe";
+            line("jp " + label(eq ? f : t));
+            if (t == blockIndex + 1) line(std::string(eq ? "jne " : "je ") + label(f));
+            else {
+                line(std::string(eq ? "je " : "jne ") + label(t));
+                if (f != blockIndex + 1) line("jmp " + label(f));
+            }
+            break;
+        }
         if (t == blockIndex + 1) line("j" + invertCc(cc) + " " + label(f));   // fall through into the true block
         else {
             line("j" + cc + " " + label(t));

@@ -960,7 +960,8 @@ const Type* Sema::exprUnary(cxx::Expr* e, Scope* in)
     }
     if (!v->isArithmetic()) { error(e->loc, "S109", "operand of unary " + op + " must be arithmetic, not " + v->text()); return m_types.error(); }
     if (e->kids[0]->semaConst) { e->semaConst = true; e->semaValue = op == "-" ? -e->kids[0]->semaValue : e->kids[0]->semaValue; }
-    return m_types.promoted(v);
+    const Type* uv = m_types.unqualified(m_types.unref(v));
+    return uv->kind == Type::Float ? uv : m_types.promoted(v);   // the integral promotions only: -f is a float
 }
 
 // a class object in a boolean context (conditions, !, &&, ||): wrapped in a cast node that calls its

@@ -1082,6 +1082,14 @@ constructor (`c ? T(1) : t`). For linking with MSVC-compiled code,
 constructors return `this` and functions with a hidden result pointer return
 it in `rax` as cl does, narrow results of calls are extended, the `new[]`
 cookie is 8 bytes and the exception runtime's frame chain is per thread.
+Floating point follows cl: `long double` is the 8-byte double (converting
+between the two is no instruction); `float op float` is a float computed in
+single precision (`addss`, constants folded with float rounding), as is
+`-f`; comparisons use `ucomiss` for floats and `ucomisd` for doubles and test
+the parity flag, so NaN is unequal to everything and true as a condition,
+and `-0.0` is false; the optimiser keeps only the identities exact under
+IEEE (`x * 1`, `x / 1`, `x - 0.0`, `x + -0.0`) and tells constants apart
+by their exact value (test 17, `fp::` in `sample-front/front.cpp`).
 Class arguments and results follow cl's x64 rules (IrGen::regParamType,
 regReturnType): a class of 1, 2, 4 or 8 bytes without a non-trivial copy
 constructor is passed as an integer of that size in its register or stack

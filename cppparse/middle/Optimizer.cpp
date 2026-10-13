@@ -4,6 +4,7 @@
 #include "Ssa.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <set>
 
 namespace cppparse {
@@ -108,6 +109,14 @@ bool foldWideInt(const std::string& sub, long a, long b, long& out)
 bool isWideInt(const Type* t)
 {
     return t && t->kind != Type::Double && t->builtinSize() == 8;
+}
+
+// is the sign bit of d set (-0.0 included)?
+bool signBit(double d)
+{
+    unsigned char bytes[sizeof(double)];
+    std::memcpy(bytes, &d, sizeof(double));
+    return (bytes[sizeof(double) - 1] & 0x80) != 0;   // little-endian: the sign is in the last byte
 }
 
 double foldFloat(const std::string& sub, double x, double y, bool& ok, bool& isCmp, long& cmp)
@@ -273,9 +282,13 @@ int Optimizer::constantFold(IrFunction& f)
                 if (fl) {
                     double x = in.args[0].kind == IrOperand::FImm ? in.args[0].fval : static_cast<double>(in.args[0].ival);
                     double y = in.args[1].kind == IrOperand::FImm ? in.args[1].fval : static_cast<double>(in.args[1].ival);
+                    // float operands and results are single precision: rounded as addss / ucomiss would see them
+                    if (in.args[0].type && in.args[0].type->kind == Type::Float) x = static_cast<double>(static_cast<float>(x));
+                    if (in.args[1].type && in.args[1].type->kind == Type::Float) y = static_cast<double>(static_cast<float>(y));
                     bool ok, isCmp; long c;
                     double r = foldFloat(in.sub, x, y, ok, isCmp, c);
                     if (!ok) continue;
+                    if (!isCmp && in.type && in.type->kind == Type::Float) r = static_cast<double>(static_cast<float>(r));
                     IrInst n; n.dst = in.dst; n.line = in.line; n.type = in.type;
                     if (isCmp) { n.op = IrInst::Const; n.args.push_back(IrOperand::imm(c, in.type)); }
                     else { n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(r, in.type)); }
@@ -300,7 +313,13 @@ int Optimizer::constantFold(IrFunction& f)
             } else if (in.op == IrInst::Conv && in.args.size() == 1 && in.args[0].isConst() && in.type) {
                 IrInst n; n.dst = in.dst; n.line = in.line; n.type = in.type;
                 const IrOperand& o = in.args[0];
-                if (in.type->isFloating()) { n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(o.kind == IrOperand::FImm ? o.fval : static_cast<double>(o.ival), in.type)); }
+                if (in.type->isFloating()) {
+                    // a float source or result is single precision (constants are kept as doubles): rounded here
+                    double v = o.kind == IrOperand::FImm ? o.fval : static_cast<double>(o.ival);
+                    if (o.kind == IrOperand::FImm && o.type && o.type->kind == Type::Float) v = static_cast<double>(static_cast<float>(v));
+                    if (in.type->kind == Type::Float) v = static_cast<double>(static_cast<float>(v));
+                    n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(v, in.type));
+                }
                 else if (in.type->isIntegral() || in.type->isPointer()) {
                     long v = o.kind == IrOperand::FImm ? static_cast<long>(o.fval) : o.ival;
                     // a negative 32-bit pattern zero-extended needs a 64-bit constant, which the IR does not have
@@ -464,8 +483,10 @@ int Optimizer::algebraic(IrFunction& f)
             if (s == "mul" && xImm && isPow2(x.ival) && x.ival > 1) { in.sub = "shl"; long k = log2of(x.ival); x = y; y = IrOperand::imm(k, in.type); ++changes; continue; }
             if (s == "udiv" && yImm && isPow2(y.ival) && y.ival > 1) { in.sub = "lshr"; y.ival = log2of(y.ival); ++changes; continue; }
             if (s == "urem" && yImm && isPow2(y.ival) && y.ival > 1) { in.sub = "and"; y.ival = y.ival - 1; ++changes; continue; }
-            if (s == "fmul" && y.kind == IrOperand::FImm && y.fval == 1.0) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
-            if (s == "fadd" && y.kind == IrOperand::FImm && y.fval == 0.0) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
+            // floating point: only the identities exact under IEEE for every x (signed zeros, NaN, infinities):
+            // x * 1, x / 1, x - (+0) and x + (-0). Not x + 0 (-0 + 0 is +0), x * 0, x - x, 0 - x
+            if ((s == "fmul" || s == "fdiv") && y.kind == IrOperand::FImm && y.fval == 1.0) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
+            if ((s == "fadd" || s == "fsub") && y.kind == IrOperand::FImm && y.fval == 0.0 && signBit(y.fval) == (s == "fadd")) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
         }
     return changes;
 }

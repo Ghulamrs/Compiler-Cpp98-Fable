@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 // sizeof(T&) is sizeof(T) (C++98 5.3.3/2), not the size of a pointer
@@ -227,6 +228,105 @@ void memInitOverloads()
     std::printf("constructor initializers: %d %d %d %d\n", a.v, a.mem.m, b.v, b.mem.m);
 }
 
+// floating point as cl computes it, results printed as their bits
+namespace fp {
+unsigned long long bitsD(double d) { unsigned long long u; std::memcpy(&u, &d, 8); return u; }
+unsigned int bitsF(float f) { unsigned int u; std::memcpy(&u, &f, 4); return u; }
+volatile double vzero = 0.0;
+
+// long double is MSVC's 8-byte double: double <-> long double converts nothing, float <-> long double as double
+long double d2ld(double x) { return x; }
+double ld2d(long double x) { return x; }
+long double f2ld(float x) { return x; }
+float ld2f(long double x) { return x; }
+long double ldAdd(long double a, double b) { return a + b; }
+void longDouble()
+{
+    std::printf("long double: %016llx %016llx %016llx %08x %016llx %d\n", bitsD(d2ld(1.1)), bitsD(ld2d(2.2L)), bitsD(f2ld(0.1f)), bitsF(ld2f(0.1L)),
+                bitsD(ldAdd(1.5L, 0.1)), (int)sizeof(long double));
+    std::printf("long double through varargs: %Lf %Lf\n", d2ld(3.25), (long double)1.5);
+}
+}
+
+namespace fp {
+// comparisons: ucomiss for floats, ucomisd for doubles, and the parity flag: NaN is unequal to everything (itself
+// included) and every ordered comparison with it is false; as a condition -0.0 is false and NaN true
+bool fBool(float x) { return x; }
+bool dBool(double x) { return x; }
+bool fNot(float x) { return !x; }
+bool fEq(float a, float b) { return a == b; }
+bool fNe(float a, float b) { return a != b; }
+bool fLt(float a, float b) { return a < b; }
+bool fLe(float a, float b) { return a <= b; }
+bool fGt(float a, float b) { return a > b; }
+bool fGe(float a, float b) { return a >= b; }
+bool dEq(double a, double b) { return a == b; }
+bool dNe(double a, double b) { return a != b; }
+bool dLt(double a, double b) { return a < b; }
+bool dGe(double a, double b) { return a >= b; }
+int fIf(float x) { if (x) return 1; return 2; }
+int dIf(double x) { if (x) return 1; return 2; }
+int dEqIf(double a, double b) { if (a == b) return 1; return 2; }
+int dNeIf(double a, double b) { if (a != b) return 1; return 2; }
+int fEqIf(float a, float b) { if (a == b) return 1; return 2; }
+int fNotNeIf(float a, float b) { if (!(a != b)) return 1; return 2; }
+int fAnd(float a, float b) { return a && b ? 3 : 4; }
+int dCond(double a) { return a ? 5 : 6; }
+void comparisons()
+{
+    double nan = vzero / vzero, nz = -vzero; float fnan = (float)nan, fnz = (float)nz;
+    std::printf("fp to bool: %d %d %d %d %d %d %d\n", fBool(fnz), fBool(fnan), fBool(1.0f), dBool(nz), dBool(nan), fNot(fnz), fNot(fnan));
+    std::printf("fp float compares: %d%d%d%d%d%d %d%d%d%d%d%d %d%d%d%d%d%d\n", fEq(fnan, fnan), fNe(fnan, fnan), fLt(fnan, 1), fLe(fnan, 1), fGt(fnan, 1), fGe(fnan, 1),
+                fEq(1, 1), fNe(1, 2), fLt(1, 2), fLe(2, 2), fGt(3, 2), fGe(2, 3), fEq(fnz, 0), fNe(fnz, 0), fLt(fnz, 0), fLe(-1, fnan), fGt(1, fnan), fGe(1, fnan));
+    std::printf("fp double compares: %d%d%d%d %d%d%d%d\n", dEq(nan, nan), dNe(nan, nan), dLt(nan, 1), dGe(nan, 1), dEq(nan, 1), dNe(1, 1), dLt(1, 2), dGe(nz, 0));
+    std::printf("fp conditions: %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", fIf(fnz), fIf(fnan), dIf(nz), dIf(nan), dEqIf(nan, nan), dNeIf(nan, nan), fEqIf(fnan, fnan),
+                fNotNeIf(fnan, fnan), fAnd(fnan, 1), fAnd(fnz, 1), dCond(nan), dCond(nz), dEqIf(2, 2), dNeIf(2, 2));
+    std::printf("fp folded conditions: %d %d %d %d\n", (bool)-0.0, -0.0 == 0.0, (bool)-0.0f, fIf(-0.0f) + dCond(-0.0));
+}
+
+// algebraic identities kept only where exact under IEEE: x * 1, x / 1, x - 0.0 and x + (-0.0); x + 0.0 of -0.0 is
+// +0.0, x * 0 is -0.0 for a negative x, x - x and x == x are not for NaN. Constants are values, not their
+// 6-digit spelling (0.1 and 0.1000001 differ) and -0.0 is not 0.0
+double addZero(double x) { return x + 0.0; }
+double subZero(double x) { return x - 0.0; }
+double mulOne(double x) { return x * 1.0; }
+double mulZero(double x) { return x * 0.0; }
+double zeroSub(double x) { return 0.0 - x; }
+double divOne(double x) { return x / 1.0; }
+double selfSub(double x) { return x - x; }
+bool selfEq(double x) { return x == x; }
+bool selfNe(double x) { return x != x; }
+float fAddZero(float x) { return x + 0.0f; }
+double nearConstants(double x) { double a = x + 0.1; double b = x + 0.1000001; return b - a; }
+double signedZeros(bool c) { double r; if (c) r = 0.0; else r = -0.0; return r; }
+void identities()
+{
+    double nan = vzero / vzero, nz = -vzero;
+    std::printf("fp identities: %016llx %016llx %016llx %016llx %016llx %016llx %d %d %d %08x\n", bitsD(addZero(nz)), bitsD(subZero(nz)), bitsD(mulOne(nz)),
+                bitsD(mulZero(-3.0)), bitsD(zeroSub(0.0)), bitsD(divOne(nz)), selfSub(nan) != selfSub(nan), selfEq(nan), selfNe(nan), bitsF(fAddZero(-0.0f)));
+    std::printf("fp folded identities: %016llx %016llx %016llx %016llx %016llx\n", bitsD(addZero(-0.0)), bitsD(-0.0 + 0.0), bitsD(nearConstants(1.0)),
+                bitsD(signedZeros(true)), bitsD(signedZeros(false)));
+}
+
+// float arithmetic is single precision (float op float is a float, C++98 5/9), and so is -f
+double floatSum(float f) { double r = f + 0.1f; return r; }
+double floatMul(float a, float b) { return a * b; }
+double floatDiv(float a, float b) { return a / b; }
+float floatChain(float a, float b, float c) { return a * b + c; }
+float floatCompound(float f) { f += 0.1f; f *= 3.0f; f -= 0.2f; return f; }
+double floatConstants() { float a = 0.1f, b = 0.2f; return a + b; }
+double floatRoundTrip() { return (double)(float)0.1; }
+int floatSizes(float f) { return (int)sizeof(-f) * 10 + (int)sizeof(f + f); }
+float floatNeg(float f) { return -f; }
+void floatArithmetic()
+{
+    std::printf("fp float arithmetic: %016llx %016llx %016llx %08x %08x\n", bitsD(floatSum(3.0f)), bitsD(floatMul(0.1f, 0.3f)), bitsD(floatDiv(1.0f, 3.0f)),
+                bitsF(floatChain(0.1f, 0.2f, 0.3f)), bitsF(floatCompound(1.0f)));
+    std::printf("fp float constants: %016llx %016llx %d %08x %08x\n", bitsD(floatConstants()), bitsD(floatRoundTrip()), floatSizes(1.0f), bitsF(floatNeg(0.0f)),
+                bitsF(floatNeg(1.5f)));
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -240,6 +340,10 @@ int main()
     functorMembers();
     conditionDeclarations();
     foldedGlobals();
+    fp::longDouble();
+    fp::comparisons();
+    fp::identities();
+    fp::floatArithmetic();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

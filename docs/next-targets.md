@@ -9,7 +9,8 @@ the default), with the items found since. Each was reproduced with a small progr
 - 17: a throw inside a catch handler. Every handler body is a try region whose landing pad calls
   `cppparse_catch_unwind` (IrGen.cpp, runtime); correct in table and sjlj mode at -O0 and -O2.
 - 18, call side: float arguments of a varargs call are copied into the integer registers (X86.cpp).
-- 19, compares and negation: floats are widened to double first; exact, only slower than cl.
+- 19, compares and negation: negation widens a float to double first (exact, only slower than cl); compares are
+  `ucomiss` on floats since 2026-10-13 (see the floating-point entry below).
 - 20, mostly: file-scope `static` functions and variables and the anonymous namespace are internal (the
   namespace carries a per-unit id); an out-of-class `inline` definition is `f i`.
 - 22, partly: a missing include is fatal; an undeclared function is error S103.
@@ -129,6 +130,17 @@ the default), with the items found since. Each was reproduced with a small progr
   handlers of that region and of the regions around it (X86.cpp computeEhEdges; liveness and loop extension in
   computeIntervals; Ir.cpp computeLiveness takes the extra edges). eh.ps1: ehCatchLoop, ehNestedLoops
   (probe.cpp), failing at -O2/-O3 before.
+- Floating point against cl (review of 2026-10-13, test 17 `fp::` in `sample-front/front.cpp`, -O0 and -O2, also
+  checked at -O1 and -O3): double <-> long double was `cvtsd2ss` (IrGen::convert: no conversion now, float <-> long
+  double as float <-> double); float compares and conversions to bool used `ucomisd` on a float register and ignored
+  PF (`(bool)-0.0f` true, `(bool)NaN` false, `NaN == NaN` true): `ucomiss`/`ucomisd` by the operands' type, and
+  ==/!= test PF in the setcc (a `jp` around it) and in the fused branch (X86.cpp emitInst Cmp/CondBr, invertCc);
+  `x + 0.0` was folded to `x` (-0.0 gave -0.0): only x*1, x/1, x-(+0.0), x+(-0.0) are kept (Optimizer::algebraic);
+  a constant's text, the CSE/GVN key, had 6 digits (`x+0.1` and `x+0.1000001` were one value) and the phi
+  simplification took -0.0 for 0.0 (IrOperand::str, Ssa phi); `float op float` was a double (TypeTable::
+  arithmeticResult promoted float, and unary -/+ did too: `sizeof(-f)` 8): it is a float computed with addss etc.,
+  `-f` is negated through a double (the back end's sign mask is a double's), and folded float operations, float
+  operands and conversions are rounded to float (Optimizer::constantFold).
 
 ## Plan
 
@@ -176,10 +188,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   o) : v(o.v + 10) { printf("cB%d ", v); } ~B() { printf("~B%d ", v); } };` then `try { try { throw B(10); } catch
   (B b) { throw b; } } catch (B b2) { printf("got%d ", b2.v); }`: cl `cB20 cB30 cB40 ~B20 ~B10 got40 ~B40 ~B30`,
   cppparse `cB20 cB30 ~B20 ~B10 cB40 got40 ~B40 ~B30` (the same objects, cB40 later).
-- A user copy constructor of a class with a virtual base that initializes the base from the source
-  (`struct NB { int v; NB(int x) : v(x) {} NB(const NB& o) : v(o.v + 10) {} }; struct V : virtual NB { V() : NB(3)
-  {} V(const V& o) : NB(o) {} };` then `V a; V b(a);`): cl `b.v == 13`, cppparse reads garbage (also when V is
-  caught by value); found by the review of the exception commits, not an exception problem (virtual bases).
 - Calls through pointers to members (`(obj.*pmf)(x)`, `(p->*pmf)(x)`) are rejected by sema (an error, not wrong code).
 - A float literal with an `f` suffix is converted decimal -> double -> float, which differs from cl's direct
   decimal -> float rounding when the double is exactly halfway between two floats. The folder

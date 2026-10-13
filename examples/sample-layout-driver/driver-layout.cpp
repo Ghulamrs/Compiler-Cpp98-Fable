@@ -1,6 +1,7 @@
 // driver-layout.cpp - compiled by cl and linked with cppparse's layout.obj: cl's value of every expression in
 // layout.hpp's LAYOUT_VALUES must equal cppparse's, and objects laid out by cppparse must read back right
 // through cl's view of the classes.
+#define _CRT_SECURE_NO_WARNINGS
 #include "layout.hpp"
 
 #include <new>
@@ -13,6 +14,39 @@ static void expect(const char* what, long got, long want)
     if (got == want) printf("  ok   %-40s %ld\n", what, got);
     else { printf("  FAIL %-40s %ld, expected %ld\n", what, got, want); ++failures; }
 }
+
+// the same calls as ovCall and owCall, made by cl: through cl's slots of cppparse's tables
+static int clOvCall(const OV* p, int which)
+{
+    switch (which) {
+    case 0: return p->a();
+    case 1: return p->f(1);
+    case 2: return p->b();
+    case 3: return p->f(1.0);
+    case 4: return p->c();
+    case 5: return p->f('x');
+    }
+    return -1;
+}
+
+static int clOwCall(const OW* p, int which)
+{
+    switch (which) {
+    case 6: return p->g();
+    case 7: return p->f(1L);
+    case 8: return p->g(1);
+    case 9: return p->f((short)1);
+    }
+    return clOvCall(p, which);
+}
+
+// a class cl derives from cppparse's OW: cppparse's calls reach its overriders through cl's table
+struct CW : OW {
+    int f(int) const { return 201; }
+    int f(short) const { return 202; }
+    int g() const { return 203; }
+    int b() const { return 204; }
+};
 
 int main()
 {
@@ -243,6 +277,145 @@ int main()
         g_vbLog = 0;
     }
 
+    printf("vftable slots of overloads\n");
+    {
+        static const long wantV[6] = { 1, 2, 3, 4, 5, 6 };
+        static const long wantW[10] = { 111, 12, 13, 114, 15, 16, 117, 118, 119, 120 };
+        static const long wantC[10] = { 111, 201, 204, 114, 15, 16, 203, 118, 119, 202 };
+        OV ov; OW ow; CW cw;
+        char what[64];
+        for (int k = 0; k < 6; ++k) {
+            sprintf(what, "ovCall(&ov, %d)", k); expect(what, ovCall(&ov, k), wantV[k]);
+            sprintf(what, "cl's ovCall(&ov, %d)", k); expect(what, clOvCall(&ov, k), wantV[k]);
+            sprintf(what, "ovCall(&ow, %d)", k); expect(what, ovCall(&ow, k), wantW[k]);
+            sprintf(what, "cl's ovCall(&ow, %d)", k); expect(what, clOvCall(&ow, k), wantW[k]);
+        }
+        for (int k = 0; k < 10; ++k) {
+            sprintf(what, "owCall(&ow, %d)", k); expect(what, owCall(&ow, k), wantW[k]);
+            sprintf(what, "cl's owCall(&ow, %d)", k); expect(what, clOwCall(&ow, k), wantW[k]);
+            sprintf(what, "owCall(&cw, %d) (cl's class)", k); expect(what, owCall(&cw, k), wantC[k]);
+            sprintf(what, "cl's owCall(&cw, %d)", k); expect(what, clOwCall(&cw, k), wantC[k]);
+        }
+        g_ovLog = 0;
+        delete makeOW();
+        expect("OW deleted by cl through OV*", g_ovLog, 21);
+        g_ovLog = 0;
+        deleteOV(makeOW());
+        expect("OW deleted by cppparse through OV*", g_ovLog, 21);
+        g_ovLog = 0;
+        deleteOV(new CW);
+        expect("CW (cl's) deleted by cppparse through OV*", g_ovLog, 21);
+    }
+
+    printf("arrays of a polymorphic class: the vector deleting destructor\n");
+    {
+        const long avSize = (long)sizeof(AV), awSize = (long)sizeof(AW);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        AV* p = makeAVArray(3);
+        expect("AV array built by cppparse, v()", p[0].v() + p[1].v() * 10 + p[2].v() * 100, 321);
+        delete[] p;
+        expect("AV array of cppparse deleted by cl: order", g_avLog, 321);
+        expect("AV array of cppparse deleted by cl: operator delete[] size", g_avFreed, 3 * avSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        p = new AV[3];
+        deleteAVArray(p);
+        expect("AV array of cl deleted by cppparse: order", g_avLog, 321);
+        expect("AV array of cl deleted by cppparse: operator delete[] size", g_avFreed, 3 * avSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        AW* q = makeAWArray(2);
+        delete[] q;
+        expect("AW array of cppparse deleted by cl: order", g_avLog, 7261);
+        expect("AW array of cppparse deleted by cl: operator delete[] size", g_avFreed, 2 * awSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        q = new AW[2];
+        deleteAWArray(q);
+        expect("AW array of cl deleted by cppparse: order", g_avLog, 7261);
+        expect("AW array of cl deleted by cppparse: operator delete[] size", g_avFreed, 2 * awSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        q = makeAWArray(2);
+        deleteAWArray(q);
+        expect("AW array of cppparse deleted by cppparse: order", g_avLog, 7261);
+        expect("AW array of cppparse deleted by cppparse: size", g_avFreed, 2 * awSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        p = makeAVArray(0);
+        delete[] p;
+        expect("empty AV array of cppparse deleted by cl: size", g_avFreed, 8);
+        g_avFreed = 0;
+        deleteAVArray(new AV[0]);
+        expect("empty AV array of cl deleted by cppparse: size", g_avFreed, 8);
+        g_avNext = 0; g_avLog = 0;
+        AV* one = new AW;
+        delete one;                        // the same slot with flags 1: one object, operator delete
+        expect("AW deleted by cl through AV* (flags 1)", g_avLog, 61);
+    }
+
+    printf("class-specific operator new, new[], delete, delete[]\n");
+    {
+        const long tn = (long)sizeof(TN), tm = (long)sizeof(TM);
+        g_tnNew = g_tnDel = 0;
+        TN* a = makeTN();
+        expect("TN::operator new size, new by cppparse", g_tnNew, tn);
+        delete a;
+        expect("TN::operator delete size, delete by cl", g_tnDel, tn);
+        g_tnNew = g_tnDel = 0;
+        deleteTN(new TN);
+        expect("TN::operator new size, new by cl", g_tnNew, tn);
+        expect("TN::operator delete size, delete by cppparse", g_tnDel, tn);
+        g_tnNew = g_tnDel = 0; g_tnNext = 0; g_tnLog = 0;
+        a = makeTNArray(3);
+        expect("TN::operator new[] size, new[] by cppparse", g_tnNew, 3 * tn + 8);
+        delete[] a;
+        expect("TN array of cppparse deleted by cl: order", g_tnLog, 321);
+        expect("TN::operator delete[] size, delete[] by cl", g_tnDel, 3 * tn + 8);
+        g_tnNew = g_tnDel = 0; g_tnNext = 0; g_tnLog = 0;
+        deleteTNArray(new TN[3]);
+        expect("TN::operator new[] size, new[] by cl", g_tnNew, 3 * tn + 8);
+        expect("TN array of cl deleted by cppparse: order", g_tnLog, 321);
+        expect("TN::operator delete[] size, delete[] by cppparse", g_tnDel, 3 * tn + 8);
+        g_tnNew = g_tnDel = 0; g_tnNext = 0; g_tnLog = 0;
+        TM* b = makeTMArray(2);
+        expect("inherited operator new[] size, new[] by cppparse", g_tnNew, 2 * tm + 8);
+        delete[] b;
+        expect("TM array of cppparse deleted by cl: order", g_tnLog, 7261);
+        expect("inherited operator delete[] size, delete[] by cl", g_tnDel, 2 * tm + 8);
+        g_tnNew = g_tnDel = 0; g_tnNext = 0; g_tnLog = 0;
+        deleteTMArray(new TM[2]);
+        expect("inherited operator new[] size, new[] by cl", g_tnNew, 2 * tm + 8);
+        expect("TM array of cl deleted by cppparse: order", g_tnLog, 7261);
+        expect("inherited operator delete[] size, delete[] by cppparse", g_tnDel, 2 * tm + 8);
+        g_tnNew = g_tnDel = 0;
+        deleteTNGlobal(makeTNGlobal());
+        expect("::new and ::delete bypass TN's operators", g_tnNew + g_tnDel, 0);
+    }
+    printf("review fixes: grouping with a non-virtual name, hidden overrides, both operator delete[] forms\n");
+    {
+        ZG z;
+        const long wantZ[4] = { 1, 2, 3, 4 };
+        char what[64];
+        for (int k = 0; k < 4; ++k) {
+            sprintf(what, "zgCall(&z, %d)", k); expect(what, zgCall(&z, k), wantZ[k]);
+        }
+        expect("cl's z.g()", static_cast<const ZG&>(z).g(), 1);
+        expect("cl's z.f(int)", static_cast<const ZG&>(z).f(1), 2);
+        expect("cl's z.f(double)", static_cast<const ZG&>(z).f(1.0), 3);
+        YA* ya = makeYC();
+        expect("yaCall(YC, f(int))", yaCall(ya, 0), 31);
+        expect("yaCall(YC, f(double))", yaCall(ya, 1), 22);
+        expect("cl's YA* f(int) of cppparse's YC", ya->f(1), 31);
+        expect("cl's YA* f(double) of cppparse's YC", ya->f(1.0), 22);
+        expect("cl's YC* k()", static_cast<YC*>(ya)->k(), 33);
+        YC yc;
+        expect("ycCall(cl's YC, f(int))", ycCall(&yc, 0), 31);
+        expect("ycCall(cl's YC, k())", ycCall(&yc, 1), 33);
+        expect("yaCall(cl's YC, f(int))", yaCall(&yc, 0), 31);
+        delete static_cast<YC*>(ya);
+        g_dnForm = 0;
+        delete[] makeDNArray(2);
+        expect("DN array of cppparse deleted by cl: operator delete[](void*)", g_dnForm, 1);
+        g_dnForm = 0;
+        deleteDNArray(new DN[2]);
+        expect("DN array of cl deleted by cppparse: operator delete[](void*)", g_dnForm, 1);
+    }
     if (failures) { printf("%d FAILED\n", failures); return 1; }
     printf("ALL OK\n");
     return 0;

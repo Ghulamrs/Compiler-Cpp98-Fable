@@ -29,12 +29,12 @@ bool hasInternalLinkage(const sema::Symbol* s)
     return false;
 }
 
-// cl's name of the scalar deleting destructor from the destructor's (or its thunk's): ??1D@@UEAA@XZ becomes
-// ??_GD@@UEAAPEAXI@Z, void* (unsigned int)
+// cl's name of the vector deleting destructor from the destructor's (or its thunk's): ??1D@@UEAA@XZ becomes
+// ??_ED@@UEAAPEAXI@Z, void* (unsigned int); the adjustor thunk ??_ED@@W7EAAPEAXI@Z
 std::string deletingName(const std::string& dtor)
 {
-    if (dtor.size() < 6 || dtor.compare(0, 3, "??1") != 0 || dtor.compare(dtor.size() - 3, 3, "@XZ") != 0) return dtor + "_G";
-    return "??_G" + dtor.substr(3, dtor.size() - 6) + "PEAXI@Z";
+    if (dtor.size() < 6 || dtor.compare(0, 3, "??1") != 0 || dtor.compare(dtor.size() - 3, 3, "@XZ") != 0) return dtor + "_E";
+    return "??_E" + dtor.substr(3, dtor.size() - 6) + "PEAXI@Z";
 }
 
 // appends n zero bytes to static data, extending a zero run that ends it
@@ -1641,6 +1641,10 @@ int IrGen::value(cxx::Expr* e)
         const sema::Type* elem = pt->kind == sema::Type::Pointer ? pt->inner : pt;
         bool isArray = e->type && e->type->decl && !e->type->decl->parts.empty() && e->type->decl->parts.back().kind == cxx::DeclaratorPart::Array;
         IrInst n = make(IrInst::Call, pt, line);
+        // the class's own operator new / new[] (its own or inherited, as lookup finds it), unless ::new
+        Symbol* classNew = !e->globalScope && e->placement.empty() && isClassType(elem) && elem->decl
+            ? classOperatorDelete(elem->decl, 0, isArray ? "operator new[]" : "operator new", 1) : 0;
+        if (classNew) need(classNew);
         if (isArray) {
             cxx::Expr* countExpr = e->type->decl->parts.back().arraySize;
             const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
@@ -1648,7 +1652,7 @@ int IrGen::value(cxx::Expr* e)
             int bytes = binary("*", count, lng, constant(sizeOf(elem) > 0 ? sizeOf(elem) : 1, lng, line), lng, lng, line);
             bool header = needsDtor(elem);   // the element count is kept in front of the elements for delete[]
             if (header) bytes = binary("+", bytes, lng, constant(8, lng, line), lng, lng, line);   // an 8-byte cookie, as MSVC
-            n.sub = "__new_array";
+            n.sub = classNew ? irName(classNew) : std::string("__new_array");
             n.args.push_back(IrOperand::temp(bytes, oldType(lng)));
             int p = emit(n);
             if (header) {
@@ -1666,8 +1670,8 @@ int IrGen::value(cxx::Expr* e)
             p = convert(value(e->placement[0]), m_semaTypes.decay(exprType(e->placement[0])), pt, line);
             for (size_t k = 1; k < e->placement.size(); ++k) value(e->placement[k]);
         } else {
-            n.sub = "__new";
-            n.args.push_back(IrOperand::imm(sizeOf(elem) > 0 ? sizeOf(elem) : 1, m_types.intType()));
+            n.sub = classNew ? irName(classNew) : std::string("__new");
+            n.args.push_back(IrOperand::imm(sizeOf(elem) > 0 ? sizeOf(elem) : 1, classNew ? oldType(m_semaTypes.sizeType()) : m_types.intType()));
             p = emit(n);
         }
         if (e->semaSym && e->semaSym->isConstructor) construct(e->semaSym, p, e->kids, 0, line);
@@ -1704,16 +1708,50 @@ int IrGen::value(cxx::Expr* e)
             m_block = xb;
             return constant(0, m_semaTypes.basic(sema::Type::Int), line);
         }
+        Symbol* adtor = dtors && e->arrayDelete && isClassType(pt->inner) && pt->inner->decl ? findSpecial(pt->inner->decl, '~') : 0;
+        if (adtor && adtor->isVirtual && adtor->vtableSlot >= 0) {
+            // delete[] of a class with a virtual destructor, as cl: an empty array is freed from its cookie, any
+            // other goes to the slot's vector deleting destructor with flags 3 (destroy the elements, free)
+            need(adtor);
+            const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
+            const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(adtor->ownerClass));
+            IrInst hd = make(IrInst::AddrIndex, pt, line); hd.extra = 1; hd.args.push_back(IrOperand::temp(p, oldType(pt))); hd.args.push_back(IrOperand::imm(-8, oldType(lng)));
+            const int cookie = emit(hd);
+            LValue hl; hl.kind = LValue::Mem; hl.addr = cookie; hl.type = lng;
+            const int count = load(hl, lng, line);
+            int vb = m_out->newBlock("delete.vector"), zb = m_out->newBlock("delete.empty");
+            condbr(toBool(count, lng, line), vb, zb, line);
+            m_block = zb;
+            freeArray(pt->inner->decl, cookie, count, line);
+            br(xb, line);
+            m_block = vb;
+            IrInst in = make(IrInst::VCall, m_semaTypes.basic(sema::Type::Void), line);
+            in.sub = irName(adtor);
+            in.extra = adtor->vtableSlot;
+            in.args.push_back(IrOperand::temp(adtor->vfptrOffset ? offsetAddress(p, cp, cp, adtor->vfptrOffset, line) : p, oldType(cp)));
+            in.args.push_back(IrOperand::imm(3, oldType(m_semaTypes.basic(sema::Type::UInt))));
+            emit(in);
+            br(xb, line);
+            m_block = xb;
+            return constant(0, m_semaTypes.basic(sema::Type::Int), line);
+        }
         if (!e->arrayDelete && pt->kind == sema::Type::Pointer) destroy(pt->inner, p, line, true);
         else if (e->arrayDelete && pt->kind == sema::Type::Pointer && needsDtor(pt->inner)) {
             const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
             IrInst hd = make(IrInst::AddrIndex, pt, line); hd.extra = 1; hd.args.push_back(IrOperand::temp(p, oldType(pt))); hd.args.push_back(IrOperand::imm(-8, oldType(lng)));
             int header = emit(hd);
             LValue hl; hl.kind = LValue::Mem; hl.addr = header; hl.type = lng;
-            forEachElement(pt->inner, p, load(hl, lng, line), false, line);
+            const int count = load(hl, lng, line);
+            forEachElement(pt->inner, p, count, false, line);
             p = header;
+            if (isClassType(pt->inner) && pt->inner->decl && !e->globalScope) {
+                // from the cookie through the class's operator delete[] (count * size + 8), as cl
+                freeArray(pt->inner->decl, header, count, line);
+                if (xb >= 0) { br(xb, line); m_block = xb; }
+                return constant(0, m_semaTypes.basic(sema::Type::Int), line);
+            }
         }
-        if (e->arrayDelete || pt->kind != sema::Type::Pointer || !isClassType(pt->inner) || !freeObject(pt->inner->decl, p, line)) {
+        if (e->arrayDelete || pt->kind != sema::Type::Pointer || !isClassType(pt->inner) || e->globalScope || !freeObject(pt->inner->decl, p, line)) {
             IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
             in.sub = e->arrayDelete ? "__delete_array" : "__delete";
             in.args.push_back(IrOperand::temp(p, oldType(pt)));
@@ -2757,14 +2795,39 @@ void IrGen::drainQueue()
     }
 }
 
-// the class-specific operator delete of cls (its own or a base's, as lookup finds it), or 0
-Symbol* IrGen::classOperatorDelete(Symbol* cls, int depth) const
+// the class-specific operator delete (or delete[]) of cls (its own or a base's, as lookup finds it), or 0
+Symbol* IrGen::classOperatorDelete(Symbol* cls, int depth, const char* name, size_t maxParams) const
 {
     if (!cls || !cls->members || depth > 32) return 0;
-    const std::vector<Symbol*>* v = cls->members->find("operator delete");
-    if (v) for (size_t i = 0; i < v->size(); ++i) if ((*v)[i]->kind == Symbol::Function && !(*v)[i]->params.empty() && (*v)[i]->params.size() <= 2) return (*v)[i];
-    for (size_t b = 0; b < cls->bases.size(); ++b) { Symbol* d = classOperatorDelete(cls->bases[b].cls, depth + 1); if (d) return d; }
+    const std::vector<Symbol*>* v = cls->members->find(name);
+    // the one-parameter form when the class declares both (C++98, as cl), else the sized one
+    if (v) for (size_t n = 1; n <= maxParams; ++n)
+        for (size_t i = 0; i < v->size(); ++i) if ((*v)[i]->kind == Symbol::Function && (*v)[i]->params.size() == n) return (*v)[i];
+    for (size_t b = 0; b < cls->bases.size(); ++b) { Symbol* d = classOperatorDelete(cls->bases[b].cls, depth + 1, name, maxParams); if (d) return d; }
     return 0;
+}
+
+// frees an array of class cls from its cookie (count elements follow it): through the class's operator delete[]
+// when lookup finds one, given count * size + 8 in the two-parameter form, as cl's vector deleting destructor
+// does; else through the global one
+void IrGen::freeArray(Symbol* cls, int cookie, int count, int line)
+{
+    const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+    const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
+    Symbol* op = classOperatorDelete(cls, 0, "operator delete[]");
+    int bytes = -1;
+    if (op && op->params.size() == 2) {
+        const int size = constant(sizeOf(cls->type), lng, line);
+        const int elems = binary("*", count, lng, size, lng, lng, line);
+        const int eight = constant(8, lng, line);
+        bytes = binary("+", elems, lng, eight, lng, lng, line);
+    }
+    if (op) need(op);
+    IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+    in.sub = op ? irName(op) : std::string("__delete_array");
+    in.args.push_back(IrOperand::temp(cookie, oldType(vp)));
+    if (bytes >= 0) in.args.push_back(IrOperand::temp(bytes, oldType(m_semaTypes.sizeType())));
+    emit(in);
 }
 
 // frees an object of class cls at p through its class-specific operator delete, with the complete object's size
@@ -2788,7 +2851,7 @@ std::string IrGen::deletingDestructor(Symbol* dtor, X86Module& x86, bool msvc)
     std::map<Symbol*, Symbol*>::iterator it = m_deleting.find(dtor);
     if (it != m_deleting.end()) return irName(it->second);
     Symbol* cls = dtor->ownerClass;
-    Symbol* fn = m_prog.newSymbol(Symbol::Function, "`scalar deleting destructor'", cls->members);
+    Symbol* fn = m_prog.newSymbol(Symbol::Function, "`vector deleting destructor'", cls->members);
     fn->ownerClass = cls;
     fn->isImplicit = true;                 // one copy survives linking, as cl's COMDAT
     fn->hasBody = true;
@@ -2804,7 +2867,10 @@ std::string IrGen::deletingDestructor(Symbol* dtor, X86Module& x86, bool msvc)
     return irName(fn);
 }
 
-// this->~D(); if (flags & 1) operator delete(this); return this
+// cl's vector deleting destructor:
+//   flags & 2 (delete[]): n = cookie before this; destroy this[n-1] .. this[0]; if (flags & 1) operator delete[]
+//                         (cookie, n * size + 8); return cookie
+//   else:                 this->~D(); if (flags & 1) operator delete(this); return this
 void IrGen::genDeletingDestructors()
 {
     for (; m_deletingDone < m_deletingOrder.size(); ++m_deletingDone) {
@@ -2816,13 +2882,44 @@ void IrGen::genDeletingDestructors()
         m_slots.clear(); m_loops.clear(); m_tryStack.clear(); m_tryCount = 0;
         prologue(fn);
         const sema::Type* u = m_semaTypes.basic(sema::Type::UInt);
-        callSpecial(dtor, thisTemp(line), -1, line);
+        const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
+        const sema::Type* ct = m_semaTypes.classType(dtor->ownerClass);
+        const sema::Type* cp = m_semaTypes.pointer(ct);
+        LValue rl; rl.kind = LValue::Local; rl.local = newLocal("tmp.result", cp, false); rl.type = cp;
         LValue fl; fl.kind = LValue::Local; fl.local = m_slots[fn->params[0]]; fl.type = u;
-        const int flagValue = load(fl, u, line);   // one statement each: the order of the IR must not depend on
-        const int one = constant(1, u, line);      // the host compiler's order of evaluating arguments
-        int bit = binary("&", flagValue, u, one, u, u, line);
-        int db = m_out->newBlock("delete"), xb = m_out->newBlock("done");
-        condbr(toBool(bit, u, line), db, xb, line);
+        const int flags0 = load(fl, u, line);      // one statement each: the order of the IR must not depend on
+        const int two = constant(2, u, line);      // the host compiler's order of evaluating arguments
+        const int arrayBit = binary("&", flags0, u, two, u, u, line);
+        int ab = m_out->newBlock("array"), sb = m_out->newBlock("scalar"), xb = m_out->newBlock("done");
+        condbr(toBool(arrayBit, u, line), ab, sb, line);
+
+        m_block = ab;
+        const int first = thisTemp(line);
+        IrInst hd = make(IrInst::AddrIndex, cp, line); hd.extra = 1;
+        hd.args.push_back(IrOperand::temp(first, oldType(cp))); hd.args.push_back(IrOperand::imm(-8, oldType(lng)));
+        const int cookie = emit(hd);
+        LValue hl; hl.kind = LValue::Mem; hl.addr = cookie; hl.type = lng;
+        const int count = load(hl, lng, line);
+        forEachElement(ct, first, count, false, line);
+        store(rl, cookie, cp, line);
+        const int flags1 = load(fl, u, line);
+        const int one1 = constant(1, u, line);
+        const int freeArr = binary("&", flags1, u, one1, u, u, line);
+        int fab = m_out->newBlock("delete.array");
+        condbr(toBool(freeArr, u, line), fab, xb, line);
+        m_block = fab;
+        freeArray(dtor->ownerClass, cookie, count, line);
+        br(xb, line);
+
+        m_block = sb;
+        callSpecial(dtor, thisTemp(line), -1, line);
+        const int self0 = thisTemp(line);
+        store(rl, self0, cp, line);
+        const int flags2 = load(fl, u, line);
+        const int one2 = constant(1, u, line);
+        const int freeOne = binary("&", flags2, u, one2, u, u, line);
+        int db = m_out->newBlock("delete");
+        condbr(toBool(freeOne, u, line), db, xb, line);
         m_block = db;
         const int self = thisTemp(line);
         if (!freeObject(dtor->ownerClass, self, line)) {
@@ -2832,10 +2929,12 @@ void IrGen::genDeletingDestructors()
             emit(del);
         }
         br(xb, line);
+
         m_block = xb;
         returnSequence(line);
+        const int result = load(rl, cp, line);
         IrInst r = make(IrInst::Ret, 0, line);
-        r.args.push_back(IrOperand::temp(thisTemp(line), m_out->locals[0].type));
+        r.args.push_back(IrOperand::temp(result, m_out->locals[0].type));
         emit(r);
         finishFunction(line);
     }
@@ -2893,7 +2992,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
                     const int adjust = s->vftables.empty() ? 0 : s->vftables[t].thunks[k];
                     if (m->isPureVirtual) { v.entries.push_back(""); continue; }
                     need(m);
-                    // the destructor's slot: the scalar deleting destructor (??_GD@@UEAAPEAXI@Z), as with cl
+                    // the destructor's slot: the vector deleting destructor (??_ED@@UEAAPEAXI@Z), as with cl
                     const std::string target = m->isDestructor ? deletingDestructor(m, x86, msvc) : irName(m);
                     if (adjust == 0) { v.entries.push_back(target); continue; }
                     const std::string thunk = target + " adjustor{" + numText(adjust) + "}";

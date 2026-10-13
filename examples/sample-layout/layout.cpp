@@ -251,3 +251,111 @@ int  vbNestedF(const VNF& f) { const VNE& e = f; const VNB& b = e; return f.a * 
 int  vbNestedG(VNG* g) { VNE* e = g; VNC* c = g; VNB* b = c; return g->a * 10000 + b->b * 1000 + c->c * 100 + e->e * 10 + g->g; }
 VNA* vbToVNA(VNG* g) { VNC* c = g; return c; }
 long vbNestedLife() { g_vbLog = 0; long ok = 0; { VNF f; VNG g; ok = f.a + g.a == 2 && g_vbLog == 12351235; g_vbLog = 0; } return ok * 10000 + g_vbLog; }
+
+int g_ovLog = 0;
+OV::OV() : o(0) {}
+int OV::a() const { return 1 + o; }
+int OV::f(int) const { return 2 + o; }
+int OV::b() const { return 3 + o; }
+int OV::f(double) const { return 4 + o; }
+int OV::c() const { return 5 + o; }
+OV::~OV() { g_ovLog = g_ovLog * 10 + 1; }
+int OV::f(char) const { return 6 + o; }
+OW::OW() { o = 10; }
+int OW::f(double) const { return 104 + o; }
+int OW::g() const { return 107 + o; }
+int OW::f(long) const { return 108 + o; }
+int OW::a() const { return 101 + o; }
+int OW::g(int) const { return 109 + o; }
+int OW::f(short) const { return 110 + o; }
+OW::~OW() { g_ovLog = g_ovLog * 10 + 2; }
+
+int ovCall(const OV* p, int which)
+{
+    switch (which) {
+    case 0: return p->a();
+    case 1: return p->f(1);
+    case 2: return p->b();
+    case 3: return p->f(1.0);
+    case 4: return p->c();
+    case 5: return p->f('x');
+    }
+    return -1;
+}
+
+int owCall(const OW* p, int which)
+{
+    switch (which) {
+    case 6: return p->g();
+    case 7: return p->f(1L);
+    case 8: return p->g(1);
+    case 9: return p->f((short)1);
+    }
+    return ovCall(p, which);
+}
+
+OV* makeOW() { return new OW; }
+void deleteOV(OV* p) { delete p; }
+
+long g_avLog = 0;
+int  g_avNext = 0;
+long g_avFreed = 0;
+AV::AV() : a(++g_avNext) {}
+AV::~AV() { g_avLog = g_avLog * 10 + a; }
+int AV::v() const { return a; }
+void AV::operator delete[](void* p, size_t n) { g_avFreed = (long)n; free(p); }
+AW::AW() : w(a + 5) {}
+AW::~AW() { g_avLog = g_avLog * 10 + w % 10; }
+int AW::v() const { return w; }
+AV* makeAVArray(int n) { return new AV[n]; }
+AW* makeAWArray(int n) { return new AW[n]; }
+void deleteAVArray(AV* p) { delete[] p; }
+void deleteAWArray(AW* p) { delete[] p; }
+
+long g_tnNew = 0, g_tnDel = 0, g_tnLog = 0;
+int  g_tnNext = 0;
+TN::TN() : t(++g_tnNext) {}
+TN::~TN() { g_tnLog = g_tnLog * 10 + t; }
+void* TN::operator new(size_t n) { g_tnNew = (long)n; return malloc(n); }
+void* TN::operator new[](size_t n) { g_tnNew = (long)n; return malloc(n); }
+void TN::operator delete(void* p, size_t n) { g_tnDel = (long)n; free(p); }
+void TN::operator delete[](void* p, size_t n) { g_tnDel = (long)n; free(p); }
+TM::TM() : m(t + 5) {}
+TM::~TM() { g_tnLog = g_tnLog * 10 + m % 10; }
+TN* makeTN() { return new TN; }
+TN* makeTNArray(int n) { return new TN[n]; }
+TM* makeTMArray(int n) { return new TM[n]; }
+void deleteTN(TN* p) { delete p; }
+void deleteTNArray(TN* p) { delete[] p; }
+void deleteTMArray(TM* p) { delete[] p; }
+TN* makeTNGlobal() { return ::new TN; }
+void deleteTNGlobal(TN* p) { ::delete p; }
+int ZG::f(char) const { return 4; }
+int ZG::g() const { return 1; }
+int ZG::f(int) const { return 2; }
+int ZG::f(double) const { return 3; }
+int zgCall(const ZG* p, int which)
+{
+    switch (which) {
+    case 0: return p->g();
+    case 1: return p->f(1);
+    case 2: return p->f(1.0);
+    case 3: return p->f('c');
+    }
+    return -1;
+}
+int YA::f(int) const { return 11; }
+int YA::f(double) const { return 12; }
+int YB::f(double) const { return 22; }
+int YC::f(int) const { return 31; }
+int YC::k() const { return 33; }
+int yaCall(const YA* p, int which) { return which == 0 ? p->f(1) : p->f(1.0); }
+int ycCall(const YC* p, int which) { return which == 0 ? p->f(1) : p->k(); }
+YA* makeYC() { return new YC; }
+int g_dnForm = 0;
+DN::DN() : d(1) {}
+DN::~DN() {}
+void DN::operator delete[](void* p) { g_dnForm = 1; free(p); }
+void DN::operator delete[](void* p, size_t) { g_dnForm = 2; free(p); }
+DN* makeDNArray(int n) { return new DN[n]; }
+void deleteDNArray(DN* p) { delete[] p; }

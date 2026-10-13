@@ -158,12 +158,14 @@ private:
     void destructorCleanup(sema::Symbol* fn);
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
     static std::string vtableName(const sema::Symbol* cls, size_t t);
-    // MSVC's scalar deleting destructor of a virtual destructor (what its vtable slot holds): destroys the complete
-    // object and frees it when bit 0 of its flags is set; made on first use, generated after the other functions
+    // MSVC's vector deleting destructor of a virtual destructor (what its vtable slot holds): with bit 1 of its
+    // flags clear it destroys the complete object, with bit 1 set the array whose count is in the cookie before
+    // it, and frees it when bit 0 is set; made on first use, generated after the other functions
     std::string deletingDestructor(sema::Symbol* dtor, X86Module& x86, bool msvc);
     void genDeletingDestructors();
-    sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth) const;
+    sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth, const char* name = "operator delete", size_t maxParams = 2) const;
     bool freeObject(sema::Symbol* cls, int p, int line);
+    void freeArray(sema::Symbol* cls, int cookie, int count, int line);
     void need(sema::Symbol* fn);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
     int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);

@@ -1453,7 +1453,7 @@ Expr* Parser::unary()
             return u;
         }
         if (op == "(") { Expr* c; if (tryCastExpr(c)) return c; }
-        if (op == "::" && (peek().text == "new" || peek().text == "delete")) advance();
+        if (op == "::" && (peek().text == "new" || peek().text == "delete")) { advance(); Expr* g = unary(); if (g && (g->kind == Expr::New || g->kind == Expr::Delete)) g->globalScope = true; return g; }
     }
     if (cur().kind == PpToken::Ident) {
         const std::string& w = cur().text;

@@ -37,6 +37,24 @@ the default), with the items found since. Each was reproduced with a small progr
   does a non-virtual `delete` (IrGen.cpp freeObject; review repro u.cpp, KD : SA, K).
 - A destructor stores its own class's vptrs on entry (IrGen.cpp genFunction), so a virtual call in a base's
   destructor reaches the base's function; sample-layout checks it in constructors and destructors, both compilers.
+- 15, vtable slots grouped by overload: a class's new virtual functions are ordered as cl orders them, by
+  declaration but with the overloads of a name together where the name is first declared in the class (an
+  overrider counts), the last declared first (Sema.cpp completeClass); sample-layout OV/OW and cl's CW : OW, called
+  through base pointers by both compilers at -O0..-O3.
+- 17, `delete[]` of a polymorphic class across compilers: the destructor slot holds cl's vector deleting destructor
+  (`??_E`, COMDAT; flags bit 1: the count from the 8-byte cookie, the elements destroyed last first, freed from the
+  cookie through the class's `operator delete[]` with count * size + 8, or the global one), and `delete[]` calls it
+  with flags 3, an empty array freed directly, as cl (IrGen.cpp genDeletingDestructors, freeArray, Delete);
+  sample-layout AV/AW arrays allocated by each compiler and deleted by the other, empty arrays too.
+- 21, class-specific allocation: a new-expression calls the class's own (or inherited) `operator new` / `new[]`
+  with cl's size (count * size + 8 with a cookie), and `delete[]` of a class with a cookie frees through its
+  `operator delete[]` (count * size + 8); `::new` and `::delete` bypass them (CxxParser.cpp unary,
+  Expr::globalScope, IrGen.cpp New/Delete); sample-layout TN/TM, allocated by each compiler and deleted by the other.
+- Review of the slot and `??_E` work: the overload grouping counts a non-virtual declaration of the name (ZG); an
+  override of a function that a middle class hides is found in the bases' tables, not by name lookup (YC::f(int)
+  over YA::f(int) past YB::f(double); before, YC got a new slot and `YA*` calls ran YA::f) (Sema.cpp
+  completeClass); a class declaring both `operator delete[](void*)` and the sized form uses the first, as cl, and
+  likewise `operator delete` (IrGen.cpp classOperatorDelete); all in sample-layout, both compilers.
 - 18, callee side: a variadic function keeps its parameters in their home slots and its prologue spills rcx,
   rdx, r8 and r9 there (named floats from xmm0-xmm3); `include/cstdarg`, `stdarg.h` and `vprintf`/`vfprintf`/
   `vsprintf` in `cstdio` give va_list/va_start/va_arg/va_end over that area, as MSVC's vadefs.h (X86.cpp).
@@ -88,8 +106,9 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 |---|---|---|---|---|
 | 14 | 23: virtual bases. Sema now lays them out as cl (Sema::layoutClass, layoutVbtables: own or shared vbptr injected as cl does, virtual bases once after nvSize in cl's order, vbtable entries and names; test 17 checks `sample-front/vbase-layout.cpp` against `/d1reportAllClassLayout`); `--compile6` compiles non-polymorphic ones (vbtable data, conversions through the vbptr, the "most derived" flag as the constructors' last parameter, `??1` plus the vbase destructor `??_D`; IrGen::toBase, storeVbptrs, vbaseDestructor; nested virtual bases with their vbptrs in the virtual part; test 13 sample-layout across both compilers). Still refused (S130, driver/main.cpp virtualBaseRefusal): polymorphic classes with virtual bases (the vfptr inside the virtual base, a class's own vfptr only for new virtuals, overrides through adjustor thunks, vtordisp and `$4` thunks), empty or over-aligned virtual bases (cl's padding), `#pragma pack`, vbtable names with paths of several bases | refused (S130) for those | large | layout (later) |
 | 14b | polymorphic virtual bases, what row 14 leaves refused (S130, driver/main.cpp virtualBaseRefusal, sample-front/vbase.cpp): Sema::layoutClass still gives a class a vfptr of its own for a polymorphic virtual base (cl: only for new virtual functions; the vfptr stays in the virtual base subobject) and completeClass takes a virtual base as primary base; left: vftables of the virtual bases at their places (`??_7D@@6BV@@@`), overrides reached through them with adjustor thunks computed from the virtual base's offset, vtordisp fields (4 bytes before a virtual base whose virtual function a class with a user constructor or destructor overrides) and the `$4` vtordisp thunks, the vptr stores in constructors and destructors for the virtual part, the vbtable-relative this of the vbase destructor `??_D` for a virtual `~D`; also empty or over-aligned virtual bases (cl's 4-byte padding), `#pragma pack`, and vbtable names with paths of several bases | refused (S130) | large | layout |
-| 17 | `delete[]` of an array of a polymorphic class across compilers: cl calls the vector deleting destructor (`??_E`, flags bit 1) through the slot, which holds cppparse's scalar one | wrong free in mixed links | small | layout |
 | 20 | vftable names: two tables introduced by the same class are now named after the bases that tell them apart (`??_7G@@6BQ1@@@`, `??_7G@@6BQ2@@@`, IrGen.cpp registerMetadata); left: cl's full rule (clang's MicrosoftVTableContext MangledPath), e.g. `struct F : X, D` (D : A, B, C) where cl names one table `??_7F@@6B@` and cppparse `??_7F@@6BX@@@` (review repro t2.cpp); paths longer than one class | wrong names in mixed links (both COMDATs kept) | small | layout |
+| 21 | left of class-specific allocation: a constructor that throws inside a new-expression does not free the memory through the matching operator delete (cl does; cppparse frees nothing, with the global operators either); placement forms of a class's operator new (`new (arena) T` with `T::operator new(size_t, Arena&)`) are not looked up (the placement argument is taken as the address); `delete[]` of a class with a trivial destructor (no cookie) and a two-parameter `operator delete[]` frees through the global one. Repro: `int freed; struct T { T() { throw 1; } static void* operator new(size_t n) { return malloc(n); } static void operator delete(void* p) { ++freed; free(p); } }; try { new T; } catch (int) {}`: cl `freed == 1`, cppparse 0. Placement: `struct A {}; struct P { static void* operator new(size_t n, A&) { return malloc(n); } }; A a; P* p = new (a) P;`: cl calls P's operator new, cppparse uses `&a` as the address. No cookie: `struct Q { static void operator delete[](void* p, size_t n) { log(n); free(p); } }; delete[] new Q[2];`: cl logs 2, cppparse calls the global `operator delete[]` | leak, wrong allocator | small | layout |
+| 22 | an element destructor that throws during `delete[]` (vector deleting destructor, IrGen.cpp genDeletingDestructors, and the non-virtual `delete[]` path, forEachElement): cl destroys the remaining elements in `??_M`'s cleanup and then rethrows (log 5 4 3 2 1); cppparse stops at the throwing element (log 5 4 3) and frees nothing. Needs a cleanup region around the element loop that destroys the rest. Repro: `long lg; struct W { int i; W(); virtual ~W() { lg = lg * 10 + i; if (i == 3) throw 1; } }; int n; W::W() : i(++n) {}` (C++98: the destructor may throw), then `W* p = new W[5]; try { delete[] p; } catch (int) {}`: cl `lg == 54321` and the exception reaches the handler, cppparse `lg == 543` | elements not destroyed, leak | small | layout |
 | 18 | member pointers to virtual functions (cl's vcall thunks `??_9`) | not supported | medium | layout |
 | 19 | covariant return through a secondary base (`CD* CD::self()` over `SB* SB::self()`, SB at 16): needs cl's return-adjusting thunk and its slot layout. `--compile6` refuses it (S131, driver/main.cpp, sample-front/covariant.cpp; review repro u.cpp); only the first overridden function is checked | refused (S131) | medium | layout |
 
@@ -105,8 +124,8 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   scalarConstant), which shifts every later `$TSS<n>` of the function against cl's, so with cl inlining
   the function such an object can be constructed twice (repro: review-e t6/d6, run.ps1 t6 d6). Giving such statics a private guard is not enough: cl reads them as static data from the shared COMDAT, so cppparse must emit their folded value as data (needs a floating constant evaluator for IrGlobal data); statics in nested blocks
   use cppparse's block numbers, not cl's `?4`/`?6`/`?7` scheme; exceptions do not cross between cl's
-  and cppparse's runtimes (a cl throw into a cppparse frame fails fast); vtable slots grouped by overload as MSVC does
-  (Sema.cpp:1169-1174) (the destructor slot holding the scalar deleting destructor is done).
+  and cppparse's runtimes (a cl throw into a cppparse frame fails fast) (vtable slots grouped by overload and the
+  destructor slot holding the deleting destructor are done).
 - design-table-exceptions.md section 7: an exception edge from every call to its landing pad, then GVN and
   register values across handlers; the main lever on code size (1.57 times cl's on the matrix sample).
 

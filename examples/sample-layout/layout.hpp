@@ -105,6 +105,61 @@ struct GP { GP(); virtual ~GP(); virtual int fp() const; int p; };
 struct GQ1 : GP { };
 struct GQ2 : GP { virtual int fq() const; };
 struct GG : GQ1, GQ2 { int fp() const; };
+// vftable slots of overloads, as cl orders the new virtual functions of a class: by declaration, but the
+// overloads of a name together where the name is first declared (an overrider counts), the last declared
+// first. OV: a, f(char), f(double), f(int), b, c, ~OV. OW adds f(short), f(long), g(int), g() (f first: its
+// first declaration in OW is the overrider f(double)). The driver derives CW from OW, built by cl.
+struct OV { OV(); virtual int a() const; virtual int f(int) const; virtual int b() const; virtual int f(double) const;
+            virtual int c() const; virtual ~OV(); virtual int f(char) const; int o; };
+struct OW : OV { OW(); int f(double) const; virtual int g() const; virtual int f(long) const; int a() const;
+                 virtual int g(int) const; virtual int f(short) const; ~OW(); };
+extern int g_ovLog;                            // ~OW appends 2, ~OV 1
+int  ovCall(const OV* p, int which);           // 0 a(), 1 f(int), 2 b(), 3 f(double), 4 c(), 5 f(char)
+int  owCall(const OW* p, int which);           // 0-5 as ovCall, 6 g(), 7 f(long), 8 g(int), 9 f(short)
+OV*  makeOW();
+void deleteOV(OV* p);
+// arrays of a polymorphic class: cl's delete[] calls the destructor slot with flags 3, which holds the vector
+// deleting destructor (??_EAV@@UEAAPEAXI@Z): it reads the count from the 8-byte cookie in front of the
+// elements, destroys them last first and frees from the cookie through the class's operator delete[]
+struct AV { AV(); virtual ~AV(); virtual int v() const; static void operator delete[](void* p, size_t n); int a; };
+struct AW : AV { AW(); ~AW(); int v() const; int w; };
+extern long g_avLog;                           // each destructor appends its object's digit
+extern int  g_avNext;                          // the next AV::a
+extern long g_avFreed;                         // the size AV::operator delete[] was given (0: not called)
+AV*  makeAVArray(int n);                       // new AV[n] by cppparse
+AW*  makeAWArray(int n);
+void deleteAVArray(AV* p);                     // delete[] p by cppparse
+void deleteAWArray(AW* p);
+// class-specific operator new, new[], delete and delete[] (TM inherits them): new-expressions of both compilers
+// call them with cl's sizes (count * size + 8 for an array with a cookie); ::new and ::delete bypass them
+struct TN { TN(); ~TN(); static void* operator new(size_t n); static void* operator new[](size_t n);
+            static void operator delete(void* p, size_t n); static void operator delete[](void* p, size_t n); int t; };
+struct TM : TN { TM(); ~TM(); int m; };
+extern long g_tnNew, g_tnDel, g_tnLog;         // the sizes the operators were given; the destructors' digits
+extern int  g_tnNext;
+TN*  makeTN();
+TN*  makeTNArray(int n);
+TM*  makeTMArray(int n);
+void deleteTN(TN* p);
+void deleteTNArray(TN* p);
+void deleteTMArray(TM* p);
+TN*  makeTNGlobal();                           // ::new TN
+void deleteTNGlobal(TN* p);                    // ::delete p
+// slot grouping counts a non-virtual declaration of the name (ZG: f(double), f(int), g), and an override of a
+// function a middle class hides is found in the base's table (YC::f(int) overrides YA::f(int) past YB)
+struct ZG { int f(char) const; virtual int g() const; virtual int f(int) const; virtual int f(double) const; };
+struct YA { virtual int f(int) const; virtual int f(double) const; };
+struct YB : YA { virtual int f(double) const; };
+struct YC : YB { virtual int f(int) const; virtual int k() const; };
+int  zgCall(const ZG* p, int which);           // 0 g(), 1 f(1), 2 f(1.0), 3 f('c')
+int  yaCall(const YA* p, int which);           // 0 f(1), 1 f(1.0)
+int  ycCall(const YC* p, int which);           // 0 f(1), 1 k()
+YA*  makeYC();
+// both forms of operator delete[]: the one-parameter one is used (C++98, as cl)
+struct DN { DN(); ~DN(); static void operator delete[](void* p); static void operator delete[](void* p, size_t n); int d; };
+extern int g_dnForm;                           // 1 or 2: which operator delete[] ran
+DN*  makeDNArray(int n);
+void deleteDNArray(DN* p);
 
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \

@@ -763,6 +763,13 @@ union or struct in a class are members of the class, placed at the
 unnamed member that holds them. The polymorphic bases are placed first: the
 first one is at offset 0 and the class shares its vptr and extends its
 vtable (`DP : NP, PB` with a virtual PB is 24 bytes, PB at 0, NP at 16).
+A class's new virtual functions take their slots in declaration order,
+except that the overloads of a name sit together where the name is first
+declared in the class (an overrider counts) and the last declared comes
+first, as cl orders them (`a, f(int), b, f(double), ~V` gives `a,
+f(double), f(int), b, ~V`; layout.hpp OV, OW); a non-virtual declaration
+of the name counts too. An override is found among the slots of the
+bases' tables, so a function a middle class hides is still overridden.
 Every other polymorphic base subobject keeps its own vfptr, and the class
 gets a secondary vftable for each (`Symbol::vftables`, named as cl names
 them: `??_7SD@@6BSB@@@`), which the constructor stores next to the primary
@@ -772,13 +779,24 @@ function moves `this` back on entry, and an override held by the primary
 table as well is reached from the secondary one through an adjustor thunk
 (`sub rcx, 16; jmp`, named `?f@SD@@WBA@EBAHXZ`, COMDAT); a destructor always
 takes the complete object, so its secondary slots are thunks.
-A virtual destructor's slot holds MSVC's scalar deleting destructor
-(`??_GSD@@UEAAPEAXI@Z`: destroy, then free when bit 0 of its flags is
-set), so `delete` through any base frees the complete object and cl's
-`delete` of cppparse's objects (and the other way round) works. It
-frees through the class's own `operator delete` when lookup in the
+A virtual destructor's slot holds MSVC's vector deleting destructor
+(`??_ESD@@UEAAPEAXI@Z`, COMDAT, the name cl's tables use): with bit 1 of
+its flags clear it destroys the object and frees it when bit 0 is set;
+with bit 1 set it destroys the array whose count is in the 8-byte cookie
+in front of it, last element first, and frees it from the cookie when
+bit 0 is set. `delete` calls it with flags 1 and `delete[]` with flags 3
+(an empty array is freed from its cookie directly), as cl does, so
+`delete` through any base frees the complete object, and objects and
+arrays allocated by either compiler are deleted by the other (cl's own
+tables name `??_E` as a weak external that falls back to its `??_G`;
+cppparse emits only `??_E`). It frees through the class's own `operator
+delete` (`operator delete[]`, given count * size + 8) when lookup in the
 complete class finds one (with the complete object's size for the
-two-parameter form), as a non-virtual `delete` does. A
+two-parameter form), as a non-virtual `delete` does. A new-expression
+calls the class's own (or inherited) `operator new` / `operator new[]`
+with cl's size (count * size + 8 when the array has a cookie), and
+`delete[]` frees an array with a cookie through the class's `operator
+delete[]`; `::new` and `::delete` use the global ones. A
 destructor stores its own class's vptrs on entry, as a constructor does
 after its bases, so a virtual call made while a base part is built or
 destroyed reaches that base's function. Virtual base classes are laid out
@@ -1031,10 +1049,8 @@ constructors both ways, calls through pointers to functions (`(*fp)(x)`,
 pointers returned by calls), variadic class arguments (passed as by-value
 parameters would be) and members cl ignores for the result rule (a member
 with a constructor or private data still allows `rax`; a const or reference
-member, which deletes the copy assignment, does not). The remaining differences from cl's ABI (the
-virtual destructor slot holds the destructor rather than a scalar deleting
-destructor, a non-polymorphic first base is laid out before a polymorphic
-one) are not
+member, which deletes the copy assignment, does not). The remaining differences from cl's ABI
+(docs/next-targets.md) are not
 hit between the units of cppparse on `sample-opt`: `sandbox/scripts/mix.ps1`,
 which links each cppparse object among cl-built ones, runs every
 combination correctly.

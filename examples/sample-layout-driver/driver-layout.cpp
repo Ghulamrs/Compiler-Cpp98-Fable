@@ -186,6 +186,62 @@ int main()
         expect("gg fq() through cl's GQ2*", static_cast<GQ2*>(gg)->fq(), 98);
         delete static_cast<GQ2*>(gg);
     }
+    {
+        // virtual bases: objects built by one compiler, converted, copied and destroyed by the other
+        g_vbLog = 0;
+        VX x;
+        expect("VX built by cl: log", g_vbLog, 1234);
+        expect("v through VL* (cppparse)", vbReadV(&x), 7);
+        expect("v and r through VR& (cppparse)", vbReadVR(x), 73);
+        expect("VX* to VB* (cppparse), null", vbToVB(0) != 0, 0);
+        expect("VX* to VB* (cppparse)", (long)((char*)vbToVB(&x) - (char*)&x), (long)((char*)static_cast<VB*>(&x) - (char*)&x));
+        VM m;
+        expect("VM read by cppparse", vbReadVM(&m), 5 + 7 + 5);
+        VN n;
+        expect("VN read by cppparse", vbReadVN(n), 79);
+        g_vbLog = 0;
+        VX* p = vbMakeVX();
+        expect("VX built by cppparse: log", g_vbLog, 1234);
+        expect("v of cppparse's VX through cl's VL*", static_cast<VL*>(p)->v, 7);
+        expect("r of cppparse's VX through cl's VR*", static_cast<VR*>(p)->r + static_cast<VR*>(p)->v, 10);
+        g_vbLog = 0;
+        vbDelete(p);
+        expect("VX deleted by cppparse: log", g_vbLog, 69);
+        p = new VX;
+        g_vbLog = 0;
+        vbDelete(p);
+        expect("cl's VX deleted by cppparse: log", g_vbLog, 69);
+        p = vbMakeVX();
+        g_vbLog = 0;
+        delete p;
+        expect("cppparse's VX deleted by cl: log", g_vbLog, 69);
+        expect("VX on cppparse's stack: log", vbOnStack(), 123469);
+        expect("VX copied by cppparse", vbCopy(x), 107234);
+        {
+            VX c = x;
+            expect("cl's copy read by cppparse", vbReadV(&c) * 10 + vbReadVR(c) % 10, 1073);
+        }
+        expect("new VX[2], delete[] by cppparse", vbArray(2), 16969);
+        VY y;
+        expect("VY (VB named by the most derived class)", vbSumVY(y), 7 + 2 + 3 + 4 + 6);
+        VZ z;
+        expect("VZ (vbptrs shared from VX at 8)", vbSumVZ(z), 7384);
+        VD d;
+        expect("VD v d", d.v * 10 + d.d, 71);
+        g_vbLog = 0;
+        {
+            VNF f;
+            expect("VNF built by cl: log", g_vbLog, 1235);
+            expect("VNF read by cppparse", vbNestedF(f), 12356);
+            VNG g;
+            expect("VNG read by cppparse", vbNestedG(&g), 12358);
+            expect("VNG* to VNA* (cppparse)", (long)((char*)vbToVNA(&g) - (char*)&g), (long)((char*)static_cast<VNA*>(&g) - (char*)&g));
+            g_vbLog = 0;
+        }
+        expect("VNF and VNG destroyed by cl: log", g_vbLog, 7979);
+        expect("VNF and VNG on cppparse's stack: log", vbNestedLife(), 17979);
+        g_vbLog = 0;
+    }
 
     if (failures) { printf("%d FAILED\n", failures); return 1; }
     printf("ALL OK\n");

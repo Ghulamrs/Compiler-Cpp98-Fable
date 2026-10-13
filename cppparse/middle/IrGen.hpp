@@ -71,8 +71,9 @@ private:
         int               flag;        // local byte: 1 while the object is constructed
         bool              guarded;     // the normal-path destruction must test the flag (temporary of a conditional arm)
         bool              unwindOnly;  // a member built by a constructor: destroyed only when the body throws
+        bool              baseSubobject;   // a base part: destroyed without its virtual bases
         std::string       abortGuard;  // a static local's initializer: its guard global, handed to _Init_thread_abort
-        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false) {}
+        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false) {}
     };
     struct ExitThunk {                 // destroys a global or static local at exit; registered with atexit once it is built
         sema::Symbol*     fn;
@@ -89,7 +90,17 @@ private:
     int  copySize(const sema::Type* t) const { return t && t->kind == sema::Type::Class && t->decl && t->decl->layoutDone && t->decl->nvSize == 0 ? 0 : sizeOf(t); }
     int  alignOf(const sema::Type* t) const { return m_semaTypes.alignOf(t); }
     bool isClassType(const sema::Type* t) const { t = m_semaTypes.unref(t); return t && t->kind == sema::Type::Class; }
-    bool baseOffset(sema::Symbol* derived, sema::Symbol* base, int& offset, int depth = 0) const;
+    bool baseOffset(sema::Symbol* derived, sema::Symbol* base, int& offset, int depth = 0) const;   // not through virtual bases
+    // MSVC's virtual bases: base is reached through the virtual base at entry index of derived's vbtable (the
+    // one at its vbptrOffset), then rest bytes further; toBase converts a non-null address either way
+    bool virtualBasePath(sema::Symbol* derived, sema::Symbol* base, int& index, int& rest) const;
+    bool isBaseOf(sema::Symbol* derived, sema::Symbol* base) const { int o = 0, i = 0, r = 0; return baseOffset(derived, base, o) || virtualBasePath(derived, base, i, r); }
+    static bool hasVbases(const sema::Symbol* cls) { return cls && !cls->vbases.empty(); }
+    int  toBase(int addr, sema::Symbol* derived, sema::Symbol* base, int line);
+    static std::string vbtableName(const sema::Symbol* cls, size_t t);
+    void storeVbptrs(sema::Symbol* cls, int objAddr, int line);
+    sema::Symbol* vbaseDestructor(sema::Symbol* cls);   // cl's ??_D: the destructor of a complete object
+    void genVbaseDestructor(sema::Symbol* fn);
     std::string throwDescriptorFor(const sema::Type* t) const;
 
     // special members
@@ -115,7 +126,7 @@ private:
     void constructDefault(const sema::Type* t, int addr, int line);
     void forEachElement(const sema::Type* elem, int base, int count, bool construct, int line);
     int  materialize(cxx::Expr* e, const sema::Type* t, int dst, int line);
-    void destroy(const sema::Type* t, int objAddr, int line, bool viaVtable);
+    void destroy(const sema::Type* t, int objAddr, int line, bool viaVtable, bool complete = true);   // complete: with its virtual bases
 
     // lifetimes
     int  registerCleanup(int slot, const sema::Type* t, bool viaPointer, int mode, int line);
@@ -219,6 +230,10 @@ private:
     std::map<sema::Symbol*, sema::Symbol*> m_deleting;     // virtual destructor -> its deleting destructor
     std::vector<sema::Symbol*> m_deletingOrder;            // the virtual destructors, in the order their deleting ones were made
     size_t                     m_deletingDone;
+    std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtors;   // class -> its vbase destructor (??_D)
+    std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtorOf;  // vbase destructor -> its class
+    int                        m_ctorFlag;      // the "most derived" flag the next constructor call passes (1, 0 for a base)
+    int                        m_vbFlagSlot;    // the constructor's own flag parameter, or -1
     int                        m_staticCount;
     int                        m_guardCount;    // guarded static locals so far in the function (cl's $TSS<n>)
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block

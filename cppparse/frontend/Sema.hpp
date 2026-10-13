@@ -117,6 +117,19 @@ struct VfTable {
     VfTable() : offset(0), introducedBy(0) {}
 };
 
+// one vbptr of a class with virtual bases and its vbtable (MSVC: ??_8D@@7B@): entries[0] is the offset of the
+// vbptr from the start of the subobject that owns it (negated), entries[k] the offset of the virtual base
+// order[k - 1] from the vbptr, in a complete object of the class
+struct VbTable {
+    int                  offset;          // of the vbptr in the class
+    Symbol*              introducedBy;    // the class whose own vbptr this is
+    std::vector<Symbol*> order;           // the virtual bases indexed by the table (index k + 1)
+    std::vector<int>     entries;
+    std::vector<Symbol*> path;            // the bases that name the table apart (cl's ??_8VX@@7BVL@@@)
+    Symbol*              nextToMangle;    // the base appended to path when two tables would share a name
+    VbTable() : offset(0), introducedBy(0), nextToMangle(0) {}
+};
+
 struct Symbol {
     enum Kind { Namespace, Class, Enum, Typedef, Variable, Function, Enumerator, TemplateParam, ClassTemplate, FunctionTemplate, Label };
     Kind          kind;
@@ -140,6 +153,14 @@ struct Symbol {
     std::vector<Symbol*>     vtable;      // virtual functions in slot order (including inherited)
     std::vector<VfTable>     vftables;    // every vfptr of the class: [0] the one at offset 0 (fns == vtable), then the secondary ones
     int           vptrOffset;             // -1 when no vptr
+    // MSVC's virtual bases (Sema::layoutClass): every virtual base, direct or inherited, in cl's order (depth
+    // first, a base's own virtual bases before it), each placed once after the non-virtual part (nvSize) at
+    // vbaseOffsets[i] of a complete object; vbptrOffset is the vbptr whose table indexes them all (own or shared
+    // with the first non-virtual base that has one), -1 without virtual bases; vbtables: every vbptr
+    std::vector<Symbol*>     vbases;
+    std::vector<int>         vbaseOffsets;
+    std::vector<VbTable>     vbtables;
+    int           vbptrOffset;
     cxx::ClassDecl* classAst;
     // functions
     std::vector<Symbol*>     params;

@@ -781,11 +781,35 @@ complete class finds one (with the complete object's size for the
 two-parameter form), as a non-virtual `delete` does. A
 destructor stores its own class's vptrs on entry, as a constructor does
 after its bases, so a virtual call made while a base part is built or
-destroyed reaches that base's function. Virtual base classes are not laid
-out as cl lays them out yet (no vbptr, no shared subobject): `--compile6`
-refuses a class that has one, directly or through a base, with S130 and
-writes no object (test 17, `examples/sample-front/vbase.cpp`); `--sema6`
-and the reports accept them. Likewise an override with a covariant return
+destroyed reaches that base's function. Virtual base classes are laid out
+as cl lays them out (Sema::layoutClass): the class shares the vbptr of its
+first non-virtual base that has one, or gets its own after the non-virtual
+bases, the members moved down past it as cl injects it (`VN : NB, virtual
+VB { short n; }`: vbptr at 8, n at 18); every virtual base, direct or
+inherited, is placed once after the non-virtual part (nvSize), in cl's
+order, and each vbptr has its vbtable (entries and the bases that name it
+apart, `??_8VX@@7BVL@@@`); test 17 compares sizes and vbtables with cl's
+`/d1reportAllClassLayout` (`examples/sample-front/vbase-layout.cpp`).
+`--compile6` compiles the non-polymorphic ones as cl does: the vbtables
+are read-only COMDAT data (`??_8D@@7B@`); a conversion to a virtual base
+(and member access and calls through it) loads the vbptr and the base's
+entry, a null pointer staying null; a constructor takes cl's "most
+derived" flag as its last parameter (after `this` when variadic): the
+creator passes 1, and the constructor then stores the vbptrs and builds the
+virtual bases first, while the non-virtual bases get 0; `~D` (`??1`)
+destroys only the non-virtual part and the vbase destructor (`??_D`),
+which stack objects, members, arrays and `delete` use, destroys the
+virtual bases after it. A virtual base with virtual bases of its own keeps
+its vbptr in the virtual part, stored by the most derived constructor, its
+table named after the base it comes through as cl names it (test 13,
+sample-layout: a diamond, shared and injected vbptrs, nested virtual bases,
+copies, arrays and logs, built and destroyed across both compilers). Still
+refused with S130 (test 17, `examples/sample-front/vbase.cpp`): polymorphic
+classes with virtual bases (the vfptr inside the virtual base, vtordisp),
+empty or over-aligned virtual bases, `#pragma pack`,
+and vbtables whose names need a path of several bases; `--sema6` and the
+reports accept them.
+Likewise an override with a covariant return
 type whose conversion moves the pointer (`CD* self()` over `SB* self()`
 with SB at 16 in CD) would need cl's return-adjusting thunk: S131
 (`covariant.cpp`).

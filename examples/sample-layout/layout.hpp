@@ -132,7 +132,52 @@ struct GG : GQ1, GQ2 { int fp() const; };
     X(sizeof(DQ)) X(LAYOUT_BASE(DQ, NP)) X(LAYOUT_BASE(DQ, E)) X(LAYOUT_BASE(DQ, PB)) X(LAYOUT_FIELD(DQ, q)) \
     X(sizeof(DR)) X(LAYOUT_BASE(DR, NP)) X(LAYOUT_BASE(DR, PB)) X(LAYOUT_FIELD(DR, r)) \
     X(sizeof(SD)) X(LAYOUT_BASE(SD, SA)) X(LAYOUT_BASE(SD, SB)) X(LAYOUT_FIELD(SD, sd)) \
-    X(sizeof(SE)) X(LAYOUT_BASE(SE, SB)) X(LAYOUT_BASE(SE, NP)) X(LAYOUT_FIELD(SE, se))
+    X(sizeof(SE)) X(LAYOUT_BASE(SE, SB)) X(LAYOUT_BASE(SE, NP)) X(LAYOUT_FIELD(SE, se)) \
+    X(sizeof(VB)) X(sizeof(VD)) X(LAYOUT_FIELD(VD, d)) X(sizeof(VL)) X(sizeof(VX)) X(LAYOUT_BASE(VX, VR)) \
+    X(LAYOUT_FIELD(VX, x)) X(sizeof(VN)) X(LAYOUT_FIELD(VN, n)) X(sizeof(VM)) X(LAYOUT_FIELD(VM, m)) X(sizeof(VY)) \
+    X(LAYOUT_FIELD(VY, y)) X(sizeof(VZ)) X(LAYOUT_BASE(VZ, VX)) X(LAYOUT_FIELD(VZ, z)) \
+    X(sizeof(VNB)) X(sizeof(VNC)) X(sizeof(VNE)) X(sizeof(VNF)) X(LAYOUT_BASE(VNF, VNE)) X(LAYOUT_FIELD(VNF, f)) X(sizeof(VNG))
+
+// ---- virtual bases (MSVC: vbptr, vbtables, the "most derived" flag, the vbase destructor ??_D) -----------
+// A class with virtual bases shares the vbptr of its first non-virtual base that has one or gets its own after
+// the non-virtual bases; each virtual base is placed once, after the non-virtual part (a diamond shares it).
+// The conversions to a virtual base go through the vbtable; the constructor called with "most derived" set
+// stores the vbptrs and builds the virtual bases; ??_D destroys them after ~D. Both compilers build, convert,
+// copy and destroy these objects; the constructors and destructors log their digits in g_vbLog.
+extern long g_vbLog;
+struct VB { int v; VB() : v(7) { g_vbLog = g_vbLog * 10 + 1; } VB(const VB& o) : v(o.v + 100) { g_vbLog = g_vbLog * 10 + 8; } ~VB() { g_vbLog = g_vbLog * 10 + 9; } };
+struct VD : virtual VB { int d; VD(); ~VD(); };
+struct VL : virtual VB { int l; VL() : l(2) { g_vbLog = g_vbLog * 10 + 2; } };
+struct VR : virtual VB { int r; VR() : r(3) { g_vbLog = g_vbLog * 10 + 3; } ~VR() { g_vbLog = g_vbLog * 10 + 6; } };
+struct VX : VL, VR { int x; VX() : x(4) { g_vbLog = g_vbLog * 10 + 4; } };   // the diamond: one VB, at 40
+struct VN : C1, virtual VB { short n; VN() : n(9) {} };                         // vbptr at 8, n at 18
+struct V2 { double q; V2() : q(2.5) {} };
+struct VM : virtual VB, C1, virtual V2 { int m; VM() : m(5) {} };              // VB at 24, V2 at 32
+struct VY : VX { int y; VY() : VB(), y(6) {} };                                // the most derived class names VB
+struct VZ : C1, VX { int z; VZ() : z(8) {} };                                  // shares VX's vbptrs at 8 and 24
+int  vbReadV(VL* p);                       // p->v
+int  vbReadVR(const VR& r);                // r.v * 10 + r.r
+int  vbReadVM(VM* p);                      // q * 2 + v + m
+int  vbReadVN(const VN& n);                // v * 10 + n
+VB*  vbToVB(VX* p);                        // null stays null
+VX*  vbMakeVX();
+void vbDelete(VX* p);                      // delete p (??_D, then operator delete)
+long vbOnStack();                          // a VX on cppparse's stack: the log
+int  vbCopy(const VX& x);                  // a copy's v l r x
+long vbArray(int n);                       // new VX[n], delete[]: the destructors' log
+int  vbSumVY(const VY& y);
+int  vbSumVZ(const VZ& z);
+// virtual bases with virtual bases of their own (their vbptrs in the virtual part): built once each
+struct VNA { int a; VNA() : a(1) { g_vbLog = g_vbLog * 10 + 1; } ~VNA() { g_vbLog = g_vbLog * 10 + 9; } };
+struct VNB : virtual VNA { int b; VNB() : b(2) { g_vbLog = g_vbLog * 10 + 2; } ~VNB() { g_vbLog = g_vbLog * 10 + 7; } };
+struct VNC : virtual VNB { int c; VNC() : c(3) { g_vbLog = g_vbLog * 10 + 3; } };
+struct VNE : virtual VNB, virtual VNA { int e; VNE() : e(5) { g_vbLog = g_vbLog * 10 + 5; } };
+struct VNF : VNC, VNE { int f; VNF() : f(6) {} };                              // VNA at 40, VNB at 48
+struct VNG : virtual VNC, virtual VNE { int g; VNG() : g(8) {} };              // four virtual bases
+int  vbNestedF(const VNF& f);              // a b c e f, through the bases
+int  vbNestedG(VNG* g);                    // a b c e g, through VNE* and VNC*
+VNA* vbToVNA(VNG* g);                      // through VNC's VNB
+long vbNestedLife();                       // a VNF and a VNG on cppparse's stack: built right, then the destructors' log
 
 // the value of the k-th expression of LAYOUT_VALUES as cppparse computes it; -1 past the end
 int layoutValue(int k);

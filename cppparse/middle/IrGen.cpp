@@ -53,7 +53,7 @@ void zeroData(std::vector<IrDataItem>& out, int n)
 static Symbol* namedLocal(cxx::Expr* e);
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
-    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_nrvoEnabled(false), m_nrvo(0), m_tryCount(0),
+    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_nrvoEnabled(false), m_nrvo(0), m_scopeSerial(0), m_tryCount(0),
       m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_deletingDone(0), m_ctorFlag(1), m_vbFlagSlot(-1),m_staticCount(0), m_guardCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
@@ -1283,12 +1283,39 @@ void IrGen::runCleanup(const Cleanup& c, bool guarded, int line)
 void IrGen::openScope()
 {
     m_scopes.push_back(m_cleanups.size());
+    m_scopeIds.push_back(m_scopeSerial++);
+}
+
+IrGen::JumpState IrGen::jumpState(int block, int line) const
+{
+    JumpState j;
+    j.block = block; j.line = line; j.ids = m_scopeIds; j.scopes = m_scopes; j.cleanups = m_cleanups; j.tryStack = m_tryStack;
+    return j;
+}
+
+// goto: destroys the objects of the scopes left (innermost first) and leaves the try regions, as break and return
+// do, from the state at the goto (m_cleanups, m_tryStack hold it). A jump into a scope past an object with a
+// destructor, or into a try block or a handler, is ill-formed (C++98 6.7/3, 15/2): refused
+void IrGen::gotoExit(const JumpState& from, const JumpState& to, const std::string& label)
+{
+    size_t k = 0;
+    while (k < from.ids.size() && k < to.ids.size() && from.ids[k] == to.ids[k]) ++k;
+    const size_t keepFrom = k < from.scopes.size() ? from.scopes[k] : from.cleanups.size();
+    const size_t keepTo = k < to.scopes.size() ? to.scopes[k] : to.cleanups.size();
+    size_t t = 0;
+    while (t < from.tryStack.size() && t < to.tryStack.size() && from.tryStack[t] == to.tryStack[t]) ++t;
+    if (keepTo > keepFrom) unsupported(from.line, "goto " + label + " jumps past the initialisation of an object with a destructor (ill-formed)");
+    else if (t < to.tryStack.size()) unsupported(from.line, "goto " + label + " jumps into a try block or a handler (ill-formed)");
+    leaveScopes(keepTo < keepFrom ? keepTo : keepFrom, from.line);
+    leaveTryRegions(t, from.line);
+    br(labelBlock(label), from.line);
 }
 
 void IrGen::closeScope(int line)
 {
     size_t mark = m_scopes.back();
     m_scopes.pop_back();
+    m_scopeIds.pop_back();
     if (!terminated()) for (size_t i = m_cleanups.size(); i > mark; --i) runCleanup(m_cleanups[i - 1], m_cleanups[i - 1].guarded, line);
     m_cleanups.erase(m_cleanups.begin() + static_cast<std::ptrdiff_t>(mark), m_cleanups.end());
 }
@@ -2332,11 +2359,34 @@ void IrGen::stmt(cxx::Stmt* s)
         emit(in);
         return;
     }
-    case cxx::Stmt::Goto: br(labelBlock(s->label), line); return;   // objects of the scopes left are not destroyed
+    case cxx::Stmt::Goto: {
+        std::map<std::string, JumpState>::const_iterator lab = m_labelStates.find(s->label);
+        if (lab != m_labelStates.end()) { gotoExit(jumpState(m_block, line), lab->second, s->label); return; }
+        // forward: the scopes left are known at the label; this block leaves them then
+        int exitBlock = m_out->newBlock("goto." + s->label);
+        br(exitBlock, line);
+        m_pendingGotos[s->label].push_back(jumpState(exitBlock, line));
+        return;
+    }
     case cxx::Stmt::Label: {
         int b = labelBlock(s->label);
         br(b, line);
         m_block = b;
+        JumpState here = jumpState(b, line);
+        m_labelStates[s->label] = here;
+        std::map<std::string, std::vector<JumpState> >::iterator pg = m_pendingGotos.find(s->label);
+        if (pg != m_pendingGotos.end()) {
+            std::vector<Cleanup> savedCleanups = m_cleanups;
+            std::vector<int> savedTry = m_tryStack;
+            for (size_t g = 0; g < pg->second.size(); ++g) {
+                const JumpState& from = pg->second[g];
+                m_block = from.block; m_cleanups = from.cleanups; m_tryStack = from.tryStack;
+                gotoExit(from, here, s->label);
+            }
+            m_cleanups = savedCleanups; m_tryStack = savedTry;
+            m_block = b;
+            m_pendingGotos.erase(pg);
+        }
         for (size_t i = 0; i < s->kids.size(); ++i) stmt(s->kids[i]);
         return;
     }
@@ -2618,7 +2668,7 @@ void IrGen::prologue(Symbol* fn)
     m_block = m_bodyBlock;
     m_unwindId = m_tryCount++;
     m_tryStack.push_back(m_unwindId);
-    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0; m_guardCount = 0;
+    m_cleanups.clear(); m_scopes.clear(); m_scopeIds.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_labelStates.clear(); m_pendingGotos.clear(); m_staticCount = 0; m_guardCount = 0;
     if (m_out->hasThis && fn->thisAdjust != 0) {
         // called with the address of the vfptr whose table first holds it (MSVC's this adjustor): back to the object
         const sema::Type* tp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));

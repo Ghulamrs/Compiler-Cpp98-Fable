@@ -985,7 +985,10 @@ operations come from the runtime, they are compiler intrinsics in MSVC);
 `double` member emits a float constant; static locals are module globals
 initialised on the first pass under a guard byte (COMDAT when the
 function is inline, named per function so every unit agrees); `goto`
-and labels are blocks (objects of the scopes left are not destroyed);
+and labels are blocks (a `goto` destroys the objects of the scopes it
+leaves, innermost first, and leaves try blocks, as `break` does; one that
+jumps past an object with a destructor or into a try block is refused,
+S132);
 anonymous-namespace symbols carry a per-unit id (`?A0x<hash>@`) so units
 do not collide. The version 6 mangler now spells every name cl.exe gives
 cppparse's own sources (checked unit by unit with `sandbox/scripts/mix.ps1`,

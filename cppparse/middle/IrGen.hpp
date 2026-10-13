@@ -269,6 +269,20 @@ private:
     int                        m_tryCount;
     std::vector<Cleanup>       m_cleanups;      // constructed objects of the open scopes, in construction order
     std::vector<size_t>        m_scopes;        // m_cleanups.size() at each open block scope
+    std::vector<int>           m_scopeIds;      // a number for each open block scope (goto: the scopes it leaves)
+    int                        m_scopeSerial;
+    struct JumpState {                          // the scopes, objects and try regions at a goto or a label
+        int                  block;             // goto: the block that leaves the scopes (forward jumps)
+        int                  line;
+        std::vector<int>     ids;
+        std::vector<size_t>  scopes;
+        std::vector<Cleanup> cleanups;
+        std::vector<int>     tryStack;
+    };
+    std::map<std::string, JumpState>              m_labelStates;    // labels generated so far
+    std::map<std::string, std::vector<JumpState> > m_pendingGotos;  // gotos to labels not generated yet
+    JumpState jumpState(int block, int line) const;
+    void      gotoExit(const JumpState& from, const JumpState& to, const std::string& label);
     std::vector<Cleanup>       m_temps;         // temporaries of the current full expression
     std::vector<Cleanup>       m_flagged;       // every cleanup of the function, for the unwind handlers
     int                        m_unwindId;      // the function's catch-all region

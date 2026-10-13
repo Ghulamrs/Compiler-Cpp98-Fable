@@ -94,6 +94,14 @@ int useExternInt() { extern int gCount; extern int helperF(); gCount += 10; retu
 int lateUse() { extern int gLate; return gLate; }
 int gLate = 42;
 
+// goto out of scopes destroys their objects, innermost first, and leaves try blocks; backwards over a
+// declaration destroys the object too
+struct L { int v; L(int x) : v(x) { std::printf("  L%d\n", v); } ~L() { std::printf("  ~L%d\n", v); } };
+void gotoOut(int n) { { L a(20); if (n) goto out; L b(21); } out: std::printf("  out\n"); }
+void gotoBack(int n) { int i = 0; again: L c(30 + i); if (++i < n) goto again; std::printf("  done\n"); }
+void gotoTry(int n) { try { L d(40); { L e(41); if (n) goto past; } throw 1; } catch (int) { std::printf("  caught\n"); } past: std::printf("  past\n"); try { throw 2; } catch (int) { std::printf("  caught again\n"); } }
+void gotoNested(int n) { for (int i = 0; i < 3; ++i) { L f(50 + i); for (int j = 0; j < 3; ++j) { L g(60 + j); if (i == n && j == 1) goto done; } } done: std::printf("  done2\n"); }
+
 struct Holder {
     V m; W w;
     Holder(int v) : m(mkV(v)), w(W(v + 1)) { std::printf("  Holder\n"); }
@@ -150,6 +158,8 @@ int main()
     section("7 self-referring NRVO local, block-scope extern");
     { Self r = selfRef(); std::printf("  self %d %d\n", r.x, (int)(r.self == &r)); }
     { GA a = useExtern(); int i = useExternInt(); std::printf("  extern %d %d %d %d\n", a.v, i, gCount, lateUse()); }
+    section("8 goto");
+    gotoOut(1); gotoOut(0); gotoBack(3); gotoTry(1); gotoTry(0); gotoNested(1);
     section("end");
     return 0;
 }

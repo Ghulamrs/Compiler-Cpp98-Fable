@@ -1517,7 +1517,12 @@ int IrGen::value(cxx::Expr* e)
 
     switch (e->kind) {
     case cxx::Expr::IntLit: case cxx::Expr::CharLit: case cxx::Expr::BoolLit: return constant(e->semaValue, t, line);
-    case cxx::Expr::FloatLit: { IrInst in = make(IrInst::FConst, t, line); in.args.push_back(IrOperand::fimm(strtod(e->text.c_str(), 0), oldType(t))); return emit(in); }
+    case cxx::Expr::FloatLit: {
+        // a float literal's constant holds its float value (the optimiser folds conversions of it)
+        double v = strtod(e->text.c_str(), 0);
+        if (t->kind == sema::Type::Float) v = static_cast<double>(static_cast<float>(v));
+        IrInst in = make(IrInst::FConst, t, line); in.args.push_back(IrOperand::fimm(v, oldType(t))); return emit(in);
+    }
     case cxx::Expr::StringLit: {
         IrInst in = make(IrInst::StrConst, 0, line); in.type = m_types.charPtr(); in.args.push_back(IrOperand::str(e->text, m_types.charPtr())); return emit(in);
     }

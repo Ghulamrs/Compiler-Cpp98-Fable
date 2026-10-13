@@ -82,6 +82,7 @@ public:
     const Type* unref(const Type* t) const { return t && t->kind == Type::Reference ? t->inner : t; }
     int  sizeOf(const Type* t) const;
     int  alignOf(const Type* t) const;
+    static void memberPointerModel(const Symbol* cls, bool& multiple, bool& virt, int depth);
     int  rank(const Type* t) const;        // integer conversion rank
     const Type* promoted(const Type* t);   // integral / floating promotion
     const Type* arithmeticResult(const Type* a, const Type* b);   // usual arithmetic conversions
@@ -229,6 +230,9 @@ struct Scope {
     bool isNamespaceLike() const { return kind == Global || kind == Namespace; }
 };
 
+// the value of an integer literal's digits modulo 2^64 (SemaExpr.cpp); *overflow when it needs more bits
+unsigned long long integerLiteralValue(const std::string& text, bool* overflow);
+
 struct Diag {
     enum Severity { Error, Warning, Note };
     Severity    severity;
@@ -323,6 +327,7 @@ private:
     const Type* instantiateClassTemplate(Symbol* tmpl, const std::vector<cxx::TemplateArg>& args, Scope* from, const cxx::Loc& loc);
     bool   templateArgText(const std::vector<cxx::TemplateArg>& args, Scope* from, std::vector<const Type*>& types, std::vector<long>& ints, std::string& text);
     bool   derivesFrom(Symbol* derived, Symbol* base, int* offset, int depth = 0);
+    int    baseSubobjects(Symbol* derived, Symbol* base);   // subobjects of base in derived (C2594 / C2385 when > 1)
 
     // expressions
     const Type* expr(cxx::Expr* e, Scope* in);

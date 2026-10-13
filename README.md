@@ -844,7 +844,24 @@ reports accept them. S132 (found while generating code, no object
 written; `examples/sample-front/vbase-refused.cpp`) refuses a `catch` of
 a class used as a virtual base, `.*`/`->*` on a class with virtual bases
 and a cast from a virtual base down to a derived class (ill-formed, cl's
-C2635).
+C2635). Pointers to members are not generated yet: S132 also refuses
+`.*`/`->*` and every value of a member pointer type on any class (they
+compiled as `void*`: `->*` read garbage, a null data member pointer was 0
+where cl's is -1) and a class with a member of such a type
+(`memptr-refused.cpp`, `memptr-field.cpp`); calls through them stay a sema
+error (S109). Their sizes are cl's (TypeTable::sizeOf by the inheritance
+model: data 4, 8 with virtual bases; functions 8, 16 with multiple or
+virtual inheritance or a vfptr added in front of a base; an incomplete
+class 12 and 24; front.cpp `mpsize::`, `review::`). Namespace-scope and
+static member pointers are refused too (`memptr-global.cpp`). A direct base that is also a
+base of another direct base is diagnosed as cl does (Sema::declareClass;
+`ambiguous-base.cpp`): S141, an error, where cl gives C2584
+(`struct F : virtual V, W {}` with `W : V`), S142, a warning, where cl
+gives C4584 (`struct G : V, W {}`); ambiguous conversions to a base (cl C2594: S143 for
+casts, S105 for implicit conversions) and unqualified access to a member of
+a base held more than once (cl C2385: S144) are errors (Sema::baseSubobjects,
+`ambiguous.cpp`); `d.B::a` and `d.C::f()` go through the named base
+(IrGen namingBase: they used the first path; front.cpp `ambig::`).
 Likewise an override with a covariant return
 type whose conversion moves the pointer (`CD* self()` over `SB* self()`
 with SB at 16 in CD) would need cl's return-adjusting thunk: S131
@@ -1062,7 +1079,9 @@ when the out-of-line definition replaced the parameters; indices and pointer
 differences were 32-bit (`long` is 32-bit here) and `sizeof` was
 `unsigned int`; integer literals above `LONG_MAX` were clamped (types now as
 cl: `0xFFFFFFFF` is `unsigned int`, `2166136261` is `unsigned long`; values
-beyond 32 bits warn, S127), `char` is signed and escapes in character and
+up to 64 bits are read whole and typed as cl, `long long` and `unsigned long
+long` included; one outside the 32-bit sign-extended range is built at run
+time, not a constant expression; only beyond 64 bits S127 warns), `char` is signed and escapes in character and
 string literals (octal, `\x`) are decoded; constant folding of unsigned
 operations and of casts to narrow types; narrow integer results are
 re-extended after every operation, call and same-size signedness change (the
@@ -1075,7 +1094,15 @@ and `static_cast` to a derived class did not subtract it; slicing copies and
 assignments of polymorphic classes keep their own vptr; a static reference
 local had the size of its referent; `float` constants and statics were
 doubles; frames of a page or more call `__chkstk`; float constants are
-emitted as their exact bits; loop unrolling (`-O3`) renamed the values a
+emitted as their exact bits; floating -> integer conversions follow cl's
+code (signed and narrow targets through a 32-bit `cvttsd2si`, so out of
+range they give 80000000h truncated, `unsigned int` through a 64-bit one,
+`unsigned long long` by cl's two-range sequence; `-O2` folded
+`(unsigned)3e9` to 2147483648), `unsigned long long` -> floating converts a
+value with its top bit set by halves as cl does, the optimiser folds both
+the same way (Optimizer.cpp floatToInt), and value numbering compares
+floating constants by their bits (it took `1e19` and `1e19f` for one value;
+sample-front `conv::`); loop unrolling (`-O3`) renamed the values a
 loop uses from before it, such as hoisted invariants. The old type checker
 recursed without end on a copy constructor when it looked for a converting
 constructor (`c ? T(1) : t`). For linking with MSVC-compiled code,

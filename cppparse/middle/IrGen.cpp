@@ -129,6 +129,25 @@ const Type* IrGen::oldType(const sema::Type* t)
     return r;
 }
 
+namespace {
+
+// the class a qualified member access names ("d.C::a": C), searched by name among the bases of the object's
+// class; 0 when unqualified or not found. A base held more than once must be reached through it (sema S144
+// refuses the ambiguous forms)
+Symbol* namingBase(const cxx::Expr* member, Symbol* cls, int depth = 0)
+{
+    if (!member || !cls || member->name.parts.size() < 2 || depth > 32) return 0;
+    const std::string& q = member->name.parts[member->name.parts.size() - 2].ident;
+    for (size_t i = 0; i < cls->bases.size(); ++i) {
+        Symbol* b = cls->bases[i].cls;
+        if (b && b->name == q) return b;
+    }
+    for (size_t i = 0; i < cls->bases.size(); ++i) { Symbol* r = namingBase(member, cls->bases[i].cls, depth + 1); if (r) return r; }
+    return 0;
+}
+
+} // namespace
+
 bool IrGen::baseOffset(Symbol* derived, Symbol* base, int& offset, int depth) const
 {
     if (!derived || !base || depth > 32) return false;
@@ -156,7 +175,8 @@ bool IrGen::virtualBasePath(Symbol* derived, Symbol* base, int& index, int& rest
 
 void IrGen::unsupported(int line, const std::string& what)
 {
-    m_unsupported.push_back("line " + numText(static_cast<long>(line)) + ": " + what);
+    const std::string m = "line " + numText(static_cast<long>(line)) + ": " + what;
+    if (std::find(m_unsupported.begin(), m_unsupported.end(), m) == m_unsupported.end()) m_unsupported.push_back(m);   // once per line
 }
 
 // the labels defined inside statement s
@@ -178,15 +198,24 @@ bool IrGen::isVirtualBaseAnywhere(Symbol* cls) const
     return false;
 }
 
-// .* and ->* on a class with virtual bases: cl's member pointers into virtual bases carry a vbtable index (S132)
+// pointers to members are not generated yet (cl: a 4-byte offset with null -1 for data, a code pointer with a
+// this adjustment and vcall thunks for functions): .* and ->* and every value of a member pointer type are
+// refused (S132) rather than compiled as void*; on a class with virtual bases the message says so
 void IrGen::memberPointerCheck(cxx::Expr* e)
 {
-    if (e->kind != cxx::Expr::Binary || (e->text != ".*" && e->text != "->*") || e->kids.empty()) return;
-    const sema::Type* ot = m_semaTypes.unref(exprType(e->kids[0]));
-    if (ot && ot->kind == sema::Type::Pointer) ot = ot->inner;
-    ot = ot ? m_semaTypes.unqualified(ot) : 0;
-    if (ot && ot->kind == sema::Type::Class && hasVbases(ot->decl))
-        unsupported(e->loc.line, "pointer to member of '" + ot->decl->qualifiedName() + "', a class with virtual bases, is not supported yet by --compile6");
+    if (!e) return;
+    if (e->kind == cxx::Expr::Binary && (e->text == ".*" || e->text == "->*") && !e->kids.empty()) {
+        const sema::Type* ot = m_semaTypes.unref(exprType(e->kids[0]));
+        if (ot && ot->kind == sema::Type::Pointer) ot = ot->inner;
+        ot = ot ? m_semaTypes.unqualified(ot) : 0;
+        if (ot && ot->kind == sema::Type::Class && hasVbases(ot->decl))
+            unsupported(e->loc.line, "pointer to member of '" + ot->decl->qualifiedName() + "', a class with virtual bases, is not supported yet by --compile6");
+        else unsupported(e->loc.line, "'" + e->text + "' (pointer to member) is not supported yet by --compile6");
+        return;
+    }
+    const sema::Type* t = e->semaType ? m_semaTypes.unqualified(m_semaTypes.unref(e->semaType)) : 0;
+    if (t && t->kind == sema::Type::MemberPointer)
+        unsupported(e->loc.line, "a value of pointer to member type '" + t->text() + "' is not supported yet by --compile6");
 }
 
 // MSVC's conversion to a virtual base: the vbptr's table holds the base's distance from the vbptr
@@ -394,10 +423,16 @@ int IrGen::bitConstant(unsigned long long v, const sema::Type* t, int line)
     const long long sv = static_cast<long long>(v);
     if (sv >= -2147483647LL - 1 && sv <= 2147483647LL) return constant(static_cast<long>(sv), t, line);
     const unsigned long lo = static_cast<unsigned long>(v & 0xFFFFFFFFULL);
-    int hi = binary("<<", constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(v >> 32))), t, line), t, constant(32, t, line), t, t, line);
-    int mid = binary("<<", constant(static_cast<long>(lo >> 16), t, line), t, constant(16, t, line), t, t, line);
-    int r = binary("|", hi, t, mid, t, t, line);
-    return binary("|", r, t, constant(static_cast<long>(lo & 0xFFFFUL), t, line), t, t, line);
+    // one constant per statement: the order of a call's arguments is unspecified (cl and cppparse differ)
+    const int top = constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(v >> 32))), t, line);
+    const int by32 = constant(32, t, line);
+    const int hi = binary("<<", top, t, by32, t, t, line);
+    const int midBits = constant(static_cast<long>(lo >> 16), t, line);
+    const int by16 = constant(16, t, line);
+    const int mid = binary("<<", midBits, t, by16, t, t, line);
+    const int r = binary("|", hi, t, mid, t, t, line);
+    const int low = constant(static_cast<long>(lo & 0xFFFFUL), t, line);
+    return binary("|", r, t, low, t, t, line);
 }
 
 namespace {
@@ -696,6 +731,13 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
         }
         objT = m_semaTypes.unqualified(objT);
         int off = s->offset;
+        // "d.C::a": through the named base first, the path to the member's class from there
+        Symbol* naming = objT->kind == sema::Type::Class ? namingBase(e, objT->decl) : 0;
+        if (naming && naming != s->ownerClass && s->ownerClass) {
+            int b1 = 0, b2 = 0;
+            if (baseOffset(objT->decl, naming, b1) && baseOffset(naming, s->ownerClass, b2)) off += b1 + b2;
+            else { base = toBase(base, objT->decl, naming, line); base = toBase(base, naming, s->ownerClass, line); }
+        } else
         if (objT->kind == sema::Type::Class && objT->decl && s->ownerClass && objT->decl != s->ownerClass) { int bo = 0; if (baseOffset(objT->decl, s->ownerClass, bo)) off += bo; else base = toBase(base, objT->decl, s->ownerClass, line); }
         IrInst in = make(IrInst::AddrField, m_semaTypes.pointer(lv.type), line);
         in.sub = s->name;
@@ -1656,6 +1698,12 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
             if (objT->kind == sema::Type::Pointer) objT = objT->inner;
         } else { LValue ol = lvalue(obj); thisPtr = ol.kind == LValue::None ? value(obj) : load(ol, objT, line); }
         objT = m_semaTypes.unqualified(objT);
+        Symbol* naming = objT->kind == sema::Type::Class ? namingBase(callee, objT->decl) : 0;
+        if (naming && naming != fn->ownerClass) {
+            // "d.C::f()": through the named base first
+            thisPtr = convert(thisPtr, m_semaTypes.pointer(objT), m_semaTypes.pointer(m_semaTypes.classType(naming)), line);
+            objT = m_semaTypes.classType(naming);
+        }
         if (objT->kind == sema::Type::Class && objT->decl && objT->decl != fn->ownerClass) thisPtr = convert(thisPtr, m_semaTypes.pointer(objT), m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass)), line);
         virtualCall = callee->name.parts.size() == 1;
     } else if (callee->kind != cxx::Expr::Member && !objectCall && fn->ownerClass && !fn->isStatic && m_out->hasThis) {
@@ -1681,8 +1729,17 @@ int IrGen::value(cxx::Expr* e)
         return constant(e->semaValue, t->kind == sema::Type::NullPtr ? m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)) : t, line);
 
     switch (e->kind) {
-    case cxx::Expr::IntLit: case cxx::Expr::CharLit: case cxx::Expr::BoolLit: return constant(e->semaValue, t, line);
-    case cxx::Expr::FloatLit: { IrInst in = make(IrInst::FConst, t, line); in.args.push_back(IrOperand::fimm(strtod(e->text.c_str(), 0), oldType(t))); return emit(in); }
+    case cxx::Expr::IntLit:
+        // a 64-bit literal outside the 32-bit sign-extended immediates: put together from pieces
+        if (!e->semaConst && sizeOf(t) == 8) return bitConstant(sema::integerLiteralValue(e->text, 0), t, line);
+        return constant(e->semaValue, t, line);
+    case cxx::Expr::CharLit: case cxx::Expr::BoolLit: return constant(e->semaValue, t, line);
+    case cxx::Expr::FloatLit: {
+        // a float literal's constant holds its float value (the optimiser folds conversions of it)
+        double v = strtod(e->text.c_str(), 0);
+        if (t->kind == sema::Type::Float) v = static_cast<double>(static_cast<float>(v));
+        IrInst in = make(IrInst::FConst, t, line); in.args.push_back(IrOperand::fimm(v, oldType(t))); return emit(in);
+    }
     case cxx::Expr::StringLit: {
         IrInst in = make(IrInst::StrConst, 0, line); in.type = m_types.charPtr(); in.args.push_back(IrOperand::str(e->text, m_types.charPtr())); return emit(in);
     }
@@ -1736,6 +1793,31 @@ int IrGen::value(cxx::Expr* e)
         const bool reinterpret = e->kind == cxx::Expr::NamedCast && e->text == "reinterpret_cast";
         if (isReference(exprType(e))) { LValue inner = lvalue(e->kids[0]); if (inner.kind != LValue::None) return reinterpret ? addressOf(inner, line) : convert(addressOf(inner, line), m_semaTypes.pointer(inner.type), m_semaTypes.pointer(t), line); }
         if (reinterpret && t->isPointer() && m_semaTypes.decay(exprType(e->kids[0]))->isPointer()) return value(e->kids[0]);   // the same address
+        {
+            // a constant floating value cast to an integer type: cl folds it modulo 2^N ((int)3e9 is b2d05e00h,
+            // (unsigned short)1e10 e400h), not as the instruction would convert it at run time
+            const sema::Type* ft = m_semaTypes.unqualified(m_semaTypes.unref(exprType(e->kids[0])));
+            const sema::Type* it = m_semaTypes.unqualified(t);
+            double d = 0;
+            const cxx::Expr* lit = e->kids[0];
+            while (lit && lit->kind == cxx::Expr::Paren && lit->kids.size() == 1) lit = lit->kids[0];
+            // only a literal operand: cl converts "-2147483649.0" (a negation) at run time even under /Od
+            if (lit && lit->kind == cxx::Expr::FloatLit && !lit->text.empty() && lit->text[0] != '-' && ft && ft->isFloating() && it->isIntegral() && it->kind != sema::Type::Bool && sizeOf(it) > 0 && sizeOf(it) <= 8 && foldArith(e->kids[0], d, 0) && d == d) {
+                const double two64 = 18446744073709551616.0;
+                double m = std::fmod(d < 0 ? std::ceil(d) : std::floor(d), two64);
+                if (m < 0) m += two64;
+                if (m == m && m < two64) {
+                    unsigned long long u = static_cast<unsigned long long>(m);
+                    const int bits = sizeOf(it) * 8;
+                    if (bits < 64) {
+                        u &= (1ULL << bits) - 1;
+                        if (!it->isUnsigned() && (u >> (bits - 1)) != 0) u |= ~((1ULL << bits) - 1);   // sign-extended
+                        return constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(u & 0xFFFFFFFFULL))), t, line);
+                    }
+                    return bitConstant(u, t, line);
+                }
+            }
+        }
         return convert(value(e->kids[0]), exprType(e->kids[0]), t, line);
     }
     case cxx::Expr::Paren: return value(e->kids[0]);
@@ -2480,7 +2562,10 @@ void IrGen::stmt(cxx::Stmt* s)
         }
         for (size_t i = 0; i < flat.size(); ++i) {
             if (flat[i]->kind != cxx::Stmt::Case) continue;
-            int cv = constant(flat[i]->expr->semaValue, vt, flat[i]->loc.line);
+            // the label's value in its own type, then converted ("case 4294967295U:" of an unsigned long long)
+            const sema::Type* lt = m_semaTypes.unqualified(m_semaTypes.unref(exprType(flat[i]->expr)));
+            int cv = lt && lt->isIntegral() ? convert(constant(flat[i]->expr->semaValue, lt, flat[i]->loc.line), lt, vt, flat[i]->loc.line)
+                                            : constant(flat[i]->expr->semaValue, vt, flat[i]->loc.line);
             IrInst c = make(IrInst::Cmp, m_semaTypes.basic(sema::Type::Bool), flat[i]->loc.line); c.sub = "eq";
             c.args.push_back(IrOperand::temp(convert(v, st, vt, line), oldType(vt))); c.args.push_back(IrOperand::temp(cv, oldType(vt)));
             int cond = emit(c);

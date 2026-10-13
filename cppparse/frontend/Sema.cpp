@@ -155,6 +155,20 @@ const Type* TypeTable::decay(const Type* t)
     return t;
 }
 
+// cl's inheritance model of a class for its member pointers: multiple when it or a base has several direct
+// bases, virtual when it has a virtual base anywhere
+void TypeTable::memberPointerModel(const Symbol* cls, bool& multiple, bool& virt, int depth)
+{
+    if (!cls || depth > 64) return;
+    if (cls->bases.size() > 1) multiple = true;
+    // a vfptr of its own in front of a base without one: the base is not at offset 0 (cl: multiple)
+    for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->isPolymorphic && !cls->bases[b].isVirtual && cls->bases[b].cls && !cls->bases[b].cls->isPolymorphic) multiple = true;
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        if (cls->bases[b].isVirtual) virt = true;
+        memberPointerModel(cls->bases[b].cls, multiple, virt, depth + 1);
+    }
+}
+
 int TypeTable::sizeOf(const Type* t) const
 {
     if (!t) return 8;
@@ -167,7 +181,20 @@ int TypeTable::sizeOf(const Type* t) const
     case Type::Long: case Type::ULong: return m_longSize;
     case Type::LongLong: case Type::ULongLong: case Type::Double: return 8;
     case Type::LongDouble: return m_longDoubleSize;
-    case Type::Pointer: case Type::Reference: case Type::NullPtr: case Type::MemberPointer: return m_pointerSize;
+    case Type::Pointer: case Type::Reference: case Type::NullPtr: return m_pointerSize;
+    case Type::MemberPointer: {
+        // cl's representations by the class's inheritance model: data, a 4-byte offset (plus a vbtable index
+        // with virtual bases); functions, a code pointer (plus a this adjustment with multiple inheritance, plus
+        // a vbtable index with virtual bases), rounded to the pointer's alignment
+        bool multiple = false, virt = false;
+        const Symbol* mc = t->memberClass ? t->memberClass->decl : 0;
+        // an incomplete class: cl's unspecified model (data 12, functions a pointer plus three ints)
+        if (!mc || !mc->isDefinition) return !t->inner || t->inner->kind != Type::Function ? 12 : (m_pointerSize + 12 + m_pointerSize - 1) / m_pointerSize * m_pointerSize;
+        memberPointerModel(mc, multiple, virt, 0);
+        if (!t->inner || t->inner->kind != Type::Function) return virt ? 8 : 4;
+        const int n = m_pointerSize + (multiple || virt ? 4 : 0) + (virt ? 4 : 0);
+        return (n + m_pointerSize - 1) / m_pointerSize * m_pointerSize;
+    }
     case Type::Array: return t->arraySize > 0 ? static_cast<int>(t->arraySize) * sizeOf(t->inner) : 0;
     case Type::Class: return t->decl && t->decl->layoutDone ? t->decl->size : 8;
     default: return 8;
@@ -179,6 +206,7 @@ int TypeTable::alignOf(const Type* t) const
     if (!t) return 8;
     if (t->kind == Type::Array) return alignOf(t->inner);
     if (t->kind == Type::Class) return t->decl && t->decl->layoutDone ? t->decl->align : 8;
+    if (t->kind == Type::MemberPointer) return t->inner && t->inner->kind == Type::Function ? m_pointerSize : 4;
     int s = sizeOf(t);
     return s > m_maxAlign ? m_maxAlign : (s < 1 ? 1 : s);
 }
@@ -721,6 +749,18 @@ Symbol* Sema::declareEnum(cxx::EnumDecl* e, Scope* in, cxx::Access access)
     return en;
 }
 
+// where 'target' occurs among the bases of 'from' (transitively): as a virtual base (the edge to it is virtual)
+// or not; a non-virtual base of a virtual base counts as non-virtual, as cl takes it
+static void baseOccurrences(const Symbol* from, const Symbol* target, bool& nonVirtual, bool& virt, int depth)
+{
+    if (!from || depth > 32) return;
+    for (size_t b = 0; b < from->bases.size(); ++b) {
+        const bool v = from->bases[b].isVirtual;   // cl looks at the edge to the base itself only
+        if (from->bases[b].cls == target) (v ? virt : nonVirtual) = true;
+        baseOccurrences(from->bases[b].cls, target, nonVirtual, virt, depth + 1);
+    }
+}
+
 Symbol* Sema::declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Symbol* existing)
 {
     Scope* target = in;
@@ -762,6 +802,21 @@ Symbol* Sema::declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Sym
             // a dependent base: members are looked up at instantiation time
         } else if (bt->kind != Type::Error) error(c->bases[b].loc, "S113", "base '" + c->bases[b].name.text() + "' is not a class");
     }
+    // a direct base that is also a base of another direct base, as cl reports it: an error (C2584) when the
+    // direct one comes first and only one of the two is virtual, else a warning (C4584) when the direct one is not
+    // virtual; nothing when both are virtual (one shared subobject) or for a later virtual direct base
+    for (size_t i = 0; i < cls->bases.size(); ++i)
+        for (size_t j = 0; j < cls->bases.size(); ++j) {
+            if (i == j || !cls->bases[i].cls || !cls->bases[j].cls) continue;
+            bool nonVirtual = false, virt = false;
+            baseOccurrences(cls->bases[j].cls, cls->bases[i].cls, nonVirtual, virt, 0);
+            if (!nonVirtual && !virt) continue;
+            const bool direct = cls->bases[i].isVirtual, indirect = virt && !nonVirtual;
+            if (direct && indirect) continue;
+            const std::string d = cls->bases[i].cls->qualifiedName(), o = cls->bases[j].cls->qualifiedName();
+            if (i < j && direct != indirect) error(c->loc, "S141", "'" + cls->qualifiedName() + "': direct base '" + d + "' is inaccessible; already a base of '" + o + "' (cl C2584)");
+            else if (!direct) warning(c->loc, "S142", "'" + cls->qualifiedName() + "': base-class '" + d + "' is already a base-class of '" + o + "' (cl C4584)");
+        }
     // members: the class is complete for member function bodies, which are analysed later
     Symbol* savedClass = m_currentClass;
     m_currentClass = cls;
@@ -1193,6 +1248,42 @@ bool Sema::derivesFrom(Symbol* derived, Symbol* base, int* offset, int depth)
         if (derivesFrom(derived->bases[i].cls, base, &o, depth + 1)) { if (offset) *offset = derived->bases[i].offset + o; return true; }
     }
     return false;
+}
+
+namespace {
+
+// the paths from cls down to base that take no virtual edge (cls itself counts when it is base)
+int nonVirtualPaths(const Symbol* cls, const Symbol* base, int depth)
+{
+    if (!cls || depth > 32) return 0;
+    if (cls == base) return 1;
+    int n = 0;
+    for (size_t i = 0; i < cls->bases.size(); ++i) if (!cls->bases[i].isVirtual) n += nonVirtualPaths(cls->bases[i].cls, base, depth + 1);
+    return n;
+}
+
+// every virtual base of cls, direct or inherited, once
+void virtualBases(const Symbol* cls, std::vector<const Symbol*>& out, int depth)
+{
+    if (!cls || depth > 32) return;
+    for (size_t i = 0; i < cls->bases.size(); ++i) {
+        const Symbol* b = cls->bases[i].cls;
+        if (cls->bases[i].isVirtual && std::find(out.begin(), out.end(), b) == out.end()) out.push_back(b);
+        virtualBases(b, out, depth + 1);
+    }
+}
+
+} // namespace
+
+// how many subobjects of class 'base' an object of 'derived' holds: more than one makes a conversion to it or an
+// unqualified use of its non-static members ambiguous (cl C2594, C2385); a virtual base counts once
+int Sema::baseSubobjects(Symbol* derived, Symbol* base)
+{
+    int n = nonVirtualPaths(derived, base, 0);
+    std::vector<const Symbol*> vb;
+    virtualBases(derived, vb, 0);
+    for (size_t i = 0; i < vb.size(); ++i) n += nonVirtualPaths(vb[i], base, 0);
+    return n;
 }
 
 namespace {

@@ -8,6 +8,25 @@
 namespace cppparse {
 namespace sema {
 
+// the value of an integer literal (decimal, 0x hexadecimal or 0 octal, suffixes ignored), modulo 2^64;
+// *overflow is set when it does not fit in 64 bits
+unsigned long long integerLiteralValue(const std::string& text, bool* overflow)
+{
+    int radix = 10;
+    size_t i = 0;
+    if (text.size() > 1 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) { radix = 16; i = 2; }
+    else if (text.size() > 1 && text[0] == '0') { radix = 8; i = 1; }
+    unsigned long long v = 0;
+    for (; i < text.size(); ++i) {
+        const char c = text[i];
+        const int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
+        if (d >= radix) break;
+        if (overflow && v > (0xFFFFFFFFFFFFFFFFULL - static_cast<unsigned long long>(d)) / static_cast<unsigned long long>(radix)) *overflow = true;
+        v = v * static_cast<unsigned long long>(radix) + static_cast<unsigned long long>(d);
+    }
+    return v;
+}
+
 namespace {
 
 std::string numText(long v) { std::ostringstream s; s << v; return s.str(); }
@@ -285,7 +304,7 @@ Conversion Sema::convertType(const Type* from, bool lvalue, bool nullConstant, c
             if (ref->isConst && !ref->isVolatile) { c.rank = Conversion::Exact; return c; }      // const T& binds a temporary
             return c;
         }
-        if (ru->kind == Type::Class && su->kind == Type::Class && su->decl && ru->decl && derivesFrom(su->decl, ru->decl, 0)) {
+        if (ru->kind == Type::Class && su->kind == Type::Class && su->decl && ru->decl && derivesFrom(su->decl, ru->decl, 0) && baseSubobjects(su->decl, ru->decl) <= 1) {
             if (srcLvalue && cvOk) { c.rank = Conversion::Standard; c.derivedToBase = true; return c; }
             if (ref->isConst) { c.rank = Conversion::Standard; c.derivedToBase = true; return c; }
             return c;
@@ -303,7 +322,7 @@ Conversion Sema::convertType(const Type* from, bool lvalue, bool nullConstant, c
     const Type* dst = m_types.unqualified(to);
     if (src == dst) { c.rank = Conversion::Exact; return c; }
     if (dst->kind == Type::Class) {
-        if (src->kind == Type::Class && src->decl && dst->decl && derivesFrom(src->decl, dst->decl, 0)) { c.rank = Conversion::Standard; c.derivedToBase = true; return c; }
+        if (src->kind == Type::Class && src->decl && dst->decl && derivesFrom(src->decl, dst->decl, 0) && baseSubobjects(src->decl, dst->decl) <= 1) { c.rank = Conversion::Standard; c.derivedToBase = true; return c; }
         if (!allowUser || !dst->decl || !dst->decl->members) return c;
         // converting constructor
         std::vector<Symbol*> ctors;
@@ -359,7 +378,7 @@ Conversion Sema::convertType(const Type* from, bool lvalue, bool nullConstant, c
         const Type* spu = m_types.unqualified(sp); const Type* dpu = m_types.unqualified(dp);
         if (spu == dpu) { c.rank = Conversion::Exact; c.qualification = sp != dp; return c; }
         if (dpu->kind == Type::Void) { c.rank = Conversion::Standard; return c; }
-        if (spu->kind == Type::Class && dpu->kind == Type::Class && spu->decl && dpu->decl && derivesFrom(spu->decl, dpu->decl, 0)) { c.rank = Conversion::Standard; c.derivedToBase = true; return c; }
+        if (spu->kind == Type::Class && dpu->kind == Type::Class && spu->decl && dpu->decl && derivesFrom(spu->decl, dpu->decl, 0) && baseSubobjects(spu->decl, dpu->decl) <= 1) { c.rank = Conversion::Standard; c.derivedToBase = true; return c; }
         return c;
     }
     if (dst->kind == Type::MemberPointer) {
@@ -753,6 +772,21 @@ const Type* Sema::exprMember(cxx::Expr* e, Scope* in)
     ++m_stats.namesResolved;
     Symbol* s = out[0];
     e->semaSym = s;
+    if (!destructorName && (s->kind == Symbol::Variable || s->kind == Symbol::Function || s->kind == Symbol::FunctionTemplate)) {
+        // a non-static member of a base held more than once, or names from unrelated bases (cl C2385); the
+        // class that names the member is the qualifier's ("d.B::a") or the object's
+        Symbol* naming = cls;
+        if (e->name.parts.size() > 1) { Scope* q = scopeForQualifier(e->name, cls->members); if (q && q->kind == Scope::Class && q->owner) naming = q->owner; }
+        bool ambiguous = false;
+        for (size_t k = 1; k < out.size() && !ambiguous; ++k)
+            if (out[k]->ownerClass && s->ownerClass && out[k]->ownerClass != s->ownerClass && !derivesFrom(out[k]->ownerClass, s->ownerClass, 0) && !derivesFrom(s->ownerClass, out[k]->ownerClass, 0)) ambiguous = true;
+        bool nonStatic = false;
+        for (size_t k = 0; k < out.size(); ++k) if (!out[k]->isStatic && out[k]->kind != Symbol::Enumerator) nonStatic = true;
+        if (!ambiguous && nonStatic && s->ownerClass && naming != s->ownerClass && baseSubobjects(naming, s->ownerClass) > 1) ambiguous = true;
+        // the object's own class must hold the naming class once ("d.B::a" with two B in d)
+        if (!ambiguous && nonStatic && naming != cls && baseSubobjects(cls, naming) > 1) ambiguous = true;
+        if (ambiguous) { error(e->loc, "S144", "ambiguous access of '" + name + "' in '" + cls->qualifiedName() + "' (cl C2385)"); return m_types.error(); }
+    }
     if (s->kind == Symbol::Variable) {
         e->semaLvalue = true;
         if (s->hasConstValue) { e->semaConst = true; e->semaValue = s->constValue; }
@@ -850,6 +884,21 @@ const Type* Sema::exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked
     if (!to || to->kind == Type::Error) return m_types.error();
     if (to->kind == Type::Dependent) return to;
     const Type* tu = m_types.unref(to);
+    if (e->kids.size() == 1 && e->kids[0]->semaType) {
+        // a cast between a class and one of its bases held more than once (up or down; cl C2594)
+        const Type* fu = m_types.unqualified(m_types.unref(e->kids[0]->semaType));
+        const Type* toc = m_types.unqualified(tu);
+        if (fu->kind == Type::Pointer && toc->kind == Type::Pointer) { fu = m_types.unqualified(fu->inner); toc = m_types.unqualified(toc->inner); }
+        else if (to->kind != Type::Reference && toc->kind != Type::Class) fu = 0;
+        if (fu && toc && fu->kind == Type::Class && toc->kind == Type::Class && fu->decl && toc->decl && fu != toc) {
+            Symbol* d = derivesFrom(fu->decl, toc->decl, 0) ? fu->decl : derivesFrom(toc->decl, fu->decl, 0) ? toc->decl : 0;
+            Symbol* b = d == fu->decl ? toc->decl : fu->decl;
+            if (d && baseSubobjects(d, b) > 1) {
+                error(e->loc, "S143", "ambiguous conversions from '" + e->kids[0]->semaType->text() + "' to '" + to->text() + "': '" + d->qualifiedName() + "' has more than one '" + b->qualifiedName() + "' (cl C2594)");
+                return m_types.error();
+            }
+        }
+    }
     if (tu->kind == Type::Class && tu->decl && checked) {
         if (!tu->decl->isDefinition) { error(e->loc, "S113", "incomplete class '" + tu->decl->qualifiedName() + "' in a cast"); return to; }
         std::vector<Symbol*> ctors;
@@ -1147,28 +1196,23 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         bool u = false; int l = 0;
         while (!s.empty() && (s[s.size() - 1] == 'u' || s[s.size() - 1] == 'U' || s[s.size() - 1] == 'l' || s[s.size() - 1] == 'L')) { if (s[s.size() - 1] == 'u' || s[s.size() - 1] == 'U') u = true; else ++l; s.erase(s.size() - 1); }
         // the type is the first of int, (unsigned int for hexadecimal and octal), long, unsigned long, long
-        // long that holds the value, as cl does; a value beyond 32 bits keeps its low 32 bits
-        int radix = 10;
-        size_t i = 0;
-        if (s.size() > 1 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { radix = 16; i = 2; }
-        else if (s.size() > 1 && s[0] == '0') { radix = 8; i = 1; }
-        unsigned long v = 0;
-        bool wide = false;
-        for (; i < s.size(); ++i) {
-            char c = s[i];
-            int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
-            if (d >= radix) break;
-            if (v > (0xFFFFFFFFUL - static_cast<unsigned long>(d)) / static_cast<unsigned long>(radix)) wide = true;
-            v = v * static_cast<unsigned long>(radix) + static_cast<unsigned long>(d);
-        }
-        const bool fitsSigned = !wide && v <= 0x7FFFFFFFUL;
+        // long, unsigned long long that holds the value, as cl does
+        bool overflow = false;
+        const unsigned long long v = integerLiteralValue(e->text, &overflow);
+        const bool hexOct = s.size() > 1 && s[0] == '0';
+        const bool wide = v > 0xFFFFFFFFULL;
+        const bool fitsSigned = v <= 0x7FFFFFFFULL;
         Type::Kind k;
-        if (l >= 2 || wide) k = u || (wide && radix != 10) ? Type::ULongLong : Type::LongLong;
+        if (l >= 2 || wide) k = u || v > 0x7FFFFFFFFFFFFFFFULL ? Type::ULongLong : Type::LongLong;
         else if (u) k = l ? Type::ULong : Type::UInt;
         else if (l) k = fitsSigned ? Type::Long : Type::ULong;
-        else k = fitsSigned ? Type::Int : (radix == 10 ? Type::ULong : Type::UInt);
-        if (wide) warning(e->loc, "S127", "integer constant " + e->text + " does not fit in 32 bits: only its low 32 bits are kept");
-        e->semaConst = true; e->semaValue = static_cast<long>(v);
+        else k = fitsSigned ? Type::Int : (hexOct ? Type::UInt : Type::ULong);
+        if (overflow) warning(e->loc, "S127", "integer constant " + e->text + " does not fit in 64 bits: only its low 64 bits are kept");
+        // semaValue holds 32 bits, sign-extended for a 64-bit type: a 64-bit value outside that range is no
+        // constant here (IrGen builds it at run time; a constant expression needing it is an error)
+        const long long sv = static_cast<long long>(v);
+        e->semaConst = !(k == Type::LongLong || k == Type::ULongLong) || (sv >= -2147483647LL - 1 && sv <= 2147483647LL);
+        e->semaValue = e->semaConst ? static_cast<long>(static_cast<int>(static_cast<unsigned int>(v & 0xFFFFFFFFULL))) : 0;
         t = m_types.basic(k);
         break;
     }

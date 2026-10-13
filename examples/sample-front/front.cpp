@@ -327,6 +327,147 @@ void floatArithmetic()
 }
 }
 
+// floating -> integer conversions as cl compiles them at run time and folds them as constants: signed and narrow
+// targets through 32 bits (out of range: 80000000h, then truncated), unsigned int through 64 bits, unsigned long long
+// by its two ranges; unsigned long long -> floating with the top bit set; -O2 once folded (unsigned)3e9 to 2147483648
+// and value-numbered 1e19 and 1e19f as one constant
+namespace conv {
+static const double dv[] = { 0.0, 1.5, -1.5, 127.9, 200.7, 255.9, -128.9, 32767.5, 40000.25, 65535.75, -32768.5,
+    2147483647.0, 2147483648.0, 3000000000.0, 4294967295.0, -2147483648.0, 9007199254740993.0,
+    9223372036854775807.0, 1e19, 1.8446744073709550e19, -9223372036854775808.0, 0.999 };
+static const float fv[] = { 0.0f, 1.5f, -1.5f, 127.9f, 200.7f, 255.9f, -128.9f, 32767.5f, 40000.25f, 65535.75f,
+    2147483520.0f, 2147483648.0f, 3000000000.0f, 4294967040.0f, -2147483648.0f, 9.2233715e18f, 1e19f, 1.8446743e19f, 0.999f };
+void runtimeD()
+{
+    for (unsigned i = 0; i < sizeof(dv) / sizeof(dv[0]); ++i) {
+        volatile double x = dv[i];
+        double v = x;
+        std::printf("d %u: sc %d uc %u ss %d us %u", i, (int)(signed char)v, (unsigned)(unsigned char)v, (int)(short)v, (unsigned)(unsigned short)v);
+        std::printf(" i %d u %u ll %lld ull %llu\n", (int)v, (unsigned)v, (long long)v, (unsigned long long)v);
+    }
+}
+void runtimeF()
+{
+    for (unsigned i = 0; i < sizeof(fv) / sizeof(fv[0]); ++i) {
+        volatile float x = fv[i];
+        float v = x;
+        std::printf("f %u: sc %d uc %u ss %d us %u", i, (int)(signed char)v, (unsigned)(unsigned char)v, (int)(short)v, (unsigned)(unsigned short)v);
+        std::printf(" i %d u %u ll %lld ull %llu\n", (int)v, (unsigned)v, (long long)v, (unsigned long long)v);
+    }
+}
+void consts()
+{
+    std::printf("c u %u %u %u %u\n", (unsigned)3000000000.0, (unsigned)4294967295.0, (unsigned)2147483648.0, (unsigned)3000000000.0f);
+    std::printf("c ull %llu %llu %llu\n", (unsigned long long)1e19, (unsigned long long)9223372036854775808.0, (unsigned long long)1e19f);
+    std::printf("c i %d %d %lld %lld\n", (int)-2147483648.0, (int)-1.5, (long long)-1.5, (long long)9007199254740993.0);
+    std::printf("c s %d %u %d %u\n", (int)(short)32767.5, (unsigned)(unsigned short)65535.75, (int)(signed char)-128.9, (unsigned)(unsigned char)255.9f);
+    double d = 3000000000.0; unsigned u = (unsigned)d; unsigned long long q = (unsigned long long)(d * 4.0);
+    std::printf("c local %u %llu\n", u, q);
+    float f = 3e9f; std::printf("c localf %u %llu\n", (unsigned)f, (unsigned long long)(f * 4.0f));
+}
+void toFloating()
+{
+    const unsigned long long top = 1ULL << 63;
+    const unsigned long long uq[] = { 0ULL, 1ULL, (1ULL << 32) - 1, top - 1, top, top + 2048, top + 2049, ~0ULL, top + (1ULL << 61) + 12345, top + 1024, top + 3072 };
+    for (unsigned i = 0; i < sizeof(uq) / sizeof(uq[0]); ++i) {
+        volatile unsigned long long x = uq[i];
+        unsigned long long v = x; long long s = (long long)v; unsigned u = (unsigned)v;
+        std::printf("tofp %u: %.17g %.9g %.17g %.17g %.9g\n", i, (double)v, (double)(float)v, (double)s, (double)u, (double)(float)u);
+    }
+    std::printf("tofp c %.17g %.17g %.9g %.17g\n", (double)3000000000u, (double)~0ULL, (double)(float)4294967295u, (double)(1ULL << 63));
+    unsigned k = 3000000000u; unsigned long long q = ~0ULL;
+    std::printf("tofp local %.17g %.17g %.9g\n", (double)k, (double)q, (double)(float)q);
+    float f19 = 1e19f; std::printf("f19 %.17g %llu\n", (double)f19, (unsigned long long)f19);
+}
+}
+
+// sizes of pointers to members by cl's inheritance models (data 4, 8 with virtual bases; functions 8, 16 with
+// multiple or virtual inheritance); they were all 8
+namespace mpsize {
+struct P { int a; int f(); };
+struct M { int m; };
+struct Q : M, P { int q; };
+struct R : Q { };
+struct V { int v; };
+struct W : virtual V { int w; int g(); };
+struct S1 : P { };
+void show()
+{
+    std::printf("member pointer sizes: %d %d %d %d %d %d %d %d %d\n", (int)sizeof(int P::*), (int)sizeof(int (P::*)()), (int)sizeof(int Q::*),
+        (int)sizeof(int (Q::*)()), (int)sizeof(int R::*), (int)sizeof(int (R::*)()), (int)sizeof(int W::*), (int)sizeof(int (W::*)()),
+        (int)sizeof(int (S1::*)()));
+}
+}
+
+// 64-bit integer literals: types and values as cl (a value from 2^31 to 2^64-1, decimal, hexadecimal, octal,
+// suffixed or not) at run time, in globals, statics, arrays and as converted case labels; 4294967295ULL was
+// sign-extended to 2^64-1 and wider literals kept their low 32 bits
+namespace lit {
+static const unsigned long long a[] = { 4294967295ULL, 9223372036854775808ULL, 12345678901234567891ULL, 0xFFFFFFFFULL, 0x80000000ULL, 2147483648LL, 040000000000LL };
+unsigned long long b = 4294967295ULL;
+static unsigned long long c[] = { 4294967296ULL, 1ULL << 40, 0x100000000 };
+long long d[] = { -5000000000LL, 5000000000LL, -2147483648LL, 2147483648LL, 9223372036854775807LL, 0x7FFFFFFFFFFFFFFF };
+unsigned long long sq() { static unsigned long long s = 18446744073709551615ULL; return s; }
+const unsigned long long kc = 4294967295ULL;
+void show()
+{
+    volatile int i = 0;
+    std::printf("lit a %llu %llu %llu %llu %llu %llu %llu\n", a[i], a[i+1], a[i+2], a[i+3], a[i+4], a[i+5], a[i+6]);
+    std::printf("lit b %llu c %llu %llu %llu\n", b, c[i], c[i+1], c[i+2]);
+    std::printf("lit d %lld %lld %lld %lld %lld %lld\n", d[i], d[i+1], d[i+2], d[i+3], d[i+4], d[i+5]);
+    unsigned long long e[] = { 4294967295ULL, 9223372036854775808ULL, 3000000000ULL };
+    std::printf("lit e %llu %llu %llu sq %llu kc %llu\n", e[i], e[i+1], e[i+2], sq(), kc);
+    long long x = 3000000000LL; unsigned long long y = 0xFFFFFFFFull + 1; long long z = -3000000000LL;
+    std::printf("lit run %lld %llu %lld %llu %lld\n", x, y, z, 4294967295ULL * 2, 5000000000 / 3);
+    // types: signed or not, and size
+    std::printf("lit types %d %d %d %d %d %d %d %d\n", (int)(2147483648 * 0 - 1 < 0), (int)sizeof(2147483648), (int)(0x80000000 * 0 - 1 < 0),
+        (int)sizeof(4294967296), (int)(0x100000000 * 0 - 1 < 0), (int)(9223372036854775808 * 0 - 1 < 0), (int)sizeof(5000000000L), (int)(0xFFFFFFFFLL * 0 - 1 < 0));
+    unsigned long long sw = b; int r = 0;
+    switch (sw) { case 4294967295U: r = 1; break; case 1ULL: r = 2; break; default: r = 3; }
+    std::printf("lit switch %d\n", r);
+}
+}
+
+// a base held twice (D : B, C with B : A, C : A): reached through a named base or an unambiguous path; d.C::a
+// used to be B's A (the first path), and the ambiguous forms compiled silently (now S143/S144, ambiguous.cpp)
+namespace ambig {
+struct A { int a; int f() const { return a * 10; } };
+struct B : A { int b; };
+struct C : A { int c; };
+struct D : B, C { int d; };
+struct V2 { int v; };
+struct E1 : virtual V2 { };
+struct E2 : virtual V2 { };
+struct G : E1, E2 { };
+int viaB(A* p) { return p->a; }
+void show()
+{
+    D d; d.B::a = 1; d.C::a = 2; d.b = 3; d.c = 4; d.d = 5;
+    A* pb = (B*)&d; A* pc = static_cast<C*>(&d);
+    B& rb = d; C* cp = &d;
+    std::printf("ambig %d %d %d %d %d %d %d %d\n", d.B::a, d.C::a, pb->a, pc->a, rb.a, cp->a, d.B::f(), d.C::f() + viaB(cp));
+    G g; g.v = 7; V2* v = &g; E1* e1 = &g;
+    std::printf("ambig virtual %d %d %d\n", g.v, v->v, e1->v);
+}
+}
+
+// review of the member-pointer and conversion commits: cl's sizes for an incomplete class (unspecified model) and
+// for a vfptr added in front of a base without one (multiple model); a class template with a member pointer
+// only named through a pointer is accepted; out-of-range literal casts folded modulo 2^N as cl folds them
+namespace review {
+struct Inc;
+struct A1 { int a; };
+struct D1 : A1 { virtual void h() {} };
+struct P { int a; };
+template <class T> struct Holder { int T::* f; int x; };
+void show()
+{
+    std::printf("review sizes %d %d %d %d %d\n", (int)sizeof(void (Inc::*)()), (int)sizeof(int Inc::*), (int)sizeof(void (D1::*)()), (int)sizeof(int D1::*), (int)sizeof(Holder<P>*));
+    std::printf("review folds %x %llx %x %x %llx %d %x\n", (int)3e9, (long long)9.3e18, (unsigned)1e19, (unsigned)(unsigned short)1e10,
+        (unsigned long long)2e19, (int)(signed char)300.0, (unsigned)static_cast<unsigned char>(-1.5));
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -344,6 +485,11 @@ int main()
     fp::comparisons();
     fp::identities();
     fp::floatArithmetic();
+    conv::runtimeD(); conv::runtimeF(); conv::consts(); conv::toFloating();
+    mpsize::show();
+    lit::show();
+    ambig::show();
+    review::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

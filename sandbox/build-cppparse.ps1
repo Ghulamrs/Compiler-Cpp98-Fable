@@ -759,7 +759,12 @@ try {
         @{ unit = "goto-refused"; expect = @("error S132: line 5: goto x jumps past the initialisation of an object with a destructor (ill-formed)", "error S132: line 6: goto y jumps into a try block or a handler (ill-formed)") },
         @{ unit = "covariant"; expect = @("error S131: 'CD::self' overrides 'SB::self' with a covariant return type") },
         @{ unit = "goto-handler"; expect = @("error S132: line 5: a goto out of a catch handler ('out')", "error S132: line 6: a goto out of a catch handler ('out')") },
-        @{ unit = "new-refused"; expect = @("error S132: line 8: a placement new-expression of 'Q'", "error S132: line 9: new of a multidimensional array of 'S'", "error S132: line 9: delete[] of a multidimensional array of 'S'") }
+        @{ unit = "new-refused"; expect = @("error S132: line 8: a placement new-expression of 'Q'", "error S132: line 9: new of a multidimensional array of 'S'", "error S132: line 9: delete[] of a multidimensional array of 'S'") },
+        @{ unit = "memptr-refused"; expect = @("error S132: line 9: '->*' (pointer to member) is not supported yet", "error S132: line 10: a value of pointer to member type 'int P::*'", "error S132: line 11: a value of pointer to member type 'int Q::*'") },
+        @{ unit = "memptr-field"; expect = @("error S132: 'Holder::field' is a pointer to member") },
+        @{ unit = "memptr-global"; expect = @("(4): error S132: 'gmp' is a pointer to member", "(5): error S132: 'S::smp' is a pointer to member") },
+        @{ unit = "ambiguous-base"; expect = @("(8): error S141: 'F': direct base 'V' is inaccessible; already a base of 'W'", "(9): error S141: 'H2': direct base 'V' is inaccessible; already a base of 'WV'", "(10): error S141: 'H5': direct base 'V' is inaccessible; already a base of 'X'", "(11): warning S142: 'G2': base-class 'V' is already a base-class of 'W'", "(12): warning S142: 'H3': base-class 'V' is already a base-class of 'WV'", "(16): warning S142: 'T7': base-class 'V' is already a base-class of 'XV'", "(17): error S141: 'T8': direct base 'V' is inaccessible; already a base of 'XV'") },
+        @{ unit = "ambiguous"; expect = @("ambiguous.cpp(12): error S105: cannot initialise 'p1' of type A* from D*", "ambiguous.cpp(13): error S143: ambiguous conversions from 'D*' to 'A*'", "ambiguous.cpp(14): error S143:", "ambiguous.cpp(15): error S144: ambiguous access of 'a' in 'D'", "ambiguous.cpp(16): error S144: ambiguous access of 'f'", "ambiguous.cpp(17): error S105: cannot convert D to the return type A&") }
     )
     foreach ($r in $rejects) {
         $nm = "front-$($r.unit)"

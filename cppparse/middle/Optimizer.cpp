@@ -39,6 +39,26 @@ void countUses(const IrFunction& f, std::map<int, int>& uses)
 }
 
 bool isPow2(long v) { return v > 0 && (v & (v - 1)) == 0; }
+
+// a floating value converted to the integer type t as cl's code converts it at run time (X86.cpp): signed and
+// narrow targets through a 32-bit cvttsd2si, unsigned int through a 64-bit one, unsigned long long by ranges;
+// an out-of-range result is the "integer indefinite" 80000000h / 8000000000000000h
+long long cvtt64(double x) { return x >= -9223372036854775808.0 && x < 9223372036854775808.0 ? static_cast<long long>(x) : (-9223372036854775807LL - 1); }
+long long cvtt32(double x) { return x > -2147483649.0 && x < 2147483648.0 ? static_cast<long long>(x) : -2147483648LL; }
+long long floatToInt(double x, int size, bool isUnsigned)
+{
+    if (size == 8 && isUnsigned) {
+        if (!(x >= 9223372036854775808.0)) return cvtt64(x);
+        const double y = x - 9223372036854775808.0;
+        return y >= 9223372036854775808.0 ? cvtt64(y) : static_cast<long long>(static_cast<unsigned long long>(cvtt64(y)) + 9223372036854775808ULL);
+    }
+    if (size == 8) return cvtt64(x);
+    if (size == 4 && isUnsigned) return static_cast<long long>(static_cast<unsigned long long>(cvtt64(x)) & 0xFFFFFFFFULL);
+    const long long v = cvtt32(x);
+    if (size == 2) return isUnsigned ? (v & 0xFFFF) : static_cast<short>(v & 0xFFFF);
+    if (size == 1) return isUnsigned ? (v & 0xFF) : static_cast<signed char>(v & 0xFF);
+    return v;
+}
 int  log2of(long v) { int n = 0; while (v > 1) { v >>= 1; ++n; } return n; }
 
 std::string instKey(const IrInst& in)
@@ -46,7 +66,7 @@ std::string instKey(const IrInst& in)
     // addresses are the same whatever the constness of the pointee type
     bool addr = in.op == IrInst::AddrField || in.op == IrInst::AddrIndex || in.op == IrInst::AddrLocal || in.op == IrInst::AddrGlobal;
     std::string k = intToString(static_cast<int>(in.op)) + "|" + in.sub + "|" + intToString(static_cast<int>(in.extra)) + "|" + (in.type && !addr ? in.type->str() : "") + "|";
-    for (size_t a = 0; a < in.args.size(); ++a) k += in.args[a].str() + ",";
+    for (size_t a = 0; a < in.args.size(); ++a) k += operandKey(in.args[a]) + ",";   // floating constants by their bits
     return k;
 }
 
@@ -314,14 +334,25 @@ int Optimizer::constantFold(IrFunction& f)
                 IrInst n; n.dst = in.dst; n.line = in.line; n.type = in.type;
                 const IrOperand& o = in.args[0];
                 if (in.type->isFloating()) {
+                    double d = o.kind == IrOperand::FImm ? o.fval : static_cast<double>(o.ival);
                     // a float source or result is single precision (constants are kept as doubles): rounded here
-                    double v = o.kind == IrOperand::FImm ? o.fval : static_cast<double>(o.ival);
-                    if (o.kind == IrOperand::FImm && o.type && o.type->kind == Type::Float) v = static_cast<double>(static_cast<float>(v));
-                    if (in.type->kind == Type::Float) v = static_cast<double>(static_cast<float>(v));
-                    n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(v, in.type));
+                    if (o.kind == IrOperand::FImm && o.type && o.type->kind == Type::Float) d = static_cast<double>(static_cast<float>(d));
+                    // an unsigned source: its immediate is a 32-bit pattern, sign-extended to 64 bits
+                    if (o.kind == IrOperand::Imm && in.sub == "uitofp" && o.type && o.type->builtinSize() == 4) d = static_cast<double>(static_cast<unsigned long>(o.ival));
+                    else if (o.kind == IrOperand::Imm && in.sub == "uitofp" && o.ival < 0) continue;   // >= 2^63: rounded at run time
+                    if (in.type->kind == Type::Float) d = static_cast<double>(static_cast<float>(d));
+                    n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(d, in.type));
                 }
                 else if (in.type->isIntegral() || in.type->isPointer()) {
-                    long v = o.kind == IrOperand::FImm ? static_cast<long>(o.fval) : o.ival;
+                    long v = o.ival;
+                    if (o.kind == IrOperand::FImm) {
+                        // the IR's immediates are 32-bit, sign-extended to 64 bits (zero-extended for unsigned int):
+                        // a result outside that range stays a run-time conversion
+                        const int size = in.type->builtinSize();
+                        const long long r = floatToInt(o.fval, size, in.type->isUnsigned);
+                        if (size == 8 && (r < -2147483647LL - 1 || r > 2147483647LL)) continue;
+                        v = static_cast<long>(static_cast<int>(static_cast<unsigned int>(static_cast<unsigned long long>(r) & 0xFFFFFFFFULL)));
+                    }
                     // a negative 32-bit pattern zero-extended needs a 64-bit constant, which the IR does not have
                     if (in.sub == "zext" && v < 0 && in.type->builtinSize() > 4) continue;
                     if (in.sub == "trunc") { int bits = in.type->builtinSize() * 8; if (bits < 32) v = in.type->isUnsigned ? (v & ((1L << bits) - 1)) : ((v << (32 - bits)) >> (32 - bits)); }

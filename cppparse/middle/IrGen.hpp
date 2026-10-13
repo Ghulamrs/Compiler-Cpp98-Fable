@@ -148,6 +148,9 @@ private:
     bool staticInit(sema::Symbol* var, IrGlobal& g);
     bool staticData(const sema::Type* t, const cxx::Initializer& init, std::vector<IrDataItem>& out);
     bool constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataItem>& out, int depth);
+    bool foldArith(cxx::Expr* x, double& v, int depth);
+    bool convertFolded(const sema::Type* t, double& v) const;
+    static bool floatRoundsOnce(double d);
     bool aggregateData(const sema::Type* t, const std::vector<cxx::Expr*>* elems, std::vector<IrDataItem>& out, int depth);
     bool readOnlyObject(const sema::Type* t) const;
     void registerAtExit(const std::string& global, const sema::Type* t, int line);
@@ -202,6 +205,8 @@ private:
     void   stmt(cxx::Stmt* s);
     int    labelBlock(const std::string& name);
     void   localDecl(cxx::Decl* d);
+    int    conditionDecl(cxx::Decl* d, const sema::Type*& t, int line);
+    void   declLoop(cxx::Stmt* s, int cb, int next, int xb, int line);
     void   initObject(const LValue& lv, const sema::Type* t, sema::Symbol* var, cxx::InitDeclarator& id, int line);
     void   abiResult(IrInst& r, int line);
     void   initAggregate(const sema::Type* t, int addr, const std::vector<cxx::Expr*>& elems, bool zeroRest, int line);
@@ -229,6 +234,8 @@ private:
     X86Module*                 m_x86;              // receives the globals that static locals become
     bool                       m_msvcNames;        // --msvc-mangling: static locals get cl's decorated names
     std::map<sema::Symbol*, std::string> m_staticNames;   // static local -> its global's IR name
+    std::map<sema::Symbol*, long> m_staticBlocks;         // static local of the current function -> cl's block number
+    void numberStaticBlocks(cxx::Stmt* s, long& next, long current);
     std::map<sema::Symbol*, sema::Symbol*> m_deleting;     // virtual destructor -> its deleting destructor
     std::vector<sema::Symbol*> m_deletingOrder;            // the virtual destructors, in the order their deleting ones were made
     size_t                     m_deletingDone;

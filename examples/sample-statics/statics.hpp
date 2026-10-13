@@ -23,7 +23,71 @@ struct FlakyQ { int which; FlakyQ(int w); };
 inline FlakyP& flakyX() { static FlakyP x(0); return x; }   // throws first from cppparse
 inline FlakyQ& flakyY() { static FlakyQ y(1); return y; }   // throws first from cl
 
+// statics cl initialises as constants: static data (the folded value, in the function's COMDATs) and no guard,
+// so the counted object after them gets $TSS0 and the second one $TSS1 on both sides. cl /O2 inlines konstK
+// into the driver (STATICS_INLINE is __forceinline there) and reads u, d, f, g, z, c, b as data from whichever
+// unit's COMDAT the linker keeps; each call returns the values and then moves them on, from either side
+#ifndef STATICS_INLINE
+#define STATICS_INLINE inline
+#endif
+struct KonstSeen { int u; double d; float f; float g; double z; char c; bool b; int t; int t2; };
+STATICS_INLINE void konstK(KonstSeen& s)
+{
+    static int u = int();
+    static double d = 1.0/4;
+    static float f = 1.5f*2;
+    static Counted t;
+    static float g = (float)(1.0/3) + 1;
+    static double z = double();
+    static char c = 'a' + 1;
+    static bool b = 0.5;
+    static Counted t2;
+    s.u = u; s.d = d; s.f = f; s.g = g; s.z = z; s.c = c; s.b = b; s.t = t.id; s.t2 = t2.id;
+    ++u; d += 1; f += 1; g += 1; z -= 1; ++c; b = !b;
+}
+
+// statics in nested blocks, named after cl's block numbers (the body 2; each compound statement, if, branch,
+// loop and switch takes the next one in source order), so cl's inlined copy and cppparse's reach the same
+// objects and guards
+struct NestedSeen { const Counted* p; const Counted* s; const Counted* x; const Counted* y; int w; };
+STATICS_INLINE void nestedN(int k, NestedSeen& n)
+{
+    n.p = 0; n.s = 0; n.x = 0; n.y = 0; n.w = 0;
+    if (k > 0) { static Counted p; n.p = &p; } else { static Counted q; n.p = &q; }
+    for (int i = 0; i < 1; ++i) { static Counted s; n.s = &s; { static int w = 7; n.w = w++; } }
+    while (k == 5) { static Counted never; n.x = &never; break; }
+    switch (k) { case 1: { static Counted x; n.x = &x; } break; default: break; }
+    { { static Counted y; n.y = &y; } }
+}
+
+// constants folded with the usual arithmetic conversions (float op int is float, rounded after each float
+// operation, overflow to infinity), conversions to unsigned, sizeof and long long: data with cl's bytes, so
+// the counted object after them is $TSS0 on both sides
+struct KonstFold { float f3; double d17; double d16; float f6; unsigned u; float fm; double ds; double dl; int t; };
+STATICS_INLINE void konstF(KonstFold& s)
+{
+    static float f3 = 16777217 + 1.0f;
+    static double d17 = 0.1f * 3;
+    static double d16 = (float)(1.0 / 3) + 1;
+    static float f6 = 1.0e38f * 10 / 10;
+    static unsigned u = 3000000000.0;
+    static float fm = 3.4028235e38f;
+    static double ds = sizeof(int);
+    static double dl = 5LL;
+    static Counted t;
+    s.f3 = f3; s.d17 = d17; s.d16 = d16; s.f6 = f6; s.u = u; s.fm = fm; s.ds = ds; s.dl = dl; s.t = t.id;
+}
+
+// a function-try-block: its try block is block 3, as cl numbers it
+STATICS_INLINE const Counted* tryN(int a)
+try { if (a) { static Counted s1; return &s1; } static Counted s3; return &s3; }
+catch (int) { return 0; }
+
 // cppparse's side
+void cpp_konstK(KonstSeen& s);
+void cpp_konstF(KonstFold& s);
+const Counted* cpp_tryN(int a);
+void cpp_nestedN(int k, NestedSeen& n);
 int cpp_touchA();
 int cpp_touchB();
 int cpp_touchC();

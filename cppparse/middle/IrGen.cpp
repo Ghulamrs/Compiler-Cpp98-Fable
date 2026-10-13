@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -1935,9 +1936,11 @@ void IrGen::localDecl(cxx::Decl* d)
             m_staticNames[var] = gname;
             long block = 2;
             if (m_msvcNames && m_x86) {
-                // cl numbers the blocks of a function; the body is 2. A nested block gets 2 plus its position
-                // among the function's blocks: unique within the function, though not always cl's number
-                if (var->scope && !(var->scope->parent && var->scope->parent->kind == Scope::Function)) {
+                // cl numbers the blocks of a function; the body is 2 (numberStaticBlocks). Without that number
+                // (no body walked): 2 plus the block's position among the function's blocks, unique only
+                std::map<Symbol*, long>::const_iterator nb = m_staticBlocks.find(var);
+                if (nb != m_staticBlocks.end()) block = nb->second;
+                else if (var->scope && !(var->scope->parent && var->scope->parent->kind == Scope::Function)) {
                     long k = 0;
                     for (size_t si = 0; si < m_prog.scopes.size(); ++si) {
                         const Scope* sc = m_prog.scopes[si];
@@ -2059,6 +2062,59 @@ void IrGen::scopedStmt(cxx::Stmt* s, int line)
     closeScope(line);
 }
 
+// a declaration as the condition of if, while, for or switch: the variable is built (in the scope the caller
+// opened) and its value returned, a class object's through its conversion function; t receives the value's type
+int IrGen::conditionDecl(cxx::Decl* d, const sema::Type*& t, int line)
+{
+    localDecl(d);
+    Symbol* v = d->declarators.empty() || !d->declarators[0].decl ? 0 : d->declarators[0].decl->semaSym;
+    t = m_semaTypes.basic(sema::Type::Int);
+    if (!v || m_slots.find(v) == m_slots.end()) return constant(0, t, line);
+    LValue lv; lv.kind = LValue::Local; lv.local = m_slots[v]; lv.type = m_semaTypes.unref(v->type);
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(v->type));
+    if (u && u->kind == sema::Type::Class && u->decl && u->decl->members) {
+        Symbol* conv = 0;
+        const std::vector<Symbol*>& ms = u->decl->members->order;
+        for (size_t i = 0; i < ms.size() && !conv; ++i)
+            if (ms[i]->kind == Symbol::Function && ms[i]->isConversion && ms[i]->type && ms[i]->type->inner && ms[i]->type->inner->isScalar()) conv = ms[i];
+        if (!conv) { m_notes.push_back("L" + numText(line) + ": no conversion of the condition's " + u->decl->qualifiedName()); return constant(0, t, line); }
+        std::vector<cxx::Expr*> none;
+        int obj = isReference(v->type) ? load(lv, v->type, line) : addressOf(lv, line);
+        obj = adjustThis(conv, obj, u, line);
+        t = conv->type->inner;
+        return callFunction(conv, obj, -1, none, 0, true, line);
+    }
+    t = lv.type;
+    return load(lv, v->type, line);
+}
+
+// a loop whose condition declares a variable: the variable is built from the condition on every pass and
+// destroyed at the end of each pass, when the condition is false, and on break and continue (as cl does). The
+// body and a break reach the latch, which destroys it and repeats (to next) while the condition held
+void IrGen::declLoop(cxx::Stmt* s, int cb, int next, int xb, int line)
+{
+    const sema::Type* b = m_semaTypes.basic(sema::Type::Bool);
+    const int bb = m_out->newBlock("loop.body"), latch = m_out->newBlock("loop.latch"), brk = m_out->newBlock("loop.break");
+    const int ok = newLocal("cond.ok", b, false);
+    LValue okl; okl.kind = LValue::Local; okl.local = ok; okl.type = b;
+    m_block = cb;
+    openScope();
+    const sema::Type* t = 0;
+    int c = toBool(conditionDecl(s->decl, t, line), t, line);
+    endFullExpr(line);
+    store(okl, c, b, line);
+    condbr(c, bb, latch, line);
+    LoopTargets lt; lt.breakBlock = brk; lt.continueBlock = latch; lt.tryDepth = m_tryStack.size(); lt.cleanupDepth = m_cleanups.size(); m_loops.push_back(lt);
+    m_block = bb; scopedStmt(s->kids.empty() ? 0 : s->kids[0], line); br(latch, line);
+    m_loops.pop_back();
+    m_block = brk; store(okl, constant(0, b, line), b, line); br(latch, line);
+    m_block = latch;
+    closeScope(line);
+    int again = load(okl, b, line);
+    condbr(again, next, xb, line);
+    m_block = xb;
+}
+
 void IrGen::stmt(cxx::Stmt* s)
 {
     if (!s) return;
@@ -2071,7 +2127,7 @@ void IrGen::stmt(cxx::Stmt* s)
     case cxx::Stmt::If: {
         int tb = m_out->newBlock("if.then"), eb = s->kids.size() > 1 ? m_out->newBlock("if.else") : -1, join = m_out->newBlock("if.end");
         openScope();   // a condition variable lives through both branches
-        if (s->decl) { localDecl(s->decl); Symbol* v = s->decl->declarators[0].decl->semaSym; LValue lv; lv.kind = LValue::Local; lv.local = m_slots[v]; lv.type = v->type; condbr(toBool(load(lv, v->type, line), v->type, line), tb, eb >= 0 ? eb : join, line); }
+        if (s->decl) { const sema::Type* t = 0; int c = toBool(conditionDecl(s->decl, t, line), t, line); endFullExpr(line); condbr(c, tb, eb >= 0 ? eb : join, line); }
         else condition(s->expr, tb, eb >= 0 ? eb : join);
         m_block = tb; scopedStmt(s->kids[0], line); br(join, line);
         if (eb >= 0) { m_block = eb; scopedStmt(s->kids[1], line); br(join, line); }
@@ -2080,6 +2136,12 @@ void IrGen::stmt(cxx::Stmt* s)
         return;
     }
     case cxx::Stmt::While: {
+        if (s->decl) {
+            int dc = m_out->newBlock("while.cond"), dx = m_out->newBlock("while.end");
+            br(dc, line);
+            declLoop(s, dc, dc, dx, line);
+            return;
+        }
         int cb = m_out->newBlock("while.cond"), bb = m_out->newBlock("while.body"), xb = m_out->newBlock("while.end");
         br(cb, line);
         m_block = cb; condition(s->expr, bb, xb);
@@ -2102,11 +2164,19 @@ void IrGen::stmt(cxx::Stmt* s)
     case cxx::Stmt::For: {
         openScope();   // the init-statement's variables live until the loop ends
         if (s->init) stmt(s->init);
+        if (s->decl) {
+            int cb = m_out->newBlock("for.cond"), sb = m_out->newBlock("for.step"), xb = m_out->newBlock("for.end");
+            br(cb, line);
+            declLoop(s, cb, sb, xb, line);
+            m_block = sb; if (s->expr2) { value(s->expr2); endFullExpr(line); } br(cb, line);
+            m_block = xb;
+            closeScope(line);
+            return;
+        }
         int cb = m_out->newBlock("for.cond"), bb = m_out->newBlock("for.body"), sb = m_out->newBlock("for.step"), xb = m_out->newBlock("for.end");
         br(cb, line);
         m_block = cb;
-        if (s->decl) { localDecl(s->decl); Symbol* v = s->decl->declarators[0].decl->semaSym; LValue lv; lv.kind = LValue::Local; lv.local = m_slots[v]; lv.type = v->type; condbr(toBool(load(lv, v->type, line), v->type, line), bb, xb, line); }
-        else if (s->expr) condition(s->expr, bb, xb); else br(bb, line);
+        if (s->expr) condition(s->expr, bb, xb); else br(bb, line);
         LoopTargets lt; lt.breakBlock = xb; lt.continueBlock = sb; lt.tryDepth = m_tryStack.size(); lt.cleanupDepth = m_cleanups.size(); m_loops.push_back(lt);
         m_block = bb; scopedStmt(s->kids[0], line); br(sb, line);
         m_loops.pop_back();
@@ -2116,10 +2186,19 @@ void IrGen::stmt(cxx::Stmt* s)
         return;
     }
     case cxx::Stmt::Switch: {
-        int v = value(s->expr);
-        endFullExpr(line);
-        openScope();
-        const sema::Type* vt = m_semaTypes.unqualified(m_semaTypes.decay(exprType(s->expr)));
+        int v;
+        const sema::Type* st;   // the controlling value's type
+        if (s->decl) {          // "switch (int y = ...)": y lives through the body
+            openScope();
+            v = conditionDecl(s->decl, st, line);
+            endFullExpr(line);
+        } else {
+            v = value(s->expr);
+            st = exprType(s->expr);
+            endFullExpr(line);
+            openScope();
+        }
+        const sema::Type* vt = m_semaTypes.unqualified(m_semaTypes.decay(st));
         if (!vt->isIntegral()) vt = m_semaTypes.basic(sema::Type::Int);
         cxx::Stmt* body = s->kids[0];
         std::vector<cxx::Stmt*> items;
@@ -2142,7 +2221,7 @@ void IrGen::stmt(cxx::Stmt* s)
             if (flat[i]->kind != cxx::Stmt::Case) continue;
             int cv = constant(flat[i]->expr->semaValue, vt, flat[i]->loc.line);
             IrInst c = make(IrInst::Cmp, m_semaTypes.basic(sema::Type::Bool), flat[i]->loc.line); c.sub = "eq";
-            c.args.push_back(IrOperand::temp(convert(v, exprType(s->expr), vt, line), oldType(vt))); c.args.push_back(IrOperand::temp(cv, oldType(vt)));
+            c.args.push_back(IrOperand::temp(convert(v, st, vt, line), oldType(vt))); c.args.push_back(IrOperand::temp(cv, oldType(vt)));
             int cond = emit(c);
             int next = m_out->newBlock("switch.test");
             condbr(cond, labelBlock[flat[i]], next, flat[i]->loc.line);
@@ -2737,6 +2816,45 @@ void IrGen::abiResult(IrInst& r, int line)
     }
 }
 
+// cl's numbers for the blocks of a function, which name its static locals and their guards ("?1" for the body,
+// 2): counted in source order from the body, a compound statement takes the next number; an if takes one, and
+// each of its branches one more (the branch's scope) before its own statements; for, while, do and switch take
+// one before their body; a try block and a handler are their compound statements. Found from cl's objects
+// (static locals in blocks, branches, loops, switch, try/catch, labels, conditions with declarations)
+void IrGen::numberStaticBlocks(cxx::Stmt* s, long& next, long current)
+{
+    if (!s) return;
+    switch (s->kind) {
+    case cxx::Stmt::Compound: {
+        const long mine = next++;
+        (void)current;
+        for (size_t i = 0; i < s->kids.size(); ++i) numberStaticBlocks(s->kids[i], next, mine);
+        return;
+    }
+    case cxx::Stmt::DeclStmt:
+        if (s->decl)
+            for (size_t i = 0; i < s->decl->declarators.size(); ++i) {
+                Symbol* v = s->decl->declarators[i].decl ? s->decl->declarators[i].decl->semaSym : 0;
+                if (v && v->kind == Symbol::Variable && v->isStatic) m_staticBlocks[v] = current;
+            }
+        return;
+    case cxx::Stmt::If:
+        ++next;
+        for (size_t i = 0; i < s->kids.size() && i < 2; ++i) { const long branch = next++; numberStaticBlocks(s->kids[i], next, branch); }
+        return;
+    case cxx::Stmt::For: case cxx::Stmt::While: case cxx::Stmt::DoWhile: case cxx::Stmt::Switch: {
+        const long mine = next++;
+        numberStaticBlocks(s->init, next, mine);
+        for (size_t i = 0; i < s->kids.size(); ++i) numberStaticBlocks(s->kids[i], next, mine);
+        return;
+    }
+    default:
+        numberStaticBlocks(s->init, next, current);
+        for (size_t i = 0; i < s->kids.size(); ++i) numberStaticBlocks(s->kids[i], next, current);
+        return;
+    }
+}
+
 void IrGen::genFunction(Symbol* fn)
 {
     cxx::Decl* def = fn->definition;
@@ -2749,6 +2867,9 @@ void IrGen::genFunction(Symbol* fn)
     // as cl: a destructor stores its own class's vptrs first, so a virtual call made while it (or a base's
     // destructor after it) runs reaches this class's functions, not those of the derived object being destroyed
     if (fn->isDestructor && fn->ownerClass) storeVptr(fn->ownerClass, thisTemp(def->loc.line), def->loc.line);
+    m_staticBlocks.clear();
+    // a function-try-block: the body (2) holds the try block (3, the next number) and its handlers
+    if (m_msvcNames) { long next = def->body->kind == cxx::Stmt::Try ? 3 : 2; numberStaticBlocks(def->body, next, 2); }
     stmt(def->body);
     if (!terminated()) {
         IrInst r = make(IrInst::Ret, 0, def->loc.line);
@@ -3038,8 +3159,11 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             if (s->declAlign > g.align) g.align = s->declAlign;
             bool dynamic = false;
             const bool scalar = !isClassType(s->type) && m_semaTypes.unref(s->type)->kind != sema::Type::Array;
-            if (s->init && s->init->semaConst && scalar) g.init = numText(s->init->semaValue);
-            else if (s->init && s->init->kind == cxx::Expr::FloatLit && scalar) g.init = s->init->text;
+            // an integer constant for an integer or a pointer as it is; a floating, bool or converted value through
+            // constantData, which converts it exactly as cl does ("double d = 0xFFFFFFFFu;", "bool b = 0.5;")
+            const sema::Type* st = m_semaTypes.unqualified(m_semaTypes.unref(s->type));
+            const sema::Type* it0 = s->init ? m_semaTypes.unqualified(m_semaTypes.unref(exprType(s->init))) : 0;
+            if (s->init && s->init->semaConst && scalar && st && !st->isFloating() && st->kind != sema::Type::Bool && it0 && (it0->isIntegral() || it0->isPointer())) g.init = numText(s->init->semaValue);
             else if (staticInit(s, g)) {}   // constants and addresses: static data, as cl emits a constant table
             else if (isClassType(s->type) && !isReference(s->type)) dynamic = s->initCtor != 0 || s->init != 0 || needsDefaultCtor(s->type);
             else dynamic = s->init != 0;
@@ -3107,8 +3231,9 @@ bool IrGen::staticData(const sema::Type* t, const cxx::Initializer& init, std::v
         if (u->kind == sema::Type::Array || u->kind == sema::Type::Class) return aggregateData(u, &init.args, out, 0);
         return init.args.size() == 1 && constantData(t, init.args[0], out, 0);
     }
-    // "const char* p = "x";", "int* p = &g;": a pointer initialised by an address
-    return init.args.size() == 1 && u->kind == sema::Type::Pointer && constantData(t, init.args[0], out, 0);
+    // "const char* p = "x";", "int* p = &g;": a pointer initialised by an address; "double d = 1.0/4;",
+    // "int u = int();", "float f(1.5f*2);": an arithmetic constant, folded
+    return init.args.size() == 1 && (u->kind == sema::Type::Pointer || u->isArithmetic()) && constantData(t, init.args[0], out, 0);
 }
 
 // the bytes of an object of type t initialised by x (0: zero-initialised); false when the initializer needs code
@@ -3132,18 +3257,18 @@ bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataIt
     IrDataItem it;
     it.size = size;
     if (u->isFloating()) {
-        cxx::Expr* f = x;
-        bool neg = false;
-        if (f->kind == cxx::Expr::Unary && f->text == "-" && f->kids.size() == 1) { neg = true; f = f->kids[0]; }
-        std::string text;
-        if (f->kind == cxx::Expr::FloatLit) {
-            text = f->text;
-            while (!text.empty() && std::strchr("fFlL", text[text.size() - 1])) text.erase(text.size() - 1);
-        } else if (f->semaConst && exprType(f) && m_semaTypes.unref(exprType(f))->isIntegral()) text = numText(f->semaValue) + ".0";
-        else return false;
-        if (text.empty() || text.find_first_not_of("0123456789.eE+-") != std::string::npos) return false;
+        // folded as cl folds it: "1.0/4", "1.5f*2", "double()", "(float)(1.0/3) + 1", an integer constant
+        double v = 0;
+        if (!foldArith(x, v, 0) || !convertFolded(u, v)) return false;
+        // the bits as MASM's encoded real ("03FD0000000000000r"): no decimal text to round again
+        unsigned char bytes[8];
+        const float fv = static_cast<float>(v);
+        if (size == 4) std::memcpy(bytes, &fv, 4); else if (size == 8) std::memcpy(bytes, &v, 8); else return false;
+        static const char hexDigits[] = "0123456789ABCDEF";
         it.kind = IrDataItem::Float;
-        it.text = (neg ? "-" : "") + text;
+        it.text = "0";
+        for (int i = size - 1; i >= 0; --i) { it.text += hexDigits[bytes[i] >> 4]; it.text += hexDigits[bytes[i] & 15]; }
+        it.text += "r";
         out.push_back(it);
         return true;
     }
@@ -3185,14 +3310,150 @@ bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataIt
         out.push_back(it);
         return true;
     }
-    if (!x->semaConst || !u->isIntegral()) return false;
+    if (!u->isIntegral()) return false;
     long v = x->semaValue;
+    const sema::Type* xt = x->semaType ? m_semaTypes.unqualified(m_semaTypes.unref(x->semaType)) : 0;
+    if (!x->semaConst || (xt && !xt->isIntegral())) {
+        // "int()", "(int)2.75", "bool b = 0.5;": an arithmetic constant converted
+        double d = 0;
+        if (!foldArith(x, d, 0) || !convertFolded(u, d)) return false;
+        v = d >= 2147483648.0 ? static_cast<long>(d - 4294967296.0) : static_cast<long>(d);   // the 32 bits
+    }
     if (u->kind == sema::Type::Bool) v = v != 0;
     else if (size == 1) v &= 0xFF;
     else if (size == 2) v &= 0xFFFF;
     it.kind = IrDataItem::Int;
     it.value = v;
     out.push_back(it);
+    return true;
+}
+
+// an arithmetic constant expression of the initializer of a static object, folded into v as a value of x's own
+// type, exactly as cl folds it: literals, integer constants, unary + -, binary + - * / and conversions (casts,
+// "T()"). The usual arithmetic conversions apply first (float op int is float), and every float-typed result is
+// rounded to float (one double operation on two floats rounded to float is the float operation; overflow gives
+// infinity, as cl). A decimal float literal whose double is exactly halfway between two floats is not folded:
+// rounding it again could differ from cl's direct rounding. Anything else not provably cl's value: false
+bool IrGen::foldArith(cxx::Expr* x, double& v, int depth)
+{
+    if (!x || depth > 64) return false;
+    const sema::Type* t = x->semaType ? m_semaTypes.unqualified(m_semaTypes.unref(x->semaType)) : 0;
+    if (!t || !t->isArithmetic()) return false;
+    if (t->isIntegral() && x->semaConst) {
+        if (t->kind == sema::Type::LongLong || t->kind == sema::Type::ULongLong) {
+            // semaValue is a long: only a sizeof, or a literal whose digits give that same value
+            if (x->kind != cxx::Expr::SizeofType && x->kind != cxx::Expr::SizeofExpr) {
+                if (x->kind != cxx::Expr::IntLit) return false;
+                std::string d = x->text;
+                while (!d.empty() && std::strchr("uUlL", d[d.size() - 1])) d.erase(d.size() - 1);
+                double lit = 0;
+                int base = 10;
+                size_t i = 0;
+                if (d.size() > 2 && d[0] == '0' && (d[1] == 'x' || d[1] == 'X')) { base = 16; i = 2; }
+                else if (d.size() > 1 && d[0] == '0') { base = 8; i = 1; }
+                for (; i < d.size(); ++i) {
+                    const char ch = static_cast<char>(std::tolower(static_cast<unsigned char>(d[i])));
+                    int dv = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : 99;
+                    if (dv >= base) return false;
+                    lit = lit * base + dv;
+                }
+                if (lit != static_cast<double>(x->semaValue)) return false;
+            }
+            if (x->semaValue < 0) return false;
+        }
+        v = static_cast<double>(x->semaValue);
+        const bool isUnsigned = t->kind == sema::Type::UChar || t->kind == sema::Type::UShort || t->kind == sema::Type::UInt || t->kind == sema::Type::ULong;
+        if (isUnsigned && v < 0) v += 4294967296.0;
+        return true;
+    }
+    switch (x->kind) {
+    case cxx::Expr::FloatLit: {
+        std::string text = x->text;
+        while (!text.empty() && std::strchr("fFlL", text[text.size() - 1])) text.erase(text.size() - 1);
+        if (text.empty() || text.find_first_not_of("0123456789.eE+-") != std::string::npos) return false;
+        v = std::strtod(text.c_str(), 0);
+        if (t->kind == sema::Type::Float && !floatRoundsOnce(v)) return false;
+        break;
+    }
+    case cxx::Expr::Paren:
+        if (x->kids.size() != 1 || !foldArith(x->kids[0], v, depth + 1)) return false;
+        break;
+    case cxx::Expr::Unary:
+        if (x->kids.size() != 1 || (x->text != "-" && x->text != "+") || !foldArith(x->kids[0], v, depth + 1)) return false;
+        if (x->text == "-") v = -v;
+        break;
+    case cxx::Expr::Binary: {
+        double a = 0, b = 0;
+        if (x->kids.size() != 2 || !foldArith(x->kids[0], a, depth + 1) || !foldArith(x->kids[1], b, depth + 1)) return false;
+        if (!t->isFloating()) return false;   // integer arithmetic is sema's (semaConst)
+        // the usual arithmetic conversions, from the operands' own types: double if either is, else float
+        const sema::Type* ta = m_semaTypes.unqualified(m_semaTypes.unref(exprType(x->kids[0])));
+        const sema::Type* tb = m_semaTypes.unqualified(m_semaTypes.unref(exprType(x->kids[1])));
+        const bool wide = ta->kind == sema::Type::Double || ta->kind == sema::Type::LongDouble || tb->kind == sema::Type::Double || tb->kind == sema::Type::LongDouble;
+        const sema::Type* ct = m_semaTypes.basic(wide ? sema::Type::Double : sema::Type::Float);
+        if (!convertFolded(ct, a) || !convertFolded(ct, b)) return false;
+        if (x->text == "+") v = a + b;
+        else if (x->text == "-") v = a - b;
+        else if (x->text == "*") v = a * b;
+        else if (x->text == "/") { if (b == 0) return false; v = a / b; }
+        else return false;
+        // the operation's own type, whatever sema made of it (float op int is float: rounded here)
+        if (!convertFolded(ct, v)) return false;
+        break;
+    }
+    case cxx::Expr::Cast:
+    case cxx::Expr::NamedCast:
+    case cxx::Expr::FunctionalCast:
+        if (x->kind == cxx::Expr::NamedCast && x->text != "static_cast") return false;
+        if (x->kids.empty() && x->kind == cxx::Expr::FunctionalCast) { v = 0; break; }   // "int()": value-initialised
+        if (x->kids.size() != 1 || !foldArith(x->kids[0], v, depth + 1)) return false;
+        break;
+    default:
+        return false;
+    }
+    return convertFolded(t, v);
+}
+
+// false when the double d lies exactly halfway between two floats: the decimal it came from may not
+bool IrGen::floatRoundsOnce(double d)
+{
+    const float f = static_cast<float>(d);
+    if (static_cast<double>(f) == d || f != f) return true;
+    unsigned int bits = 0;
+    std::memcpy(&bits, &f, 4);
+    // the float on d's other side: one step away from zero when f is nearer zero than d, else toward it
+    const bool fBelowMagnitude = (d < 0 ? -static_cast<double>(f) < -d : static_cast<double>(f) < d);
+    unsigned int nb = fBelowMagnitude ? bits + 1 : bits - 1;
+    float g;
+    std::memcpy(&g, &nb, 4);
+    if (g != g) return false;
+    return (static_cast<double>(f) + static_cast<double>(g)) / 2 != d;
+}
+
+// v converted to the arithmetic type t as cl converts a constant; false when the result is not a plain value
+// (NaN, an infinity or a value out of range converted to an integer, an enum)
+bool IrGen::convertFolded(const sema::Type* t, double& v) const
+{
+    if (v != v) return false;
+    const bool finite = v <= 1.7976931348623157e308 && v >= -1.7976931348623157e308;
+    if (t->kind == sema::Type::Float) { v = static_cast<double>(static_cast<float>(v)); return true; }   // to infinity beyond
+    if (t->kind == sema::Type::Double || t->kind == sema::Type::LongDouble) return true;
+    if (!finite) return false;
+    if (t->kind == sema::Type::Bool) { v = v != 0 ? 1 : 0; return true; }
+    if (!t->isIntegral() || t->kind == sema::Type::Enum) return false;
+    const double n = v < 0 ? -std::floor(-v) : std::floor(v);   // toward zero
+    double lo = -2147483648.0, hi = 2147483647.0;
+    switch (t->kind) {
+    case sema::Type::Char: case sema::Type::SChar: lo = -128; hi = 127; break;
+    case sema::Type::UChar: lo = 0; hi = 255; break;
+    case sema::Type::Short: lo = -32768; hi = 32767; break;
+    case sema::Type::UShort: case sema::Type::WChar: lo = 0; hi = 65535; break;
+    case sema::Type::UInt: case sema::Type::ULong: lo = 0; hi = 4294967295.0; break;
+    case sema::Type::ULongLong: lo = 0; break;   // emitted from a 32-bit value: below 2^31
+    default: break;
+    }
+    if (n < lo || n > hi) return false;
+    v = n;
     return true;
 }
 

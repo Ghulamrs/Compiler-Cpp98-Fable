@@ -139,6 +139,81 @@ void predefined()
 #endif
 }
 
+// a declaration as the condition of while, if, for and switch: re-initialised from the condition on every
+// iteration, destroyed at the end of each iteration (and when the condition is false or the loop is left)
+struct Gauge {
+    static int built, destroyed;
+    int v;
+    Gauge(int x) : v(x) { ++built; }
+    Gauge(const Gauge& o) : v(o.v) { ++built; }
+    ~Gauge() { ++destroyed; }
+    operator int() const { return v; }
+};
+int Gauge::built = 0;
+int Gauge::destroyed = 0;
+
+int whileInt(int k) { int r = 0; while (int y = k--) { r += y; } return r; }
+int whileGauge(int k) { int r = 0; while (Gauge g = k--) { r += g.v; if (Gauge::built - Gauge::destroyed != 1) return -1; } return r; }
+int whileBreak(int k) { int r = 0; while (Gauge g = k--) { if (g.v == 2) break; if (g.v == 4) continue; r += g.v; } return r; }
+int ifInt(int k) { if (int y = k * 2) return y; else return y - 1; }
+int ifGauge(int k) { if (Gauge g = k) return g.v * 10; else return g.v - 1; }
+int forInt(int k) { int r = 0; for (int i = 0; int y = k - i; ++i) r += y; return r; }
+int forGauge(int k) { int r = 0; for (int i = 0; Gauge g = k - i; ++i) { if (i == 1) continue; r += g.v; } return r; }
+int switchInt(int k) { switch (int y = k + 1) { case 2: return y * 100; default: return y; } }
+int switchGauge(int k) { switch (Gauge g = k + 1) { case 2: return g.v * 100; default: break; } return -5; }
+
+void conditionDeclarations()
+{
+    std::printf("while decl: %d %d %d\n", whileInt(4), whileInt(0), whileInt(1));
+    Gauge::built = Gauge::destroyed = 0;
+    int a = whileGauge(4);
+    std::printf("while Gauge: %d built %d destroyed %d\n", a, Gauge::built, Gauge::destroyed);
+    Gauge::built = Gauge::destroyed = 0;
+    int b = whileBreak(6);
+    std::printf("while break/continue: %d built %d destroyed %d\n", b, Gauge::built, Gauge::destroyed);
+    std::printf("if decl: %d %d\n", ifInt(3), ifInt(0));
+    Gauge::built = Gauge::destroyed = 0;
+    int c = ifGauge(3), d = ifGauge(0);
+    std::printf("if Gauge: %d %d built %d destroyed %d\n", c, d, Gauge::built, Gauge::destroyed);
+    std::printf("for decl: %d %d\n", forInt(4), forInt(0));
+    Gauge::built = Gauge::destroyed = 0;
+    int e = forGauge(4);
+    std::printf("for Gauge: %d built %d destroyed %d\n", e, Gauge::built, Gauge::destroyed);
+    std::printf("switch decl: %d %d\n", switchInt(1), switchInt(5));
+    Gauge::built = Gauge::destroyed = 0;
+    int f = switchGauge(1), g = switchGauge(4);
+    std::printf("switch Gauge: %d %d built %d destroyed %d\n", f, g, Gauge::built, Gauge::destroyed);
+}
+
+// globals initialised by constants that need a conversion: static data with the bytes cl gives them
+namespace folded {
+double d1 = 0xFFFFFFFFu;
+float f1 = 0x80000000;
+unsigned u1 = 3000000000.0;
+unsigned char uc1 = 255.9;
+wchar_t w1 = 65.7;
+bool b1 = 0.5;
+short s1 = -1.9;
+double d4 = 2147483647 + 0.5f;
+double d16 = (float)(1.0 / 3) + 1;
+double d17 = 0.1f * 3;
+float f3 = 16777217 + 1.0f;
+double d18 = 'a' + 0.25f;
+}
+void showBytes(const char* name, const void* p, int n)
+{
+    std::printf("%s", name);
+    for (int i = 0; i < n; ++i) std::printf(" %02x", ((const unsigned char*)p)[i]);
+    std::printf("\n");
+}
+void foldedGlobals()
+{
+    showBytes("d1", &folded::d1, 8); showBytes("f1", &folded::f1, 4); showBytes("u1", &folded::u1, 4);
+    showBytes("uc1", &folded::uc1, 1); showBytes("w1", &folded::w1, 2); showBytes("b1", &folded::b1, 1);
+    showBytes("s1", &folded::s1, 2); showBytes("d4", &folded::d4, 8); showBytes("d16", &folded::d16, 8);
+    showBytes("d17", &folded::d17, 8); showBytes("f3", &folded::f3, 4); showBytes("d18", &folded::d18, 8);
+}
+
 int main()
 {
     predefined();
@@ -149,6 +224,8 @@ int main()
     memberTemplates();
     functionPointerMembers();
     functorMembers();
+    conditionDeclarations();
+    foldedGlobals();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

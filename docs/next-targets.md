@@ -60,7 +60,7 @@ the default), with the items found since. Each was reproduced with a small progr
   `vsprintf` in `cstdio` give va_list/va_start/va_arg/va_end over that area, as MSVC's vadefs.h (X86.cpp).
 - 20, static locals: cl's names (`?n@?1??counterA@@YAHXZ@4HA`, MangleSema.cpp) and Static linkage, External in
   one COMDAT only for an inline function, so cl and cppparse copies share the variable. A static in a nested
-  block gets a unique block number that is not always cl's.
+  block gets cl's block number (IrGen::numberStaticBlocks).
 - 21, constant tables: a global or static local initialised by constants, string literals and addresses of
   globals and functions (arrays, plain aggregates, pointers) is static data with relocations, in .rdata when
   const, as cl emits it; classes with bit-fields stay on the dynamic path (IrGen.cpp, X86.cpp).
@@ -119,12 +119,15 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   guarded with cl's thread-safe-statics protocol and names is done (sample-statics in Test 13, with
   _Init_thread_abort for a throwing initializer); class results through pointers to functions,
   `(*fp)(x)`, variadic class arguments and cl's own-members rule for results in rax are done (sample-abi);
-  open: a static local cl initialises as a constant (`static int u = int();`, `static double d = 1.0/4;`,
-  floating constants, value-initialisation) still gets a guard from cppparse (IrGen localDecl,
-  scalarConstant), which shifts every later `$TSS<n>` of the function against cl's, so with cl inlining
-  the function such an object can be constructed twice (repro: review-e t6/d6, run.ps1 t6 d6). Giving such statics a private guard is not enough: cl reads them as static data from the shared COMDAT, so cppparse must emit their folded value as data (needs a floating constant evaluator for IrGlobal data); statics in nested blocks
-  use cppparse's block numbers, not cl's `?4`/`?6`/`?7` scheme; exceptions do not cross between cl's
-  and cppparse's runtimes (a cl throw into a cppparse frame fails fast) (vtable slots grouped by overload and the
+  a static local cl initialises as a constant (`static int u = int();`, `static double d = 1.0/4;`,
+  `static float f = 1.5f*2;`, value-initialisation, casts) is static data with cl's folded bytes and no
+  guard (IrGen::foldArith/convertFolded; the bits go out as MASM's encoded reals), so the `$TSS<n>` after
+  it match cl's (konstK in sample-statics, cl inlining it); statics in nested blocks get cl's block
+  numbers (IrGen::numberStaticBlocks: the body 2, then in source order each compound statement, if and
+  each of its branches, for/while/do/switch; checked against cl for blocks, branches, else-if chains,
+  loops, switch, try/catch, labels and conditions with declarations; nestedN in sample-statics); open:
+  statics inside the member functions of a local class are not checked against cl; exceptions do not cross between cl's
+  and cppparse's runtimes (a cl throw into a cppparse frame fails fast); (vtable slots grouped by overload and the
   destructor slot holding the deleting destructor are done).
 - design-table-exceptions.md section 7: an exception edge from every call to its landing pad, then GVN and
   register values across handlers; the main lever on code size (1.57 times cl's on the matrix sample).
@@ -135,6 +138,21 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   `delete` through a base pointer skips the base destructors, and one from a stack object's destructor is not
   caught at all ("unhandled exception of type int"). Repro: review-v w.cpp.
 - Calls through pointers to members (`(obj.*pmf)(x)`, `(p->*pmf)(x)`) are rejected by sema (an error, not wrong code).
+- A float literal with an `f` suffix is converted decimal -> double -> float, which differs from cl's direct
+  decimal -> float rounding when the double is exactly halfway between two floats. The folder
+  (IrGen::foldArith, floatRoundsOnce) no longer folds such a literal, but it then takes the guarded dynamic
+  path (one more `$TSS<n>` than cl, so later guards of the function shift) and the run-time value, like the
+  code's own float constants and the assembler's REAL4, is still double-rounded. Repro (checked):
+  `float* hf() { static float h = 1.00000005960464477550f; return &h; }`: cl 0x3F800001, cppparse a guard
+  and 0x3F800000. Fix: a correctly rounded decimal -> float conversion (exact big-decimal comparison with the
+  midpoint).
+- Out-of-range float -> integer conversions in constants (undefined; cl keeps the value, e.g.
+  `static double v = (unsigned char)300.0 + 0.5;` is 300.5 in cl's data) are not folded: guarded dynamic path,
+  so the guards after them shift against cl's.
+- At -O2 a run-time double -> unsigned conversion of 3000000000.0 gives 2147483648 (-O0 is correct); found by
+  the review of e75fd50 (review-g), not yet investigated.
+- Statics in a member function of a local class: the mangled name lacks the enclosing function (cl nests
+  it), so such a static is not shared with cl's copy; found by the review of 92a19bb (review-g).
 
 ## Code size against cl /O2 (analysis of the matrix sample, 2026-10-13)
 

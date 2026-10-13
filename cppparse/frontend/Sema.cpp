@@ -207,7 +207,10 @@ const Type* TypeTable::promoted(const Type* t)
 
 const Type* TypeTable::arithmeticResult(const Type* a, const Type* b)
 {
-    a = promoted(a); b = promoted(b);
+    // the integral promotions only: float op float stays float (C++98 5/9), computed in single precision
+    a = unqualified(unref(a)); b = unqualified(unref(b));
+    if (a->kind != Type::Float) a = promoted(a);
+    if (b->kind != Type::Float) b = promoted(b);
     if (a->kind == Type::LongDouble || b->kind == Type::LongDouble) return basic(Type::LongDouble);
     if (a->kind == Type::Double || b->kind == Type::Double) return basic(Type::Double);
     if (a->kind == Type::Float || b->kind == Type::Float) return basic(Type::Float);

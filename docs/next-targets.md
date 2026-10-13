@@ -9,7 +9,8 @@ the default), with the items found since. Each was reproduced with a small progr
 - 17: a throw inside a catch handler. Every handler body is a try region whose landing pad calls
   `cppparse_catch_unwind` (IrGen.cpp, runtime); correct in table and sjlj mode at -O0 and -O2.
 - 18, call side: float arguments of a varargs call are copied into the integer registers (X86.cpp).
-- 19, compares and negation: floats are widened to double first; exact, only slower than cl.
+- 19, compares and negation: negation widens a float to double first (exact, only slower than cl); compares are
+  `ucomiss` on floats since 2026-10-13 (see the floating-point entry below).
 - 20, mostly: file-scope `static` functions and variables and the anonymous namespace are internal (the
   namespace carries a per-unit id); an out-of-class `inline` definition is `f i`.
 - 22, partly: a missing include is fatal; an undeclared function is error S103.
@@ -96,6 +97,17 @@ the default), with the items found since. Each was reproduced with a small progr
 - 22, predefined macros (decided 2026-10-13): the Windows target defines `_MT=1` and `_CPPUNWIND=1`, as cl does for a
   `/MT /EHsc` build (common/Target.cpp); `_MSC_VER` stays undefined, so code under it, written for MSVC's extensions,
   is not compiled; test 17 (`sample-front/front.cpp`) checks the macros against cl.
+- Floating point against cl (review of 2026-10-13, test 17 `fp::` in `sample-front/front.cpp`, -O0 and -O2, also
+  checked at -O1 and -O3): double <-> long double was `cvtsd2ss` (IrGen::convert: no conversion now, float <-> long
+  double as float <-> double); float compares and conversions to bool used `ucomisd` on a float register and ignored
+  PF (`(bool)-0.0f` true, `(bool)NaN` false, `NaN == NaN` true): `ucomiss`/`ucomisd` by the operands' type, and
+  ==/!= test PF in the setcc (a `jp` around it) and in the fused branch (X86.cpp emitInst Cmp/CondBr, invertCc);
+  `x + 0.0` was folded to `x` (-0.0 gave -0.0): only x*1, x/1, x-(+0.0), x+(-0.0) are kept (Optimizer::algebraic);
+  a constant's text, the CSE/GVN key, had 6 digits (`x+0.1` and `x+0.1000001` were one value) and the phi
+  simplification took -0.0 for 0.0 (IrOperand::str, Ssa phi); `float op float` was a double (TypeTable::
+  arithmeticResult promoted float, and unary -/+ did too: `sizeof(-f)` 8): it is a float computed with addss etc.,
+  `-f` is negated through a double (the back end's sign mask is a double's), and folded float operations, float
+  operands and conversions are rounded to float (Optimizer::constantFold).
 
 ## Plan
 

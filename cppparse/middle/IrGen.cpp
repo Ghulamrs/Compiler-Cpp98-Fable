@@ -1606,6 +1606,14 @@ int IrGen::value(cxx::Expr* e)
         if (op == "!") { int b = toBool(v, ot, line); IrInst in = make(IrInst::Cmp, m_semaTypes.basic(sema::Type::Bool), line); in.sub = "eq"; in.args.push_back(IrOperand::temp(b, m_types.boolType())); in.args.push_back(IrOperand::imm(0, m_types.boolType())); return emit(in); }
         if (op == "+") return convert(v, ot, t, line);
         v = convert(v, ot, t, line);
+        if (op == "-" && t->kind == sema::Type::Float) {
+            // -f is a float: negated as a double (the back end's sign mask is a double's), exact both ways
+            const sema::Type* dt = m_semaTypes.basic(sema::Type::Double);
+            IrInst in = make(IrInst::Un, dt, line);
+            in.sub = "fneg";
+            in.args.push_back(IrOperand::temp(convert(v, t, dt, line), oldType(dt)));
+            return convert(emit(in), dt, t, line);
+        }
         IrInst in = make(IrInst::Un, t, line);
         in.sub = op == "-" ? (t->isFloating() ? "fneg" : "neg") : "not";
         in.args.push_back(IrOperand::temp(v, oldType(t)));

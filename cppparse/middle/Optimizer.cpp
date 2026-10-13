@@ -282,9 +282,13 @@ int Optimizer::constantFold(IrFunction& f)
                 if (fl) {
                     double x = in.args[0].kind == IrOperand::FImm ? in.args[0].fval : static_cast<double>(in.args[0].ival);
                     double y = in.args[1].kind == IrOperand::FImm ? in.args[1].fval : static_cast<double>(in.args[1].ival);
+                    // float operands and results are single precision: rounded as addss / ucomiss would see them
+                    if (in.args[0].type && in.args[0].type->kind == Type::Float) x = static_cast<double>(static_cast<float>(x));
+                    if (in.args[1].type && in.args[1].type->kind == Type::Float) y = static_cast<double>(static_cast<float>(y));
                     bool ok, isCmp; long c;
                     double r = foldFloat(in.sub, x, y, ok, isCmp, c);
                     if (!ok) continue;
+                    if (!isCmp && in.type && in.type->kind == Type::Float) r = static_cast<double>(static_cast<float>(r));
                     IrInst n; n.dst = in.dst; n.line = in.line; n.type = in.type;
                     if (isCmp) { n.op = IrInst::Const; n.args.push_back(IrOperand::imm(c, in.type)); }
                     else { n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(r, in.type)); }

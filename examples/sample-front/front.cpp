@@ -294,6 +294,24 @@ void identities()
     std::printf("fp folded identities: %016llx %016llx %016llx %016llx %016llx\n", bitsD(addZero(-0.0)), bitsD(-0.0 + 0.0), bitsD(nearConstants(1.0)),
                 bitsD(signedZeros(true)), bitsD(signedZeros(false)));
 }
+
+// float arithmetic is single precision (float op float is a float, C++98 5/9), and so is -f
+double floatSum(float f) { double r = f + 0.1f; return r; }
+double floatMul(float a, float b) { return a * b; }
+double floatDiv(float a, float b) { return a / b; }
+float floatChain(float a, float b, float c) { return a * b + c; }
+float floatCompound(float f) { f += 0.1f; f *= 3.0f; f -= 0.2f; return f; }
+double floatConstants() { float a = 0.1f, b = 0.2f; return a + b; }
+double floatRoundTrip() { return (double)(float)0.1; }
+int floatSizes(float f) { return (int)sizeof(-f) * 10 + (int)sizeof(f + f); }
+float floatNeg(float f) { return -f; }
+void floatArithmetic()
+{
+    std::printf("fp float arithmetic: %016llx %016llx %016llx %08x %08x\n", bitsD(floatSum(3.0f)), bitsD(floatMul(0.1f, 0.3f)), bitsD(floatDiv(1.0f, 3.0f)),
+                bitsF(floatChain(0.1f, 0.2f, 0.3f)), bitsF(floatCompound(1.0f)));
+    std::printf("fp float constants: %016llx %016llx %d %08x %08x\n", bitsD(floatConstants()), bitsD(floatRoundTrip()), floatSizes(1.0f), bitsF(floatNeg(0.0f)),
+                bitsF(floatNeg(1.5f)));
+}
 }
 
 int main()
@@ -311,6 +329,7 @@ int main()
     fp::longDouble();
     fp::comparisons();
     fp::identities();
+    fp::floatArithmetic();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

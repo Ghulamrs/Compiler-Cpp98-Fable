@@ -12,5 +12,8 @@ struct G2 : V, W { };            // C4584
 struct H3 : WV, V { };           // C4584
 struct F2 : W, virtual V { };    // accepted
 struct H1 : virtual V, WV { };   // accepted (one shared V)
+struct XV : virtual W { };
+struct T7 : V, XV { };           // C4584 (the V inside the virtual W is not a virtual base)
+struct T8 : virtual V, XV { };   // C2584
 
 int main() { return 0; }

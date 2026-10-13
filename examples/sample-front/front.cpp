@@ -338,6 +338,23 @@ void show()
 }
 }
 
+// review of the member-pointer and conversion commits: cl's sizes for an incomplete class (unspecified model) and
+// for a vfptr added in front of a base without one (multiple model); a class template with a member pointer
+// only named through a pointer is accepted; out-of-range literal casts folded modulo 2^N as cl folds them
+namespace review {
+struct Inc;
+struct A1 { int a; };
+struct D1 : A1 { virtual void h() {} };
+struct P { int a; };
+template <class T> struct Holder { int T::* f; int x; };
+void show()
+{
+    std::printf("review sizes %d %d %d %d %d\n", (int)sizeof(void (Inc::*)()), (int)sizeof(int Inc::*), (int)sizeof(void (D1::*)()), (int)sizeof(int D1::*), (int)sizeof(Holder<P>*));
+    std::printf("review folds %x %llx %x %x %llx %d %x\n", (int)3e9, (long long)9.3e18, (unsigned)1e19, (unsigned)(unsigned short)1e10,
+        (unsigned long long)2e19, (int)(signed char)300.0, (unsigned)static_cast<unsigned char>(-1.5));
+}
+}
+
 int main()
 {
     predefined();
@@ -354,6 +371,7 @@ int main()
     mpsize::show();
     lit::show();
     ambig::show();
+    review::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

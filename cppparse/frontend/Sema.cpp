@@ -161,6 +161,8 @@ void TypeTable::memberPointerModel(const Symbol* cls, bool& multiple, bool& virt
 {
     if (!cls || depth > 64) return;
     if (cls->bases.size() > 1) multiple = true;
+    // a vfptr of its own in front of a base without one: the base is not at offset 0 (cl: multiple)
+    for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->isPolymorphic && !cls->bases[b].isVirtual && cls->bases[b].cls && !cls->bases[b].cls->isPolymorphic) multiple = true;
     for (size_t b = 0; b < cls->bases.size(); ++b) {
         if (cls->bases[b].isVirtual) virt = true;
         memberPointerModel(cls->bases[b].cls, multiple, virt, depth + 1);
@@ -185,7 +187,10 @@ int TypeTable::sizeOf(const Type* t) const
         // with virtual bases); functions, a code pointer (plus a this adjustment with multiple inheritance, plus
         // a vbtable index with virtual bases), rounded to the pointer's alignment
         bool multiple = false, virt = false;
-        memberPointerModel(t->memberClass ? t->memberClass->decl : 0, multiple, virt, 0);
+        const Symbol* mc = t->memberClass ? t->memberClass->decl : 0;
+        // an incomplete class: cl's unspecified model (data 12, functions a pointer plus three ints)
+        if (!mc || !mc->isDefinition) return !t->inner || t->inner->kind != Type::Function ? 12 : (m_pointerSize + 12 + m_pointerSize - 1) / m_pointerSize * m_pointerSize;
+        memberPointerModel(mc, multiple, virt, 0);
         if (!t->inner || t->inner->kind != Type::Function) return virt ? 8 : 4;
         const int n = m_pointerSize + (multiple || virt ? 4 : 0) + (virt ? 4 : 0);
         return (n + m_pointerSize - 1) / m_pointerSize * m_pointerSize;
@@ -741,14 +746,15 @@ Symbol* Sema::declareEnum(cxx::EnumDecl* e, Scope* in, cxx::Access access)
     return en;
 }
 
-// where 'target' occurs among the bases of 'from' (transitively): reached through a virtual base or not
-static void baseOccurrences(const Symbol* from, const Symbol* target, bool throughVirtual, bool& nonVirtual, bool& virt, int depth)
+// where 'target' occurs among the bases of 'from' (transitively): as a virtual base (the edge to it is virtual)
+// or not; a non-virtual base of a virtual base counts as non-virtual, as cl takes it
+static void baseOccurrences(const Symbol* from, const Symbol* target, bool& nonVirtual, bool& virt, int depth)
 {
     if (!from || depth > 32) return;
     for (size_t b = 0; b < from->bases.size(); ++b) {
-        const bool v = throughVirtual || from->bases[b].isVirtual;
+        const bool v = from->bases[b].isVirtual;   // cl looks at the edge to the base itself only
         if (from->bases[b].cls == target) (v ? virt : nonVirtual) = true;
-        baseOccurrences(from->bases[b].cls, target, v, nonVirtual, virt, depth + 1);
+        baseOccurrences(from->bases[b].cls, target, nonVirtual, virt, depth + 1);
     }
 }
 
@@ -800,7 +806,7 @@ Symbol* Sema::declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Sym
         for (size_t j = 0; j < cls->bases.size(); ++j) {
             if (i == j || !cls->bases[i].cls || !cls->bases[j].cls) continue;
             bool nonVirtual = false, virt = false;
-            baseOccurrences(cls->bases[j].cls, cls->bases[i].cls, false, nonVirtual, virt, 0);
+            baseOccurrences(cls->bases[j].cls, cls->bases[i].cls, nonVirtual, virt, 0);
             if (!nonVirtual && !virt) continue;
             const bool direct = cls->bases[i].isVirtual, indirect = virt && !nonVirtual;
             if (direct && indirect) continue;

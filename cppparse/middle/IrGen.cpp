@@ -1628,6 +1628,31 @@ int IrGen::value(cxx::Expr* e)
         const bool reinterpret = e->kind == cxx::Expr::NamedCast && e->text == "reinterpret_cast";
         if (isReference(exprType(e))) { LValue inner = lvalue(e->kids[0]); if (inner.kind != LValue::None) return reinterpret ? addressOf(inner, line) : convert(addressOf(inner, line), m_semaTypes.pointer(inner.type), m_semaTypes.pointer(t), line); }
         if (reinterpret && t->isPointer() && m_semaTypes.decay(exprType(e->kids[0]))->isPointer()) return value(e->kids[0]);   // the same address
+        {
+            // a constant floating value cast to an integer type: cl folds it modulo 2^N ((int)3e9 is b2d05e00h,
+            // (unsigned short)1e10 e400h), not as the instruction would convert it at run time
+            const sema::Type* ft = m_semaTypes.unqualified(m_semaTypes.unref(exprType(e->kids[0])));
+            const sema::Type* it = m_semaTypes.unqualified(t);
+            double d = 0;
+            const cxx::Expr* lit = e->kids[0];
+            while (lit && lit->kind == cxx::Expr::Paren && lit->kids.size() == 1) lit = lit->kids[0];
+            // only a literal operand: cl converts "-2147483649.0" (a negation) at run time even under /Od
+            if (lit && lit->kind == cxx::Expr::FloatLit && !lit->text.empty() && lit->text[0] != '-' && ft && ft->isFloating() && it->isIntegral() && it->kind != sema::Type::Bool && sizeOf(it) > 0 && sizeOf(it) <= 8 && foldArith(e->kids[0], d, 0) && d == d) {
+                const double two64 = 18446744073709551616.0;
+                double m = std::fmod(d < 0 ? std::ceil(d) : std::floor(d), two64);
+                if (m < 0) m += two64;
+                if (m == m && m < two64) {
+                    unsigned long long u = static_cast<unsigned long long>(m);
+                    const int bits = sizeOf(it) * 8;
+                    if (bits < 64) {
+                        u &= (1ULL << bits) - 1;
+                        if (!it->isUnsigned() && (u >> (bits - 1)) != 0) u |= ~((1ULL << bits) - 1);   // sign-extended
+                        return constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(u & 0xFFFFFFFFULL))), t, line);
+                    }
+                    return bitConstant(u, t, line);
+                }
+            }
+        }
         return convert(value(e->kids[0]), exprType(e->kids[0]), t, line);
     }
     case cxx::Expr::Paren: return value(e->kids[0]);

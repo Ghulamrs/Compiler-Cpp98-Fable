@@ -166,6 +166,18 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   initialised with it gets a dynamic initialiser (a static local a guard) where cl emits static data
   (`unsigned long long b = 4294967295ULL;`: cl `DQ 0FFFFFFFFh`, cppparse `DQ 0` plus an initialiser; the value
   is right once main runs). Fix: a 64-bit semaValue (SemaExpr folding, constantValue, IrGen constant tables).
+- (review of the lane C commits, fixed) the C2584/C4584 check took a non-virtual base of a virtual base for a
+  virtual one (cl looks only at the edge to the base: `W : V; XV : virtual W; T7 : V, XV` warns, `T8 : virtual
+  V, XV` is an error); the member-pointer field refusal fired on implicit instantiations cl accepts
+  (`sizeof(Holder<P>*)`; instantiations are no longer refused, using their member still is); member-pointer
+  sizes for an incomplete class (cl's unspecified model: data 12, functions 24) and for a vfptr added in front
+  of a non-polymorphic base (multiple model, 16); namespace-scope and static member pointers to members are
+  refused (S132, memptr-global.cpp); a cast of a floating literal to an integer type is folded modulo 2^N as cl
+  folds it (`(int)3e9` b2d05e00h, `(unsigned short)1e10` e400h; IrGen value, Cast). Left: a negated literal
+  (`(int)-2147483649.0`) is converted at run time (80000000h; cl /Od prints the same as a printf argument but was
+  reported as 7fffffff in another context, not checked); a template instantiation with a member-pointer field
+  is not refused when copied or value-initialised (its null would be 0, cl -1): `template <class T> struct H {
+  int T::* f; }; H<P> h = H<P>();`.
 - Statics in a member function of a local class: the mangled name lacks the enclosing function (cl nests
   it), so such a static is not shared with cl's copy; found by the review of 92a19bb (`int t4(int a) { struct L { static int f(int b) { static int s1 = b; return s1; } }; return L::f(a); }`).
 

@@ -837,7 +837,9 @@ where cl's is -1) and a class with a member of such a type
 (`memptr-refused.cpp`, `memptr-field.cpp`); calls through them stay a sema
 error (S109). Their sizes are cl's (TypeTable::sizeOf by the inheritance
 model: data 4, 8 with virtual bases; functions 8, 16 with multiple or
-virtual inheritance; front.cpp `mpsize::`). A direct base that is also a
+virtual inheritance or a vfptr added in front of a base; an incomplete
+class 12 and 24; front.cpp `mpsize::`, `review::`). Namespace-scope and
+static member pointers are refused too (`memptr-global.cpp`). A direct base that is also a
 base of another direct base is diagnosed as cl does (Sema::declareClass;
 `ambiguous-base.cpp`): S141, an error, where cl gives C2584
 (`struct F : virtual V, W {}` with `W : V`), S142, a warning, where cl

@@ -2676,6 +2676,8 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
         const std::vector<Symbol*>* ctors = base->members ? base->members->find(base->ctorName()) : 0;
         Symbol* chosen = 0;
         size_t nargs = mi ? mi->args.size() : 0;
+        // the constructor overload resolution chose (sema); by the number of arguments only when there is none
+        if (mi && mi->semaSym && mi->semaSym->isConstructor && mi->semaSym->ownerClass == base) chosen = mi->semaSym;
         if (ctors) for (size_t i = 0; i < ctors->size() && !chosen; ++i) { Symbol* c = (*ctors)[i]; if (c->kind == Symbol::Function && c->isConstructor && nargs >= static_cast<size_t>(c->requiredParams) && nargs <= c->params.size()) chosen = c; }
         m_ctorFlag = 0;   // a base, virtual or not, never builds its own virtual bases here
         if (chosen) { std::vector<cxx::Expr*> none; construct(chosen, baddr, mi ? mi->args : none, 0, mi ? mi->loc.line : line); }
@@ -2715,7 +2717,7 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
             else if (nargs == 1 && isClassType(exprType(mi->args[0])) && m_semaTypes.unqualified(m_semaTypes.unref(exprType(mi->args[0]))) == fu) materialize(mi->args[0], fu, faddr, mi->loc.line);
             else {
                 const std::vector<Symbol*>* ctors = fu->decl->members ? fu->decl->members->find(fu->decl->ctorName()) : 0;
-                Symbol* chosen = 0;
+                Symbol* chosen = (mi->semaSym && mi->semaSym->isConstructor && mi->semaSym->ownerClass == fu->decl) ? mi->semaSym : 0;
                 if (ctors) for (size_t i = 0; i < ctors->size() && !chosen; ++i) { Symbol* c = (*ctors)[i]; if (c->kind == Symbol::Function && c->isConstructor && nargs >= static_cast<size_t>(c->requiredParams) && nargs <= c->params.size()) chosen = c; }
                 if (chosen) construct(chosen, faddr, mi->args, 0, mi->loc.line);
                 else constructDefault(fu, faddr, line);

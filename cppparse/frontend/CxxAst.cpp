@@ -525,7 +525,7 @@ struct Cloner {
         declSpec(c->spec);
         for (size_t i = 0; i < c->declarators.size(); ++i) { c->declarators[i].decl = declarator(c->declarators[i].decl); init(c->declarators[i].init); }
         c->declarator = declarator(c->declarator);
-        for (size_t i = 0; i < c->memInits.size(); ++i) { name(c->memInits[i].name); for (size_t k = 0; k < c->memInits[i].args.size(); ++k) c->memInits[i].args[k] = expr(c->memInits[i].args[k]); }
+        for (size_t i = 0; i < c->memInits.size(); ++i) { c->memInits[i].semaSym = 0; name(c->memInits[i].name); for (size_t k = 0; k < c->memInits[i].args.size(); ++k) c->memInits[i].args[k] = expr(c->memInits[i].args[k]); }
         c->body = stmt(c->body);
         c->classDef = classDecl(c->classDef);
         c->enumDef = enumDecl(c->enumDef);

@@ -1485,7 +1485,9 @@ void Sema::analyzeFunctionBody(Symbol* fn, cxx::Decl* def, Scope* enclosing)
         const Type* tu = m_types.unref(tt);
         if (tu->kind == Type::Class && tu->decl && tu->decl->isDefinition) {
             std::vector<Symbol*> ctors; lookupMember(tu->decl, tu->decl->ctorName(), ctors);
-            noteUse(resolveOverload(ctors, mi.args, 0, 0, fs, mi.loc, tu->decl->name + "::" + tu->decl->name, true));
+            Symbol* chosen = resolveOverload(ctors, mi.args, 0, 0, fs, mi.loc, tu->decl->name + "::" + tu->decl->name, true);
+            noteUse(chosen);
+            mi.semaSym = chosen;
         } else if (mi.args.size() == 1) {
             Conversion c = convert(mi.args[0], tt, fs);
             if (c.rank == Conversion::None && valueType(mi.args[0])->kind != Type::Error) error(mi.loc, "S105", "cannot initialise '" + mi.name.text() + "' of type " + tt->text() + " from " + valueType(mi.args[0])->text());

@@ -1,0 +1,19 @@
+GAP ANALYSIS OF C++98
+
+Left for later sessions, all recorded in docs/next-targets.md with repros:
+
+Polymorphic virtual bases (14b): the largest remaining item. They are refused today, not miscompiled.
+Cases that still behave differently from cl:
+takeV(mk()) copies twice and destroys in a different order;
+a throwing element destructor in delete[];
+throwing destructors in general;
+catch by value skips the copy constructor;
+->* reads garbage;
+the -O2 double-to-unsigned conversion;
+ill-formed hierarchies cl rejects are accepted.
+Mixed cl/cppparse links only: a halfway float literal; statics in local classes; vtable names with longer base paths; exceptions crossing runtimes.
+Code size: the plan to bring it from about 1.85 down to about 1.25 of cl.
+The behaviour gaps are the ones to tackle first next time, as they are the remaining silent-difference cases.
+
+
+

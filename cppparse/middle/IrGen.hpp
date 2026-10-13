@@ -79,7 +79,8 @@ private:
         int               freeKind;    // 1: frees the object whose address slot holds, 2: the array whose cookie it holds
         sema::Symbol*     freeCls;     // the class whose operator delete frees it (0: the global one)
         int               countSlot;   // freeKind 2: the local holding the element count
-        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false), restIndex(-1), freeKind(0), freeCls(0), countSlot(-1) {}
+        bool              noCookie;    // freeKind 2: an array without a cookie (a sized operator delete[] gets count * size)
+        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false), restIndex(-1), freeKind(0), freeCls(0), countSlot(-1), noCookie(false) {}
     };
     struct ExitThunk {                 // destroys a global or static local at exit; registered with atexit once it is built
         sema::Symbol*     fn;
@@ -181,7 +182,7 @@ private:
     void genDeletingDestructors();
     sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth, const char* name = "operator delete", size_t maxParams = 2) const;
     bool freeObject(sema::Symbol* cls, int p, int line);
-    void freeArray(sema::Symbol* cls, int cookie, int count, int line);
+    void freeArray(sema::Symbol* cls, int cookie, int count, int line, bool hasCookie = true);
     void need(sema::Symbol* fn);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
     int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);
@@ -261,6 +262,8 @@ private:
     int                        m_staticCount;
     int                        m_guardCount;    // guarded static locals so far in the function (cl's $TSS<n>)
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block
+    std::vector<std::set<std::string> > m_handlerLabels;   // the labels inside each catch handler being generated
+    static void collectLabels(const cxx::Stmt* s, std::set<std::string>& out);
 
     IrFunction*                m_out;
     sema::Symbol*              m_fn;

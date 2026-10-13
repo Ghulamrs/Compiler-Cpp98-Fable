@@ -756,7 +756,9 @@ try {
         @{ unit = "sizeof-incomplete"; expect = @("error S113: sizeof of incomplete class 'Inc'", "error S113: sizeof of incomplete class 'std::", "error S113: sizeof of incomplete class 'Self'", "error S113: sizeof of void") },
         @{ unit = "vbase"; expect = @("error S130: 'VL' has a virtual base class", "error S130: 'VR' has a virtual base class", "error S130: 'VD' has a virtual base class") },
         @{ unit = "vbase-refused"; expect = @("error S132: line 8: cannot convert from 'V' to 'D': 'V' is a virtual base", "error S132: line 9: pointer to member of 'D', a class with virtual bases", "error S132: line 10: catching 'V', a virtual base class") },
-        @{ unit = "covariant"; expect = @("error S131: 'CD::self' overrides 'SB::self' with a covariant return type") }
+        @{ unit = "covariant"; expect = @("error S131: 'CD::self' overrides 'SB::self' with a covariant return type") },
+        @{ unit = "goto-handler"; expect = @("error S132: line 5: a goto out of a catch handler ('out')", "error S132: line 6: a goto out of a catch handler ('out')") },
+        @{ unit = "new-refused"; expect = @("error S132: line 8: a placement new-expression of 'Q'", "error S132: line 9: new of a multidimensional array of 'S'", "error S132: line 9: delete[] of a multidimensional array of 'S'") }
     )
     foreach ($r in $rejects) {
         $nm = "front-$($r.unit)"

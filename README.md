@@ -931,7 +931,11 @@ for `new T[n]`, after destroying the elements built) throws frees the
 memory through the matching operator delete, the class's or the global
 one; a placement new frees nothing. `catch (T x)` copy-constructs the
 handler's object from the thrown one and destroys it when the handler
-ends (a copy constructor that throws there calls terminate). `throw obj`
+ends (a copy constructor that throws there calls terminate); an
+exception leaving the handler destroys its objects before the handled
+exception is released. A handler for a base class that is not the first
+gets that base subobject (the throw descriptor gives each base's
+offset). A goto out of a handler is refused (S132). `throw obj`
 copy-constructs the exception object into heap storage that the
 runtime owns (`cppparse_throw_owned`) and destroys with the class's
 destructor when the handler ends. The driver `examples/sample-life-driver/

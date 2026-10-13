@@ -288,3 +288,46 @@ int ehCatchValue(int k)
     try { r = catchValue(k); } catch (int x) { r = x; }
     return r * 1000 + g_copies * 10 + g_live;
 }
+
+// a class without destructor (no cookie) and a sized operator delete[]: new P[3] whose second constructor throws
+// frees through it with count * size
+int g_pn = 0, g_psize = 0;
+struct PS { int id; PS() : id(g_pn++) { if (id == 1) throw 9; }
+    static void* operator new[](size_t s) { return malloc(s); } static void operator delete[](void* p, size_t s) { g_psize = static_cast<int>(s); free(p); } };
+
+int ehNoCookie()
+{
+    g_pn = 0; g_psize = 0;
+    int r = 0;
+    try { PS* p = new PS[3]; delete[] p; } catch (int x) { r = x; }
+    return r * 100 + g_psize;
+}
+
+// leaving a by-value handler with an exception: its parameter is destroyed before the exception it handles
+struct HB { int v; HB(int x) : v(x) {} HB(const HB& o) : v(o.v + 10) {} ~HB() { g_dlog = g_dlog * 100 + v; } };
+
+int ehHandlerOrder()
+{
+    g_dlog = 0;
+    int r = 0;
+    try {
+        try { throw HB(9); } catch (HB b) {
+            try { throw HB(4); } catch (HB c) { r = c.v; }
+            throw 5;
+        }
+    } catch (int e) { r = r * 10 + e; }
+    return static_cast<int>(g_dlog % 1000000) * 1000 + r;
+}
+
+// catching a base that is not the first: the handler gets that base subobject, by reference and by value
+struct XP { int pad; XP() : pad(5) {} };
+struct MB : XP, HB { MB() : HB(7) {} };
+
+int ehCatchBase(int byValue)
+{
+    g_dlog = 0;
+    int r = 0;
+    if (byValue) { try { throw MB(); } catch (HB b) { r = b.v; } }
+    else { try { throw MB(); } catch (HB& b) { r = b.v; } }
+    return r * 1000 + static_cast<int>(g_dlog % 1000);
+}

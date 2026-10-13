@@ -23,6 +23,9 @@ int ehMixed(int n);
 int ehDtorThrow(int k);
 int ehArrays(int k);
 int ehCatchValue(int k);
+int ehNoCookie();
+int ehHandlerOrder();
+int ehCatchBase(int byValue);
 extern int g_destroyed;
 
 static int g_walked = -2;
@@ -80,6 +83,9 @@ int main()
     for (int k = 0; k <= 4; ++k) printf("ehDtorThrow(%d) = %d\n", k, ehDtorThrow(k));
     for (int k = 0; k <= 5; ++k) printf("ehArrays(%d) = %d\n", k, ehArrays(k));
     for (int k = 1; k <= 3; ++k) printf("ehCatchValue(%d) = %d\n", k, ehCatchValue(k));
+    printf("ehNoCookie() = %d\n", ehNoCookie());
+    printf("ehHandlerOrder() = %d\n", ehHandlerOrder());
+    printf("ehCatchBase(0) = %d, ehCatchBase(1) = %d\n", ehCatchBase(0), ehCatchBase(1));
     printf("destructors: %d\n", g_destroyed);
     check("try frames left", (unsigned long long)cppparse_frame_depth(), 0);
     check("caught exceptions left", (unsigned long long)cppparse_caught_depth(), 0);

@@ -71,7 +71,8 @@ foreach ($m in $models.Keys) {
 # whole programs that must call terminate; the standard output and the exit code (abort) must equal cl's:
 #   terminate.cpp: an exception leaving a destructor run by the stack unwinding
 #   terminate-catch.cpp: a copy constructor that throws while it initializes a by-value catch parameter
-foreach ($tn in "terminate", "terminate-catch") {
+#   terminate-handler.cpp: the destructor of a by-value parameter that throws while an exception leaves its handler
+foreach ($tn in "terminate", "terminate-catch", "terminate-handler") {
     $tdir = "$out\$tn"
     New-Item -ItemType Directory -Force "$tdir\cl" | Out-Null
     $msg = & $cl /nologo /EHsc /Zc:implicitNoexcept- /O2 "/Fo$tdir\cl\" "/Fe$tdir\cl\$tn.exe" "$src\$tn.cpp" 2>&1 | Out-String

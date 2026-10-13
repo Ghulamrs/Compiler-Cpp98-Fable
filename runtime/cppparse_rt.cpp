@@ -179,10 +179,15 @@ static int sameType(const char* thrown, const char* caught)
     return strcmp(lastComponent(a), lastComponent(b)) == 0;   /* "geom::Error" matches "Error" */
 }
 
+/* the offset of the base subobject the last successful match found ("Base@16" in the descriptor), which
+   cppparse_catch_begin adds to the object address it returns */
+static __declspec(thread) unsigned long g_matchOffset = 0;
+
 int cppparse_match(const char* catchType)
 {
     const char* p;
     if (!g_inflight.type) return 0;
+    g_matchOffset = 0;
     if (strcmp(catchType, "...") == 0) return 1;
     p = g_inflight.type;
     while (*p) {
@@ -192,7 +197,12 @@ int cppparse_match(const char* catchType)
         if (n >= sizeof entry) n = sizeof entry - 1;
         memcpy(entry, p, n);
         entry[n] = 0;
-        if (sameType(entry, catchType)) return 1;
+        {
+            char* at = strchr(entry, '@');
+            unsigned long off = 0;
+            if (at) { *at = 0; off = strtoul(at + 1, 0, 10); }
+            if (sameType(entry, catchType)) { g_matchOffset = off; return 1; }
+        }
         p = e ? e + 1 : p + n;
     }
     return 0;
@@ -203,6 +213,8 @@ void* cppparse_catch_begin(void)
     void* obj = g_inflight.object;
     if (g_caughtCount < 32) g_caught[g_caughtCount++] = g_inflight;
     else { dropException(&g_inflight); obj = 0; }  /* too deeply nested: the object is dropped */
+    if (obj) obj = (char*)obj + g_matchOffset;
+    g_matchOffset = 0;
     g_inflight.object = 0;
     g_inflight.type = 0;
     g_inflight.size = 0;
@@ -218,14 +230,20 @@ void cppparse_catch_end(void)
     }
 }
 
+/* the handler got the address of the object or of one of its base subobjects */
+static int holds(const struct cppparse_exception* e, const void* p)
+{
+    return (const char*)p >= (const char*)e->object && (const char*)p < (const char*)e->object + (e->size ? e->size : 1);
+}
+
 /* an exception is leaving a handler (the landing pad around a handler body calls this, having just caught it): the
    exception that handler handled ends, unless it is the one leaving ("throw;" in the handler) */
 void cppparse_catch_unwind(void* handled)
 {
     int k;
-    if (g_caughtCount == 0 || g_caught[g_caughtCount - 1].object == handled) return;
+    if (g_caughtCount == 0 || holds(&g_caught[g_caughtCount - 1], handled)) return;
     for (k = g_caughtCount - 2; k >= 0; --k)
-        if (g_caught[k].object == handled) {
+        if (holds(&g_caught[k], handled)) {
             dropException(&g_caught[k]);
             for (; k + 1 < g_caughtCount; ++k) g_caught[k] = g_caught[k + 1];
             --g_caughtCount;

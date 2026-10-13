@@ -2,6 +2,9 @@
 // cl-compiled driver reads through its own view of the classes.
 #include "layout.hpp"
 
+#include <new>
+#include <stdlib.h>
+
 EM g_em;
 NE g_ne;
 BF    g_bf;
@@ -134,3 +137,86 @@ int polyX(const NP* p)
 {
     return p->x;
 }
+
+int g_dtorLog = 0;
+int g_sbCtorSaw = 0, g_sbDtorSaw = 0, g_sdDtorSaw = 0;
+SA::SA() : sa(10) {}
+int SA::a() const { return 1; }
+int SA::f() const { return 2; }
+SB::SB() : sb(20) { g_sbCtorSaw = g(); }      // SB::g: the object is an SB while SB is built
+int SB::b() const { return 3; }
+int SB::f() const { return 4; }
+int SB::g() const { return 5; }
+SB::~SB() { g_dtorLog = g_dtorLog * 10 + 2; g_sbDtorSaw = g(); }   // SB::g again while SB is destroyed
+SD::SD() : sd(30) {}
+int SD::f() const { return 100 + sd; }
+int SD::g() const { return 200 + sa + sb + sd; }   // this arrives at the SB subobject and is moved back to SD
+int SD::b() const { return 300 + sa; }
+int SD::h() const { return 400 + g(); }            // a call through this: moved to SB again
+SD::~SD() { g_dtorLog = g_dtorLog * 10 + 1; g_sdDtorSaw = h(); }   // SD::h, SD::g, not SE::g
+SE::SE() : se('e') { x = 7; }
+int SE::g() const { return 500 + se; }
+int SE::a() const { return 600 + x; }
+SE::~SE() { g_dtorLog = g_dtorLog * 10 + 3; }
+
+int saCall(const SA* p, int which)
+{
+    return which == 0 ? p->a() : p->f();
+}
+
+int sbCall(const SB* p, int which)
+{
+    switch (which) {
+    case 0: return p->b();
+    case 1: return p->f();
+    case 2: return p->g();
+    }
+    return -1;
+}
+
+int sdCall(const SD* p, int which)
+{
+    switch (which) {
+    case 0: return p->f();
+    case 1: return p->g();
+    case 2: return p->b();
+    case 3: return p->h();
+    case 4: return p->a();
+    case 5: return p->SD::g();
+    }
+    return -1;
+}
+
+long destroyThroughSB(int derived)
+{
+    static double storage[8];
+    g_dtorLog = 0;
+    SB* b = derived ? static_cast<SB*>(new (storage) SE) : static_cast<SB*>(new (storage) SD);
+    b->~SB();                              // the destructor slot of SB's table: a thunk to the complete object's
+    return g_dtorLog;
+}
+
+long deleteThroughSB(int derived)
+{
+    SB* b = derived ? static_cast<SB*>(new SE) : static_cast<SB*>(new SD);
+    g_dtorLog = 0;
+    delete b;                              // the deleting destructor frees the complete object, not the SB part
+    return g_dtorLog;
+}
+
+int g_kDeleted = 0;
+KB::KB() : k(5) {}
+KB::~KB() {}
+void KB::operator delete(void* p, size_t n) { g_kDeleted = (int)n; free(p); }
+KD::KD() : kd(6) {}
+KD::~KD() {}
+KB* makeKDasKB() { return new KD; }
+void deleteKB(KB* p) { delete p; }
+
+GP::GP() : p(8) {}
+GP::~GP() {}
+int GP::fp() const { return 80 + p; }
+int GQ2::fq() const { return 90 + p; }
+int GG::fp() const { return 10 + GQ1::p; }
+int ggCall(const GQ2* p) { return p->fp() * 100 + p->fq(); }
+GG* makeGG() { return new GG; }

@@ -59,6 +59,8 @@ public:
     void        setTableExceptions(bool on) { m_tableEh = on; }
     bool        tableExceptions() const { return m_tableEh; }
     void        addVtable(const IrVtable& v) { m_vtables.push_back(v); }
+    // an adjustor thunk a vtable slot names: "sub rcx, adjust; jmp target" (COMDAT, as cl emits it); once per name
+    void        addThunk(const std::string& irName, const std::string& target, int adjust);
     void        addGlobal(const IrGlobal& g) { m_globals.push_back(g); }
     void        addInitializer(const std::string& irName) { m_initializers.push_back(irName); }   // run by the CRT before main
     void        registerSymbolName(const std::string& irName, const std::string& decorated);   // MSVC name of a function
@@ -93,6 +95,9 @@ private:
     std::map<std::string, std::string> m_globalNames;     // qualified variable name -> decorated name
     std::set<std::string>              m_dataSymbols;     // symbols already made PUBLIC in .data
     std::vector<IrVtable>              m_vtables;
+    struct Thunk { std::string name, target; int adjust; };
+    std::vector<Thunk>                 m_thunks;
+    std::set<std::string>              m_thunkNames;
     std::vector<IrGlobal>              m_globals;
     std::vector<std::string>           m_initializers;
     std::string floatLabel(double v);

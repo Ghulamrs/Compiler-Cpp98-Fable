@@ -105,6 +105,18 @@ struct BaseClass {
     BaseClass() : cls(0), access(cxx::AccessPublic), isVirtual(false), offset(0) {}
 };
 
+// one vfptr of a polymorphic class and the table it points to (MSVC: one vftable per polymorphic base subobject
+// that does not share the vfptr at offset 0). fns[s] is the final overrider in slot s; thunks[s] is how far the
+// entry moves this down (from the vfptr's subobject to where the overrider expects it): non-zero means the slot
+// holds an adjustor thunk ("sub rcx, n; jmp f")
+struct VfTable {
+    int                  offset;          // of the vfptr in the class
+    Symbol*              introducedBy;    // the class whose own vfptr this is (names the table: ??_7D@@6BPB@@@)
+    std::vector<Symbol*> fns;
+    std::vector<int>     thunks;
+    VfTable() : offset(0), introducedBy(0) {}
+};
+
 struct Symbol {
     enum Kind { Namespace, Class, Enum, Typedef, Variable, Function, Enumerator, TemplateParam, ClassTemplate, FunctionTemplate, Label };
     Kind          kind;
@@ -126,6 +138,7 @@ struct Symbol {
     std::vector<Symbol*>     fields;      // non-static data members in order (offset in Symbol::offset)
     std::vector<Symbol*>     unnamedBitFields;   // ": n" members, not named and not initialised: laid out before fields[index]
     std::vector<Symbol*>     vtable;      // virtual functions in slot order (including inherited)
+    std::vector<VfTable>     vftables;    // every vfptr of the class: [0] the one at offset 0 (fns == vtable), then the secondary ones
     int           vptrOffset;             // -1 when no vptr
     cxx::ClassDecl* classAst;
     // functions
@@ -134,7 +147,11 @@ struct Symbol {
     cxx::Decl*    definition;             // the function definition (or 0)
     cxx::Decl*    declAst;                // the declaration this symbol came from
     Scope*        body;                   // function scope (parameters) when defined
-    int           vtableSlot;
+    int           vtableSlot;             // in the vftable at thisAdjust
+    int           thisAdjust;             // virtual function: MSVC's this adjustor, the offset in its class of the vfptr
+                                          // whose table first holds it; callers pass this + thisAdjust (0 for destructors)
+    int           vfptrOffset;            // virtual function: the vfptr (in its class) whose table holds it at vtableSlot;
+                                          // equal to thisAdjust except for a destructor reached through a secondary table
     Symbol*       overrides;
     Symbol*       ownerClass;             // member functions / static members / fields
     // variables, enumerators, fields

@@ -29,6 +29,14 @@ bool hasInternalLinkage(const sema::Symbol* s)
     return false;
 }
 
+// cl's name of the scalar deleting destructor from the destructor's (or its thunk's): ??1D@@UEAA@XZ becomes
+// ??_GD@@UEAAPEAXI@Z, void* (unsigned int)
+std::string deletingName(const std::string& dtor)
+{
+    if (dtor.size() < 6 || dtor.compare(0, 3, "??1") != 0 || dtor.compare(dtor.size() - 3, 3, "@XZ") != 0) return dtor + "_G";
+    return "??_G" + dtor.substr(3, dtor.size() - 6) + "PEAXI@Z";
+}
+
 // appends n zero bytes to static data, extending a zero run that ends it
 void zeroData(std::vector<IrDataItem>& out, int n)
 {
@@ -43,7 +51,7 @@ void zeroData(std::vector<IrDataItem>& out, int n)
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
     : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_tryCount(0),
-      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_staticCount(0), m_guardCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
+      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_deletingDone(0), m_staticCount(0), m_guardCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
 {
@@ -751,7 +759,17 @@ int IrGen::callFunction(Symbol* fn, int thisPtr, int sretAddr, const std::vector
     const sema::Type* retReg = sret ? regReturnType(fn, rt) : 0;
     IrInst in = make(IrInst::Call, retReg ? retReg : sret ? m_semaTypes.basic(sema::Type::Void) : rt, line);
     in.sub = irName(fn);
-    if (thisPtr >= 0) in.args.push_back(IrOperand::temp(thisPtr, oldType(m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass)))));
+    const bool vcall = virtualCall && fn->isVirtual && fn->vtableSlot >= 0 && thisPtr >= 0;
+    if (thisPtr >= 0) {
+        // MSVC's this adjustor: a virtual function first held by a secondary vftable is called with the address of
+        // that vfptr (a virtual call loads the vptr there); a destructor takes the complete object
+        const int adjust = vcall ? fn->vfptrOffset : fn->thisAdjust;
+        const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));
+        if (adjust != 0) thisPtr = offsetAddress(thisPtr, cp, cp, adjust, line);
+        in.args.push_back(IrOperand::temp(thisPtr, oldType(cp)));
+        // the destructor's slot holds the deleting destructor: flags 0 destroys without freeing
+        if (vcall && fn->isDestructor) in.args.push_back(IrOperand::imm(0, oldType(m_semaTypes.basic(sema::Type::UInt))));
+    }
     int retSlot = -1;
     if (sret) {
         if (sretAddr < 0) { retSlot = newLocal("tmp.ret", m_semaTypes.unqualified(rt), true); LValue tl; tl.kind = LValue::Local; tl.local = retSlot; tl.type = m_semaTypes.unqualified(rt); sretAddr = addressOf(tl, line); }
@@ -773,7 +791,7 @@ int IrGen::callFunction(Symbol* fn, int thisPtr, int sretAddr, const std::vector
         int v = argument(def, ft->params[p], line);
         in.args.push_back(IrOperand::temp(v, oldType(isReference(ft->params[p]) ? m_semaTypes.pointer(m_semaTypes.unref(ft->params[p])) : regParamType(ft->params[p]) ? regParamType(ft->params[p]) : isClassType(ft->params[p]) ? m_semaTypes.pointer(ft->params[p]) : ft->params[p])));
     }
-    if (virtualCall && fn->isVirtual && fn->vtableSlot >= 0 && thisPtr >= 0) { in.op = IrInst::VCall; in.extra = fn->vtableSlot; }
+    if (vcall) { in.op = IrInst::VCall; in.extra = fn->vtableSlot; }
     if (isReference(rt)) in.type = oldType(m_semaTypes.pointer(rt->inner));
     int r = emit(in);
     if (retReg) { LValue m; m.kind = LValue::Mem; m.addr = sretAddr; m.type = retReg; store(m, r, retReg, line); }   // the result's bytes came in rax
@@ -932,6 +950,7 @@ void IrGen::callSpecial(Symbol* fn, int thisPtr, int argPtr, int line)
     const sema::Type* rt = fn->type && fn->type->kind == sema::Type::Function ? fn->type->inner : m_semaTypes.basic(sema::Type::Void);
     IrInst in = make(IrInst::Call, isReference(rt) ? m_semaTypes.pointer(rt->inner) : rt, line);
     in.sub = irName(fn);
+    if (fn->thisAdjust != 0) thisPtr = offsetAddress(thisPtr, pt, pt, fn->thisAdjust, line);
     in.args.push_back(IrOperand::temp(thisPtr, oldType(pt)));
     if (argPtr >= 0) in.args.push_back(IrOperand::temp(argPtr, oldType(pt)));
     emit(in);
@@ -1604,6 +1623,22 @@ int IrGen::value(cxx::Expr* e)
             condbr(toBool(p, pt, line), db, xb, line);
             m_block = db;
         }
+        Symbol* vdtor = !e->arrayDelete && pt->kind == sema::Type::Pointer && isClassType(pt->inner) && pt->inner->decl ? findSpecial(pt->inner->decl, '~') : 0;
+        if (vdtor && vdtor->isVirtual && vdtor->vtableSlot >= 0) {
+            // a virtual destructor: the slot's deleting destructor destroys the complete object and frees it (flags
+            // 1), as cl calls it, so a pointer to a secondary base frees the right address
+            need(vdtor);
+            const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(vdtor->ownerClass));
+            IrInst in = make(IrInst::VCall, m_semaTypes.basic(sema::Type::Void), line);
+            in.sub = irName(vdtor);
+            in.extra = vdtor->vtableSlot;
+            in.args.push_back(IrOperand::temp(vdtor->vfptrOffset ? offsetAddress(p, cp, cp, vdtor->vfptrOffset, line) : p, oldType(cp)));
+            in.args.push_back(IrOperand::imm(1, oldType(m_semaTypes.basic(sema::Type::UInt))));
+            emit(in);
+            br(xb, line);
+            m_block = xb;
+            return constant(0, m_semaTypes.basic(sema::Type::Int), line);
+        }
         if (!e->arrayDelete && pt->kind == sema::Type::Pointer) destroy(pt->inner, p, line, true);
         else if (e->arrayDelete && pt->kind == sema::Type::Pointer && needsDtor(pt->inner)) {
             const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
@@ -1613,10 +1648,12 @@ int IrGen::value(cxx::Expr* e)
             forEachElement(pt->inner, p, load(hl, lng, line), false, line);
             p = header;
         }
-        IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
-        in.sub = e->arrayDelete ? "__delete_array" : "__delete";
-        in.args.push_back(IrOperand::temp(p, oldType(pt)));
-        emit(in);
+        if (e->arrayDelete || pt->kind != sema::Type::Pointer || !isClassType(pt->inner) || !freeObject(pt->inner->decl, p, line)) {
+            IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+            in.sub = e->arrayDelete ? "__delete_array" : "__delete";
+            in.args.push_back(IrOperand::temp(p, oldType(pt)));
+            emit(in);
+        }
         if (xb >= 0) { br(xb, line); m_block = xb; }
         return constant(0, m_semaTypes.basic(sema::Type::Int), line);
     }
@@ -2170,18 +2207,34 @@ void IrGen::need(Symbol* fn)
     if (fn->isImplicit || (fn->hasBody && fn->definition)) m_queue.push_back(fn);
 }
 
+// the IR name of a class's vftable t (0: the one at offset 0, "vtable@D"; then "vtable@D{for PB@16}")
+std::string IrGen::vtableName(const Symbol* cls, size_t t)
+{
+    std::string n = "vtable@" + cls->qualifiedName();
+    if (t == 0 || t >= cls->vftables.size()) return n;
+    const sema::VfTable& v = cls->vftables[t];
+    return n + "{for " + (v.introducedBy ? v.introducedBy->qualifiedName() : std::string("?")) + "@" + numText(v.offset) + "}";
+}
+
+// every vfptr of the object: the one at offset 0, then those of the secondary vftables at their offsets
 void IrGen::storeVptr(Symbol* cls, int objAddr, int line)
 {
     if (!cls->isPolymorphic) return;
     const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
-    IrInst vt = make(IrInst::AddrGlobal, vp, line);
-    vt.args.push_back(IrOperand::global("vtable@" + cls->qualifiedName(), oldType(m_semaTypes.basic(sema::Type::Void))));
-    int vtp = emit(vt);
-    IrInst st = make(IrInst::StoreMem, vp, line);
-    st.sub = "vptr";
-    st.args.push_back(IrOperand::temp(objAddr, oldType(m_semaTypes.pointer(m_semaTypes.classType(cls)))));
-    st.args.push_back(IrOperand::temp(vtp, oldType(vp)));
-    emit(st);
+    const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(cls));
+    const size_t n = cls->vftables.empty() ? 1 : cls->vftables.size();
+    for (size_t t = 0; t < n; ++t) {
+        IrInst vt = make(IrInst::AddrGlobal, vp, line);
+        vt.args.push_back(IrOperand::global(vtableName(cls, t), oldType(m_semaTypes.basic(sema::Type::Void))));
+        int vtp = emit(vt);
+        int at = objAddr;
+        if (t > 0) { IrInst fa = make(IrInst::AddrField, m_semaTypes.pointer(vp), line); fa.sub = "vptr"; fa.extra = cls->vftables[t].offset; fa.args.push_back(IrOperand::temp(objAddr, oldType(cp))); at = emit(fa); }
+        IrInst st = make(IrInst::StoreMem, vp, line);
+        st.sub = "vptr";
+        st.args.push_back(IrOperand::temp(at, oldType(t > 0 ? m_semaTypes.pointer(vp) : cp)));
+        st.args.push_back(IrOperand::temp(vtp, oldType(vp)));
+        emit(st);
+    }
 }
 
 void IrGen::prologue(Symbol* fn)
@@ -2239,6 +2292,12 @@ void IrGen::prologue(Symbol* fn)
     m_unwindId = m_tryCount++;
     m_tryStack.push_back(m_unwindId);
     m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0; m_guardCount = 0;
+    if (m_out->hasThis && fn->thisAdjust != 0) {
+        // called with the address of the vfptr whose table first holds it (MSVC's this adjustor): back to the object
+        const sema::Type* tp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));
+        LValue tl; tl.kind = LValue::Local; tl.local = 0; tl.type = tp;
+        store(tl, offsetAddress(thisTemp(fn->loc.line), tp, tp, -fn->thisAdjust, fn->loc.line), tp, fn->loc.line);
+    }
     for (size_t i = 0; i < inRegister.size(); ++i) {
         // the object lives in a local of the callee; the parameter name reaches it through a pointer, as for
         // objects passed by address
@@ -2458,6 +2517,9 @@ void IrGen::genFunction(Symbol* fn)
     m_slots.clear(); m_loops.clear(); m_tryStack.clear(); m_tryCount = 0;
     prologue(fn);
     if (fn->isConstructor) constructorInit(fn, def);
+    // as cl: a destructor stores its own class's vptrs first, so a virtual call made while it (or a base's
+    // destructor after it) runs reaches this class's functions, not those of the derived object being destroyed
+    if (fn->isDestructor && fn->ownerClass) storeVptr(fn->ownerClass, thisTemp(def->loc.line), def->loc.line);
     stmt(def->body);
     if (!terminated()) {
         IrInst r = make(IrInst::Ret, 0, def->loc.line);
@@ -2482,6 +2544,8 @@ void IrGen::generate(std::vector<IrFunction*>& out)
             && !s->isLazyInstantiation) m_queue.push_back(s);   // template instantiations: only through need()
     }
     drainQueue();
+    genDeletingDestructors();
+    drainQueue();
     genInitializer();
     // the destructor thunks call destructors that may not be generated yet, and those may build static locals
     // that register further thunks
@@ -2502,6 +2566,90 @@ void IrGen::drainQueue()
     }
 }
 
+// the class-specific operator delete of cls (its own or a base's, as lookup finds it), or 0
+Symbol* IrGen::classOperatorDelete(Symbol* cls, int depth) const
+{
+    if (!cls || !cls->members || depth > 32) return 0;
+    const std::vector<Symbol*>* v = cls->members->find("operator delete");
+    if (v) for (size_t i = 0; i < v->size(); ++i) if ((*v)[i]->kind == Symbol::Function && !(*v)[i]->params.empty() && (*v)[i]->params.size() <= 2) return (*v)[i];
+    for (size_t b = 0; b < cls->bases.size(); ++b) { Symbol* d = classOperatorDelete(cls->bases[b].cls, depth + 1); if (d) return d; }
+    return 0;
+}
+
+// frees an object of class cls at p through its class-specific operator delete, with the complete object's size
+// for the two-parameter form, as cl does; false when the class has none (the global one frees it)
+bool IrGen::freeObject(Symbol* cls, int p, int line)
+{
+    Symbol* op = classOperatorDelete(cls, 0);
+    if (!op) return false;
+    need(op);
+    const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+    IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+    in.sub = irName(op);
+    in.args.push_back(IrOperand::temp(p, oldType(vp)));
+    if (op->params.size() == 2) in.args.push_back(IrOperand::imm(sizeOf(cls->type), oldType(m_semaTypes.sizeType())));
+    emit(in);
+    return true;
+}
+
+std::string IrGen::deletingDestructor(Symbol* dtor, X86Module& x86, bool msvc)
+{
+    std::map<Symbol*, Symbol*>::iterator it = m_deleting.find(dtor);
+    if (it != m_deleting.end()) return irName(it->second);
+    Symbol* cls = dtor->ownerClass;
+    Symbol* fn = m_prog.newSymbol(Symbol::Function, "`scalar deleting destructor'", cls->members);
+    fn->ownerClass = cls;
+    fn->isImplicit = true;                 // one copy survives linking, as cl's COMDAT
+    fn->hasBody = true;
+    fn->loc = dtor->loc;
+    const sema::Type* u = m_semaTypes.basic(sema::Type::UInt);
+    fn->type = m_semaTypes.function(m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)), std::vector<const sema::Type*>(1, u), false, false);
+    Symbol* flags = m_prog.newSymbol(Symbol::Variable, "flags", 0);
+    flags->type = u; flags->isParam = true;
+    fn->params.push_back(flags);
+    m_deleting[dtor] = fn;
+    m_deletingOrder.push_back(dtor);
+    if (msvc) x86.registerSymbolName(irName(fn), deletingName(msvcMangleSymbol(*dtor)));
+    return irName(fn);
+}
+
+// this->~D(); if (flags & 1) operator delete(this); return this
+void IrGen::genDeletingDestructors()
+{
+    for (; m_deletingDone < m_deletingOrder.size(); ++m_deletingDone) {
+        Symbol* dtor = m_deletingOrder[m_deletingDone];
+        Symbol* fn = m_deleting[dtor];
+        const int line = fn->loc.line;
+        m_out = new IrFunction;
+        m_fn = fn;
+        m_slots.clear(); m_loops.clear(); m_tryStack.clear(); m_tryCount = 0;
+        prologue(fn);
+        const sema::Type* u = m_semaTypes.basic(sema::Type::UInt);
+        callSpecial(dtor, thisTemp(line), -1, line);
+        LValue fl; fl.kind = LValue::Local; fl.local = m_slots[fn->params[0]]; fl.type = u;
+        const int flagValue = load(fl, u, line);   // one statement each: the order of the IR must not depend on
+        const int one = constant(1, u, line);      // the host compiler's order of evaluating arguments
+        int bit = binary("&", flagValue, u, one, u, u, line);
+        int db = m_out->newBlock("delete"), xb = m_out->newBlock("done");
+        condbr(toBool(bit, u, line), db, xb, line);
+        m_block = db;
+        const int self = thisTemp(line);
+        if (!freeObject(dtor->ownerClass, self, line)) {
+            IrInst del = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+            del.sub = "__delete";
+            del.args.push_back(IrOperand::temp(self, m_out->locals[0].type));
+            emit(del);
+        }
+        br(xb, line);
+        m_block = xb;
+        returnSequence(line);
+        IrInst r = make(IrInst::Ret, 0, line);
+        r.args.push_back(IrOperand::temp(thisTemp(line), m_out->locals[0].type));
+        emit(r);
+        finishFunction(line);
+    }
+}
+
 void IrGen::registerMetadata(X86Module& x86, bool msvc)
 {
     m_x86 = &x86;
@@ -2509,15 +2657,62 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
     for (size_t i = 0; i < m_prog.symbols.size(); ++i) {
         Symbol* s = m_prog.symbols[i];
         if (s->kind == Symbol::Class && s->isDefinition && s->isPolymorphic && !s->isDependentContext && s->layoutDone) {
-            IrVtable v;
-            v.className = s->qualifiedName();
-            for (size_t k = 0; k < s->vtable.size(); ++k) {
-                Symbol* m = s->vtable[k];
-                v.entries.push_back(m->isPureVirtual ? std::string("") : irName(m));
-                if (!m->isPureVirtual) need(m);
+            // one table per vfptr; a slot whose overrider expects this elsewhere holds an adjustor thunk, named
+            // as cl names it (?f@D@@WBA@EAAHXZ: D::f`adjustor{16}')
+            const size_t n = s->vftables.empty() ? 1 : s->vftables.size();
+            // the class each table is named for: the one that introduced its vfptr, or, when two tables share
+            // that, the base on the way down to it that tells them apart (G : Q1, Q2, both from P: Q1 and Q2)
+            std::vector<std::vector<Symbol*> > paths(n);
+            for (size_t t = 0; t < n && n > 1; ++t) {
+                const Symbol* cur = s;
+                int off = s->vftables[t].offset;
+                for (int guard = 0; guard < 32 && cur != s->vftables[t].introducedBy; ++guard) {
+                    const sema::BaseClass* hit = 0;
+                    for (size_t b = 0; b < cur->bases.size() && !hit; ++b) {
+                        const sema::BaseClass& bc = cur->bases[b];
+                        if (!bc.cls || !bc.cls->isPolymorphic) continue;
+                        for (size_t k = 0; k < bc.cls->vftables.size(); ++k) if (bc.cls->vftables[k].offset == off - bc.offset) hit = &bc;
+                    }
+                    if (!hit) break;
+                    paths[t].push_back(hit->cls);
+                    off -= hit->offset;
+                    cur = hit->cls;
+                }
+                if (paths[t].empty() || paths[t].back() != s->vftables[t].introducedBy) paths[t].push_back(s->vftables[t].introducedBy);
             }
-            x86.addVtable(v);
-            if (msvc) x86.registerGlobalName("vtable@" + v.className, msvcMangleVtableSymbol(*s));
+            std::vector<size_t> pick(n, 0);
+            for (size_t t = 0; t < n; ++t) pick[t] = paths[t].empty() ? 0 : paths[t].size() - 1;
+            for (int round = 0; round < 32; ++round) {
+                bool moved = false;
+                for (size_t t = 0; t < n; ++t)
+                    for (size_t u = t + 1; u < n; ++u)
+                        if (!paths[t].empty() && !paths[u].empty() && paths[t][pick[t]] == paths[u][pick[u]]) {
+                            if (pick[t] > 0) { --pick[t]; moved = true; }
+                            if (pick[u] > 0) { --pick[u]; moved = true; }
+                        }
+                if (!moved) break;
+            }
+            for (size_t t = 0; t < n; ++t) {
+                IrVtable v;
+                const std::string name = vtableName(s, t);
+                v.className = name.substr(7);
+                const std::vector<Symbol*>& fns = s->vftables.empty() ? s->vtable : s->vftables[t].fns;
+                for (size_t k = 0; k < fns.size(); ++k) {
+                    Symbol* m = fns[k];
+                    const int adjust = s->vftables.empty() ? 0 : s->vftables[t].thunks[k];
+                    if (m->isPureVirtual) { v.entries.push_back(""); continue; }
+                    need(m);
+                    // the destructor's slot: the scalar deleting destructor (??_GD@@UEAAPEAXI@Z), as with cl
+                    const std::string target = m->isDestructor ? deletingDestructor(m, x86, msvc) : irName(m);
+                    if (adjust == 0) { v.entries.push_back(target); continue; }
+                    const std::string thunk = target + " adjustor{" + numText(adjust) + "}";
+                    v.entries.push_back(thunk);
+                    x86.addThunk(thunk, target, adjust);
+                    if (msvc) x86.registerSymbolName(thunk, m->isDestructor ? deletingName(msvcMangleThunkSymbol(*m, adjust)) : msvcMangleThunkSymbol(*m, adjust));
+                }
+                x86.addVtable(v);
+                if (msvc) x86.registerGlobalName(name, msvcMangleVtableSymbol(*s, n > 1 && !paths[t].empty() ? paths[t][pick[t]] : 0));
+            }
         }
         if (s->kind == Symbol::Variable && !s->isLocal && !s->isParam && (!s->isMember || s->isStatic) && s->scope && !s->isDependentContext) {
             // a static const member with a constant initializer is folded where it is used and not emitted

@@ -125,10 +125,15 @@ void IrFunction::computeCfg()
                 addUniqueInt(blocks[static_cast<size_t>(blocks[i].succs[s])].preds, static_cast<int>(i));
 }
 
-void IrFunction::computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut) const
+void IrFunction::computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut,
+                                 const std::vector<std::vector<int> >* extraSuccs) const
 {
     const size_t n = blocks.size();
     std::vector<std::vector<int> > succ(n);
+    if (extraSuccs)
+        for (size_t b = 0; b < n && b < extraSuccs->size(); ++b)
+            for (size_t s = 0; s < (*extraSuccs)[b].size(); ++s)
+                if ((*extraSuccs)[b][s] >= 0 && static_cast<size_t>((*extraSuccs)[b][s]) < n) addUniqueInt(succ[b], (*extraSuccs)[b][s]);
     std::vector<std::set<int> > used(n), defined(n);
     for (size_t b = 0; b < n; ++b)
         for (size_t k = 0; k < blocks[b].insts.size(); ++k) {

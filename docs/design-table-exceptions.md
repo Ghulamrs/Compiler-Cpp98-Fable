@@ -155,6 +155,12 @@ That is allowed by C++ ("implementation-defined whether the stack is unwound").
   "no volatile registers in try functions" and the `handlersSelfContained` revert.
 - At a landing pad, volatile registers are garbage. That is already true after any call, and values live
   into the pad are live across the call, so they get callee-saved registers or stack slots.
+- Done in the back end only (2026-10-13): the register allocator's liveness has an edge from every block
+  whose calls or throws lie in a region to the handlers of that region and of the regions around it
+  (X86.cpp computeEhEdges, used by computeIntervals). Without it, a value the code after a catch needs (a
+  string literal hoisted out of a loop whose body catches) was dead at an inlined throw laid out after the
+  loop, which reused its callee-saved register; the landing pad then resumed with the throw's value in it.
+  The IR does not split blocks at calls yet, so the optimiser's workarounds stay.
 
 ## 8. Limits (same as today)
 

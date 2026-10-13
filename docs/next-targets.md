@@ -96,6 +96,15 @@ the default), with the items found since. Each was reproduced with a small progr
 - 22, predefined macros (decided 2026-10-13): the Windows target defines `_MT=1` and `_CPPUNWIND=1`, as cl does for a
   `/MT /EHsc` build (common/Target.cpp); `_MSC_VER` stays undefined, so code under it, written for MSVC's extensions,
   is not compiled; test 17 (`sample-front/front.cpp`) checks the macros against cl.
+- Table model, -O2/-O3: a catch inside a loop crashed or lost a value (review repro: `for (k...) { bad = k; try {
+  printf("a%d ", 1); thr(1); printf("b%d ", 2); thr(2); } catch (int e) { printf("caught %d\n", e); } }`, access
+  violation on the third pass). The runtime was right (`RtlVirtualUnwind` gives each frame its callee-saved
+  registers back); the register allocator was not: its liveness had no exception edges, so the inlined throw laid
+  out after the loop took rbx, which held the hoisted `"a%d "` that the code after the landing pad still needed.
+  The back end now adds an edge from every block whose calls or throws may reach a table landing pad to the
+  handlers of that region and of the regions around it (X86.cpp computeEhEdges; liveness and loop extension in
+  computeIntervals; Ir.cpp computeLiveness takes the extra edges). eh.ps1: ehCatchLoop, ehNestedLoops
+  (probe.cpp), failing at -O2/-O3 before.
 
 ## Plan
 
@@ -132,7 +141,9 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   and cppparse's runtimes (a cl throw into a cppparse frame fails fast); (vtable slots grouped by overload and the
   destructor slot holding the deleting destructor are done).
 - design-table-exceptions.md section 7: an exception edge from every call to its landing pad, then GVN and
-  register values across handlers; the main lever on code size (1.57 times cl's on the matrix sample).
+  register values across handlers; the main lever on code size (1.57 times cl's on the matrix sample). The
+  register allocator has these edges now (computeEhEdges); the IR and the optimiser do not (a call inside a region
+  does not end its block), so pinHandlerLocals, the GVN guard and handlersSelfContained stay.
 
 ## Other known limits (found by the reviews of 2026-10-13)
 
@@ -140,7 +151,10 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   `delete` through a base pointer skips the base destructors, and one from a stack object's destructor is not
   caught at all ("unhandled exception of type int"). Repro: `struct WA { virtual ~WA(); }; struct WB : WA {};
   struct WD : WB { ~WD() { throw 1; } };` then `try { delete (WB*)new WD; } catch (int) {}`: cl runs ~WD, ~WB, ~WA;
-  cppparse catches the int but skips ~WB and ~WA.
+  cppparse catches the int but skips ~WB and ~WA. Temporaries too, in both models and at -O0: in
+  `try { int s = TT(1).get() + TT(2).get(); } catch (int) {}` with a ~TT that throws for TT(1), the cleanup runs
+  ~TT(1) a second time, which throws again: "unhandled exception of type int" (C++98: an object whose destructor
+  has started is not destroyed again).
 - Calls through pointers to members (`(obj.*pmf)(x)`, `(p->*pmf)(x)`) are rejected by sema (an error, not wrong code).
 - A float literal with an `f` suffix is converted decimal -> double -> float, which differs from cl's direct
   decimal -> float rounding when the double is exactly halfway between two floats. The folder

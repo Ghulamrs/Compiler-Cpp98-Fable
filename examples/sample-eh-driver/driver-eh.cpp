@@ -20,6 +20,8 @@ int ehFromHandler(int n);
 int ehBig(int n);
 int ehLoop(int n);
 int ehMixed(int n);
+void ehCatchLoop(int n);
+void ehNestedLoops(int n);
 extern int g_destroyed;
 
 static int g_walked = -2;
@@ -38,6 +40,15 @@ static int refDeep(int n, double x)
     double y = x * 1.5, z = x + 2.25, w = x * x;
     int r = n == 0 ? 1000 : refDeep(n - 1, x + 1.0);
     return r + a + b + c + d + e + static_cast<int>(y + z + w);
+}
+
+// called by the catch-in-a-loop tests of probe.cpp with string literals the caller keeps in registers
+static unsigned g_notes = 0;
+extern "C" void eh_note(const char* s, int v)
+{
+    unsigned h = static_cast<unsigned>(v);
+    while (*s) h = h * 31 + static_cast<unsigned char>(*s++);
+    g_notes = g_notes * 7 + h;
 }
 
 static int failures = 0;
@@ -74,6 +85,11 @@ int main()
     printf("ehBig(0) = %d, ehBig(99) = %d\n", ehBig(0), ehBig(99));
     printf("ehLoop(1000) = %d\n", ehLoop(1000));
     printf("ehMixed(0) = %d, ehMixed(21) = %d\n", ehMixed(0), ehMixed(21));
+    ehCatchLoop(9);
+    printf("ehCatchLoop(9): notes %08x\n", g_notes);
+    g_notes = 0;
+    ehNestedLoops(5);
+    printf("ehNestedLoops(5): notes %08x\n", g_notes);
     printf("destructors: %d\n", g_destroyed);
     check("try frames left", (unsigned long long)cppparse_frame_depth(), 0);
     check("caught exceptions left", (unsigned long long)cppparse_caught_depth(), 0);

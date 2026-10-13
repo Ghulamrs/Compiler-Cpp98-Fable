@@ -271,7 +271,10 @@ runtime's `cppparse_eh_handler`, followed by cppparse's range table: `CPPX`, a c
 begin, end and landing pad. The landing pad is the region's dispatch stub; the code generator marks the ranges
 with `;@ehrange` lines, which are comments to ml64. `throw` walks the stack with the unwind tables
 (`RtlLookupFunctionEntry`, `RtlVirtualUnwind`). It enters the first landing pad whose range holds a frame's call
-site with `RtlRestoreContext`, so that frame gets its callee-saved registers back as they were at the call. The
+site with `RtlRestoreContext`, so that frame gets its callee-saved registers back as they were at the call; the
+register allocator therefore treats every call or throw inside a region as a possible jump to the region's
+handlers (and those of the regions around it), so what the code after a catch reads stays in its register
+across them (X86.cpp computeEhEdges). The
 same walk also finds the setjmp frames of version 5's model (`--eh=sjlj`): it longjmps to one once it has passed
 the stack frame that holds it. Both models can therefore be mixed in one program. A handler body is a region of
 its own: an exception that leaves it has the runtime release the exception the handler held

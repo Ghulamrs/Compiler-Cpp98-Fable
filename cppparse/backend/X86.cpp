@@ -224,6 +224,11 @@ private:
     // ranges in the function's unwind info, each with the landing pad (the dispatch stub of its innermost region)
     // where the runtime resumes this frame when an exception passes through a call in that range
     bool computeRegions();                       // false when the regions are not properly nested along every path
+    // the exception edges of the table regions: a call or throw inside a region continues at the handlers of that
+    // region and of every region around it, with each register as it was at the call; what a handler reads (and
+    // what the code after it reads, a loop that goes round again) is live across every such call
+    void computeEhEdges();
+    std::vector<std::vector<int> > m_ehSuccs;    // block -> handler blocks its calls and throws may continue at
     void setRegions(const std::vector<long>& now);   // closes / opens a range where the innermost region changes
     struct EhRange { std::string begin, end; long region; };
     bool                m_tableEh;
@@ -273,6 +278,35 @@ bool X86Function::computeRegions()
         }
     }
     return ok;
+}
+
+void X86Function::computeEhEdges()
+{
+    const size_t n = m_f.blocks.size();
+    m_ehSuccs.assign(n, std::vector<int>());
+    std::map<long, std::vector<int> > handlersOf;   // region -> its handler entries (the TryBegin's block operands)
+    for (size_t b = 0; b < n; ++b)
+        for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            if (in.op != IrInst::TryBegin) continue;
+            for (size_t a = 0; a < in.args.size(); ++a) if (in.args[a].kind == IrOperand::Block) handlersOf[in.extra].push_back(in.args[a].id);
+        }
+    for (size_t b = 0; b < n; ++b) {
+        std::vector<long> cur = m_regionIn[b];
+        std::vector<int>& out = m_ehSuccs[b];
+        for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = m_f.blocks[b].insts[i];
+            if (in.op == IrInst::TryBegin) { cur.push_back(in.extra); continue; }
+            if (in.op == IrInst::TryEnd) { if (!cur.empty() && cur.back() == in.extra) cur.pop_back(); continue; }
+            if (in.op != IrInst::Call && in.op != IrInst::VCall && in.op != IrInst::Throw) continue;
+            // a clause that does not match rethrows from the landing pad to the regions around: all of them count
+            for (size_t r = 0; r < cur.size(); ++r) {
+                const std::vector<int>& hs = handlersOf[cur[r]];
+                for (size_t h = 0; h < hs.size(); ++h)
+                    if (hs[h] >= 0 && static_cast<size_t>(hs[h]) < n && std::find(out.begin(), out.end(), hs[h]) == out.end()) out.push_back(hs[h]);
+            }
+        }
+    }
 }
 
 void X86Function::setRegions(const std::vector<long>& now)
@@ -371,8 +405,10 @@ void X86Function::computeIntervals()
     }
     // an interval spans every block the value is live through: a loop header that only passes a value on (its
     // copies sit in edge blocks laid out after the loop) must not give the value's register to another one
+    // (with table regions, the exception edges count: a value a landing pad's handler needs stays in its place
+    // across every call that may throw to it)
     std::vector<std::set<int> > liveIn, liveOut;
-    m_f.computeLiveness(liveIn, liveOut);
+    m_f.computeLiveness(liveIn, liveOut, m_tableEh ? &m_ehSuccs : 0);
     for (size_t b = 0; b < m_f.blocks.size(); ++b) {
         for (std::set<int>::const_iterator t = liveIn[b].begin(); t != liveIn[b].end(); ++t) {
             std::map<int, Interval>::iterator it = m_intervals.find(*t);
@@ -385,9 +421,11 @@ void X86Function::computeIntervals()
     }
     for (std::map<int, Interval>::iterator it = m_intervals.begin(); it != m_intervals.end(); ++it)
         if (!it->second.isFloat) it->second.isFloat = tempIsFloat(it->first);
-    for (size_t b = 0; b < m_f.blocks.size(); ++b)
-        for (size_t s = 0; s < m_f.blocks[b].succs.size(); ++s) {
-            int target = m_f.blocks[b].succs[s];
+    for (size_t b = 0; b < m_f.blocks.size(); ++b) {
+        std::vector<int> succs = m_f.blocks[b].succs;
+        if (m_tableEh && b < m_ehSuccs.size()) succs.insert(succs.end(), m_ehSuccs[b].begin(), m_ehSuccs[b].end());
+        for (size_t s = 0; s < succs.size(); ++s) {
+            int target = succs[s];
             if (target < 0 || static_cast<size_t>(target) >= m_f.blocks.size()) continue;
             if (m_blockStart[static_cast<size_t>(target)] > m_blockStart[b]) continue;
             int loopStart = m_blockStart[static_cast<size_t>(target)], loopEnd = m_blockEnd[b];
@@ -397,6 +435,7 @@ void X86Function::computeIntervals()
                 if (iv.start >= loopStart && iv.start <= loopEnd && iv.end < loopEnd && iv.start > iv.end) iv.end = loopEnd;
             }
         }
+    }
 }
 
 void X86Function::analyzeParams()
@@ -1372,6 +1411,7 @@ std::string X86Function::run()
             }
         // regions that are not nested the same way on every path keep the setjmp frames (the runtime handles both)
         m_tableEh = !handlers.empty() && computeRegions();
+        if (m_tableEh) computeEhEdges();
         // a landing pad finds every register as it was at the call that threw, so the setjmp rules (callee-saved
         // registers only, no coalescing) are not needed, as long as a handler takes no value in a register from
         // the code before it (the optimiser keeps what handlers read in memory; checked here all the same)

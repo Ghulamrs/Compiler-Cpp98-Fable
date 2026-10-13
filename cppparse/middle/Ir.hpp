@@ -122,8 +122,11 @@ struct IrFunction {
     int  newTemp(const Type* t) { tempTypes[nextTemp] = t; return nextTemp++; }
     int  newBlock(const std::string& label);
     void computeCfg();
-    // temporaries live on entry to and on exit from every block, with the successors taken from the branches
-    void computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut) const;
+    // temporaries live on entry to and on exit from every block, with the successors taken from the branches;
+    // extraSuccs (optional, one list per block) adds edges no instruction names: the back end's exception edges
+    // from a block whose calls may throw to the handlers of the table regions around them
+    void computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut,
+                         const std::vector<std::vector<int> >* extraSuccs = 0) const;
     int  instCount() const;
     const Type* typeOf(int temp) const;
 };

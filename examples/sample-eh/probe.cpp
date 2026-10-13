@@ -206,3 +206,54 @@ int ehMixed(int n)
         return e.code * 100 + (g_destroyed - before);
     }
 }
+
+// a catch inside a loop (table model): the loop keeps loop-invariant values in callee-saved registers (the
+// hoisted addresses of the string literals, as printf's formats would be) while calls in the try throw. A landing
+// pad resumes the frame with its registers as they were at the call that threw, so no code that may throw to it
+// may reuse those registers, the inlined throws laid out after the loop included
+int g_ehBad = -1;
+extern "C" void eh_note(const char* s, int v);   // in the driver (cl): mixes s and v into a checksum
+void throwIf(int v) { if (v == g_ehBad) throw v; }
+void ehCatchLoop(int n)
+{
+    for (int k = 1; k < n; ++k) {
+        g_ehBad = k % 4;
+        try { eh_note("a%d ", 1); throwIf(1); eh_note("b%d ", 2); throwIf(2); eh_note("c%d ", 3); throwIf(3); }
+        catch (int e) { eh_note("caught %d\n", e); }
+    }
+    eh_note("end\n", n);
+}
+
+// the same in nested loops, with objects to destroy, and throws from three calls down; each level keeps its own
+// values in callee-saved registers across its calls (the unwinder gives every frame's registers back)
+int ehLevel3(int a, int b)
+{
+    int s = a, t = b, u = a ^ b;
+    for (int i = 0; i < 3; ++i) { s += t * i; t = t * 3 + u; u += s; throwIf(a + i); eh_note("l3", u); }
+    return (s + t + u) & 0xffff;
+}
+int ehLevel2(int a, int b)
+{
+    Guard g(1);
+    int x = a * 7, y = b * 5, z = a + b;
+    for (int i = 0; i < 2; ++i) { x += ehLevel3(a + i, b); y ^= x; z += y; }
+    return (x + y + z) & 0xffff;
+}
+int ehLevel1(int n, int b)
+{
+    int acc = 0;
+    for (int i = 0; i < n; ++i) { Guard g(1); acc += ehLevel2(i, b); }
+    return acc;
+}
+void ehNestedLoops(int n)
+{
+    for (int k = 0; k < n; ++k) {
+        for (int j = 0; j < 3; ++j) {
+            g_ehBad = (k * 3 + j) % 5;
+            try { Guard g(1); eh_note("t%d ", k * 10 + j); eh_note("r%d ", ehLevel1(k, j)); }
+            catch (int e) { eh_note("c%d ", e); }
+        }
+        try { eh_note("a%d ", k); throwIf(k); eh_note("b%d ", k); throwIf(k + 1); } catch (int e) { eh_note("caught %d\n", e); }
+    }
+    eh_note("end\n", n);
+}

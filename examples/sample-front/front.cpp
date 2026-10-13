@@ -214,6 +214,60 @@ void foldedGlobals()
     showBytes("d17", &folded::d17, 8); showBytes("f3", &folded::f3, 4); showBytes("d18", &folded::d18, 8);
 }
 
+// floating -> integer conversions as cl compiles them at run time and folds them as constants: signed and narrow
+// targets through 32 bits (out of range: 80000000h, then truncated), unsigned int through 64 bits, unsigned long long
+// by its two ranges; unsigned long long -> floating with the top bit set; -O2 once folded (unsigned)3e9 to 2147483648
+// and value-numbered 1e19 and 1e19f as one constant
+namespace conv {
+static const double dv[] = { 0.0, 1.5, -1.5, 127.9, 200.7, 255.9, -128.9, 32767.5, 40000.25, 65535.75, -32768.5,
+    2147483647.0, 2147483648.0, 3000000000.0, 4294967295.0, -2147483648.0, 9007199254740993.0,
+    9223372036854775807.0, 1e19, 1.8446744073709550e19, -9223372036854775808.0, 0.999 };
+static const float fv[] = { 0.0f, 1.5f, -1.5f, 127.9f, 200.7f, 255.9f, -128.9f, 32767.5f, 40000.25f, 65535.75f,
+    2147483520.0f, 2147483648.0f, 3000000000.0f, 4294967040.0f, -2147483648.0f, 9.2233715e18f, 1e19f, 1.8446743e19f, 0.999f };
+void runtimeD()
+{
+    for (unsigned i = 0; i < sizeof(dv) / sizeof(dv[0]); ++i) {
+        volatile double x = dv[i];
+        double v = x;
+        std::printf("d %u: sc %d uc %u ss %d us %u", i, (int)(signed char)v, (unsigned)(unsigned char)v, (int)(short)v, (unsigned)(unsigned short)v);
+        std::printf(" i %d u %u ll %lld ull %llu\n", (int)v, (unsigned)v, (long long)v, (unsigned long long)v);
+    }
+}
+void runtimeF()
+{
+    for (unsigned i = 0; i < sizeof(fv) / sizeof(fv[0]); ++i) {
+        volatile float x = fv[i];
+        float v = x;
+        std::printf("f %u: sc %d uc %u ss %d us %u", i, (int)(signed char)v, (unsigned)(unsigned char)v, (int)(short)v, (unsigned)(unsigned short)v);
+        std::printf(" i %d u %u ll %lld ull %llu\n", (int)v, (unsigned)v, (long long)v, (unsigned long long)v);
+    }
+}
+void consts()
+{
+    std::printf("c u %u %u %u %u\n", (unsigned)3000000000.0, (unsigned)4294967295.0, (unsigned)2147483648.0, (unsigned)3000000000.0f);
+    std::printf("c ull %llu %llu %llu\n", (unsigned long long)1e19, (unsigned long long)9223372036854775808.0, (unsigned long long)1e19f);
+    std::printf("c i %d %d %lld %lld\n", (int)-2147483648.0, (int)-1.5, (long long)-1.5, (long long)9007199254740993.0);
+    std::printf("c s %d %u %d %u\n", (int)(short)32767.5, (unsigned)(unsigned short)65535.75, (int)(signed char)-128.9, (unsigned)(unsigned char)255.9f);
+    double d = 3000000000.0; unsigned u = (unsigned)d; unsigned long long q = (unsigned long long)(d * 4.0);
+    std::printf("c local %u %llu\n", u, q);
+    float f = 3e9f; std::printf("c localf %u %llu\n", (unsigned)f, (unsigned long long)(f * 4.0f));
+}
+void toFloating()
+{
+    const unsigned long long top = 1ULL << 63;
+    const unsigned long long uq[] = { 0ULL, 1ULL, (1ULL << 32) - 1, top - 1, top, top + 2048, top + 2049, ~0ULL, top + (1ULL << 61) + 12345, top + 1024, top + 3072 };
+    for (unsigned i = 0; i < sizeof(uq) / sizeof(uq[0]); ++i) {
+        volatile unsigned long long x = uq[i];
+        unsigned long long v = x; long long s = (long long)v; unsigned u = (unsigned)v;
+        std::printf("tofp %u: %.17g %.9g %.17g %.17g %.9g\n", i, (double)v, (double)(float)v, (double)s, (double)u, (double)(float)u);
+    }
+    std::printf("tofp c %.17g %.17g %.9g %.17g\n", (double)3000000000u, (double)~0ULL, (double)(float)4294967295u, (double)(1ULL << 63));
+    unsigned k = 3000000000u; unsigned long long q = ~0ULL;
+    std::printf("tofp local %.17g %.17g %.9g\n", (double)k, (double)q, (double)(float)q);
+    float f19 = 1e19f; std::printf("f19 %.17g %llu\n", (double)f19, (unsigned long long)f19);
+}
+}
+
 int main()
 {
     predefined();
@@ -226,6 +280,7 @@ int main()
     functorMembers();
     conditionDeclarations();
     foldedGlobals();
+    conv::runtimeD(); conv::runtimeF(); conv::consts(); conv::toFloating();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

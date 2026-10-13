@@ -1031,7 +1031,15 @@ and `static_cast` to a derived class did not subtract it; slicing copies and
 assignments of polymorphic classes keep their own vptr; a static reference
 local had the size of its referent; `float` constants and statics were
 doubles; frames of a page or more call `__chkstk`; float constants are
-emitted as their exact bits; loop unrolling (`-O3`) renamed the values a
+emitted as their exact bits; floating -> integer conversions follow cl's
+code (signed and narrow targets through a 32-bit `cvttsd2si`, so out of
+range they give 80000000h truncated, `unsigned int` through a 64-bit one,
+`unsigned long long` by cl's two-range sequence; `-O2` folded
+`(unsigned)3e9` to 2147483648), `unsigned long long` -> floating converts a
+value with its top bit set by halves as cl does, the optimiser folds both
+the same way (Optimizer.cpp floatToInt), and value numbering compares
+floating constants by their bits (it took `1e19` and `1e19f` for one value;
+sample-front `conv::`); loop unrolling (`-O3`) renamed the values a
 loop uses from before it, such as hoisted invariants. The old type checker
 recursed without end on a copy constructor when it looked for a converting
 constructor (`c ? T(1) : t`). For linking with MSVC-compiled code,

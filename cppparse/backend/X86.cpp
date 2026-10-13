@@ -1096,14 +1096,64 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         if (s == "sitofp" || s == "uitofp") {
             std::string a = use(in.args[0], "rax");
             std::string rd = def(in.dst, true, "xmm0", spill);
-            line(std::string(isSingle(in.type) ? "cvtsi2ss " : "cvtsi2sd ") + rd + ", " + a);
+            const std::string cvt = isSingle(in.type) ? "cvtsi2ss " : "cvtsi2sd ";
+            if (s == "uitofp" && typeSize(in.args[0].type) == 8) {
+                // unsigned long long as cl: with the top bit set, half of it (the lost bit kept as a sticky bit)
+                // converted and doubled
+                const std::string big = m_label + "_U" + intToString(in.dst) + "b", even = m_label + "_U" + intToString(in.dst) + "e",
+                                  done = m_label + "_U" + intToString(in.dst) + "d";
+                line("test " + a + ", " + a);
+                line("js " + big);
+                line(cvt + rd + ", " + a);
+                line("jmp " + done);
+                m_out << big << ":\n";
+                if (a != "rax") line("mov rax, " + a);
+                line("shr rax, 1");
+                line("jnc " + even);
+                line("or rax, 1");
+                m_out << even << ":\n";
+                line(cvt + rd + ", rax");
+                line(std::string(isSingle(in.type) ? "addss " : "addsd ") + rd + ", " + rd);
+                m_out << done << ":\n";
+            } else line(cvt + rd + ", " + a);
             finish(in.dst, spill, true, rd);
             break;
         }
         if (s == "fptosi") {
+            // as cl: a signed or narrow target converts through 32 bits (out of range: 80000000h, then truncated),
+            // unsigned int through 64 bits, unsigned long long through cl's two-range sequence
             std::string a = use(in.args[0], "xmm0");
             std::string rd = def(in.dst, false, "rax", spill);
-            line(std::string(isSingle(in.args[0].type) ? "cvttss2si " : "cvttsd2si ") + rd + ", " + a);
+            const int to = typeSize(in.type);
+            const bool uns = in.type && in.type->isUnsigned;
+            const std::string cvt = isSingle(in.args[0].type) ? "cvttss2si " : "cvttsd2si ";
+            if (to == 8 && uns) {
+                // x < 2^63 (or NaN): cvttsd2si x; else y = x - 2^63 and cvttsd2si y, plus 2^63 when y < 2^63
+                if (isSingle(in.args[0].type)) { line("cvtss2sd xmm0, " + a); a = "xmm0"; }
+                const std::string small = m_label + "_U" + intToString(in.dst) + "s", done = m_label + "_U" + intToString(in.dst) + "d";
+                line("movsd xmm1, real8 ptr [" + floatConst(9223372036854775808.0) + "]");
+                line("comisd " + a + ", xmm1");
+                line("jb " + small);
+                if (a != "xmm0") line("movsd xmm0, " + a);
+                line("subsd xmm0, xmm1");
+                line("comisd xmm0, xmm1");
+                line("cvttsd2si " + rd + ", xmm0");
+                line("jae " + done);
+                line("rol " + rd + ", 1");    // rd < 2^63 here: setting bit 63 adds 2^63
+                line("or " + rd + ", 1");
+                line("ror " + rd + ", 1");
+                line("jmp " + done);
+                m_out << small << ":\n";
+                line("cvttsd2si " + rd + ", " + a);
+                m_out << done << ":\n";
+            } else if (to == 8 || (to == 4 && uns)) {
+                line(cvt + rd + ", " + a);
+                if (to == 4) line("mov " + reg32(rd) + ", " + reg32(rd));
+            } else {
+                line(cvt + reg32(rd) + ", " + a);
+                if (to == 4) line("movsxd " + rd + ", " + reg32(rd));
+                else if (to == 2 || to == 1) line(std::string(uns ? "movzx " : "movsx ") + rd + ", " + regSized(rd, to));
+            }
             finish(in.dst, spill, false, rd);
             break;
         }

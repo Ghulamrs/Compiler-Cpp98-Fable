@@ -3,10 +3,21 @@
 #include "Optimizer.hpp"
 #include "PathUtil.hpp"
 
+#include <cstring>
 #include <map>
 #include <set>
 
 namespace cppparse {
+
+std::string operandKey(const IrOperand& o)
+{
+    if (o.kind != IrOperand::FImm) return o.str();
+    unsigned char b[sizeof(double)];
+    std::memcpy(b, &o.fval, sizeof b);
+    std::string k = "#f";
+    for (size_t i = 0; i < sizeof b; ++i) k += intToString(static_cast<int>(b[i])) + ".";
+    return k;
+}
 
 namespace {
 
@@ -274,7 +285,7 @@ struct GvnState {
         for (size_t a = 0; a < in.args.size(); ++a) {
             IrOperand o = in.args[a];
             if (o.kind == IrOperand::Temp) { std::map<int, int>::iterator r = replaced.find(o.id); if (r != replaced.end()) o.id = r->second; }
-            k += o.str() + ",";
+            k += operandKey(o) + ",";
         }
         return k;
     }

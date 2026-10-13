@@ -152,8 +152,14 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 - Out-of-range float -> integer conversions in constants (undefined; cl keeps the value, e.g.
   `static double v = (unsigned char)300.0 + 0.5;` is 300.5 in cl's data) are not folded: guarded dynamic path,
   so the guards after them shift against cl's.
-- At -O2 a run-time double -> unsigned conversion of 3000000000.0 gives 2147483648 (-O0 is correct); found by
-  the review of e75fd50 (`volatile double x = 3000000000.0; unsigned u = (unsigned)x;`), not yet investigated.
+- (fixed) At -O2 a run-time double -> unsigned conversion of 3000000000.0 gave 2147483648: the optimiser folded
+  it through a 32-bit `long`. Floating <-> integer conversions now follow cl's code at every level and in the
+  folder (X86.cpp Conv, Optimizer.cpp floatToInt; sample-front `conv::`).
+- An integer literal of type `long long` / `unsigned long long` whose value fits in 32 unsigned bits but not in
+  a signed `long` keeps the sign-extended 32-bit pattern (Expr::semaValue is a `long`), silently: `unsigned long
+  long b = 4294967295ULL;` prints 18446744073709551615 (cl 4294967295), `9223372036854775808ULL` and other wider
+  literals keep their low 32 bits (S127 warns for those, not for this case). Values computed at run time
+  (`(1ULL << 32) - 1`, `~0ULL`) are right. Fix: a 64-bit literal value in Sema and IrGen::bitConstant for it.
 - Statics in a member function of a local class: the mangled name lacks the enclosing function (cl nests
   it), so such a static is not shared with cl's copy; found by the review of 92a19bb (`int t4(int a) { struct L { static int f(int b) { static int s1 = b; return s1; } }; return L::f(a); }`).
 

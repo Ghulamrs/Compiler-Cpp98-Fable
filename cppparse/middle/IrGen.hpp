@@ -97,6 +97,11 @@ private:
     bool needsCopyCtor(const sema::Type* t, int depth = 0) const;
     bool needsCopyAssign(const sema::Type* t, int depth = 0) const;
     bool needsDefaultCtor(const sema::Type* t, int depth = 0) const;
+    // MSVC x64: a class of 1, 2, 4 or 8 bytes without a non-trivial copy constructor travels in an integer
+    // register; a POD-like one of those sizes is returned in rax by a non-member or static function
+    const sema::Type* regParamType(const sema::Type* t) const;
+    const sema::Type* regReturnType(sema::Symbol* fn, const sema::Type* rt) const;
+    bool podForReturn(const sema::Type* t, int depth) const;
     void callSpecial(sema::Symbol* fn, int thisPtr, int argPtr, int line);
     void copyBytes(int dst, int src, int size, int line);
     void bitField(LValue& lv, const sema::Symbol* field) const;   // marks lv as the bit-field field (when it is one)
@@ -209,6 +214,7 @@ private:
     sema::Symbol*              m_fn;
     int                        m_block;
     int                        m_sretSlot;
+    const sema::Type*          m_retReg;        // the integer type a small class result returns in, else 0
     std::map<sema::Symbol*, int> m_slots;
     std::vector<LoopTargets>   m_loops;
     std::vector<int>           m_tryStack;      // region ids, -1 inside a handler body

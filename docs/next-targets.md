@@ -70,7 +70,7 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 ## Deferred
 
 - 15 (MSVC ABI parity), only needed for mixed links with cl objects: classes of 1/2/4/8 bytes passed and
-  returned in registers (IrGen.cpp:658, 671, 1930); vtable slots grouped by overload as MSVC does
+  returned in registers is done (IrGen::regParamType/regReturnType, sample-abi in Test 13); vtable slots grouped by overload as MSVC does
   (Sema.cpp:1169-1174); the destructor slot holding a scalar deleting destructor.
 - design-table-exceptions.md section 7: an exception edge from every call to its landing pad, then GVN and
   register values across handlers; the main lever on code size (1.57 times cl's on the matrix sample).

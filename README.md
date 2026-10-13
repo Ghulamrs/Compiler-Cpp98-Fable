@@ -961,11 +961,22 @@ recursed without end on a copy constructor when it looked for a converting
 constructor (`c ? T(1) : t`). For linking with MSVC-compiled code,
 constructors return `this` and functions with a hidden result pointer return
 it in `rax` as cl does, narrow results of calls are extended, the `new[]`
-cookie is 8 bytes and the exception runtime's frame chain is per thread. The
-remaining differences from cl's ABI (the virtual destructor slot holds the
-destructor rather than a scalar deleting destructor, classes of 1, 2, 4 or 8
-bytes are passed by address and returned through a hidden pointer, a
-non-polymorphic first base is laid out before a polymorphic one) are not
+cookie is 8 bytes and the exception runtime's frame chain is per thread.
+Class arguments and results follow cl's x64 rules (IrGen::regParamType,
+regReturnType): a class of 1, 2, 4 or 8 bytes without a non-trivial copy
+constructor is passed as an integer of that size in its register or stack
+slot (floats inside it too), any other by the address of a caller-made copy
+that the callee destroys; a C++03 aggregate of those sizes (no user-declared
+constructor, destructor or copy assignment, no bases, no virtual functions,
+no private or protected or reference members, members alike) is returned in
+ax by a non-member or static function, every other class through the
+hidden result pointer (after 	his for member functions), also through
+pointers to functions. examples/sample-abi with its cl-compiled driver
+(Test 13) crosses S1/S2/S4/S8/F2/D1/S3/S12/S16 and classes with
+constructors both ways. The remaining differences from cl's ABI (the
+virtual destructor slot holds the destructor rather than a scalar deleting
+destructor, a non-polymorphic first base is laid out before a polymorphic
+one) are not
 hit between the units of cppparse on `sample-opt`: `sandbox/scripts/mix.ps1`,
 which links each cppparse object among cl-built ones, runs every
 combination correctly.

@@ -331,3 +331,16 @@ int ehCatchBase(int byValue)
     else { try { throw MB(); } catch (HB& b) { r = b.v; } }
     return r * 1000 + static_cast<int>(g_dlog % 1000);
 }
+
+// temporaries of a full-expression whose destructor throws: the others are still destroyed, the throwing one is
+// not destroyed again by the unwind handler (the flag is cleared before the destructor runs)
+int g_tbad = -1;
+struct TT { int v; TT(int x) : v(x) {} ~TT() { g_dlog = g_dlog * 10 + v; if (v == g_tbad) throw v; } int get() const { return v; } };
+
+int ehTempDtor(int k)
+{
+    g_dlog = 0; g_tbad = k;
+    int r = 0;
+    try { r = TT(1).get() + TT(2).get(); } catch (int e) { r = 100 + e; }
+    return static_cast<int>(g_dlog) * 1000 + r;
+}

@@ -26,6 +26,7 @@ int ehCatchValue(int k);
 int ehNoCookie();
 int ehHandlerOrder();
 int ehCatchBase(int byValue);
+int ehTempDtor(int k);
 extern int g_destroyed;
 
 static int g_walked = -2;
@@ -86,6 +87,7 @@ int main()
     printf("ehNoCookie() = %d\n", ehNoCookie());
     printf("ehHandlerOrder() = %d\n", ehHandlerOrder());
     printf("ehCatchBase(0) = %d, ehCatchBase(1) = %d\n", ehCatchBase(0), ehCatchBase(1));
+    for (int k = 1; k <= 3; ++k) printf("ehTempDtor(%d) = %d\n", k, ehTempDtor(k));
     printf("destructors: %d\n", g_destroyed);
     check("try frames left", (unsigned long long)cppparse_frame_depth(), 0);
     check("caught exceptions left", (unsigned long long)cppparse_caught_depth(), 0);

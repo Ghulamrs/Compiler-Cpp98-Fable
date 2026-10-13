@@ -32,6 +32,11 @@ int exitOrder();
 int varargs();
 double sumMixed(int n, ...);
 int bumpShared();
+int constantTables();
+
+// built by this object's initializer, which runs before self.obj's (it is linked first): the constant tables it
+// reads must be static data, not built by cppparse's initializer
+static const long g_earlyTables = constantTables();
 
 // also in self.cpp: the linker keeps one copy of the function and one of its static local, whose names must be
 // cl's, or cppparse's code (with the call inlined at -O2) counts in a variable of its own
@@ -124,6 +129,8 @@ int main()
     check("varargs()", varargs(), 110100805);
     check("sumMixed() called by cl", static_cast<long>(sumMixed(7, 1.0, 2, 3.0, 4, 5.0, 6, 7.0) * 10), 12160);
     check("inline static shared with cl", sharedInline(), 123);
+    check("constant tables before init", g_earlyTables, 545344853);
+    check("constantTables()", constantTables(), 545344853);
     check("exitOrder() before exit", exitOrder(), 99);   // nothing destroyed yet; the order is printed after main
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;

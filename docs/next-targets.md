@@ -25,6 +25,9 @@ the default), with the items found since. Each was reproduced with a small progr
 - 20, static locals: cl's names (`?n@?1??counterA@@YAHXZ@4HA`, MangleSema.cpp) and Static linkage, External in
   one COMDAT only for an inline function, so cl and cppparse copies share the variable. A static in a nested
   block gets a unique block number that is not always cl's.
+- 21, constant tables: a global or static local initialised by constants, string literals and addresses of
+  globals and functions (arrays, plain aggregates, pointers) is static data with relocations, in .rdata when
+  const, as cl emits it; classes with bit-fields stay on the dynamic path (IrGen.cpp, X86.cpp).
 - README "known limit" (untyped library results): with the headers included the version 6 front end types
   `strtod` and `std::string::size`; the paragraph describes the legacy self-compile.
 
@@ -43,7 +46,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | 9 | 23: bit-fields ignored; anonymous union/struct members cannot be named | wrong size, false error | medium | layout |
 | 10 | 23: polymorphic base not first: own vptr, not moved first (Sema.cpp:1080, 1093, 1155) | wrong layout | medium | layout |
 | 11 | MatrixTest.cpp: injected class name with arguments (Sema.cpp:368-379); a redeclared function template is a second candidate (Sema.cpp:1033); member templates do not see the enclosing parameters (SemaExpr.cpp:544-572) | does not compile | small-medium | front end |
-| 12 | 21: constant pointer tables initialised dynamically in .data, not .rdata with relocations | start-up order | medium | back end |
 | 14 | 23: virtual bases laid out inline, no vbptr | wrong values | large | layout (later) |
 | 15 | 22: `_MSC_VER`, `_MT`, `_CPPUNWIND` not predefined (common/Target.cpp) | by choice so far | small | decision |
 

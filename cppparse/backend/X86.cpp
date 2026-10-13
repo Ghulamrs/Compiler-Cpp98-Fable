@@ -1437,7 +1437,21 @@ void X86Module::emitGlobals()
         std::string sym = globalSymbol(g.name);
         bool numeric = !g.init.empty();
         std::string def;
-        if (g.isFloat) def = sym + (g.size == 4 ? " REAL4 " : " REAL8 ") + (numeric ? g.init : std::string("0.0"));   // float is loaded with movss
+        if (!g.data.empty()) {
+            // a constant table: a label, then its items; an address is a DQ OFFSET the writer turns into a relocation
+            def = sym + " LABEL BYTE";
+            for (size_t k = 0; k < g.data.size(); ++k) {
+                const IrDataItem& it = g.data[k];
+                const char* dir = it.size == 1 ? "DB" : it.size == 2 ? "DW" : it.size == 4 ? "DD" : "DQ";
+                def += "\n        ";
+                if (it.kind == IrDataItem::Zero) def += "DB " + intToString(it.size) + " DUP (0)";
+                else if (it.kind == IrDataItem::Int) def += std::string(dir) + " " + intToString(static_cast<int>(it.value));
+                else if (it.kind == IrDataItem::Float) def += std::string(it.size == 4 ? "REAL4 " : "REAL8 ") + it.text;
+                else if (it.kind == IrDataItem::String) def += "DQ OFFSET " + stringLabel(it.text);
+                else { def += "DQ OFFSET " + globalSymbol(it.text); useGlobal(it.text); }
+            }
+        }
+        else if (g.isFloat) def = sym + (g.size == 4 ? " REAL4 " : " REAL8 ") + (numeric ? g.init : std::string("0.0"));   // float is loaded with movss
         else if (g.size == 1) def = sym + " DB " + (numeric ? g.init : std::string("0"));
         else if (g.size == 2) def = sym + " DW " + (numeric ? g.init : std::string("0"));
         else if (g.size == 4) def = sym + " DD " + (numeric ? g.init : std::string("0"));
@@ -1447,10 +1461,11 @@ void X86Module::emitGlobals()
         int align = g.size >= 8 ? 8 : g.size >= 4 ? 4 : g.size >= 2 ? 2 : 1;
         if (g.align > align) align = g.align;
         // a COMDAT item is a section of its own: its alignment goes to the section (on the marker), not into padding
-        if (g.linkOnce) m_data += ";@comdat any" + (align > 1 ? " align " + intToString(align) : std::string("")) + "\n";
-        m_data += (g.internal ? std::string("") : "        PUBLIC " + sym + "\n");
-        if (!g.linkOnce && align > 1) m_data += "        ALIGN " + intToString(align) + "\n";
-        m_data += def + "\n";
+        std::string& out = g.readOnly ? m_rdata : m_data;
+        if (g.linkOnce) out += ";@comdat any" + (align > 1 ? " align " + intToString(align) : std::string("")) + "\n";
+        out += (g.internal ? std::string("") : "        PUBLIC " + sym + "\n");
+        if (!g.linkOnce && align > 1) out += "        ALIGN " + intToString(align) + "\n";
+        out += def + "\n";
         m_defined.insert(sym);
         m_dataSymbols.insert(sym);
     }
@@ -1512,6 +1527,7 @@ std::string X86Module::finish()
             s << "\n";
         }
     }
+    s << m_rdata;   // after the literals: sign_mask keeps the section's 16-byte alignment
     if (!m_initializers.empty()) {
         // pointers to the dynamic initialisers of this module's globals: the CRT calls them before main
         s << "\nCRT$XCU SEGMENT ALIGN(8) ALIAS('.CRT$XCU') READ\n";

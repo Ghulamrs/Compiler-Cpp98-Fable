@@ -981,7 +981,14 @@ when every unit's copy is one COMDAT, so a cl-built and a cppparse-built
 copy of an inline function count in the same variable (`sharedCounter`;
 test 15 compares the names and linkage of `sample-mangle`'s static locals
 with cl's). A static in a nested block gets a unique block number, not
-always the one cl gives it.
+always the one cl gives it. A global or static local whose initializer is
+made of constants, string literals and addresses of globals and functions
+(an array, a plain aggregate without constructors, bases or bit-fields, a
+pointer) is emitted as static data, item by item, with `DQ OFFSET` for the
+addresses (relocations in the COFF writer), and in `.rdata` when it is
+const, as cl does: such a table is valid before any initializer runs,
+whatever the link order (the driver's own initializer reads
+`constantTables()` before `self.obj`'s runs).
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

@@ -28,15 +28,28 @@ struct IrVtable {
     std::vector<std::string> entries;      // IR function names in slot order; "" for a pure virtual slot
 };
 
+// one piece of a global's initial contents, emitted as data: zero bytes, an integer, a floating-point literal, the
+// address of a string literal, or the address of a global or function (a relocation)
+struct IrDataItem {
+    enum Kind { Zero, Int, Float, String, Address };
+    Kind        kind;
+    int         size;        // bytes; Zero: the length of the run
+    long        value;       // Int
+    std::string text;        // Float: the literal; String: the literal with its quotes; Address: the IR name
+    IrDataItem() : kind(Zero), size(0), value(0) {}
+};
+
 struct IrGlobal {
     std::string name;        // qualified variable name as the IR refers to it
     int         size;
     bool        isFloat;
     std::string init;        // numeric initialiser text, or empty for zero
+    std::vector<IrDataItem> data;   // when not empty: the contents item by item (a constant table, an address)
+    bool        readOnly;    // a const object with static contents: .rdata (.const), as cl places it
     bool        linkOnce;    // a static local of an inline function: every unit emits it, one copy survives (COMDAT)
     bool        internal;    // internal linkage: a static variable at namespace scope or a static local of an internal function
     int         align;       // the type's alignment or a larger __declspec(align(N)); 0: from the size only
-    IrGlobal() : size(8), isFloat(false), linkOnce(false), internal(false), align(0) {}
+    IrGlobal() : size(8), isFloat(false), readOnly(false), linkOnce(false), internal(false), align(0) {}
 };
 
 class X86Module {
@@ -66,6 +79,7 @@ private:
 
     std::string              m_code;
     std::string              m_data;
+    std::string              m_rdata;           // const objects with static contents, emitted in .const
     std::map<std::string, std::string> m_strings;   // label -> literal; labels are derived from the contents so
     std::map<std::string, double>      m_floats;    // that the output is the same whatever the thread timing
     std::set<std::string>    m_externs;

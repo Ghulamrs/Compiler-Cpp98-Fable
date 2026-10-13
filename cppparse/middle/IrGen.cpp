@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 
 namespace cppparse {
 
@@ -26,6 +27,16 @@ bool hasInternalLinkage(const sema::Symbol* s)
     for (const sema::Scope* sc = s->scope; sc; sc = sc->parent)
         if (sc->kind == sema::Scope::Namespace && sc->owner && sc->owner->name.empty()) return true;
     return false;
+}
+
+// appends n zero bytes to static data, extending a zero run that ends it
+void zeroData(std::vector<IrDataItem>& out, int n)
+{
+    if (n <= 0) return;
+    if (!out.empty() && out.back().kind == IrDataItem::Zero) { out.back().size += n; return; }
+    IrDataItem z;
+    z.size = n;
+    out.push_back(z);
 }
 
 } // namespace
@@ -1610,6 +1621,11 @@ void IrGen::localDecl(cxx::Decl* d)
             if (var->declAlign > g.align) g.align = var->declAlign;
             bool scalarConstant = id.init.kind != cxx::Initializer::None && id.init.args.size() == 1 && id.init.args[0]->semaConst && vt->isScalar() && !isReference(var->type) && !vt->isFloating();
             if (scalarConstant) g.init = numText(id.init.args[0]->semaValue);
+            // a table of constants and addresses is static data, built before anything runs (no guard)
+            else if (id.init.kind != cxx::Initializer::None && !isReference(var->type) && !needsDtor(vt) && !var->initCtor) {
+                std::vector<IrDataItem> items;
+                if (staticData(var->type, id.init, items)) { g.data = items; g.readOnly = readOnlyObject(var->type); scalarConstant = true; }
+            }
             if (m_x86) m_x86->addGlobal(g);
             const bool destroyed = !isReference(var->type) && needsDtor(vt);   // registered with atexit once built
             bool needsCode = !scalarConstant && (id.init.kind != cxx::Initializer::None || needsDefaultCtor(vt) || destroyed);
@@ -2234,6 +2250,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             const bool scalar = !isClassType(s->type) && m_semaTypes.unref(s->type)->kind != sema::Type::Array;
             if (s->init && s->init->semaConst && scalar) g.init = numText(s->init->semaValue);
             else if (s->init && s->init->kind == cxx::Expr::FloatLit && scalar) g.init = s->init->text;
+            else if (staticInit(s, g)) {}   // constants and addresses: static data, as cl emits a constant table
             else if (isClassType(s->type) && !isReference(s->type)) dynamic = s->initCtor != 0 || s->init != 0 || needsDefaultCtor(s->type);
             else dynamic = s->init != 0;
             if (dynamic) m_dynamicGlobals.push_back(s);
@@ -2275,6 +2292,161 @@ void IrGen::genInitializer()
     returnSequence(m_initSymbol->loc.line);
     emit(make(IrInst::Ret, 0, m_initSymbol->loc.line));
     finishFunction(m_initSymbol->loc.line);
+}
+
+// a global initialised by constants, string literals and addresses of globals and functions is emitted as static
+// data (in .rdata when it is const), as cl does: it is valid before any initializer runs, whatever the link order
+bool IrGen::staticInit(Symbol* var, IrGlobal& g)
+{
+    if (isReference(var->type) || needsDtor(var->type) || var->initCtor) return false;
+    cxx::InitDeclarator* id = 0;
+    if (var->declAst) for (size_t k = 0; k < var->declAst->declarators.size(); ++k) if (var->declAst->declarators[k].decl && var->declAst->declarators[k].decl->semaSym == var) id = &var->declAst->declarators[k];
+    if (!id || id->init.kind == cxx::Initializer::None) return false;
+    std::vector<IrDataItem> d;
+    if (!staticData(var->type, id->init, d)) return false;
+    g.data = d;
+    g.readOnly = readOnlyObject(var->type);
+    return true;
+}
+
+bool IrGen::staticData(const sema::Type* t, const cxx::Initializer& init, std::vector<IrDataItem>& out)
+{
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    if (!u) return false;
+    if (init.kind == cxx::Initializer::Brace) {
+        if (u->kind == sema::Type::Array || u->kind == sema::Type::Class) return aggregateData(u, &init.args, out, 0);
+        return init.args.size() == 1 && constantData(t, init.args[0], out, 0);
+    }
+    // "const char* p = "x";", "int* p = &g;": a pointer initialised by an address
+    return init.args.size() == 1 && u->kind == sema::Type::Pointer && constantData(t, init.args[0], out, 0);
+}
+
+// the bytes of an object of type t initialised by x (0: zero-initialised); false when the initializer needs code
+bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataItem>& out, int depth)
+{
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    if (!u || depth > 16 || isReference(t)) return false;
+    while (x && x->kind == cxx::Expr::Paren && x->kids.size() == 1) x = x->kids[0];
+    if (x && x->kind == cxx::Expr::Error) return false;
+    const int size = sizeOf(u);
+    if (size <= 0) return false;
+    if (u->kind == sema::Type::Array || u->kind == sema::Type::Class) {
+        if (x && x->kind != cxx::Expr::InitList) return false;
+        return aggregateData(u, x ? &x->kids : 0, out, depth + 1);
+    }
+    if (x && x->kind == cxx::Expr::InitList) {   // a scalar in braces
+        if (x->kids.size() > 1) return false;
+        return constantData(u, x->kids.empty() ? 0 : x->kids[0], out, depth + 1);
+    }
+    if (!x) { zeroData(out, size); return true; }
+    IrDataItem it;
+    it.size = size;
+    if (u->isFloating()) {
+        cxx::Expr* f = x;
+        bool neg = false;
+        if (f->kind == cxx::Expr::Unary && f->text == "-" && f->kids.size() == 1) { neg = true; f = f->kids[0]; }
+        std::string text;
+        if (f->kind == cxx::Expr::FloatLit) {
+            text = f->text;
+            while (!text.empty() && std::strchr("fFlL", text[text.size() - 1])) text.erase(text.size() - 1);
+        } else if (f->semaConst && exprType(f) && m_semaTypes.unref(exprType(f))->isIntegral()) text = numText(f->semaValue) + ".0";
+        else return false;
+        if (text.empty() || text.find_first_not_of("0123456789.eE+-") != std::string::npos) return false;
+        it.kind = IrDataItem::Float;
+        it.text = (neg ? "-" : "") + text;
+        out.push_back(it);
+        return true;
+    }
+    if (u->kind == sema::Type::Pointer) {
+        if (x->semaConst) {
+            if (x->semaValue != 0) return false;
+            zeroData(out, size);                     // the null pointer
+            return true;
+        }
+        if (x->kind == cxx::Expr::StringLit) {
+            if (x->text.empty() || x->text[0] != '"') return false;
+            it.kind = IrDataItem::String;
+            it.text = x->text;
+            out.push_back(it);
+            return true;
+        }
+        cxx::Expr* target = x;
+        const bool addressOf = x->kind == cxx::Expr::Unary && x->text == "&" && x->kids.size() == 1;
+        if (addressOf) target = x->kids[0];
+        while (target->kind == cxx::Expr::Paren && target->kids.size() == 1) target = target->kids[0];
+        Symbol* s = target->kind == cxx::Expr::Name ? target->semaSym : 0;
+        if (!s) return false;
+        if (s->kind == Symbol::Function) {
+            if (s->ownerClass && !s->isStatic) return false;
+            need(s);
+            it.text = irName(s);
+        } else if (s->kind == Symbol::Variable) {
+            // the address of a global, or an array naming its first element; not the value of a pointer variable
+            if (isReference(s->type) || s->isParam || (s->isMember && !s->isStatic)) return false;
+            if (!addressOf && m_semaTypes.unref(s->type)->kind != sema::Type::Array) return false;
+            if (s->isMember && s->isStatic && s->hasConstValue && s->init && s->init->semaConst) return false;   // folded, never emitted
+            if (s->isLocal) {
+                std::map<Symbol*, std::string>::const_iterator sn = m_staticNames.find(s);
+                if (!s->isStatic || sn == m_staticNames.end()) return false;
+                it.text = sn->second;
+            } else it.text = s->qualifiedName();
+        } else return false;
+        it.kind = IrDataItem::Address;
+        out.push_back(it);
+        return true;
+    }
+    if (!x->semaConst || !u->isIntegral()) return false;
+    long v = x->semaValue;
+    if (u->kind == sema::Type::Bool) v = v != 0;
+    else if (size == 1) v &= 0xFF;
+    else if (size == 2) v &= 0xFFFF;
+    it.kind = IrDataItem::Int;
+    it.value = v;
+    out.push_back(it);
+    return true;
+}
+
+// an array, or a plain aggregate class (no constructor, destructor, base, virtual function, union or bit-field;
+// the layout ignores bit-fields, so such a class keeps being built by code): the elements in order, the padding
+// and the members without an initializer zero
+bool IrGen::aggregateData(const sema::Type* t, const std::vector<cxx::Expr*>* elems, std::vector<IrDataItem>& out, int depth)
+{
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    const size_t given = elems ? elems->size() : 0;
+    if (u->kind == sema::Type::Array) {
+        if (u->arraySize <= 0 || given > static_cast<size_t>(u->arraySize)) return false;
+        for (long i = 0; i < u->arraySize; ++i)
+            if (!constantData(u->inner, static_cast<size_t>(i) < given ? (*elems)[static_cast<size_t>(i)] : 0, out, depth + 1)) return false;
+        return true;
+    }
+    Symbol* c = u->kind == sema::Type::Class ? u->decl : 0;
+    if (!c || !c->layoutDone || c->isUnion || c->isPolymorphic || !c->bases.empty() || needsDefaultCtor(u) || needsDtor(u)) return false;
+    if (given > c->fields.size()) return false;
+    int at = 0;
+    for (size_t f = 0; f < c->fields.size(); ++f) {
+        Symbol* fld = c->fields[f];
+        if (isReference(fld->type) || fld->offset < at) return false;
+        if (fld->declAst)
+            for (size_t k = 0; k < fld->declAst->declarators.size(); ++k)
+                if (fld->declAst->declarators[k].decl && fld->declAst->declarators[k].decl->semaSym == fld && fld->declAst->declarators[k].decl->bitfield) return false;
+        zeroData(out, fld->offset - at);
+        if (!constantData(fld->type, f < given ? (*elems)[f] : 0, out, depth + 1)) return false;
+        at = fld->offset + sizeOf(fld->type);
+    }
+    if (at > sizeOf(u)) return false;
+    zeroData(out, sizeOf(u) - at);
+    return true;
+}
+
+// const all the way down (the elements of an array) and no mutable member: the object can live in .rdata
+bool IrGen::readOnlyObject(const sema::Type* t) const
+{
+    const sema::Type* e = m_semaTypes.unref(t);
+    while (e && e->kind == sema::Type::Array) { if (e->isConst) return true; e = e->inner; }
+    if (!e || !e->isConst) return false;
+    if (e->kind == sema::Type::Class && e->decl)
+        for (size_t f = 0; f < e->decl->fields.size(); ++f) if (e->decl->fields[f]->isMutable) return false;
+    return true;
 }
 
 // as cl does: once an object with a destructor is built, an internal thunk that destroys it is registered with

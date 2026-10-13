@@ -505,3 +505,37 @@ inline int sharedCounter()                 // the driver defines it too: one var
 }
 
 int bumpShared() { return sharedCounter(); }
+
+// constant tables: static data that is valid before any initializer runs, whatever the link order (the driver's
+// own initializer reads them first); the const ones live in .rdata
+namespace {
+
+int g_tableA = 3;
+int g_tableB = 4;
+int twiceOf(int v) { return 2 * v; }
+int thriceOf(int v) { return 3 * v; }
+
+struct Entry { const char* name; int* value; int (*scale)(int); double weight; char tag; };
+
+static const char* const kTableNames[3] = { "alpha", "beta", "gamma" };
+int* const kValues[] = { &g_tableA, &g_tableB, 0 };
+const Entry kEntries[] = { { "a", &g_tableA, twiceOf, 0.5, 'x' }, { "bb", &g_tableB, thriceOf, 1.25, 'y' } };
+const char* g_greeting = "hello";
+int g_counts[4] = { 1, 2 };
+
+}
+
+int constantTables()
+{
+    int names = 0, values = 0, entries = 0;
+    for (int i = 0; i < 3; ++i) names = names * 10 + (kTableNames[i] ? static_cast<int>(std::strlen(kTableNames[i])) : 0);
+    for (int i = 0; kValues[i]; ++i) values = values * 10 + *kValues[i];
+    for (int i = 0; i < 2; ++i) {
+        const Entry& e = kEntries[i];
+        if (!e.name || !e.value || !e.scale) return -1;
+        int (*scale)(int) = e.scale;       // (a call through the member itself, e.scale(...), is not compiled yet)
+        entries += scale(*e.value) + static_cast<int>(std::strlen(e.name)) + static_cast<int>(e.weight * 4) + (e.tag == 'x' + i ? 10 : 0);
+    }
+    int rest = (g_greeting ? static_cast<int>(std::strlen(g_greeting)) : 0) * 10 + g_counts[0] + g_counts[1] + g_counts[2] + g_counts[3];
+    return names * 1000000 + values * 10000 + entries * 100 + rest;
+}

@@ -55,6 +55,10 @@ the default), with the items found since. Each was reproduced with a small progr
 - plan 11c: deduction against a template-id in a member template evaluates the arguments that are not its own
   parameters where the template is (the enclosing instantiation's bound R, a literal) and compares them (SemaExpr.cpp
   deduce). MatrixTest.cpp now compiles and prints what cl's build prints at -O0 and -O2 (test 17).
+- calls through a function-pointer data member (`e.scale(x)`, `p->scale(x)`, `e.shared(x)` for a static one) called
+  an external symbol named after the member: the callee now carries the member's type (SemaExpr.cpp exprCall), so
+  the call is indirect through its value; parentheses around the callee are dropped (`(e.scale)(x)`), and `(*fp)(x)`
+  and `(*f)(x)` call through the pointer (IrGen.cpp call); test 17, `sample-front/front.cpp`.
 
 ## Plan
 

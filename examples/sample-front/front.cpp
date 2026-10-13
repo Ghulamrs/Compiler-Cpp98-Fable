@@ -91,6 +91,22 @@ void memberTemplates()
     std::printf("member templates: %d %d %d %d %d %d\n", a.widthOf(w), b.fixedRows(w), p.v[0], p.v[5], p.v[7], (int)sizeof(p));
 }
 
+// a call through a function-pointer data member is an indirect call through its value, not a call to a
+// function named after the member; also through ->, in parentheses, a static member and a local pointer
+static double doubled(double x) { return 2 * x; }
+static double halved(double x) { return x / 2; }
+struct Scaler { double (*scale)(double); int k; static double (*shared)(double); };
+double (*Scaler::shared)(double) = halved;
+
+void functionPointerMembers()
+{
+    Scaler e; e.scale = doubled; e.k = 1;
+    Scaler* p = &e;
+    double (*lp)(double) = halved;
+    std::printf("function pointer members: %g %g %g %g %g %g %g %g %g %g\n", e.scale(3.0), p->scale(4.0), (e.scale)(5.0),
+                Scaler::shared(6.0), e.shared(8.0), lp(10.0), (*lp)(12.0), (*p->scale)(1.5), (*doubled)(0.25), (halved)(0.5));
+}
+
 // with a using-directive at file scope: std::count, std::min and std::max are visible unqualified
 using namespace std;
 int localHidesFileUsing(int n) { int count = 0, max = 2; while (count < n + max) ++count; return count; }
@@ -102,6 +118,7 @@ int main()
     injected();
     redeclared();
     memberTemplates();
+    functionPointerMembers();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

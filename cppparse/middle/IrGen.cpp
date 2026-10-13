@@ -1213,6 +1213,12 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
         // function pointer or undeclared function
         IrInst in = make(IrInst::Call, rt, line);
         const sema::Type* ct = m_semaTypes.unref(exprType(callee));
+        // "(*fp)(x)": the dereferenced pointer is the address called
+        while (ct->kind == sema::Type::Function && callee->kind == cxx::Expr::Unary && callee->text == "*" && callee->kids.size() == 1) {
+            callee = callee->kids[0];
+            ct = m_semaTypes.unref(exprType(callee));
+        }
+        if (ct->kind == sema::Type::Function && callee->semaSym && callee->semaSym->kind == Symbol::Function) ct = m_semaTypes.pointer(ct);   // "(*f)(x)", f a function
         if (ct->kind == sema::Type::Pointer && ct->inner->kind == sema::Type::Function) {
             int fp = value(callee);
             in.args.push_back(IrOperand::temp(fp, oldType(ct)));

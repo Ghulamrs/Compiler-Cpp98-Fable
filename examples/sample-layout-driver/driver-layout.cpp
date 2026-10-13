@@ -251,6 +251,48 @@ int main()
         expect("CW (cl's) deleted by cppparse through OV*", g_ovLog, 21);
     }
 
+    printf("arrays of a polymorphic class: the vector deleting destructor\n");
+    {
+        const long avSize = (long)sizeof(AV), awSize = (long)sizeof(AW);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        AV* p = makeAVArray(3);
+        expect("AV array built by cppparse, v()", p[0].v() + p[1].v() * 10 + p[2].v() * 100, 321);
+        delete[] p;
+        expect("AV array of cppparse deleted by cl: order", g_avLog, 321);
+        expect("AV array of cppparse deleted by cl: operator delete[] size", g_avFreed, 3 * avSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        p = new AV[3];
+        deleteAVArray(p);
+        expect("AV array of cl deleted by cppparse: order", g_avLog, 321);
+        expect("AV array of cl deleted by cppparse: operator delete[] size", g_avFreed, 3 * avSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        AW* q = makeAWArray(2);
+        delete[] q;
+        expect("AW array of cppparse deleted by cl: order", g_avLog, 7261);
+        expect("AW array of cppparse deleted by cl: operator delete[] size", g_avFreed, 2 * awSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        q = new AW[2];
+        deleteAWArray(q);
+        expect("AW array of cl deleted by cppparse: order", g_avLog, 7261);
+        expect("AW array of cl deleted by cppparse: operator delete[] size", g_avFreed, 2 * awSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        q = makeAWArray(2);
+        deleteAWArray(q);
+        expect("AW array of cppparse deleted by cppparse: order", g_avLog, 7261);
+        expect("AW array of cppparse deleted by cppparse: size", g_avFreed, 2 * awSize + 8);
+        g_avNext = 0; g_avLog = 0; g_avFreed = 0;
+        p = makeAVArray(0);
+        delete[] p;
+        expect("empty AV array of cppparse deleted by cl: size", g_avFreed, 8);
+        g_avFreed = 0;
+        deleteAVArray(new AV[0]);
+        expect("empty AV array of cl deleted by cppparse: size", g_avFreed, 8);
+        g_avNext = 0; g_avLog = 0;
+        AV* one = new AW;
+        delete one;                        // the same slot with flags 1: one object, operator delete
+        expect("AW deleted by cl through AV* (flags 1)", g_avLog, 61);
+    }
+
     if (failures) { printf("%d FAILED\n", failures); return 1; }
     printf("ALL OK\n");
     return 0;

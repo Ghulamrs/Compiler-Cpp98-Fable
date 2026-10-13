@@ -41,6 +41,11 @@ the default), with the items found since. Each was reproduced with a small progr
   declaration but with the overloads of a name together where the name is first declared in the class (an
   overrider counts), the last declared first (Sema.cpp completeClass); sample-layout OV/OW and cl's CW : OW, called
   through base pointers by both compilers at -O0..-O3.
+- 17, `delete[]` of a polymorphic class across compilers: the destructor slot holds cl's vector deleting destructor
+  (`??_E`, COMDAT; flags bit 1: the count from the 8-byte cookie, the elements destroyed last first, freed from the
+  cookie through the class's `operator delete[]` with count * size + 8, or the global one), and `delete[]` calls it
+  with flags 3, an empty array freed directly, as cl (IrGen.cpp genDeletingDestructors, freeArray, Delete);
+  sample-layout AV/AW arrays allocated by each compiler and deleted by the other, empty arrays too.
 - 18, callee side: a variadic function keeps its parameters in their home slots and its prologue spills rcx,
   rdx, r8 and r9 there (named floats from xmm0-xmm3); `include/cstdarg`, `stdarg.h` and `vprintf`/`vfprintf`/
   `vsprintf` in `cstdio` give va_list/va_start/va_arg/va_end over that area, as MSVC's vadefs.h (X86.cpp).
@@ -88,7 +93,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 |---|---|---|---|---|
 | 14 | 23: virtual bases. `--compile6` refuses a class with one (S130, driver/main.cpp) instead of laying it out inline; left: the vbptr and vbtable (`??_8D@@7B@`), virtual base subobjects placed once at the end of the most-derived object (shared in a diamond), conversions and member access through the vbtable, the constructors' hidden "most derived" flag (virtual bases built once), destruction order, vtordisp where MSVC emits it | refused (S130) | large | layout (later) |
 | 15 | 22: `_MSC_VER`, `_MT`, `_CPPUNWIND` not predefined (common/Target.cpp) | by choice so far | small | decision |
-| 17 | `delete[]` of an array of a polymorphic class across compilers: cl calls the vector deleting destructor (`??_E`, flags bit 1) through the slot, which holds cppparse's scalar one | wrong free in mixed links | small | layout |
 | 20 | vftable names: two tables introduced by the same class are now named after the bases that tell them apart (`??_7G@@6BQ1@@@`, `??_7G@@6BQ2@@@`, IrGen.cpp registerMetadata); left: cl's full rule (clang's MicrosoftVTableContext MangledPath), e.g. `struct F : X, D` (D : A, B, C) where cl names one table `??_7F@@6B@` and cppparse `??_7F@@6BX@@@` (review repro t2.cpp); paths longer than one class | wrong names in mixed links (both COMDATs kept) | small | layout |
 | 18 | member pointers to virtual functions (cl's vcall thunks `??_9`) | not supported | medium | layout |
 | 19 | covariant return through a secondary base (`CD* CD::self()` over `SB* SB::self()`, SB at 16): needs cl's return-adjusting thunk and its slot layout. `--compile6` refuses it (S131, driver/main.cpp, sample-front/covariant.cpp; review repro u.cpp); only the first overridden function is checked | refused (S131) | medium | layout |

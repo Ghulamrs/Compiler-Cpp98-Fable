@@ -118,6 +118,18 @@ int  ovCall(const OV* p, int which);           // 0 a(), 1 f(int), 2 b(), 3 f(do
 int  owCall(const OW* p, int which);           // 0-5 as ovCall, 6 g(), 7 f(long), 8 g(int), 9 f(short)
 OV*  makeOW();
 void deleteOV(OV* p);
+// arrays of a polymorphic class: cl's delete[] calls the destructor slot with flags 3, which holds the vector
+// deleting destructor (??_EAV@@UEAAPEAXI@Z): it reads the count from the 8-byte cookie in front of the
+// elements, destroys them last first and frees from the cookie through the class's operator delete[]
+struct AV { AV(); virtual ~AV(); virtual int v() const; static void operator delete[](void* p, size_t n); int a; };
+struct AW : AV { AW(); ~AW(); int v() const; int w; };
+extern long g_avLog;                           // each destructor appends its object's digit
+extern int  g_avNext;                          // the next AV::a
+extern long g_avFreed;                         // the size AV::operator delete[] was given (0: not called)
+AV*  makeAVArray(int n);                       // new AV[n] by cppparse
+AW*  makeAWArray(int n);
+void deleteAVArray(AV* p);                     // delete[] p by cppparse
+void deleteAWArray(AW* p);
 
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \

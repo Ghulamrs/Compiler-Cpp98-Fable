@@ -776,11 +776,18 @@ function moves `this` back on entry, and an override held by the primary
 table as well is reached from the secondary one through an adjustor thunk
 (`sub rcx, 16; jmp`, named `?f@SD@@WBA@EBAHXZ`, COMDAT); a destructor always
 takes the complete object, so its secondary slots are thunks.
-A virtual destructor's slot holds MSVC's scalar deleting destructor
-(`??_GSD@@UEAAPEAXI@Z`: destroy, then free when bit 0 of its flags is
-set), so `delete` through any base frees the complete object and cl's
-`delete` of cppparse's objects (and the other way round) works. It
-frees through the class's own `operator delete` when lookup in the
+A virtual destructor's slot holds MSVC's vector deleting destructor
+(`??_ESD@@UEAAPEAXI@Z`, COMDAT, the name cl's tables use): with bit 1 of
+its flags clear it destroys the object and frees it when bit 0 is set;
+with bit 1 set it destroys the array whose count is in the 8-byte cookie
+in front of it, last element first, and frees it from the cookie when
+bit 0 is set. `delete` calls it with flags 1 and `delete[]` with flags 3
+(an empty array is freed from its cookie directly), as cl does, so
+`delete` through any base frees the complete object, and objects and
+arrays allocated by either compiler are deleted by the other (cl's own
+tables name `??_E` as a weak external that falls back to its `??_G`;
+cppparse emits only `??_E`). It frees through the class's own `operator
+delete` (`operator delete[]`, given count * size + 8) when lookup in the
 complete class finds one (with the complete object's size for the
 two-parameter form), as a non-virtual `delete` does. A
 destructor stores its own class's vptrs on entry, as a constructor does
@@ -1011,10 +1018,8 @@ constructors both ways, calls through pointers to functions (`(*fp)(x)`,
 pointers returned by calls), variadic class arguments (passed as by-value
 parameters would be) and members cl ignores for the result rule (a member
 with a constructor or private data still allows `rax`; a const or reference
-member, which deletes the copy assignment, does not). The remaining differences from cl's ABI (the
-virtual destructor slot holds the destructor rather than a scalar deleting
-destructor, a non-polymorphic first base is laid out before a polymorphic
-one) are not
+member, which deletes the copy assignment, does not). The remaining differences from cl's ABI
+(docs/next-targets.md) are not
 hit between the units of cppparse on `sample-opt`: `sandbox/scripts/mix.ps1`,
 which links each cppparse object among cl-built ones, runs every
 combination correctly.

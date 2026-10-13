@@ -265,3 +265,18 @@ int owCall(const OW* p, int which)
 
 OV* makeOW() { return new OW; }
 void deleteOV(OV* p) { delete p; }
+
+long g_avLog = 0;
+int  g_avNext = 0;
+long g_avFreed = 0;
+AV::AV() : a(++g_avNext) {}
+AV::~AV() { g_avLog = g_avLog * 10 + a; }
+int AV::v() const { return a; }
+void AV::operator delete[](void* p, size_t n) { g_avFreed = (long)n; free(p); }
+AW::AW() : w(a + 5) {}
+AW::~AW() { g_avLog = g_avLog * 10 + w % 10; }
+int AW::v() const { return w; }
+AV* makeAVArray(int n) { return new AV[n]; }
+AW* makeAWArray(int n) { return new AW[n]; }
+void deleteAVArray(AV* p) { delete[] p; }
+void deleteAWArray(AW* p) { delete[] p; }

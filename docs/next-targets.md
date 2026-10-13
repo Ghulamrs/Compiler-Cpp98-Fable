@@ -59,6 +59,9 @@ the default), with the items found since. Each was reproduced with a small progr
   an external symbol named after the member: the callee now carries the member's type (SemaExpr.cpp exprCall), so
   the call is indirect through its value; parentheses around the callee are dropped (`(e.scale)(x)`), and `(*fp)(x)`
   and `(*f)(x)` call through the pointer (IrGen.cpp call); test 17, `sample-front/front.cpp`.
+- a data member of class type called as a function (`h.f(1)`, `p->f(1)`, `(h.f)(1)`, inherited from a base) called
+  operator() with the enclosing object as `this`: it now gets the member's address, converted to operator()'s class
+  (IrGen.cpp call); test 17, `sample-front/front.cpp`.
 - mapcompare.ps1 (was deferred): cl's functions come from its objects (`dumpbin /symbols`), not from link's map, so
   methods inlined everywhere are listed as "removed by link" in part B (`Matrix::rows()` 3 bytes and `cols()` 4 in
   both compilers), and a part C compares whole classes (`mx::Matrix`: 1.66 times cl's bytes over all its members,

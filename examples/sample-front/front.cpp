@@ -107,6 +107,24 @@ void functionPointerMembers()
                 Scaler::shared(6.0), e.shared(8.0), lp(10.0), (*lp)(12.0), (*p->scale)(1.5), (*doubled)(0.25), (halved)(0.5));
 }
 
+// a data member of class type called as a function: operator() on the member itself, not on the enclosing
+// object; also through ->, in parentheses, a member inherited from a base and a member whose class inherits
+// operator() from its base
+struct Adder { int k; int operator()(int x) { return x + k; } };
+struct TaggedAdder : Adder { int tag; };
+struct Holder { int pad; Adder f; };
+struct Other { int a, b; };
+struct Derived : Other, Holder { int more; TaggedAdder g; };
+
+void functorMembers()
+{
+    Holder h; h.pad = 1000; h.f.k = 7;
+    Holder* p = &h;
+    Derived d; d.a = 1; d.b = 2; d.pad = 2000; d.f.k = 40; d.more = 3000; d.g.k = 500; d.g.tag = 9;
+    Derived* q = &d;
+    std::printf("functor members: %d %d %d %d %d %d %d %d\n", (h.f)(1), h.f(2), p->f(3), (p->f)(4), d.f(5), q->f(6), d.g(7), (q->g)(8));
+}
+
 // with a using-directive at file scope: std::count, std::min and std::max are visible unqualified
 using namespace std;
 int localHidesFileUsing(int n) { int count = 0, max = 2; while (count < n + max) ++count; return count; }
@@ -119,6 +137,7 @@ int main()
     redeclared();
     memberTemplates();
     functionPointerMembers();
+    functorMembers();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

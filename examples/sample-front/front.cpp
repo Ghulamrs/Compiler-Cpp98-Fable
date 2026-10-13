@@ -54,6 +54,18 @@ void injected()
     std::printf("injected name with arguments: %d %d %d %d %d\n", t.v[1], t.v[4], (int)sizeof(t), g.otherCells(), t.otherCells());
 }
 
+// a function template declared and then defined is one template, not two candidates; a default argument given
+// by the declaration holds for the definition
+template <typename T> T twice(T x);
+template <typename T> T scaled(T x, int k = 3);
+template <typename T> T twice(T x) { return x + x; }
+template <typename T> T scaled(T x, int k) { return x * k; }
+
+void redeclared()
+{
+    std::printf("redeclared templates: %d %g %d %d\n", twice(21), twice(1.25), scaled(7), scaled(2, 10));
+}
+
 // with a using-directive at file scope: std::count, std::min and std::max are visible unqualified
 using namespace std;
 int localHidesFileUsing(int n) { int count = 0, max = 2; while (count < n + max) ++count; return count; }
@@ -63,6 +75,7 @@ int main()
     sizes();
     hiding();
     injected();
+    redeclared();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

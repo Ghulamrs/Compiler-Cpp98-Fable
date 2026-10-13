@@ -385,6 +385,8 @@ void countDecl(const Decl* d, Counts& c)
 
 } // namespace
 
+std::string expressionText(const Expr* e) { return exprText(e); }
+
 std::string dumpTranslationUnit(const TranslationUnit& tu)
 {
     std::ostringstream out;

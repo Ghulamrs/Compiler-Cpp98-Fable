@@ -20,6 +20,9 @@ int ehFromHandler(int n);
 int ehBig(int n);
 int ehLoop(int n);
 int ehMixed(int n);
+int ehDtorThrow(int k);
+int ehArrays(int k);
+int ehCatchValue(int k);
 extern int g_destroyed;
 
 static int g_walked = -2;
@@ -74,6 +77,9 @@ int main()
     printf("ehBig(0) = %d, ehBig(99) = %d\n", ehBig(0), ehBig(99));
     printf("ehLoop(1000) = %d\n", ehLoop(1000));
     printf("ehMixed(0) = %d, ehMixed(21) = %d\n", ehMixed(0), ehMixed(21));
+    for (int k = 0; k <= 4; ++k) printf("ehDtorThrow(%d) = %d\n", k, ehDtorThrow(k));
+    for (int k = 0; k <= 5; ++k) printf("ehArrays(%d) = %d\n", k, ehArrays(k));
+    for (int k = 1; k <= 3; ++k) printf("ehCatchValue(%d) = %d\n", k, ehCatchValue(k));
     printf("destructors: %d\n", g_destroyed);
     check("try frames left", (unsigned long long)cppparse_frame_depth(), 0);
     check("caught exceptions left", (unsigned long long)cppparse_caught_depth(), 0);

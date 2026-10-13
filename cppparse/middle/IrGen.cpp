@@ -52,7 +52,7 @@ void zeroData(std::vector<IrDataItem>& out, int n)
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
     : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_tryCount(0),
-      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_deletingDone(0), m_ctorFlag(1), m_vbFlagSlot(-1),m_staticCount(0), m_guardCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
+      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_deletingDone(0), m_ctorFlag(1), m_vbFlagSlot(-1),m_staticCount(0), m_guardCount(0), m_inPad(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
 {
@@ -1137,9 +1137,20 @@ void IrGen::forEachElement(const sema::Type* elem, int base, int count, bool con
     const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
     const sema::Type* eu = m_semaTypes.unqualified(elem);
     if (construct ? !needsDefaultCtor(eu) : !needsDtor(eu)) return;
-    int idx = newLocal("tmp.idx", lng, false);
+    // when an element's constructor (destructor) throws, the elements before it are destroyed, newest first, as cl
+    // does: a cleanup of the elements [0, idx) while the loop runs (none inside a landing pad: terminate)
+    const bool rest = m_inPad == 0 && needsDtor(eu);
+    int idx = newLocal("tmp.idx", lng, rest);
     LValue il; il.kind = LValue::Local; il.local = idx; il.type = lng;
     store(il, construct ? constant(0, lng, line) : count, lng, line);
+    int restCleanup = -1;
+    if (rest) {
+        int bs = newLocal("tmp.elems", m_semaTypes.pointer(eu), true);
+        LValue bl; bl.kind = LValue::Local; bl.local = bs; bl.type = m_semaTypes.pointer(eu);
+        store(bl, base, bl.type, line);
+        restCleanup = registerCleanup(bs, eu, true, 2, line);
+        m_flagged[static_cast<size_t>(restCleanup)].restIndex = idx;
+    }
     int cb = m_out->newBlock("elems.cond"), bb = m_out->newBlock("elems.body"), xb = m_out->newBlock("elems.end");
     br(cb, line);
     m_block = cb;
@@ -1161,6 +1172,7 @@ void IrGen::forEachElement(const sema::Type* elem, int base, int count, bool con
     else destroy(eu, addr, line, false);
     br(cb, line);
     m_block = xb;
+    if (restCleanup >= 0) clearFlag(restCleanup, line);
 }
 
 // constructs the object that expression e denotes directly into dst (type t): constructor calls and
@@ -1270,11 +1282,35 @@ void IrGen::runCleanup(const Cleanup& c, bool guarded, int line)
         if (guarded) { br(next, line); m_block = next; }
         return;
     }
+    // the flag is cleared first: a destructor that throws has ended the object's lifetime, the unwind handler
+    // must not destroy it again
+    store(fl, constant(0, b, line), b, line);
+    const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
+    if (c.freeKind) {
+        // the memory of a new-expression whose constructor threw (a delete whose destructor throws frees nothing, as cl)
+        const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+        LValue pl; pl.kind = LValue::Local; pl.local = c.slot; pl.type = vp;
+        const int p = load(pl, vp, line);
+        if (c.freeKind == 2 && c.freeCls) {
+            LValue nl; nl.kind = LValue::Local; nl.local = c.countSlot; nl.type = lng;
+            freeArray(c.freeCls, p, load(nl, lng, line), line);
+        } else if (c.freeKind == 2 || !c.freeCls || !freeObject(c.freeCls, p, line)) {
+            IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+            in.sub = c.freeKind == 2 ? "__delete_array" : "__delete";
+            in.args.push_back(IrOperand::temp(p, oldType(vp)));
+            emit(in);
+        }
+        if (guarded) { br(next, line); m_block = next; }
+        return;
+    }
     int addr;
     if (c.viaPointer) { LValue pl; pl.kind = LValue::Local; pl.local = c.slot; pl.type = m_semaTypes.pointer(c.type); addr = load(pl, pl.type, line); }
     else { LValue ol; ol.kind = LValue::Local; ol.local = c.slot; ol.type = c.type; addr = addressOf(ol, line); }
-    destroy(c.type, addr, line, false, !c.baseSubobject);
-    store(fl, constant(0, b, line), b, line);
+    if (c.restIndex >= 0) {
+        // the elements of an array built (or not yet destroyed) when an element's constructor (destructor) threw
+        LValue il; il.kind = LValue::Local; il.local = c.restIndex; il.type = lng;
+        forEachElement(c.type, addr, load(il, lng, line), false, line);
+    } else destroy(c.type, addr, line, false, !c.baseSubobject);
     if (guarded) { br(next, line); m_block = next; }
 }
 
@@ -1310,10 +1346,68 @@ void IrGen::keepTemporaries(size_t from)
     m_temps.erase(m_temps.begin() + static_cast<std::ptrdiff_t>(from), m_temps.end());
 }
 
-// at a handler entry: the objects built inside the region (flagged from 'mark' on) that are still alive
+// at a handler entry: the objects built inside the region (flagged from 'mark' on) that are still alive; the
+// destructors run inside a region of their own: an exception that leaves one while the stack unwinds calls
+// terminate (C++98 15.5.1), as cl does
 void IrGen::handlerCleanups(size_t mark, int line)
 {
+    if (m_flagged.size() <= mark) return;
+    const int tid = m_tryCount++;
+    const int term = m_out->newBlock("unwind.terminate");
+    const int body = m_out->newBlock("unwind.cleanups");
+    IrInst tb = make(IrInst::TryBegin, 0, line);
+    tb.extra = tid;
+    tb.args.push_back(IrOperand::block(term));
+    emit(tb);
+    br(body, line);
+    m_block = body;
+    m_tryStack.push_back(tid);
+    ++m_inPad;   // no cleanups are registered meanwhile: m_flagged is being walked
     for (size_t i = m_flagged.size(); i > mark; --i) runCleanup(m_flagged[i - 1], true, line);
+    --m_inPad;
+    m_tryStack.pop_back();
+    if (!terminated()) { IrInst te = make(IrInst::TryEnd, 0, line); te.extra = tid; emit(te); }
+    const int after = m_block;
+    m_block = term;
+    IrInst cp = make(IrInst::CatchParam, m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)), line);
+    cp.sub = "...";
+    emit(cp);
+    IrInst t = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+    t.sub = "cppparse_terminate";
+    emit(t);
+    emit(make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), line));
+    m_block = after;
+}
+
+// the memory a new-expression allocated, freed through the matching operator delete when the constructor (of an
+// element) throws; 'ptr' is the address the operator new returned (an array's cookie), 'count' its element count
+int IrGen::registerFree(int ptr, Symbol* cls, bool array, int count, int line)
+{
+    const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+    const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
+    int slot = newLocal("tmp.alloc", vp, true);
+    LValue pl; pl.kind = LValue::Local; pl.local = slot; pl.type = vp;
+    store(pl, ptr, vp, line);
+    int countSlot = -1;
+    if (array && count >= 0) {
+        countSlot = newLocal("tmp.count", lng, true);
+        LValue nl; nl.kind = LValue::Local; nl.local = countSlot; nl.type = lng;
+        store(nl, count, lng, line);
+    }
+    const int k = registerCleanup(slot, vp, true, 2, line);
+    Cleanup& c = m_flagged[static_cast<size_t>(k)];
+    c.freeKind = array ? 2 : 1;
+    c.freeCls = cls;
+    c.countSlot = countSlot;
+    if (array && countSlot < 0) c.freeCls = 0;
+    return k;
+}
+
+void IrGen::clearFlag(int index, int line)
+{
+    const sema::Type* b = m_semaTypes.basic(sema::Type::Bool);
+    LValue fl; fl.kind = LValue::Local; fl.local = m_flagged[static_cast<size_t>(index)].flag; fl.type = b;
+    store(fl, constant(0, b, line), b, line);
 }
 
 void IrGen::returnSequence(int line)
@@ -1701,7 +1795,17 @@ int IrGen::value(cxx::Expr* e)
                 IrInst adv = make(IrInst::AddrField, pt, line); adv.sub = "elements"; adv.extra = 8; adv.args.push_back(IrOperand::temp(p, oldType(pt)));
                 p = emit(adv);
             }
-            if (needsDefaultCtor(elem)) forEachElement(elem, p, count, true, line);
+            if (needsDefaultCtor(elem)) {
+                // an element's constructor that throws: the elements built are destroyed (forEachElement), then
+                // the memory is freed through the matching operator delete[] (C++98 5.3.4/17), as cl does
+                Symbol* fc = !e->globalScope && isClassType(elem) && elem->decl ? elem->decl : 0;
+                if (fc && !header) { Symbol* op = classOperatorDelete(fc, 0, "operator delete[]"); if (op && op->params.size() == 2) fc = 0; }
+                IrInst raw = make(IrInst::AddrIndex, pt, line); raw.extra = 1;
+                raw.args.push_back(IrOperand::temp(p, oldType(pt))); raw.args.push_back(IrOperand::imm(header ? -8 : 0, oldType(lng)));
+                const int k = registerFree(emit(raw), fc, true, count, line);
+                forEachElement(elem, p, count, true, line);
+                clearFlag(k, line);
+            }
             return p;
         }
         int p;
@@ -1714,10 +1818,16 @@ int IrGen::value(cxx::Expr* e)
             n.args.push_back(IrOperand::imm(sizeOf(elem) > 0 ? sizeOf(elem) : 1, classNew ? oldType(m_semaTypes.sizeType()) : m_types.intType()));
             p = emit(n);
         }
+        // a constructor (or initializer) that throws: the memory is freed through the matching operator delete
+        // (C++98 5.3.4/17), as cl does; a placement new's matching operator delete frees nothing
+        int freeK = -1;
+        if (e->placement.empty() && ((e->semaSym && e->semaSym->isConstructor) || !e->kids.empty() || (isClassType(elem) && needsDefaultCtor(elem))))
+            freeK = registerFree(p, !e->globalScope && isClassType(elem) && elem->decl ? elem->decl : 0, false, -1, line);
         if (e->semaSym && e->semaSym->isConstructor) construct(e->semaSym, p, e->kids, 0, line);
         else if (!e->kids.empty()) { LValue lv; lv.kind = LValue::Mem; lv.addr = p; lv.type = elem; store(lv, convert(value(e->kids[0]), exprType(e->kids[0]), elem, line), elem, line); }
         else if (e->hasInit && !isClassType(elem)) { LValue lv; lv.kind = LValue::Mem; lv.addr = p; lv.type = elem; store(lv, constant(0, elem, line), elem, line); }   // new T(): value-initialised
         else if (isClassType(elem)) constructDefault(elem, p, line);
+        if (freeK >= 0) clearFlag(freeK, line);
         return p;
     }
     case cxx::Expr::Delete: {
@@ -2359,8 +2469,16 @@ void IrGen::stmt(cxx::Stmt* s)
             else if (h->decl) cp.sub = h->decl->spec.text();
             int ev = emit(cp);
             handlerCleanups(mark, h->loc.line);
+            openScope();   // the handler's object of class type: destroyed when the handler ends
             if (var) {
-                if (ct->kind != sema::Type::Class && !isReference(var->type)) {
+                if (ct->kind == sema::Type::Class && ct->decl && !isReference(var->type)) {
+                    // caught by value: copy-constructed from the thrown object, as cl does (C++98 15.3/16)
+                    int slot = newLocal(var->name, var->type, true);
+                    m_slots[var] = slot;
+                    LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = ct;
+                    copyConstruct(ct, addressOf(lv, h->loc.line), ev, h->loc.line);
+                    if (needsDtor(ct)) registerCleanup(slot, ct, false, 0, h->loc.line);
+                } else if (ct->kind != sema::Type::Class && !isReference(var->type)) {
                     int slot = newLocal(var->name, var->type, false);
                     m_slots[var] = slot;
                     IrInst ld = make(IrInst::LoadMem, ct, h->loc.line); ld.args.push_back(IrOperand::temp(ev, oldType(m_semaTypes.pointer(ct))));
@@ -2394,6 +2512,7 @@ void IrGen::stmt(cxx::Stmt* s)
             m_tryStack.push_back(-1);
             m_tryStack.push_back(hid);
             stmt(h->kids[0]);
+            closeScope(h->loc.line);
             m_tryStack.pop_back();
             m_tryStack.pop_back();
             if (!terminated()) {
@@ -2595,7 +2714,7 @@ void IrGen::prologue(Symbol* fn)
     m_block = m_bodyBlock;
     m_unwindId = m_tryCount++;
     m_tryStack.push_back(m_unwindId);
-    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0; m_guardCount = 0;
+    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_dtorParts.clear(); m_labels.clear(); m_staticCount = 0; m_guardCount = 0;
     if (m_out->hasThis && fn->thisAdjust != 0) {
         // called with the address of the vfptr whose table first holds it (MSVC's this adjustor): back to the object
         const sema::Type* tp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));
@@ -2754,11 +2873,49 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
     }
 }
 
+// a destructor's members and bases, registered before its body: when the body (or the destructor of a member)
+// throws, the unwind handler destroys the ones not yet destroyed, as cl does (C++98 allows the throw)
+void IrGen::destructorParts(Symbol* fn)
+{
+    m_dtorParts.clear();
+    Symbol* cls = fn->ownerClass;
+    if (!cls) return;
+    const int line = fn->loc.line;
+    const int self = thisTemp(line);
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        Symbol* base = cls->bases[b].cls;
+        if (!base || cls->bases[b].isVirtual || !needsDtor(base->type)) continue;
+        int baddr = self;
+        if (cls->bases[b].offset > 0) { IrInst adj = make(IrInst::AddrField, m_semaTypes.pointer(m_semaTypes.classType(base)), line); adj.sub = "base " + base->name; adj.extra = cls->bases[b].offset; adj.args.push_back(IrOperand::temp(self, m_out->locals[0].type)); baddr = emit(adj); }
+        int part = newLocal("part." + base->name, m_semaTypes.pointer(base->type), true);
+        LValue pl; pl.kind = LValue::Local; pl.local = part; pl.type = m_semaTypes.pointer(base->type);
+        store(pl, baddr, pl.type, line);
+        const int k = registerCleanup(part, base->type, true, 2, line);
+        m_flagged[static_cast<size_t>(k)].baseSubobject = true;
+        m_dtorParts.push_back(k);
+    }
+    for (size_t f = 0; f < cls->fields.size(); ++f) {
+        Symbol* fld = cls->fields[f];
+        if (isReference(fld->type) || !needsDtor(fld->type)) continue;
+        const sema::Type* fu = m_semaTypes.unqualified(fld->type);
+        IrInst fa = make(IrInst::AddrField, m_semaTypes.pointer(fu), line); fa.sub = fld->name; fa.extra = fld->offset; fa.args.push_back(IrOperand::temp(self, m_out->locals[0].type));
+        int part = newLocal("part." + fld->name, m_semaTypes.pointer(fu), true);
+        LValue pl; pl.kind = LValue::Local; pl.local = part; pl.type = m_semaTypes.pointer(fu);
+        store(pl, emit(fa), pl.type, line);
+        m_dtorParts.push_back(registerCleanup(part, fu, true, 2, line));
+    }
+}
+
 void IrGen::destructorCleanup(Symbol* fn)
 {
     Symbol* cls = fn->ownerClass;
     if (!cls) return;
     const int line = fn->loc.line;
+    if (!m_dtorParts.empty()) {
+        // newest first; each flag is cleared before its destructor runs
+        for (size_t i = m_dtorParts.size(); i > 0; --i) { Cleanup c = m_flagged[static_cast<size_t>(m_dtorParts[i - 1])]; runCleanup(c, false, line); }
+        return;
+    }
     int self = thisTemp(line);
     for (size_t f = cls->fields.size(); f > 0; --f) {
         Symbol* fld = cls->fields[f - 1];
@@ -2785,6 +2942,7 @@ void IrGen::genImplicit(Symbol* fn)
     Symbol* cls = fn->ownerClass;
     const sema::Type* ct = m_semaTypes.classType(cls);
     if (m_vbaseDtorOf.count(fn)) genVbaseDestructor(fn);
+    else if (fn->isDestructor) destructorParts(fn);
     else if (fn->isConstructor && fn->params.empty()) constructorInit(fn, 0);
     else if (!fn->isDestructor) {   // an implicit destructor's body is empty: returnSequence destroys members and bases
         // copy constructor / copy assignment: memberwise, bases first
@@ -2913,6 +3071,7 @@ void IrGen::genFunction(Symbol* fn)
     // as cl: a destructor stores its own class's vptrs first, so a virtual call made while it (or a base's
     // destructor after it) runs reaches this class's functions, not those of the derived object being destroyed
     if (fn->isDestructor && fn->ownerClass) storeVptr(fn->ownerClass, thisTemp(def->loc.line), def->loc.line);
+    if (fn->isDestructor && fn->ownerClass) destructorParts(fn);
     m_staticBlocks.clear();
     // a function-try-block: the body (2) holds the try block (3, the next number) and its handlers
     if (m_msvcNames) { long next = def->body->kind == cxx::Stmt::Try ? 3 : 2; numberStaticBlocks(def->body, next, 2); }

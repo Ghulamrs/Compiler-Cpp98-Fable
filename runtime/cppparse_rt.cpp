@@ -233,6 +233,14 @@ void cppparse_catch_unwind(void* handled)
         }
 }
 
+/* an exception left a destructor that the stack unwinding called (the landing pad's own region): C++98 15.5.1 calls
+   terminate, whose default handler is abort, as cl's code does */
+void cppparse_terminate(void)
+{
+    fprintf(stderr, "cppparse runtime: terminate: an exception left a destructor during stack unwinding\n");
+    abort();
+}
+
 void cppparse_rethrow(void)
 {
     if (!g_inflight.type) {                       /* "throw;" inside a handler */

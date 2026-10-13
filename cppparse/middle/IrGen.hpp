@@ -75,7 +75,11 @@ private:
         bool              unwindOnly;  // a member built by a constructor: destroyed only when the body throws
         bool              baseSubobject;   // a base part: destroyed without its virtual bases
         std::string       abortGuard;  // a static local's initializer: its guard global, handed to _Init_thread_abort
-        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false) {}
+        int               restIndex;   // >= 0: the elements [0, index) of the array at slot (viaPointer), this local the index
+        int               freeKind;    // 1: frees the object whose address slot holds, 2: the array whose cookie it holds
+        sema::Symbol*     freeCls;     // the class whose operator delete frees it (0: the global one)
+        int               countSlot;   // freeKind 2: the local holding the element count
+        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false), restIndex(-1), freeKind(0), freeCls(0), countSlot(-1) {}
     };
     struct ExitThunk {                 // destroys a global or static local at exit; registered with atexit once it is built
         sema::Symbol*     fn;
@@ -141,6 +145,8 @@ private:
     void endFullExpr(int line, size_t from = 0);
     void keepTemporaries(size_t from);
     void handlerCleanups(size_t mark, int line);
+    int  registerFree(int ptr, sema::Symbol* cls, bool array, int count, int line);
+    void clearFlag(int index, int line);
     void returnSequence(int line);
     void finishFunction(int line);
     void scopedStmt(cxx::Stmt* s, int line);
@@ -163,6 +169,7 @@ private:
     void prologue(sema::Symbol* fn);
     void constructorInit(sema::Symbol* fn, cxx::Decl* def);
     void destructorCleanup(sema::Symbol* fn);
+    void destructorParts(sema::Symbol* fn);
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
     static std::string vtableName(const sema::Symbol* cls, size_t t);
     // MSVC's vector deleting destructor of a virtual destructor (what its vtable slot holds): with bit 1 of its
@@ -266,6 +273,8 @@ private:
     std::vector<size_t>        m_scopes;        // m_cleanups.size() at each open block scope
     std::vector<Cleanup>       m_temps;         // temporaries of the current full expression
     std::vector<Cleanup>       m_flagged;       // every cleanup of the function, for the unwind handlers
+    std::vector<int>           m_dtorParts;     // a destructor: its members and bases (indexes into m_flagged)
+    int                        m_inPad;         // > 0 while a landing pad is generated: no cleanups are registered
     int                        m_unwindId;      // the function's catch-all region
     int                        m_bodyBlock;
 };

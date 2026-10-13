@@ -33,7 +33,8 @@ Report "entry.asm assembled by ml64" ($LASTEXITCODE -eq 0) $msg
 New-Item -ItemType Directory -Force "$out\cl" | Out-Null
 # /EHa: cl 19.52 (preview) with /EHsc or /EHs at /O1 and above crashes on a throw out of a recursion whose frames
 # have destructors (deep() below; a 6-line program reproduces it, clang -O2 and cl /EHa run it correctly)
-$msg = & $cl /nologo /EHa /W4 /O2 "/Fo$out\cl\" "/Fe$out\cl\eh.exe" "$drv\driver-eh.cpp" "$src\probe.cpp" "$src\probe-mix.cpp" "$out\entry.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
+# /Zc:implicitNoexcept-: C++98's destructors, which may throw (ehDtorThrow, ehArrays)
+$msg = & $cl /nologo /EHa /Zc:implicitNoexcept- /W4 /O2 "/Fo$out\cl\" "/Fe$out\cl\eh.exe" "$drv\driver-eh.cpp" "$src\probe.cpp" "$src\probe-mix.cpp" "$out\entry.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { Report "cl reference build" $false $msg; exit 1 }
 $reference = Normalize (& "$out\cl\eh.exe" 2>&1 | Out-String)
 Report "cl reference build runs, ALL OK" ($LASTEXITCODE -eq 0 -and $reference -match 'ALL OK') $reference
@@ -64,6 +65,29 @@ foreach ($m in $models.Keys) {
             for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) { if ($a[$i] -ne $b[$i]) { $detail = "       line $($i + 1): got '$($a[$i])', cl '$($b[$i])'"; break } }
         }
         Report "$m -O${lvl}: output equals cl's (exit $($p.ExitCode))" ($p.ExitCode -eq 0 -and $same) $detail
+    }
+}
+
+# terminate.cpp, a whole program: an exception leaving a destructor run by the stack unwinding calls terminate; the
+# standard output and the exit code (abort) must equal cl's
+$tdir = "$out\terminate"
+New-Item -ItemType Directory -Force "$tdir\cl" | Out-Null
+$msg = & $cl /nologo /EHsc /Zc:implicitNoexcept- /O2 "/Fo$tdir\cl\" "/Fe$tdir\cl\terminate.exe" "$src\terminate.cpp" 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) { Report "terminate: cl reference build" $false $msg }
+else {
+    $tref = Normalize (& "$tdir\cl\terminate.exe" 2>$null | Out-String)
+    $tcode = $LASTEXITCODE
+    foreach ($m in "--eh=table", "--eh=sjlj") {
+        foreach ($lvl in 0, 2) {
+            $d = "$tdir\$($m.Substring(5))-O$lvl"
+            New-Item -ItemType Directory -Force $d | Out-Null
+            $msg = & $Exe --compile6 "-O$lvl" --obj --msvc-mangling $m -q -I ..\include -I .. -o $d -n terminate "$src\terminate.cpp" 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { Report "terminate $m -O$lvl compile" $false $msg; continue }
+            $msg = & $link /nologo "/OUT:$d\terminate.exe" "$d\terminate6.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { Report "terminate $m -O$lvl link" $false $msg; continue }
+            $run = Normalize (& "$d\terminate.exe" 2>$null | Out-String)
+            Report "terminate $m -O${lvl}: output and exit code equal cl's ($LASTEXITCODE)" ($run -eq $tref -and $LASTEXITCODE -eq $tcode -and $tcode -ne 0) "       got '$run' exit $LASTEXITCODE, cl '$tref' exit $tcode"
+        }
     }
 }
 if ($failed) { Write-Host "eh: $failed check(s) failed"; exit 1 }

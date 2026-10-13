@@ -605,11 +605,12 @@ and pointers, the type of `size_t`, the calling convention, the name mangling an
 
 | target | macros | sizes | ABI, mangling, objects | status |
 |---|---|---|---|---|
-| `x86_64-windows` (default) | `_WIN32=1`, `_WIN64=1`, `_M_X64=100` | `long` 4, `wchar_t` 2, `long double` 8, `size_t` = `unsigned long long` | Microsoft x64, MSVC, COFF | complete |
+| `x86_64-windows` (default) | `_WIN32=1`, `_WIN64=1`, `_M_X64=100`, `_MT=1`, `_CPPUNWIND=1` | `long` 4, `wchar_t` 2, `long double` 8, `size_t` = `unsigned long long` | Microsoft x64, MSVC, COFF | complete |
 | `x86_64-linux` | `__linux__`, `__unix__`, `__x86_64__`, `__LP64__`, `__ELF__` (and the short spellings) | `long` 8, `wchar_t` 4, `long double` 16 (aligned 16), `size_t` = `unsigned long` | System V, Itanium, ELF | `-E`, `--parse6`, `--sema6`; no back end yet |
 
-Every target also has `__cplusplus=199711L`, `__cppparse__=6` and `__STDC__=1`. `_MSC_VER` and `_DEBUG` are never
-predefined: code under them is MSVC's alone. The Linux sizes and macros agree with
+Every target also has `__cplusplus=199711L`, `__cppparse__=6` and `__STDC__=1`. `_MT` and `_CPPUNWIND` say what cl says
+for the programs cppparse builds (the static multithreaded CRT, as `/MT`, and C++ exceptions, as `/EHsc`; test 17
+checks both against cl). `_MSC_VER` and `_DEBUG` are never predefined: code under them is MSVC's alone. The Linux sizes and macros agree with
 `clang --target=x86_64-linux-gnu`, which will be the reference for the Linux back end as cl is for Windows.
 `--compile6` refuses a target without a back end, and stops at a missing include file instead of compiling
 against undeclared names (the analysis modes only warn). A unit with syntax or semantic errors is not compiled

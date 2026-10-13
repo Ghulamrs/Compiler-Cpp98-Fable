@@ -1030,7 +1030,9 @@ when the out-of-line definition replaced the parameters; indices and pointer
 differences were 32-bit (`long` is 32-bit here) and `sizeof` was
 `unsigned int`; integer literals above `LONG_MAX` were clamped (types now as
 cl: `0xFFFFFFFF` is `unsigned int`, `2166136261` is `unsigned long`; values
-beyond 32 bits warn, S127), `char` is signed and escapes in character and
+up to 64 bits are read whole and typed as cl, `long long` and `unsigned long
+long` included; one outside the 32-bit sign-extended range is built at run
+time, not a constant expression; only beyond 64 bits S127 warns), `char` is signed and escapes in character and
 string literals (octal, `\x`) are decoded; constant folding of unsigned
 operations and of casts to narrow types; narrow integer results are
 re-extended after every operation, call and same-size signedness change (the

@@ -8,6 +8,25 @@
 namespace cppparse {
 namespace sema {
 
+// the value of an integer literal (decimal, 0x hexadecimal or 0 octal, suffixes ignored), modulo 2^64;
+// *overflow is set when it does not fit in 64 bits
+unsigned long long integerLiteralValue(const std::string& text, bool* overflow)
+{
+    int radix = 10;
+    size_t i = 0;
+    if (text.size() > 1 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) { radix = 16; i = 2; }
+    else if (text.size() > 1 && text[0] == '0') { radix = 8; i = 1; }
+    unsigned long long v = 0;
+    for (; i < text.size(); ++i) {
+        const char c = text[i];
+        const int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
+        if (d >= radix) break;
+        if (overflow && v > (0xFFFFFFFFFFFFFFFFULL - static_cast<unsigned long long>(d)) / static_cast<unsigned long long>(radix)) *overflow = true;
+        v = v * static_cast<unsigned long long>(radix) + static_cast<unsigned long long>(d);
+    }
+    return v;
+}
+
 namespace {
 
 std::string numText(long v) { std::ostringstream s; s << v; return s.str(); }
@@ -1146,28 +1165,23 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         bool u = false; int l = 0;
         while (!s.empty() && (s[s.size() - 1] == 'u' || s[s.size() - 1] == 'U' || s[s.size() - 1] == 'l' || s[s.size() - 1] == 'L')) { if (s[s.size() - 1] == 'u' || s[s.size() - 1] == 'U') u = true; else ++l; s.erase(s.size() - 1); }
         // the type is the first of int, (unsigned int for hexadecimal and octal), long, unsigned long, long
-        // long that holds the value, as cl does; a value beyond 32 bits keeps its low 32 bits
-        int radix = 10;
-        size_t i = 0;
-        if (s.size() > 1 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { radix = 16; i = 2; }
-        else if (s.size() > 1 && s[0] == '0') { radix = 8; i = 1; }
-        unsigned long v = 0;
-        bool wide = false;
-        for (; i < s.size(); ++i) {
-            char c = s[i];
-            int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
-            if (d >= radix) break;
-            if (v > (0xFFFFFFFFUL - static_cast<unsigned long>(d)) / static_cast<unsigned long>(radix)) wide = true;
-            v = v * static_cast<unsigned long>(radix) + static_cast<unsigned long>(d);
-        }
-        const bool fitsSigned = !wide && v <= 0x7FFFFFFFUL;
+        // long, unsigned long long that holds the value, as cl does
+        bool overflow = false;
+        const unsigned long long v = integerLiteralValue(e->text, &overflow);
+        const bool hexOct = s.size() > 1 && s[0] == '0';
+        const bool wide = v > 0xFFFFFFFFULL;
+        const bool fitsSigned = v <= 0x7FFFFFFFULL;
         Type::Kind k;
-        if (l >= 2 || wide) k = u || (wide && radix != 10) ? Type::ULongLong : Type::LongLong;
+        if (l >= 2 || wide) k = u || v > 0x7FFFFFFFFFFFFFFFULL ? Type::ULongLong : Type::LongLong;
         else if (u) k = l ? Type::ULong : Type::UInt;
         else if (l) k = fitsSigned ? Type::Long : Type::ULong;
-        else k = fitsSigned ? Type::Int : (radix == 10 ? Type::ULong : Type::UInt);
-        if (wide) warning(e->loc, "S127", "integer constant " + e->text + " does not fit in 32 bits: only its low 32 bits are kept");
-        e->semaConst = true; e->semaValue = static_cast<long>(v);
+        else k = fitsSigned ? Type::Int : (hexOct ? Type::UInt : Type::ULong);
+        if (overflow) warning(e->loc, "S127", "integer constant " + e->text + " does not fit in 64 bits: only its low 64 bits are kept");
+        // semaValue holds 32 bits, sign-extended for a 64-bit type: a 64-bit value outside that range is no
+        // constant here (IrGen builds it at run time; a constant expression needing it is an error)
+        const long long sv = static_cast<long long>(v);
+        e->semaConst = !(k == Type::LongLong || k == Type::ULongLong) || (sv >= -2147483647LL - 1 && sv <= 2147483647LL);
+        e->semaValue = e->semaConst ? static_cast<long>(static_cast<int>(static_cast<unsigned int>(v & 0xFFFFFFFFULL))) : 0;
         t = m_types.basic(k);
         break;
     }

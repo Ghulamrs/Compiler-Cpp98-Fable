@@ -230,6 +230,9 @@ struct Scope {
     bool isNamespaceLike() const { return kind == Global || kind == Namespace; }
 };
 
+// the value of an integer literal's digits modulo 2^64 (SemaExpr.cpp); *overflow when it needs more bits
+unsigned long long integerLiteralValue(const std::string& text, bool* overflow);
+
 struct Diag {
     enum Severity { Error, Warning, Note };
     Severity    severity;

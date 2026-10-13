@@ -156,11 +156,16 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 - (fixed) At -O2 a run-time double -> unsigned conversion of 3000000000.0 gave 2147483648: the optimiser folded
   it through a 32-bit `long`. Floating <-> integer conversions now follow cl's code at every level and in the
   folder (X86.cpp Conv, Optimizer.cpp floatToInt; sample-front `conv::`).
-- An integer literal of type `long long` / `unsigned long long` whose value fits in 32 unsigned bits but not in
-  a signed `long` keeps the sign-extended 32-bit pattern (Expr::semaValue is a `long`), silently: `unsigned long
-  long b = 4294967295ULL;` prints 18446744073709551615 (cl 4294967295), `9223372036854775808ULL` and other wider
-  literals keep their low 32 bits (S127 warns for those, not for this case). Values computed at run time
-  (`(1ULL << 32) - 1`, `~0ULL`) are right. Fix: a 64-bit literal value in Sema and IrGen::bitConstant for it.
+- (fixed) 64-bit integer literals: `4294967295ULL` was sign-extended to 2^64-1 and wider literals kept their low
+  32 bits. Sema reads all 64 bits (integerLiteralValue) and types them as cl (int, unsigned int for hexadecimal
+  and octal, long, unsigned long, long long, unsigned long long); IrGen builds a value outside the 32-bit
+  sign-extended immediates with bitConstant; a case label converts from its own type (`case 4294967295U:` of an
+  unsigned long long switch compared with 2^64-1). Left, refused or merely different from cl: Expr::semaValue
+  is still a 32-bit `long`, so such a literal is no constant expression: `case 4294967296ULL:`, an array bound
+  or a template argument of that value is an error (S114 and the like, not wrong code); a global or static
+  initialised with it gets a dynamic initialiser (a static local a guard) where cl emits static data
+  (`unsigned long long b = 4294967295ULL;`: cl `DQ 0FFFFFFFFh`, cppparse `DQ 0` plus an initialiser; the value
+  is right once main runs). Fix: a 64-bit semaValue (SemaExpr folding, constantValue, IrGen constant tables).
 - Statics in a member function of a local class: the mangled name lacks the enclosing function (cl nests
   it), so such a static is not shared with cl's copy; found by the review of 92a19bb (`int t4(int a) { struct L { static int f(int b) { static int s1 = b; return s1; } }; return L::f(a); }`).
 

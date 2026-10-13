@@ -379,10 +379,16 @@ int IrGen::bitConstant(unsigned long long v, const sema::Type* t, int line)
     const long long sv = static_cast<long long>(v);
     if (sv >= -2147483647LL - 1 && sv <= 2147483647LL) return constant(static_cast<long>(sv), t, line);
     const unsigned long lo = static_cast<unsigned long>(v & 0xFFFFFFFFULL);
-    int hi = binary("<<", constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(v >> 32))), t, line), t, constant(32, t, line), t, t, line);
-    int mid = binary("<<", constant(static_cast<long>(lo >> 16), t, line), t, constant(16, t, line), t, t, line);
-    int r = binary("|", hi, t, mid, t, t, line);
-    return binary("|", r, t, constant(static_cast<long>(lo & 0xFFFFUL), t, line), t, t, line);
+    // one constant per statement: the order of a call's arguments is unspecified (cl and cppparse differ)
+    const int top = constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(v >> 32))), t, line);
+    const int by32 = constant(32, t, line);
+    const int hi = binary("<<", top, t, by32, t, t, line);
+    const int midBits = constant(static_cast<long>(lo >> 16), t, line);
+    const int by16 = constant(16, t, line);
+    const int mid = binary("<<", midBits, t, by16, t, t, line);
+    const int r = binary("|", hi, t, mid, t, t, line);
+    const int low = constant(static_cast<long>(lo & 0xFFFFUL), t, line);
+    return binary("|", r, t, low, t, t, line);
 }
 
 namespace {
@@ -1526,7 +1532,11 @@ int IrGen::value(cxx::Expr* e)
         return constant(e->semaValue, t->kind == sema::Type::NullPtr ? m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)) : t, line);
 
     switch (e->kind) {
-    case cxx::Expr::IntLit: case cxx::Expr::CharLit: case cxx::Expr::BoolLit: return constant(e->semaValue, t, line);
+    case cxx::Expr::IntLit:
+        // a 64-bit literal outside the 32-bit sign-extended immediates: put together from pieces
+        if (!e->semaConst && sizeOf(t) == 8) return bitConstant(sema::integerLiteralValue(e->text, 0), t, line);
+        return constant(e->semaValue, t, line);
+    case cxx::Expr::CharLit: case cxx::Expr::BoolLit: return constant(e->semaValue, t, line);
     case cxx::Expr::FloatLit: {
         // a float literal's constant holds its float value (the optimiser folds conversions of it)
         double v = strtod(e->text.c_str(), 0);
@@ -2273,7 +2283,10 @@ void IrGen::stmt(cxx::Stmt* s)
         }
         for (size_t i = 0; i < flat.size(); ++i) {
             if (flat[i]->kind != cxx::Stmt::Case) continue;
-            int cv = constant(flat[i]->expr->semaValue, vt, flat[i]->loc.line);
+            // the label's value in its own type, then converted ("case 4294967295U:" of an unsigned long long)
+            const sema::Type* lt = m_semaTypes.unqualified(m_semaTypes.unref(exprType(flat[i]->expr)));
+            int cv = lt && lt->isIntegral() ? convert(constant(flat[i]->expr->semaValue, lt, flat[i]->loc.line), lt, vt, flat[i]->loc.line)
+                                            : constant(flat[i]->expr->semaValue, vt, flat[i]->loc.line);
             IrInst c = make(IrInst::Cmp, m_semaTypes.basic(sema::Type::Bool), flat[i]->loc.line); c.sub = "eq";
             c.args.push_back(IrOperand::temp(convert(v, st, vt, line), oldType(vt))); c.args.push_back(IrOperand::temp(cv, oldType(vt)));
             int cond = emit(c);

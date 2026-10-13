@@ -286,6 +286,35 @@ void show()
 }
 }
 
+// 64-bit integer literals: types and values as cl (a value from 2^31 to 2^64-1, decimal, hexadecimal, octal,
+// suffixed or not) at run time, in globals, statics, arrays and as converted case labels; 4294967295ULL was
+// sign-extended to 2^64-1 and wider literals kept their low 32 bits
+namespace lit {
+static const unsigned long long a[] = { 4294967295ULL, 9223372036854775808ULL, 12345678901234567891ULL, 0xFFFFFFFFULL, 0x80000000ULL, 2147483648LL, 040000000000LL };
+unsigned long long b = 4294967295ULL;
+static unsigned long long c[] = { 4294967296ULL, 1ULL << 40, 0x100000000 };
+long long d[] = { -5000000000LL, 5000000000LL, -2147483648LL, 2147483648LL, 9223372036854775807LL, 0x7FFFFFFFFFFFFFFF };
+unsigned long long sq() { static unsigned long long s = 18446744073709551615ULL; return s; }
+const unsigned long long kc = 4294967295ULL;
+void show()
+{
+    volatile int i = 0;
+    std::printf("lit a %llu %llu %llu %llu %llu %llu %llu\n", a[i], a[i+1], a[i+2], a[i+3], a[i+4], a[i+5], a[i+6]);
+    std::printf("lit b %llu c %llu %llu %llu\n", b, c[i], c[i+1], c[i+2]);
+    std::printf("lit d %lld %lld %lld %lld %lld %lld\n", d[i], d[i+1], d[i+2], d[i+3], d[i+4], d[i+5]);
+    unsigned long long e[] = { 4294967295ULL, 9223372036854775808ULL, 3000000000ULL };
+    std::printf("lit e %llu %llu %llu sq %llu kc %llu\n", e[i], e[i+1], e[i+2], sq(), kc);
+    long long x = 3000000000LL; unsigned long long y = 0xFFFFFFFFull + 1; long long z = -3000000000LL;
+    std::printf("lit run %lld %llu %lld %llu %lld\n", x, y, z, 4294967295ULL * 2, 5000000000 / 3);
+    // types: signed or not, and size
+    std::printf("lit types %d %d %d %d %d %d %d %d\n", (int)(2147483648 * 0 - 1 < 0), (int)sizeof(2147483648), (int)(0x80000000 * 0 - 1 < 0),
+        (int)sizeof(4294967296), (int)(0x100000000 * 0 - 1 < 0), (int)(9223372036854775808 * 0 - 1 < 0), (int)sizeof(5000000000L), (int)(0xFFFFFFFFLL * 0 - 1 < 0));
+    unsigned long long sw = b; int r = 0;
+    switch (sw) { case 4294967295U: r = 1; break; case 1ULL: r = 2; break; default: r = 3; }
+    std::printf("lit switch %d\n", r);
+}
+}
+
 int main()
 {
     predefined();
@@ -300,6 +329,7 @@ int main()
     foldedGlobals();
     conv::runtimeD(); conv::runtimeF(); conv::consts(); conv::toFloating();
     mpsize::show();
+    lit::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

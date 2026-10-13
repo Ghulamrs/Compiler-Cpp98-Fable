@@ -727,7 +727,9 @@ bodies once their class is complete, and for every expression records
 its type, value category, constant value and the entity it refers to.
 Name lookup is unqualified through enclosing scopes and base classes,
 qualified through namespaces and classes, and for members with
-inheritance. Calls, constructors, conversions and operators on class
+inheritance; an entity found along two paths (`::printf` directly and
+through `std`'s `using ::printf` after `using namespace std`) is one
+candidate. Calls, constructors, conversions and operators on class
 operands go through overload resolution with the C++98 implicit
 conversion sequences (exact, promotion, standard, user-defined through
 converting constructors and conversion operators, reference binding,

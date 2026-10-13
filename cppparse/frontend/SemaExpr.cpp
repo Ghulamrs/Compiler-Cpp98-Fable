@@ -405,7 +405,15 @@ Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vect
 
     struct Viable { Symbol* fn; std::vector<Conversion> convs; bool exactThis; };
     std::vector<Viable> viable;
-    std::vector<Symbol*> all = cands;
+    // one entity reached twice is one candidate: "using namespace std; printf(...)" finds ::printf directly and
+    // again through the using-declaration "using ::printf;" in std
+    std::vector<Symbol*> all;
+    for (size_t i = 0; i < cands.size(); ++i) {
+        bool seen = false;
+        for (size_t k = 0; k < all.size() && !seen; ++k) seen = all[k] == cands[i];
+        if (!seen) all.push_back(cands[i]);
+    }
+    const size_t candidates = all.size();
     // function templates: deduce and instantiate, then take part like ordinary functions
     for (size_t i = 0; i < all.size(); ++i) {
         if (all[i]->kind == Symbol::FunctionTemplate) {
@@ -441,7 +449,7 @@ Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vect
         if (report && !anyErrorArg) {
             std::string sig;
             for (size_t a = firstArg; a < args.size(); ++a) sig += (a > firstArg ? ", " : "") + (args[a]->semaType ? valueType(args[a])->text() : std::string("?"));
-            error(loc, "S107", "no matching function for call to " + what + "(" + sig + ")" + (cands.empty() ? "" : " among " + numText(static_cast<long>(cands.size())) + " candidate(s)"));
+            error(loc, "S107", "no matching function for call to " + what + "(" + sig + ")" + (candidates == 0 ? "" : " among " + numText(static_cast<long>(candidates)) + " candidate(s)"));
         }
         return 0;
     }

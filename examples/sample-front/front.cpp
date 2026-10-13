@@ -47,5 +47,7 @@ int main()
     sizes();
     hiding();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
+    // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
+    printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");
     return 0;
 }

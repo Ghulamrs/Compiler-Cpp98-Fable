@@ -23,6 +23,8 @@ the default), with the items found since. Each was reproduced with a small progr
   `void` or a function type is S113 (SemaExpr.cpp completeForSizeof); test 17, `sample-front/sizeof-incomplete.cpp`.
 - plan 4: variables, parameters and functions are recorded per parser scope; template-name lookup stops at the
   innermost scope that declares the name (CxxParser.cpp isTemplateName); test 17, `sample-front/front.cpp`.
+- plan 5: overload candidates are deduplicated by entity before resolution (SemaExpr.cpp resolveOverload), so
+  `using namespace std; printf(...)` is no longer ambiguous; test 17, `sample-front/front.cpp`.
 
 ## Plan
 
@@ -32,7 +34,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | # | Item | Effect today | Size | Lane |
 |---|---|---|---|---|
 | 2 | 19: stack-passed float parameter homed with movsd (X86.cpp:1274) | wrong value | small | back end |
-| 5 | `using namespace std; printf(...)` ambiguous: candidates not deduplicated (SemaExpr.cpp:390-444) | false error | small | front end |
 | 6 | 21: global destructors never registered with atexit (IrGen.cpp genInitializer) | never run | small-medium | back end |
 | 7 | 18, callee side: variadic prologue does not home rdx/r8/r9; no stdarg.h | garbage | medium | back end |
 | 8 | 5: empty base takes a byte (Sema.cpp:1076-1088) | wrong size | small | layout |

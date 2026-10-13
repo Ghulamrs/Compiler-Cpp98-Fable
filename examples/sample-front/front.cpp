@@ -214,8 +214,22 @@ void foldedGlobals()
     showBytes("d17", &folded::d17, 8); showBytes("f3", &folded::f3, 4); showBytes("d18", &folded::d18, 8);
 }
 
+// a constructor initializer calls the constructor overload resolution chooses, not the first one taking as many
+// arguments: B(o) with o a const C& is B's copy constructor, not B(int)
+struct InitB { int v; InitB(int x) : v(x * 100) {} InitB(const InitB& o) : v(o.v + 1) {} };
+struct InitM { int m; InitM(const char*) : m(7) {} InitM(int x) : m(x) {} };
+struct InitC : InitB { InitM mem; InitC(int x) : InitB(x), mem(x) {} InitC(const InitC& o) : InitB(o), mem("copy") {} };
+
+void memInitOverloads()
+{
+    InitC a(3);
+    InitC b(a);
+    std::printf("constructor initializers: %d %d %d %d\n", a.v, a.mem.m, b.v, b.mem.m);
+}
+
 int main()
 {
+    memInitOverloads();
     predefined();
     sizes();
     hiding();

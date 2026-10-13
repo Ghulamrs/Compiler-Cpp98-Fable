@@ -48,6 +48,8 @@ public:
     const std::vector<std::string>& notes() const { return m_notes; }
     static std::string irName(const sema::Symbol* fn);
     int functionsGenerated() const { return m_generated; }
+    // builds a local that every return statement names directly in the caller's result object (cl /O2's NRVO)
+    void setNamedReturnElision(bool on) { m_nrvoEnabled = on; }
     // members of class template instantiations whose bodies had errors (Symbol::instantiationFailed) that the
     // generated code needs all the same, e.g. through an implicit destructor call: the unit cannot be compiled
     const std::vector<sema::Symbol*>& failedMembersUsed() const { return m_failedUsed; }
@@ -103,6 +105,7 @@ private:
     void memberPointerCheck(cxx::Expr* e);
     static std::string vbtableName(const sema::Symbol* cls, size_t t);
     void storeVbptrs(sema::Symbol* cls, int objAddr, int line);
+    sema::Symbol* namedResult(sema::Symbol* fn, cxx::Stmt* body);   // the local every return names (NRVO), or 0
     sema::Symbol* vbaseDestructor(sema::Symbol* cls);   // cl's ??_D: the destructor of a complete object
     void genVbaseDestructor(sema::Symbol* fn);
     std::string throwDescriptorFor(const sema::Type* t) const;
@@ -258,12 +261,28 @@ private:
     int                        m_block;
     int                        m_sretSlot;
     const sema::Type*          m_retReg;        // the integer type a small class result returns in, else 0
+    bool                       m_nrvoEnabled;   // named return value optimisation (-O1 and up, as cl /O2)
+    sema::Symbol*              m_nrvo;          // the local built in the hidden result object of this function, or 0
     std::map<sema::Symbol*, int> m_slots;
     std::vector<LoopTargets>   m_loops;
     std::vector<int>           m_tryStack;      // region ids, -1 inside a handler body
     int                        m_tryCount;
     std::vector<Cleanup>       m_cleanups;      // constructed objects of the open scopes, in construction order
     std::vector<size_t>        m_scopes;        // m_cleanups.size() at each open block scope
+    std::vector<int>           m_scopeIds;      // a number for each open block scope (goto: the scopes it leaves)
+    int                        m_scopeSerial;
+    struct JumpState {                          // the scopes, objects and try regions at a goto or a label
+        int                  block;             // goto: the block that leaves the scopes (forward jumps)
+        int                  line;
+        std::vector<int>     ids;
+        std::vector<size_t>  scopes;
+        std::vector<Cleanup> cleanups;
+        std::vector<int>     tryStack;
+    };
+    std::map<std::string, JumpState>              m_labelStates;    // labels generated so far
+    std::map<std::string, std::vector<JumpState> > m_pendingGotos;  // gotos to labels not generated yet
+    JumpState jumpState(int block, int line) const;
+    void      gotoExit(const JumpState& from, const JumpState& to, const std::string& label);
     std::vector<Cleanup>       m_temps;         // temporaries of the current full expression
     std::vector<Cleanup>       m_flagged;       // every cleanup of the function, for the unwind handlers
     int                        m_unwindId;      // the function's catch-all region

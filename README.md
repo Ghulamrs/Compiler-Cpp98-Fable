@@ -307,7 +307,10 @@ builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `obj/debug`. `-NoTests` stops after the build. The test groups (17 as of
 version 6) run against whichever configuration was built. Test 17 holds the
 front-end regressions of `examples/sample-front/`: units that must be
-rejected with their diagnostics and no object.
+rejected with their diagnostics and no object, and programs whose output
+must equal that of cl's build (`front.cpp`; `copies.cpp`, which logs every
+construction, copy and destruction of its classes and temporaries, against
+cl `/Od` at `-O0` and cl `/O2` at `-O2`).
 
 A Visual Studio 2022 solution does the same build inside the IDE:
 `cpp\cppparse.sln` with the project `cppparse\cppparse.vcxproj` (x64,
@@ -897,8 +900,16 @@ expression (a temporary bound to a reference lives as long as the
 reference; one that a `?:` result refers to is destroyed under its
 flag). Copies go through the class's own members: the copy constructor
 for initialisation, by-value arguments (the callee owns and destroys
-its copy, as MSVC does) and return values (constructor calls and calls
-returning the class build the result in place), the copy assignment
+its copy, as MSVC does, destroying its by-value parameters left to
+right as cl does; arguments are still evaluated left to right, cl goes
+right to left) and
+return values (constructor calls and calls returning the class build
+the result in place; at `-O1` and up, as cl `/O2`, a local of the
+result's class declared directly in the function body and named by every
+`return` is built in the caller's result object (NRVO, through the
+hidden result pointer, not for results returned in `rax`) and destroyed
+only when an exception leaves the function; `-O0` copies it as cl `/Od`
+does), the copy assignment
 operator for `a = b`; implicit copy constructors, assignments and
 destructors are generated memberwise (bases first). Arrays of objects
 are constructed and destroyed element by element; `new T[n]` keeps the
@@ -974,7 +985,10 @@ operations come from the runtime, they are compiler intrinsics in MSVC);
 `double` member emits a float constant; static locals are module globals
 initialised on the first pass under a guard byte (COMDAT when the
 function is inline, named per function so every unit agrees); `goto`
-and labels are blocks (objects of the scopes left are not destroyed);
+and labels are blocks (a `goto` destroys the objects of the scopes it
+leaves, innermost first, and leaves try blocks, as `break` does; one that
+jumps past an object with a destructor or into a try block is refused,
+S132);
 anonymous-namespace symbols carry a per-unit id (`?A0x<hash>@`) so units
 do not collide. The version 6 mangler now spells every name cl.exe gives
 cppparse's own sources (checked unit by unit with `sandbox/scripts/mix.ps1`,

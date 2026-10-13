@@ -197,6 +197,8 @@ struct MemInit {                    // constructor initializer: name ( args )
     QualifiedName      name;
     std::vector<Expr*> args;
     Loc                loc;
+    sema::Symbol*      semaSym;   // the constructor chosen by overload resolution for a class (stage 3)
+    MemInit() : semaSym(0) {}
 };
 
 struct TemplateParam {

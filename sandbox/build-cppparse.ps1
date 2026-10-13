@@ -663,7 +663,7 @@ try {
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 of sample-life at -O$lvl :"; Write-Host $c6; $failed++; continue }
         if ($c6 -match 'sema: 0 error') { Write-Host "  ok   sample-life analysed without errors (-O$lvl)" } else { Write-Host "  FAIL sample-life has semantic errors:"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\lifedriver$lvl.exe" "..\examples\sample-life-driver\driver-life.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = & $cl /nologo /EHsc /W3 "/DLIFE_NRVO=$([int]($lvl -ge 1))" "/Foout\x64\" "/Feout\x64\lifedriver$lvl.exe" "..\examples\sample-life-driver\driver-life.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the lifetime driver:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\lifedriver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   lifedriver$lvl.exe: all 24 lifetime checks correct (-O$lvl)" }
@@ -756,6 +756,7 @@ try {
         @{ unit = "sizeof-incomplete"; expect = @("error S113: sizeof of incomplete class 'Inc'", "error S113: sizeof of incomplete class 'std::", "error S113: sizeof of incomplete class 'Self'", "error S113: sizeof of void") },
         @{ unit = "vbase"; expect = @("error S130: 'VL' has a virtual base class", "error S130: 'VR' has a virtual base class", "error S130: 'VD' has a virtual base class") },
         @{ unit = "vbase-refused"; expect = @("error S132: line 8: cannot convert from 'V' to 'D': 'V' is a virtual base", "error S132: line 9: pointer to member of 'D', a class with virtual bases", "error S132: line 10: catching 'V', a virtual base class") },
+        @{ unit = "goto-refused"; expect = @("error S132: line 5: goto x jumps past the initialisation of an object with a destructor (ill-formed)", "error S132: line 6: goto y jumps into a try block or a handler (ill-formed)") },
         @{ unit = "covariant"; expect = @("error S131: 'CD::self' overrides 'SB::self' with a covariant return type") }
     )
     foreach ($r in $rejects) {
@@ -808,6 +809,24 @@ try {
         $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $got -eq $want) { Write-Host "  ok   front.cpp (-O$lvl) prints what cl's build prints ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
         else { Write-Host "  FAIL front.cpp (-O$lvl, exit $LASTEXITCODE) differs from cl's build:"; Write-Host "  cl:"; Write-Host $want; Write-Host "  cppparse:"; Write-Host $got; $failed++ }
+    }
+    # copies.cpp: copies and temporaries, logged by the constructors and destructors. cl /Od copies a returned named
+    # local and /O2 builds it in the result (NRVO): -O0 must print what cl /Od's build prints, -O2 what cl /O2's does
+    foreach ($lvl in @(0, 2)) {
+        $clOpt = if ($lvl -eq 0) { "/Od" } else { "/O2" }
+        $clOut = & $cl /nologo /EHsc /W3 $clOpt "/Foout\x64\" "/Feout\x64\copies_cl$lvl.exe" "..\examples\sample-front\copies.cpp" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\copies.cpp" }
+        $want = & ".\out\x64\copies_cl$lvl.exe" 2>&1 | Out-String
+        $nm = "copies$lvl"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\copies.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\copies.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
+        $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $got -eq $want) { Write-Host "  ok   copies.cpp (-O$lvl) logs the copies and destructions of cl $clOpt ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
+        else { Write-Host "  FAIL copies.cpp (-O$lvl, exit $LASTEXITCODE) differs from cl $clOpt's build:"; Write-Host "  cl:"; Write-Host $want; Write-Host "  cppparse:"; Write-Host $got; $failed++ }
     }
     # MatrixTest.cpp (Matrix.hpp, Vector.hpp; asserts and streams) against cl: member templates of class templates,
     # injected class names with arguments, a function template declared before its definition. std::cout comes

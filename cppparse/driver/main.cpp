@@ -406,6 +406,7 @@ int main(int argc, char* argv[])
                     unsigned long unitId = 2166136261UL;   // FNV-1a of the input path: this unit's anonymous namespace id
                     for (size_t k = 0; k < inputs[i].size(); ++k) unitId = (unitId ^ static_cast<unsigned char>(inputs[i][k])) * 16777619UL;
                     setMangleUnitId(unitId & 0xFFFFFFFFUL);
+                    gen.setNamedReturnElision(copt.optLevel >= 1);   // NRVO only when optimising, as cl (/Od: a copy)
                     gen.registerMetadata(x86, copt.msvcNames);   // first: it queues the vtable members and the dynamic initialisers
                     gen.generate(functions);
                     if (!gen.unsupported().empty()) {

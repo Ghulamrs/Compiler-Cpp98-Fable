@@ -1333,6 +1333,21 @@ void Sema::localDecl(cxx::Decl* d, Scope* in, bool isHandler)
         const std::string& name = dcl->name.parts.empty() ? std::string("") : dcl->name.parts.back().ident;
         if (d->spec.isTypedef) { Symbol* td = m_prog.newSymbol(Symbol::Typedef, name, in); td->type = t; td->loc = dcl->loc; dcl->semaSym = td; continue; }
         if (t->kind == Type::Function) { declareFunction(d, dcl, d->spec, in, cxx::AccessPublic, t, params); continue; }
+        if (d->spec.isExtern && id.init.kind == cxx::Initializer::None) {
+            // a block-scope extern declaration names the variable of the enclosing namespace (C++98 3.5/7): no
+            // storage, no construction here; one not declared there yet is declared there
+            Scope* ns = in;
+            while (ns && !ns->isNamespaceLike()) ns = ns->parent;
+            Symbol* global = 0;
+            const std::vector<Symbol*>* found = ns ? ns->find(name) : 0;
+            if (found) for (size_t k = 0; k < found->size() && !global; ++k) if ((*found)[k]->kind == Symbol::Variable) global = (*found)[k];
+            if (!global && ns) {
+                global = m_prog.newSymbol(Symbol::Variable, name, ns);
+                global->type = t; global->loc = dcl->loc; global->isExtern = true;
+                ++m_stats.variables;
+            }
+            if (global) { in->add(global); dcl->semaSym = global; continue; }
+        }
         Symbol* var = m_prog.newSymbol(Symbol::Variable, name, in);
         var->type = t; var->loc = dcl->loc; var->isLocal = true; var->isStatic = d->spec.isStatic; var->isExtern = d->spec.isExtern;
         var->declAlign = d->spec.align;
@@ -1485,7 +1500,9 @@ void Sema::analyzeFunctionBody(Symbol* fn, cxx::Decl* def, Scope* enclosing)
         const Type* tu = m_types.unref(tt);
         if (tu->kind == Type::Class && tu->decl && tu->decl->isDefinition) {
             std::vector<Symbol*> ctors; lookupMember(tu->decl, tu->decl->ctorName(), ctors);
-            noteUse(resolveOverload(ctors, mi.args, 0, 0, fs, mi.loc, tu->decl->name + "::" + tu->decl->name, true));
+            Symbol* chosen = resolveOverload(ctors, mi.args, 0, 0, fs, mi.loc, tu->decl->name + "::" + tu->decl->name, true);
+            noteUse(chosen);
+            mi.semaSym = chosen;
         } else if (mi.args.size() == 1) {
             Conversion c = convert(mi.args[0], tt, fs);
             if (c.rank == Conversion::None && valueType(mi.args[0])->kind != Type::Error) error(mi.loc, "S105", "cannot initialise '" + mi.name.text() + "' of type " + tt->text() + " from " + valueType(mi.args[0])->text());

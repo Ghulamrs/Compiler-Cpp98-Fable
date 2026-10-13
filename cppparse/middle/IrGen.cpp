@@ -50,8 +50,10 @@ void zeroData(std::vector<IrDataItem>& out, int n)
 
 } // namespace
 
+static Symbol* namedLocal(cxx::Expr* e);
+
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
-    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_tryCount(0),
+    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_nrvoEnabled(false), m_nrvo(0), m_scopeSerial(0), m_tryCount(0),
       m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_deletingDone(0), m_ctorFlag(1), m_vbFlagSlot(-1),m_staticCount(0), m_guardCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
@@ -1281,12 +1283,39 @@ void IrGen::runCleanup(const Cleanup& c, bool guarded, int line)
 void IrGen::openScope()
 {
     m_scopes.push_back(m_cleanups.size());
+    m_scopeIds.push_back(m_scopeSerial++);
+}
+
+IrGen::JumpState IrGen::jumpState(int block, int line) const
+{
+    JumpState j;
+    j.block = block; j.line = line; j.ids = m_scopeIds; j.scopes = m_scopes; j.cleanups = m_cleanups; j.tryStack = m_tryStack;
+    return j;
+}
+
+// goto: destroys the objects of the scopes left (innermost first) and leaves the try regions, as break and return
+// do, from the state at the goto (m_cleanups, m_tryStack hold it). A jump into a scope past an object with a
+// destructor, or into a try block or a handler, is ill-formed (C++98 6.7/3, 15/2): refused
+void IrGen::gotoExit(const JumpState& from, const JumpState& to, const std::string& label)
+{
+    size_t k = 0;
+    while (k < from.ids.size() && k < to.ids.size() && from.ids[k] == to.ids[k]) ++k;
+    const size_t keepFrom = k < from.scopes.size() ? from.scopes[k] : from.cleanups.size();
+    const size_t keepTo = k < to.scopes.size() ? to.scopes[k] : to.cleanups.size();
+    size_t t = 0;
+    while (t < from.tryStack.size() && t < to.tryStack.size() && from.tryStack[t] == to.tryStack[t]) ++t;
+    if (keepTo > keepFrom) unsupported(from.line, "goto " + label + " jumps past the initialisation of an object with a destructor (ill-formed)");
+    else if (t < to.tryStack.size()) unsupported(from.line, "goto " + label + " jumps into a try block or a handler (ill-formed)");
+    leaveScopes(keepTo < keepFrom ? keepTo : keepFrom, from.line);
+    leaveTryRegions(t, from.line);
+    br(labelBlock(label), from.line);
 }
 
 void IrGen::closeScope(int line)
 {
     size_t mark = m_scopes.back();
     m_scopes.pop_back();
+    m_scopeIds.pop_back();
     if (!terminated()) for (size_t i = m_cleanups.size(); i > mark; --i) runCleanup(m_cleanups[i - 1], m_cleanups[i - 1].guarded, line);
     m_cleanups.erase(m_cleanups.begin() + static_cast<std::ptrdiff_t>(mark), m_cleanups.end());
 }
@@ -1966,6 +1995,7 @@ void IrGen::localDecl(cxx::Decl* d)
         cxx::InitDeclarator& id = d->declarators[i];
         Symbol* var = id.decl ? id.decl->semaSym : 0;
         if (!var || var->kind != Symbol::Variable) continue;
+        if (!var->isLocal) continue;   // a block-scope extern declaration: the namespace's variable, built there
         if (var->isStatic) {
             // a static local is a global of this module; an initializer that is not a constant runs on the first pass
             const int line = id.decl->loc.line;
@@ -2074,6 +2104,21 @@ void IrGen::localDecl(cxx::Decl* d)
                 br(done, line);
                 m_block = done;
             }
+            continue;
+        }
+        if (var == m_nrvo) {
+            // NRVO: built in the caller's result object; the returns copy nothing, and only an exception that
+            // leaves the function destroys it
+            const int line = id.decl->loc.line;
+            const sema::Type* vt = var->type;
+            LValue sl; sl.kind = LValue::Local; sl.local = m_sretSlot; sl.type = m_semaTypes.pointer(vt);
+            LValue rl; rl.kind = LValue::Mem; rl.addr = load(sl, sl.type, line); rl.type = vt;
+            // the name is in scope in its own initializer (A a = &a): reads go through the hidden pointer
+            m_slots[var] = m_sretSlot;
+            var->type = m_semaTypes.reference(vt);
+            initObject(rl, vt, var, id, line);
+            if (needsDtor(vt)) registerCleanup(m_sretSlot, vt, true, 2, line);
+            endFullExpr(line);
             continue;
         }
         int slot = newLocal(var->name, var->type, false);
@@ -2297,6 +2342,8 @@ void IrGen::stmt(cxx::Stmt* s)
                 int addr = lv.kind == LValue::None ? value(s->expr) : addressOf(lv, line);
                 addr = convert(addr, m_semaTypes.pointer(lv.kind == LValue::None ? m_semaTypes.unref(exprType(s->expr)) : lv.type), m_semaTypes.pointer(m_semaTypes.unref(rt)), line);
                 in.args.push_back(IrOperand::temp(addr, oldType(m_semaTypes.pointer(rt->inner))));
+            } else if (isClassType(rt) && m_nrvo && namedLocal(s->expr) == m_nrvo) {
+                // NRVO: the object already is the result
             } else if (isClassType(rt)) {
                 // build the result in the hidden result object
                 IrInst ld = make(IrInst::LoadLocal, m_semaTypes.pointer(rt), line); ld.args.push_back(IrOperand::local(m_sretSlot, oldType(m_semaTypes.pointer(rt))));
@@ -2312,11 +2359,34 @@ void IrGen::stmt(cxx::Stmt* s)
         emit(in);
         return;
     }
-    case cxx::Stmt::Goto: br(labelBlock(s->label), line); return;   // objects of the scopes left are not destroyed
+    case cxx::Stmt::Goto: {
+        std::map<std::string, JumpState>::const_iterator lab = m_labelStates.find(s->label);
+        if (lab != m_labelStates.end()) { gotoExit(jumpState(m_block, line), lab->second, s->label); return; }
+        // forward: the scopes left are known at the label; this block leaves them then
+        int exitBlock = m_out->newBlock("goto." + s->label);
+        br(exitBlock, line);
+        m_pendingGotos[s->label].push_back(jumpState(exitBlock, line));
+        return;
+    }
     case cxx::Stmt::Label: {
         int b = labelBlock(s->label);
         br(b, line);
         m_block = b;
+        JumpState here = jumpState(b, line);
+        m_labelStates[s->label] = here;
+        std::map<std::string, std::vector<JumpState> >::iterator pg = m_pendingGotos.find(s->label);
+        if (pg != m_pendingGotos.end()) {
+            std::vector<Cleanup> savedCleanups = m_cleanups;
+            std::vector<int> savedTry = m_tryStack;
+            for (size_t g = 0; g < pg->second.size(); ++g) {
+                const JumpState& from = pg->second[g];
+                m_block = from.block; m_cleanups = from.cleanups; m_tryStack = from.tryStack;
+                gotoExit(from, here, s->label);
+            }
+            m_cleanups = savedCleanups; m_tryStack = savedTry;
+            m_block = b;
+            m_pendingGotos.erase(pg);
+        }
         for (size_t i = 0; i < s->kids.size(); ++i) stmt(s->kids[i]);
         return;
     }
@@ -2531,6 +2601,7 @@ void IrGen::genVbaseDestructor(Symbol* fn)
 
 void IrGen::prologue(Symbol* fn)
 {
+    m_nrvo = 0;
     m_out->name = irName(fn);
     m_out->fn = 0;
     m_out->variadic = fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic;
@@ -2565,6 +2636,7 @@ void IrGen::prologue(Symbol* fn)
         m_out->locals[static_cast<size_t>(m_sretSlot)].nonNull = true;
     }
     std::vector<std::pair<int, const sema::Type*> > byValue;   // class objects the callee owns
+    std::vector<Symbol*> byValueParam;                          // their parameters
     std::vector<std::pair<int, Symbol*> > inRegister;           // small class objects that arrive as an integer
     for (size_t p = 0; p < fn->params.size(); ++p) {
         Symbol* ps = fn->params[p];
@@ -2582,6 +2654,7 @@ void IrGen::prologue(Symbol* fn)
         m_slots[ps] = slot;
         if (isClassType(ps->type) && !isReference(ps->type)) {
             byValue.push_back(std::make_pair(slot, ps->type));
+            byValueParam.push_back(ps);
             ps->type = m_semaTypes.reference(ps->type);   // reads go through the pointer
         }
     }
@@ -2595,7 +2668,7 @@ void IrGen::prologue(Symbol* fn)
     m_block = m_bodyBlock;
     m_unwindId = m_tryCount++;
     m_tryStack.push_back(m_unwindId);
-    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0; m_guardCount = 0;
+    m_cleanups.clear(); m_scopes.clear(); m_scopeIds.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_labelStates.clear(); m_pendingGotos.clear(); m_staticCount = 0; m_guardCount = 0;
     if (m_out->hasThis && fn->thisAdjust != 0) {
         // called with the address of the vfptr whose table first holds it (MSVC's this adjustor): back to the object
         const sema::Type* tp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));
@@ -2620,6 +2693,7 @@ void IrGen::prologue(Symbol* fn)
         store(pl, addr, pl.type, fn->loc.line);
         m_slots[ps] = ptr;
         byValue.push_back(std::make_pair(ptr, ps->type));
+        byValueParam.push_back(ps);
         ps->type = m_semaTypes.reference(ps->type);
     }
     if (m_retReg) {
@@ -2632,8 +2706,10 @@ void IrGen::prologue(Symbol* fn)
         LValue pl; pl.kind = LValue::Local; pl.local = m_sretSlot; pl.type = m_semaTypes.pointer(rt);
         store(pl, addr, pl.type, fn->loc.line);
     }
-    for (size_t i = 0; i < byValue.size(); ++i)
-        if (needsDtor(byValue[i].second)) registerCleanup(byValue[i].first, byValue[i].second, true, 0, fn->loc.line);
+    // the callee destroys its by-value parameters left to right, as cl does: registered from the last one
+    for (size_t p = fn->params.size(); p-- > 0;)
+        for (size_t i = 0; i < byValue.size(); ++i)
+            if (byValueParam[i] == fn->params[p] && needsDtor(byValue[i].second)) registerCleanup(byValue[i].first, byValue[i].second, true, 0, fn->loc.line);
 }
 
 void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
@@ -2676,6 +2752,8 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
         const std::vector<Symbol*>* ctors = base->members ? base->members->find(base->ctorName()) : 0;
         Symbol* chosen = 0;
         size_t nargs = mi ? mi->args.size() : 0;
+        // the constructor overload resolution chose (sema); by the number of arguments only when there is none
+        if (mi && mi->semaSym && mi->semaSym->isConstructor && mi->semaSym->ownerClass == base) chosen = mi->semaSym;
         if (ctors) for (size_t i = 0; i < ctors->size() && !chosen; ++i) { Symbol* c = (*ctors)[i]; if (c->kind == Symbol::Function && c->isConstructor && nargs >= static_cast<size_t>(c->requiredParams) && nargs <= c->params.size()) chosen = c; }
         m_ctorFlag = 0;   // a base, virtual or not, never builds its own virtual bases here
         if (chosen) { std::vector<cxx::Expr*> none; construct(chosen, baddr, mi ? mi->args : none, 0, mi ? mi->loc.line : line); }
@@ -2715,7 +2793,7 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
             else if (nargs == 1 && isClassType(exprType(mi->args[0])) && m_semaTypes.unqualified(m_semaTypes.unref(exprType(mi->args[0]))) == fu) materialize(mi->args[0], fu, faddr, mi->loc.line);
             else {
                 const std::vector<Symbol*>* ctors = fu->decl->members ? fu->decl->members->find(fu->decl->ctorName()) : 0;
-                Symbol* chosen = 0;
+                Symbol* chosen = (mi->semaSym && mi->semaSym->isConstructor && mi->semaSym->ownerClass == fu->decl) ? mi->semaSym : 0;
                 if (ctors) for (size_t i = 0; i < ctors->size() && !chosen; ++i) { Symbol* c = (*ctors)[i]; if (c->kind == Symbol::Function && c->isConstructor && nargs >= static_cast<size_t>(c->requiredParams) && nargs <= c->params.size()) chosen = c; }
                 if (chosen) construct(chosen, faddr, mi->args, 0, mi->loc.line);
                 else constructDefault(fu, faddr, line);
@@ -2901,6 +2979,49 @@ void IrGen::numberStaticBlocks(cxx::Stmt* s, long& next, long current)
     }
 }
 
+// the variable a name expression (in parentheses or not) refers to, or 0
+static Symbol* namedLocal(cxx::Expr* e)
+{
+    while (e && e->kind == cxx::Expr::Paren && !e->kids.empty()) e = e->kids[0];
+    return e && e->kind == cxx::Expr::Name && e->semaSym && e->semaSym->kind == Symbol::Variable ? e->semaSym : 0;
+}
+
+static void collectReturns(cxx::Stmt* s, std::vector<cxx::Stmt*>& rets, bool& hasGoto)
+{
+    if (!s) return;
+    if (s->kind == cxx::Stmt::Return) rets.push_back(s);
+    if (s->kind == cxx::Stmt::Goto || s->kind == cxx::Stmt::Asm) hasGoto = true;
+    collectReturns(s->init, rets, hasGoto);
+    for (size_t i = 0; i < s->kids.size(); ++i) collectReturns(s->kids[i], rets, hasGoto);
+}
+
+// cl /O2's named return value optimisation, for a result returned through the hidden pointer: a local of the
+// result's class declared directly in the body and named by every return statement is built in the result
+// object. Not with goto (a jump back over the declaration would build it twice)
+Symbol* IrGen::namedResult(Symbol* fn, cxx::Stmt* body)
+{
+    if (!body || body->kind != cxx::Stmt::Compound || !fn->type || !fn->type->inner) return 0;
+    const sema::Type* rt = m_semaTypes.unqualified(fn->type->inner);
+    std::vector<cxx::Stmt*> rets;
+    bool hasGoto = false;
+    collectReturns(body, rets, hasGoto);
+    if (rets.empty() || hasGoto) return 0;
+    Symbol* var = 0;
+    for (size_t i = 0; i < rets.size(); ++i) {
+        Symbol* v = namedLocal(rets[i]->expr);
+        if (!v || (var && v != var)) return 0;
+        var = v;
+    }
+    if (!var->isLocal || var->isStatic || !var->type || isReference(var->type) || m_semaTypes.unqualified(var->type) != rt) return 0;
+    for (size_t i = 0; i < body->kids.size(); ++i) {
+        cxx::Stmt* k = body->kids[i];
+        if (k->kind != cxx::Stmt::DeclStmt || !k->decl || k->decl->kind != cxx::Decl::Simple) continue;
+        for (size_t d = 0; d < k->decl->declarators.size(); ++d)
+            if (k->decl->declarators[d].decl && k->decl->declarators[d].decl->semaSym == var) return var;
+    }
+    return 0;
+}
+
 void IrGen::genFunction(Symbol* fn)
 {
     cxx::Decl* def = fn->definition;
@@ -2909,6 +3030,7 @@ void IrGen::genFunction(Symbol* fn)
     m_fn = fn;
     m_slots.clear(); m_loops.clear(); m_tryStack.clear(); m_tryCount = 0;
     prologue(fn);
+    m_nrvo = (m_nrvoEnabled && m_sretSlot >= 0 && !m_retReg) ? namedResult(fn, def->body) : 0;
     if (fn->isConstructor) constructorInit(fn, def);
     // as cl: a destructor stores its own class's vptrs first, so a virtual call made while it (or a base's
     // destructor after it) runs reaches this class's functions, not those of the derived object being destroyed

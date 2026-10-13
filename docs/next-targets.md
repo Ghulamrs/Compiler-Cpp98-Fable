@@ -33,6 +33,8 @@ the default), with the items found since. Each was reproduced with a small progr
   X86.cpp addThunk); calls through every base, by both compilers, are in sample-layout.
 - 15, destructor slot: a virtual destructor's slot holds the scalar deleting destructor (`??_G`, IrGen.cpp
   genDeletingDestructors); `delete` calls it with flags 1, so a secondary base pointer frees the complete object.
+  It frees through the class-specific `operator delete` lookup finds in the complete class, with its size, and so
+  does a non-virtual `delete` (IrGen.cpp freeObject; review repro u.cpp, KD : SA, K).
 - A destructor stores its own class's vptrs on entry (IrGen.cpp genFunction), so a virtual call in a base's
   destructor reaches the base's function; sample-layout checks it in constructors and destructors, both compilers.
 - 18, callee side: a variadic function keeps its parameters in their home slots and its prologue spills rcx,
@@ -73,7 +75,8 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | 14 | 23: virtual bases. `--compile6` refuses a class with one (S130, driver/main.cpp) instead of laying it out inline; left: the vbptr and vbtable (`??_8D@@7B@`), virtual base subobjects placed once at the end of the most-derived object (shared in a diamond), conversions and member access through the vbtable, the constructors' hidden "most derived" flag (virtual bases built once), destruction order, vtordisp where MSVC emits it | refused (S130) | large | layout (later) |
 | 15 | 22: `_MSC_VER`, `_MT`, `_CPPUNWIND` not predefined (common/Target.cpp) | by choice so far | small | decision |
 | 17 | `delete[]` of an array of a polymorphic class across compilers: cl calls the vector deleting destructor (`??_E`, flags bit 1) through the slot, which holds cppparse's scalar one | wrong free in mixed links | small | layout |
-| 18 | member pointers to virtual functions (cl's vcall thunks `??_9`) and covariant return thunks | not supported | medium | layout |
+| 18 | member pointers to virtual functions (cl's vcall thunks `??_9`) | not supported | medium | layout |
+| 19 | covariant return through a secondary base (`CD* CD::self()` over `SB* SB::self()`, SB at 16): needs cl's return-adjusting thunk and its slot layout. `--compile6` refuses it (S131, driver/main.cpp, sample-front/covariant.cpp; review repro u.cpp); only the first overridden function is checked | refused (S131) | medium | layout |
 
 ## Deferred
 

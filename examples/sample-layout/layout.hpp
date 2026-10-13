@@ -95,6 +95,10 @@ struct SA { SA(); virtual int a() const; virtual int f() const; int sa; };
 struct SB { SB(); virtual int b() const; virtual int f() const; virtual int g() const; virtual ~SB(); int sb; };
 struct SD : SA, SB { SD(); int f() const; int g() const; int b() const; virtual int h() const; ~SD(); int sd; };   // SB at 16, sd at 32, size 40
 struct SE : NP, SD { SE(); int g() const; int a() const; ~SE(); char se; };     // SD at 0, NP at 40, se at 44, size 48
+// a class-specific operator delete, found by lookup in the complete class and given its size, also when the
+// deleting destructor is reached through a secondary base (KD : SA, KB)
+struct KB { KB(); virtual ~KB(); static void operator delete(void* p, size_t n); int k; };
+struct KD : SA, KB { KD(); ~KD(); int kd; };
 
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \
@@ -161,5 +165,8 @@ int  sbCall(const SB* p, int which);           // 0 b(), 1 f(), 2 g()
 int  sdCall(const SD* p, int which);           // 0 f(), 1 g(), 2 b(), 3 h(), 4 a(), 5 SD::g() (not virtual)
 long destroyThroughSB(int derived);            // builds an SD (or an SE) in place, destroys it through SB*: the log
 long deleteThroughSB(int derived);             // the same through new and delete: the log
+extern int g_kDeleted;                         // the size KB::operator delete was given (0: not called)
+KB*  makeKDasKB();
+void deleteKB(KB* p);                          // delete p in cppparse's code
 
 #endif

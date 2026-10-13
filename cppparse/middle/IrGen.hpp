@@ -144,6 +144,8 @@ private:
     // object and frees it when bit 0 of its flags is set; made on first use, generated after the other functions
     std::string deletingDestructor(sema::Symbol* dtor, X86Module& x86, bool msvc);
     void genDeletingDestructors();
+    sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth) const;
+    bool freeObject(sema::Symbol* cls, int p, int line);
     void need(sema::Symbol* fn);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
     int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);

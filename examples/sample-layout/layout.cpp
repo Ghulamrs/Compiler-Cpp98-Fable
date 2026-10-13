@@ -3,6 +3,7 @@
 #include "layout.hpp"
 
 #include <new>
+#include <stdlib.h>
 
 EM g_em;
 NE g_ne;
@@ -202,3 +203,12 @@ long deleteThroughSB(int derived)
     delete b;                              // the deleting destructor frees the complete object, not the SB part
     return g_dtorLog;
 }
+
+int g_kDeleted = 0;
+KB::KB() : k(5) {}
+KB::~KB() {}
+void KB::operator delete(void* p, size_t n) { g_kDeleted = (int)n; free(p); }
+KD::KD() : kd(6) {}
+KD::~KD() {}
+KB* makeKDasKB() { return new KD; }
+void deleteKB(KB* p) { delete p; }

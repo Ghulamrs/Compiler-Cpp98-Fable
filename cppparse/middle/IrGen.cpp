@@ -1529,10 +1529,12 @@ int IrGen::value(cxx::Expr* e)
             forEachElement(pt->inner, p, load(hl, lng, line), false, line);
             p = header;
         }
-        IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
-        in.sub = e->arrayDelete ? "__delete_array" : "__delete";
-        in.args.push_back(IrOperand::temp(p, oldType(pt)));
-        emit(in);
+        if (e->arrayDelete || pt->kind != sema::Type::Pointer || !isClassType(pt->inner) || !freeObject(pt->inner->decl, p, line)) {
+            IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+            in.sub = e->arrayDelete ? "__delete_array" : "__delete";
+            in.args.push_back(IrOperand::temp(p, oldType(pt)));
+            emit(in);
+        }
         if (xb >= 0) { br(xb, line); m_block = xb; }
         return constant(0, m_semaTypes.basic(sema::Type::Int), line);
     }
@@ -2373,6 +2375,32 @@ void IrGen::drainQueue()
     }
 }
 
+// the class-specific operator delete of cls (its own or a base's, as lookup finds it), or 0
+Symbol* IrGen::classOperatorDelete(Symbol* cls, int depth) const
+{
+    if (!cls || !cls->members || depth > 32) return 0;
+    const std::vector<Symbol*>* v = cls->members->find("operator delete");
+    if (v) for (size_t i = 0; i < v->size(); ++i) if ((*v)[i]->kind == Symbol::Function && !(*v)[i]->params.empty() && (*v)[i]->params.size() <= 2) return (*v)[i];
+    for (size_t b = 0; b < cls->bases.size(); ++b) { Symbol* d = classOperatorDelete(cls->bases[b].cls, depth + 1); if (d) return d; }
+    return 0;
+}
+
+// frees an object of class cls at p through its class-specific operator delete, with the complete object's size
+// for the two-parameter form, as cl does; false when the class has none (the global one frees it)
+bool IrGen::freeObject(Symbol* cls, int p, int line)
+{
+    Symbol* op = classOperatorDelete(cls, 0);
+    if (!op) return false;
+    need(op);
+    const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+    IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+    in.sub = irName(op);
+    in.args.push_back(IrOperand::temp(p, oldType(vp)));
+    if (op->params.size() == 2) in.args.push_back(IrOperand::imm(sizeOf(cls->type), oldType(m_semaTypes.sizeType())));
+    emit(in);
+    return true;
+}
+
 std::string IrGen::deletingDestructor(Symbol* dtor, X86Module& x86, bool msvc)
 {
     std::map<Symbol*, Symbol*>::iterator it = m_deleting.find(dtor);
@@ -2414,10 +2442,13 @@ void IrGen::genDeletingDestructors()
         int db = m_out->newBlock("delete"), xb = m_out->newBlock("done");
         condbr(toBool(bit, u, line), db, xb, line);
         m_block = db;
-        IrInst del = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
-        del.sub = "__delete";
-        del.args.push_back(IrOperand::temp(thisTemp(line), m_out->locals[0].type));
-        emit(del);
+        const int self = thisTemp(line);
+        if (!freeObject(dtor->ownerClass, self, line)) {
+            IrInst del = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+            del.sub = "__delete";
+            del.args.push_back(IrOperand::temp(self, m_out->locals[0].type));
+            emit(del);
+        }
         br(xb, line);
         m_block = xb;
         returnSequence(line);

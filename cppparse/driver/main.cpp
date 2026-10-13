@@ -141,6 +141,32 @@ bool hasVirtualBase(const sema::Symbol* cls, int depth)
     return false;
 }
 
+// the offset of base in derived (-1: not a base)
+int baseOffsetIn(const sema::Symbol* derived, const sema::Symbol* base, int depth)
+{
+    if (!derived || !base || depth > 32) return -1;
+    if (derived == base) return 0;
+    for (size_t b = 0; b < derived->bases.size(); ++b) {
+        const int o = baseOffsetIn(derived->bases[b].cls, base, depth + 1);
+        if (o >= 0) return derived->bases[b].offset + o;
+    }
+    return -1;
+}
+
+// an override with a covariant return type whose conversion to the overridden function's return type moves the
+// pointer (CD* to SB* with SB at 16): it needs a return-adjusting thunk, which --compile6 does not make yet (S131)
+bool needsReturnAdjustment(const sema::Symbol* fn)
+{
+    if (!fn->overrides || !fn->type || !fn->overrides->type || fn->type->kind != sema::Type::Function || fn->overrides->type->kind != sema::Type::Function) return false;
+    const sema::Type* r = fn->type->inner;
+    const sema::Type* o = fn->overrides->type->inner;
+    if (!r || !o || (r->kind != sema::Type::Pointer && r->kind != sema::Type::Reference) || r->kind != o->kind) return false;
+    const sema::Type* rc = r->inner;
+    const sema::Type* oc = o->inner;
+    if (!rc || !oc || rc->kind != sema::Type::Class || oc->kind != sema::Type::Class || rc->decl == oc->decl) return false;
+    return baseOffsetIn(rc->decl, oc->decl, 0) != 0;
+}
+
 // a unit that is not compiled leaves no object, listing or map: one of an earlier run would be taken for its own
 void removeUnitOutputs(const std::string& base)
 {
@@ -333,6 +359,13 @@ int main(int argc, char* argv[])
                 if (compile6)
                     for (size_t k = 0; k < program.symbols.size(); ++k) {
                         const sema::Symbol* s = program.symbols[k];
+                        if (s->kind == sema::Symbol::Function && s->isVirtual && s->ownerClass && !s->ownerClass->isDependentContext && !s->isDependentContext && needsReturnAdjustment(s)) {
+                            std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
+                                      << "): error S131: '" << s->qualifiedName() << "' overrides '" << s->overrides->qualifiedName()
+                                      << "' with a covariant return type whose conversion moves the pointer: return-adjusting thunks are not supported yet by --compile6\n";
+                            ++unsupported;
+                            continue;
+                        }
                         if (s->kind != sema::Symbol::Class || !s->isDefinition || s->isDependentContext || !hasVirtualBase(s, 0)) continue;
                         std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
                                   << "): error S130: '" << s->qualifiedName() << "' has a virtual base class: virtual base classes are not supported yet by --compile6 (they would not be laid out as cl lays them out)\n";

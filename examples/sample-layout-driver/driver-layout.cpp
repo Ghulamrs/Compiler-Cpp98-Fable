@@ -169,6 +169,15 @@ int main()
         expect("g() in SB() of an SE built by cppparse", g_sbCtorSaw, 5);
         expect("g() in ~SB() of an SE deleted by cppparse", g_sbDtorSaw, 5);
         expect("h() in ~SD() of an SE deleted by cppparse", g_sdDtorSaw, 660);
+
+        // the deleting destructor frees through the class's operator delete, with the complete object's size
+        g_kDeleted = 0;
+        deleteKB(makeKDasKB());
+        expect("KB::operator delete size, delete by cppparse", g_kDeleted, (long)sizeof(KD));
+        g_kDeleted = 0;
+        KB* kb = makeKDasKB();
+        delete kb;
+        expect("KB::operator delete size, delete by cl", g_kDeleted, (long)sizeof(KD));
     }
 
     if (failures) { printf("%d FAILED\n", failures); return 1; }

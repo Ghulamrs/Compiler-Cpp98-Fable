@@ -139,6 +139,7 @@ private:
     bool constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataItem>& out, int depth);
     bool foldArith(cxx::Expr* x, double& v, int depth);
     bool convertFolded(const sema::Type* t, double& v) const;
+    static bool floatRoundsOnce(double d);
     bool aggregateData(const sema::Type* t, const std::vector<cxx::Expr*>* elems, std::vector<IrDataItem>& out, int depth);
     bool readOnlyObject(const sema::Type* t) const;
     void registerAtExit(const std::string& global, const sema::Type* t, int line);

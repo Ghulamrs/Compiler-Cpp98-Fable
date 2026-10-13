@@ -2,6 +2,8 @@
 #include "statics.hpp"
 
 void cpp_konstK(KonstSeen& s) { konstK(s); }
+void cpp_konstF(KonstFold& s) { konstF(s); }
+const Counted* cpp_tryN(int a) { return tryN(a); }
 void cpp_nestedN(int k, NestedSeen& n) { nestedN(k, n); }
 int cpp_touchA() { return sharedA().id; }
 int cpp_touchB() { return sharedB().id; }

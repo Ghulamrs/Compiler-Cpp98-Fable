@@ -175,6 +175,35 @@ void conditionDeclarations()
     std::printf("switch Gauge: %d %d built %d destroyed %d\n", f, g, Gauge::built, Gauge::destroyed);
 }
 
+// globals initialised by constants that need a conversion: static data with the bytes cl gives them
+namespace folded {
+double d1 = 0xFFFFFFFFu;
+float f1 = 0x80000000;
+unsigned u1 = 3000000000.0;
+unsigned char uc1 = 255.9;
+wchar_t w1 = 65.7;
+bool b1 = 0.5;
+short s1 = -1.9;
+double d4 = 2147483647 + 0.5f;
+double d16 = (float)(1.0 / 3) + 1;
+double d17 = 0.1f * 3;
+float f3 = 16777217 + 1.0f;
+double d18 = 'a' + 0.25f;
+}
+void showBytes(const char* name, const void* p, int n)
+{
+    std::printf("%s", name);
+    for (int i = 0; i < n; ++i) std::printf(" %02x", ((const unsigned char*)p)[i]);
+    std::printf("\n");
+}
+void foldedGlobals()
+{
+    showBytes("d1", &folded::d1, 8); showBytes("f1", &folded::f1, 4); showBytes("u1", &folded::u1, 4);
+    showBytes("uc1", &folded::uc1, 1); showBytes("w1", &folded::w1, 2); showBytes("b1", &folded::b1, 1);
+    showBytes("s1", &folded::s1, 2); showBytes("d4", &folded::d4, 8); showBytes("d16", &folded::d16, 8);
+    showBytes("d17", &folded::d17, 8); showBytes("f3", &folded::f3, 4); showBytes("d18", &folded::d18, 8);
+}
+
 int main()
 {
     sizes();
@@ -185,6 +214,7 @@ int main()
     functionPointerMembers();
     functorMembers();
     conditionDeclarations();
+    foldedGlobals();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

@@ -60,8 +60,33 @@ STATICS_INLINE void nestedN(int k, NestedSeen& n)
     { { static Counted y; n.y = &y; } }
 }
 
+// constants folded with the usual arithmetic conversions (float op int is float, rounded after each float
+// operation, overflow to infinity), conversions to unsigned, sizeof and long long: data with cl's bytes, so
+// the counted object after them is $TSS0 on both sides
+struct KonstFold { float f3; double d17; double d16; float f6; unsigned u; float fm; double ds; double dl; int t; };
+STATICS_INLINE void konstF(KonstFold& s)
+{
+    static float f3 = 16777217 + 1.0f;
+    static double d17 = 0.1f * 3;
+    static double d16 = (float)(1.0 / 3) + 1;
+    static float f6 = 1.0e38f * 10 / 10;
+    static unsigned u = 3000000000.0;
+    static float fm = 3.4028235e38f;
+    static double ds = sizeof(int);
+    static double dl = 5LL;
+    static Counted t;
+    s.f3 = f3; s.d17 = d17; s.d16 = d16; s.f6 = f6; s.u = u; s.fm = fm; s.ds = ds; s.dl = dl; s.t = t.id;
+}
+
+// a function-try-block: its try block is block 3, as cl numbers it
+STATICS_INLINE const Counted* tryN(int a)
+try { if (a) { static Counted s1; return &s1; } static Counted s3; return &s3; }
+catch (int) { return 0; }
+
 // cppparse's side
 void cpp_konstK(KonstSeen& s);
+void cpp_konstF(KonstFold& s);
+const Counted* cpp_tryN(int a);
 void cpp_nestedN(int k, NestedSeen& n);
 int cpp_touchA();
 int cpp_touchB();

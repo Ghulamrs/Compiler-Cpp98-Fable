@@ -115,11 +115,21 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   `delete` through a base pointer skips the base destructors, and one from a stack object's destructor is not
   caught at all ("unhandled exception of type int"). Repro: review-v w.cpp.
 - Calls through pointers to members (`(obj.*pmf)(x)`, `(p->*pmf)(x)`) are rejected by sema (an error, not wrong code).
-- A float literal with an `f` suffix is converted decimal -> double -> float (IrGen::foldArith and the
-  assembler's REAL4), which can differ from cl's direct decimal -> float rounding in rare halfway cases: a
-  decimal just above a midpoint between two floats whose double is the midpoint itself. Repro (checked):
-  `float* hf() { static float h = 1.000000059604644775390625000000001f; return &h; }` (1 + 2^-24 plus a
-  little): cl stores 0x3F800001, cppparse rounds the double's tie to even, 0x3F800000.
+- A float literal with an `f` suffix is converted decimal -> double -> float, which differs from cl's direct
+  decimal -> float rounding when the double is exactly halfway between two floats. The folder
+  (IrGen::foldArith, floatRoundsOnce) no longer folds such a literal, but it then takes the guarded dynamic
+  path (one more `$TSS<n>` than cl, so later guards of the function shift) and the run-time value, like the
+  code's own float constants and the assembler's REAL4, is still double-rounded. Repro (checked):
+  `float* hf() { static float h = 1.00000005960464477550f; return &h; }`: cl 0x3F800001, cppparse a guard
+  and 0x3F800000. Fix: a correctly rounded decimal -> float conversion (exact big-decimal comparison with the
+  midpoint).
+- Out-of-range float -> integer conversions in constants (undefined; cl keeps the value, e.g.
+  `static double v = (unsigned char)300.0 + 0.5;` is 300.5 in cl's data) are not folded: guarded dynamic path,
+  so the guards after them shift against cl's.
+- At -O2 a run-time double -> unsigned conversion of 3000000000.0 gives 2147483648 (-O0 is correct); found by
+  the review of e75fd50 (review-g), not yet investigated.
+- Statics in a member function of a local class: the mangled name lacks the enclosing function (cl nests
+  it), so such a static is not shared with cl's copy; found by the review of 92a19bb (review-g).
 
 ## Code size against cl /O2 (analysis of the matrix sample, 2026-10-13)
 

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -2638,7 +2639,8 @@ void IrGen::genFunction(Symbol* fn)
     // destructor after it) runs reaches this class's functions, not those of the derived object being destroyed
     if (fn->isDestructor && fn->ownerClass) storeVptr(fn->ownerClass, thisTemp(def->loc.line), def->loc.line);
     m_staticBlocks.clear();
-    if (m_msvcNames) { long next = 2; numberStaticBlocks(def->body, next, 2); }
+    // a function-try-block: the body (2) holds the try block (3, the next number) and its handlers
+    if (m_msvcNames) { long next = def->body->kind == cxx::Stmt::Try ? 3 : 2; numberStaticBlocks(def->body, next, 2); }
     stmt(def->body);
     if (!terminated()) {
         IrInst r = make(IrInst::Ret, 0, def->loc.line);
@@ -2848,8 +2850,11 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             if (s->declAlign > g.align) g.align = s->declAlign;
             bool dynamic = false;
             const bool scalar = !isClassType(s->type) && m_semaTypes.unref(s->type)->kind != sema::Type::Array;
-            if (s->init && s->init->semaConst && scalar) g.init = numText(s->init->semaValue);
-            else if (s->init && s->init->kind == cxx::Expr::FloatLit && scalar) g.init = s->init->text;
+            // an integer constant for an integer or a pointer as it is; a floating, bool or converted value through
+            // constantData, which converts it exactly as cl does ("double d = 0xFFFFFFFFu;", "bool b = 0.5;")
+            const sema::Type* st = m_semaTypes.unqualified(m_semaTypes.unref(s->type));
+            const sema::Type* it0 = s->init ? m_semaTypes.unqualified(m_semaTypes.unref(exprType(s->init))) : 0;
+            if (s->init && s->init->semaConst && scalar && st && !st->isFloating() && st->kind != sema::Type::Bool && it0 && (it0->isIntegral() || it0->isPointer())) g.init = numText(s->init->semaValue);
             else if (staticInit(s, g)) {}   // constants and addresses: static data, as cl emits a constant table
             else if (isClassType(s->type) && !isReference(s->type)) dynamic = s->initCtor != 0 || s->init != 0 || needsDefaultCtor(s->type);
             else dynamic = s->init != 0;
@@ -3003,7 +3008,7 @@ bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataIt
         // "int()", "(int)2.75", "bool b = 0.5;": an arithmetic constant converted
         double d = 0;
         if (!foldArith(x, d, 0) || !convertFolded(u, d)) return false;
-        v = static_cast<long>(d);
+        v = d >= 2147483648.0 ? static_cast<long>(d - 4294967296.0) : static_cast<long>(d);   // the 32 bits
     }
     if (u->kind == sema::Type::Bool) v = v != 0;
     else if (size == 1) v &= 0xFF;
@@ -3015,16 +3020,38 @@ bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataIt
 }
 
 // an arithmetic constant expression of the initializer of a static object, folded into v as a value of x's own
-// type (rounded to float when x is float, truncated when it is integral): literals, integer constants, unary
-// + -, binary + - * / and conversions (casts, "T()"). The host's IEEE double gives cl's results for these:
-// float operands are exact in double, and one double operation rounded to float rounds as a float operation
+// type, exactly as cl folds it: literals, integer constants, unary + -, binary + - * / and conversions (casts,
+// "T()"). The usual arithmetic conversions apply first (float op int is float), and every float-typed result is
+// rounded to float (one double operation on two floats rounded to float is the float operation; overflow gives
+// infinity, as cl). A decimal float literal whose double is exactly halfway between two floats is not folded:
+// rounding it again could differ from cl's direct rounding. Anything else not provably cl's value: false
 bool IrGen::foldArith(cxx::Expr* x, double& v, int depth)
 {
     if (!x || depth > 64) return false;
     const sema::Type* t = x->semaType ? m_semaTypes.unqualified(m_semaTypes.unref(x->semaType)) : 0;
     if (!t || !t->isArithmetic()) return false;
     if (t->isIntegral() && x->semaConst) {
-        if (t->kind == sema::Type::LongLong || t->kind == sema::Type::ULongLong) return false;   // wider than semaValue
+        if (t->kind == sema::Type::LongLong || t->kind == sema::Type::ULongLong) {
+            // semaValue is a long: only a sizeof, or a literal whose digits give that same value
+            if (x->kind != cxx::Expr::SizeofType && x->kind != cxx::Expr::SizeofExpr) {
+                if (x->kind != cxx::Expr::IntLit) return false;
+                std::string d = x->text;
+                while (!d.empty() && std::strchr("uUlL", d[d.size() - 1])) d.erase(d.size() - 1);
+                double lit = 0;
+                int base = 10;
+                size_t i = 0;
+                if (d.size() > 2 && d[0] == '0' && (d[1] == 'x' || d[1] == 'X')) { base = 16; i = 2; }
+                else if (d.size() > 1 && d[0] == '0') { base = 8; i = 1; }
+                for (; i < d.size(); ++i) {
+                    const char ch = static_cast<char>(std::tolower(static_cast<unsigned char>(d[i])));
+                    int dv = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : 99;
+                    if (dv >= base) return false;
+                    lit = lit * base + dv;
+                }
+                if (lit != static_cast<double>(x->semaValue)) return false;
+            }
+            if (x->semaValue < 0) return false;
+        }
         v = static_cast<double>(x->semaValue);
         const bool isUnsigned = t->kind == sema::Type::UChar || t->kind == sema::Type::UShort || t->kind == sema::Type::UInt || t->kind == sema::Type::ULong;
         if (isUnsigned && v < 0) v += 4294967296.0;
@@ -3036,6 +3063,7 @@ bool IrGen::foldArith(cxx::Expr* x, double& v, int depth)
         while (!text.empty() && std::strchr("fFlL", text[text.size() - 1])) text.erase(text.size() - 1);
         if (text.empty() || text.find_first_not_of("0123456789.eE+-") != std::string::npos) return false;
         v = std::strtod(text.c_str(), 0);
+        if (t->kind == sema::Type::Float && !floatRoundsOnce(v)) return false;
         break;
     }
     case cxx::Expr::Paren:
@@ -3049,11 +3077,19 @@ bool IrGen::foldArith(cxx::Expr* x, double& v, int depth)
         double a = 0, b = 0;
         if (x->kids.size() != 2 || !foldArith(x->kids[0], a, depth + 1) || !foldArith(x->kids[1], b, depth + 1)) return false;
         if (!t->isFloating()) return false;   // integer arithmetic is sema's (semaConst)
+        // the usual arithmetic conversions, from the operands' own types: double if either is, else float
+        const sema::Type* ta = m_semaTypes.unqualified(m_semaTypes.unref(exprType(x->kids[0])));
+        const sema::Type* tb = m_semaTypes.unqualified(m_semaTypes.unref(exprType(x->kids[1])));
+        const bool wide = ta->kind == sema::Type::Double || ta->kind == sema::Type::LongDouble || tb->kind == sema::Type::Double || tb->kind == sema::Type::LongDouble;
+        const sema::Type* ct = m_semaTypes.basic(wide ? sema::Type::Double : sema::Type::Float);
+        if (!convertFolded(ct, a) || !convertFolded(ct, b)) return false;
         if (x->text == "+") v = a + b;
         else if (x->text == "-") v = a - b;
         else if (x->text == "*") v = a * b;
         else if (x->text == "/") { if (b == 0) return false; v = a / b; }
         else return false;
+        // the operation's own type, whatever sema made of it (float op int is float: rounded here)
+        if (!convertFolded(ct, v)) return false;
         break;
     }
     case cxx::Expr::Cast:
@@ -3069,26 +3105,46 @@ bool IrGen::foldArith(cxx::Expr* x, double& v, int depth)
     return convertFolded(t, v);
 }
 
+// false when the double d lies exactly halfway between two floats: the decimal it came from may not
+bool IrGen::floatRoundsOnce(double d)
+{
+    const float f = static_cast<float>(d);
+    if (static_cast<double>(f) == d || f != f) return true;
+    unsigned int bits = 0;
+    std::memcpy(&bits, &f, 4);
+    // the float on d's other side: one step away from zero when f is nearer zero than d, else toward it
+    const bool fBelowMagnitude = (d < 0 ? -static_cast<double>(f) < -d : static_cast<double>(f) < d);
+    unsigned int nb = fBelowMagnitude ? bits + 1 : bits - 1;
+    float g;
+    std::memcpy(&g, &nb, 4);
+    if (g != g) return false;
+    return (static_cast<double>(f) + static_cast<double>(g)) / 2 != d;
+}
+
 // v converted to the arithmetic type t as cl converts a constant; false when the result is not a plain value
+// (NaN, an infinity or a value out of range converted to an integer, an enum)
 bool IrGen::convertFolded(const sema::Type* t, double& v) const
 {
-    if (v != v || v > 1.7976931348623157e308 || v < -1.7976931348623157e308) return false;   // NaN, infinity
-    if (t->kind == sema::Type::Float) {
-        if (v > 3.4028234663852886e38 || v < -3.4028234663852886e38) return false;
-        v = static_cast<double>(static_cast<float>(v));
-        return true;
-    }
+    if (v != v) return false;
+    const bool finite = v <= 1.7976931348623157e308 && v >= -1.7976931348623157e308;
+    if (t->kind == sema::Type::Float) { v = static_cast<double>(static_cast<float>(v)); return true; }   // to infinity beyond
     if (t->kind == sema::Type::Double || t->kind == sema::Type::LongDouble) return true;
+    if (!finite) return false;
     if (t->kind == sema::Type::Bool) { v = v != 0 ? 1 : 0; return true; }
     if (!t->isIntegral() || t->kind == sema::Type::Enum) return false;
-    if (v <= -2147483649.0 || v >= 2147483648.0) return false;   // beyond a 32-bit constant
-    const long n = static_cast<long>(v);   // toward zero
-    if (t->kind == sema::Type::UInt || t->kind == sema::Type::ULong || t->kind == sema::Type::UChar || t->kind == sema::Type::UShort) { if (n < 0) return false; }
-    if ((t->kind == sema::Type::Char || t->kind == sema::Type::SChar) && (n < -128 || n > 127)) return false;
-    if (t->kind == sema::Type::UChar && n > 255) return false;
-    if (t->kind == sema::Type::Short && (n < -32768 || n > 32767)) return false;
-    if ((t->kind == sema::Type::UShort || t->kind == sema::Type::WChar) && (n < 0 || n > 65535)) return false;
-    v = static_cast<double>(n);
+    const double n = v < 0 ? -std::floor(-v) : std::floor(v);   // toward zero
+    double lo = -2147483648.0, hi = 2147483647.0;
+    switch (t->kind) {
+    case sema::Type::Char: case sema::Type::SChar: lo = -128; hi = 127; break;
+    case sema::Type::UChar: lo = 0; hi = 255; break;
+    case sema::Type::Short: lo = -32768; hi = 32767; break;
+    case sema::Type::UShort: case sema::Type::WChar: lo = 0; hi = 65535; break;
+    case sema::Type::UInt: case sema::Type::ULong: lo = 0; hi = 4294967295.0; break;
+    case sema::Type::ULongLong: lo = 0; break;   // emitted from a 32-bit value: below 2^31
+    default: break;
+    }
+    if (n < lo || n > hi) return false;
+    v = n;
     return true;
 }
 

@@ -66,6 +66,29 @@ void redeclared()
     std::printf("redeclared templates: %d %g %d %d\n", twice(21), twice(1.25), scaled(7), scaled(2, 10));
 }
 
+// member templates of a class template see the enclosing parameters, in their declaration (deduction against
+// Mat<T, R, K> with R bound, or against a literal argument) and in their body
+template <typename T, int R, int C> struct Mat {
+    T v[R * C];
+    template <int K> int widthOf(const Mat<T, R, K>&) const { return K * 10 + R; }
+    template <int K> int fixedRows(const Mat<T, 2, K>&) const { return R * 100 + K; }
+    template <int K> Mat<T, R, K> times(const Mat<T, C, K>& b) const {
+        Mat<T, R, K> r;
+        for (int i = 0; i < R; ++i)
+            for (int j = 0; j < K; ++j) { T s = T(); for (int c = 0; c < C; ++c) s += v[i * C + c] * b.v[c * K + j]; r.v[i * K + j] = s; }
+        return r;
+    }
+};
+
+void memberTemplates()
+{
+    Mat<int, 2, 3> a; Mat<int, 3, 4> b; Mat<int, 2, 5> w;
+    for (int i = 0; i < 6; ++i) a.v[i] = i + 1;
+    for (int i = 0; i < 12; ++i) b.v[i] = i % 5 - 2;
+    Mat<int, 2, 4> p = a.times(b);
+    std::printf("member templates: %d %d %d %d %d %d\n", a.widthOf(w), b.fixedRows(w), p.v[0], p.v[5], p.v[7], (int)sizeof(p));
+}
+
 // with a using-directive at file scope: std::count, std::min and std::max are visible unqualified
 using namespace std;
 int localHidesFileUsing(int n) { int count = 0, max = 2; while (count < n + max) ++count; return count; }
@@ -76,6 +99,7 @@ int main()
     hiding();
     injected();
     redeclared();
+    memberTemplates();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

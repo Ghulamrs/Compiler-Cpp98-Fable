@@ -29,6 +29,9 @@ the default), with the items found since. Each was reproduced with a small progr
   qualifier (Sema.cpp injectedTemplate); test 17, `sample-front/front.cpp`.
 - plan 11b: a function template declared and then defined is one symbol, matched by its written signature; the
   definition keeps the declaration's default arguments (Sema.cpp declareTemplate); test 17, `sample-front/front.cpp`.
+- plan 11c: deduction against a template-id in a member template evaluates the arguments that are not its own
+  parameters where the template is (the enclosing instantiation's bound R, a literal) and compares them (SemaExpr.cpp
+  deduce). MatrixTest.cpp now compiles and prints what cl's build prints at -O0 and -O2 (test 17).
 
 ## Plan
 
@@ -43,7 +46,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | 8 | 5: empty base takes a byte (Sema.cpp:1076-1088) | wrong size | small | layout |
 | 9 | 23: bit-fields ignored; anonymous union/struct members cannot be named | wrong size, false error | medium | layout |
 | 10 | 23: polymorphic base not first: own vptr, not moved first (Sema.cpp:1080, 1093, 1155) | wrong layout | medium | layout |
-| 11 | MatrixTest.cpp: member templates do not see the enclosing parameters (SemaExpr.cpp:544-572) | does not compile | small-medium | front end |
 | 12 | 21: constant pointer tables initialised dynamically in .data, not .rdata with relocations | start-up order | medium | back end |
 | 13 | 20: static locals PUBLIC with a non-MSVC name (IrGen.cpp:1584) | duplicated in mixed links | small | back end |
 | 14 | 23: virtual bases laid out inline, no vbptr | wrong values | large | layout (later) |

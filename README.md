@@ -752,7 +752,12 @@ template's name alone is the injected class name, and with arguments
 also as a qualifier. Function templates are
 instantiated by deduction from the argument types; a function template
 declared and later defined is one template (the definition takes the
-declaration's default arguments). Diagnostics carry
+declaration's default arguments). A member template of a class template
+is declared with each instantiation of the class, so it sees the class's
+bound parameters: deduction against `Matrix<T, R, K>` matches `T` and `R`
+with their values and deduces only `K`. With these, `MatrixTest.cpp`
+(`Matrix.hpp`, `Vector.hpp`) compiles and prints what cl's build prints
+at `-O0` and `-O2` (test 17). Diagnostics carry
 S codes (S100 unknown type, S101 undeclared identifier, S102 no such
 member, S103 undeclared function, S104 const assignment, S105
 conversion, S106 ambiguity, S107 no matching function, S113 incomplete

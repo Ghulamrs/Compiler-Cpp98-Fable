@@ -543,12 +543,23 @@ bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::
             for (size_t k = 0; k < c.templateArgs.size(); ++k) {
                 const cxx::TemplateArg& ta = c.templateArgs[k];
                 if (ta.type) { cxx::Param sub; sub.spec = ta.type->spec; sub.decl = ta.type->decl; if (!a->decl->templateArgs[k] || !deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints)) return false; }
-                else if (ta.expr && ta.expr->kind == cxx::Expr::Name && ta.expr->name.parts.size() == 1) {
-                    const std::string& pn = ta.expr->name.parts[0].ident;
+                else if (ta.expr) {
+                    // a parameter of this template is deduced; any other argument is a value that must match: a
+                    // literal, or a parameter of the enclosing class template bound in its instantiation
+                    // ("Matrix<T, R, K>" in a member template of Matrix<T, R, C>), evaluated where the template is
+                    const bool single = ta.expr->kind == cxx::Expr::Name && ta.expr->name.parts.size() == 1;
+                    const std::string pn = single ? ta.expr->name.parts[0].ident : std::string("");
                     bool np = false;
-                    if (tscope) { const std::vector<Symbol*>* v = tscope->find(pn); if (v) np = !v->empty(); }
-                    if (np) { if (a->decl->templateArgs[k]) { cxx::Param sub; sub.spec.kind = cxx::DeclSpec::Named; sub.spec.name = ta.expr->name; if (!deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints)) return false; } else ints[pn] = a->decl->templateIntArgs[k]; }
-                    else { long v; if (!constantValue(ta.expr, v) || a->decl->templateArgs[k] || v != a->decl->templateIntArgs[k]) return false; }
+                    if (single && tscope) { const std::vector<Symbol*>* v = tscope->find(pn); if (v) np = !v->empty(); }
+                    if (np) {
+                        if (a->decl->templateArgs[k]) { cxx::Param sub; sub.spec.kind = cxx::DeclSpec::Named; sub.spec.name = ta.expr->name; if (!deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints)) return false; }
+                        else if (ints.count(pn) && ints[pn] != a->decl->templateIntArgs[k]) return false;
+                        else ints[pn] = a->decl->templateIntArgs[k];
+                    } else {
+                        if (!ta.expr->semaType && tscope) expr(ta.expr, tscope);
+                        long v;
+                        if (!constantValue(ta.expr, v) || a->decl->templateArgs[k] || v != a->decl->templateIntArgs[k]) return false;
+                    }
                 } else return false;
             }
             return true;

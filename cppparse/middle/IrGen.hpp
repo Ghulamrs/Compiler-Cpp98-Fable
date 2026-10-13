@@ -208,6 +208,7 @@ private:
     bool                       m_msvcNames;        // --msvc-mangling: static locals get cl's decorated names
     std::map<sema::Symbol*, std::string> m_staticNames;   // static local -> its global's IR name
     int                        m_staticCount;
+    int                        m_guardCount;    // guarded static locals so far in the function (cl's $TSS<n>)
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block
 
     IrFunction*                m_out;

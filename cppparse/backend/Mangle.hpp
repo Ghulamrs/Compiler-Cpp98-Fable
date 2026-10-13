@@ -43,6 +43,8 @@ std::string msvcMangleVariableSymbol(const sema::Symbol& v);
 // a static local: "?n@?1??counterA@@YAHXZ@4HA", the variable in block <discriminator> (2: the function's body)
 std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
 std::string msvcMangleVtableSymbol(const sema::Symbol& c);
+// cl's thread-safe-static guard of a function's index-th guarded static local: "?$TSS0@?1??f@@YAAEAUCnt@@XZ@4HA"
+std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index);
 
 } // namespace cppparse
 

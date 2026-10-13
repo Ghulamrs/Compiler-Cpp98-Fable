@@ -3,6 +3,7 @@
 #include "PathUtil.hpp"
 #include "Sema.hpp"
 
+#include <sstream>
 #include <vector>
 
 namespace cppparse {
@@ -14,6 +15,7 @@ public:
     std::string function(const sema::Symbol& f);
     std::string variable(const sema::Symbol& v);
     std::string staticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
+    std::string staticGuard(const sema::Symbol& fn, long discriminator, int index);
     std::string vtable(const sema::Symbol& c);
 private:
     std::string storageType(const sema::Type* t);
@@ -298,6 +300,21 @@ std::string SemaMangler::staticLocal(const sema::Symbol& v, const sema::Symbol& 
     return out;
 }
 
+// cl's guard of the index-th dynamically initialised static local of fn: an int "$TSS<index>" in the same block
+std::string SemaMangler::staticGuard(const sema::Symbol& fn, long discriminator, int index)
+{
+    std::ostringstream id; id << "$TSS" << index;
+    std::string out = "?";
+    out += name(id.str());
+    out += "?";
+    out += number(discriminator);
+    std::string f = function(fn);
+    if (f.empty() || f[0] != '?') f = "?" + f + "@@9";
+    out += "?" + f + "@";
+    out += "4HA";
+    return out;
+}
+
 // the type part of a variable's name: "HA", "PEBDEB", "PAPEAUItem@1@A", ...
 std::string SemaMangler::storageType(const sema::Type* t)
 {
@@ -352,5 +369,6 @@ void setMangleUnitId(unsigned long id) { g_mangleUnitId = id; }
 std::string msvcMangleVariableSymbol(const sema::Symbol& v) { SemaMangler m; return m.variable(v); }
 std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator) { SemaMangler m; return m.staticLocal(v, fn, discriminator); }
 std::string msvcMangleVtableSymbol(const sema::Symbol& c) { SemaMangler m; return m.vtable(c); }
+std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index) { SemaMangler m; return m.staticGuard(fn, discriminator, index); }
 
 } // namespace cppparse

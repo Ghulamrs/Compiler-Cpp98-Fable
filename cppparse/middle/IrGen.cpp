@@ -43,7 +43,7 @@ void zeroData(std::vector<IrDataItem>& out, int n)
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
     : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_tryCount(0),
-      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_staticCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
+      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_staticCount(0), m_guardCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
 {
@@ -1745,10 +1745,10 @@ void IrGen::localDecl(cxx::Decl* d)
             // emits the same symbol (the global is then a COMDAT like the function)
             std::string gname = m_out->name + "::" + var->name + "#" + numText(m_staticCount++);
             m_staticNames[var] = gname;
+            long block = 2;
             if (m_msvcNames && m_x86) {
                 // cl numbers the blocks of a function; the body is 2. A nested block gets 2 plus its position
                 // among the function's blocks: unique within the function, though not always cl's number
-                long block = 2;
                 if (var->scope && !(var->scope->parent && var->scope->parent->kind == Scope::Function)) {
                     long k = 0;
                     for (size_t si = 0; si < m_prog.scopes.size(); ++si) {
@@ -1781,33 +1781,52 @@ void IrGen::localDecl(cxx::Decl* d)
             const bool destroyed = !isReference(var->type) && needsDtor(vt);   // registered with atexit once built
             bool needsCode = !scalarConstant && (id.init.kind != cxx::Initializer::None || needsDefaultCtor(vt) || destroyed);
             if (needsCode) {
+                // cl's thread-safe statics, so that an inline function's object (a COMDAT shared with cl's units)
+                // is built once whichever side runs first: an int guard "$TSS<n>", 0 before, -1 while some
+                // thread builds the object, then the CRT's epoch (negative). A guard of 0 or -1 leads to
+                // _Init_thread_header, which leaves it -1 when this thread is to run the initializer (it then
+                // calls _Init_thread_footer) and waits for another thread that is running it. cl's fast path
+                // compares with the thread's epoch instead (a TLS read); this test is equivalent for its values
+                const sema::Type* it = m_semaTypes.basic(sema::Type::Int);
+                const sema::Type* ut = m_semaTypes.basic(sema::Type::UInt);
                 const sema::Type* b = m_semaTypes.basic(sema::Type::Bool);
                 IrGlobal guard;
                 guard.name = gname + "$guard";
-                guard.size = 1;
+                guard.size = 4;
+                guard.align = 4;
                 guard.isFloat = false;
                 guard.linkOnce = m_out->linkOnce;
                 guard.internal = !guard.linkOnce;
-                if (m_x86) m_x86->addGlobal(guard);
-                LValue gl; gl.kind = LValue::Global; gl.global = guard.name; gl.type = b;
-                // thread-safe as cl's: a clear guard leads to the runtime's lock, which says whether this
-                // thread runs the initializer (another one may have finished it meanwhile); the runtime sets
-                // the guard after the object is built and releases the lock
+                if (m_x86) {
+                    if (m_msvcNames) m_x86->registerGlobalName(guard.name, msvcMangleStaticGuard(*m_fn, block, m_guardCount));
+                    m_x86->addGlobal(guard);
+                }
+                ++m_guardCount;
+                LValue gl; gl.kind = LValue::Global; gl.global = guard.name; gl.type = it;
                 int done = m_out->newBlock("static.done"), check = m_out->newBlock("static.lock"), doInit = m_out->newBlock("static.init");
-                condbr(toBool(load(gl, b, line), b, line), done, check, line);
+                // one statement per emitted value: the order of a call's arguments differs between compilers,
+                // and the self-built compiler must produce the same code as the MSVC-built one
+                int g0 = load(gl, it, line);
+                int one = constant(1, ut, line);
+                int biased = binary("+", g0, ut, one, ut, ut, line);
+                int one2 = constant(1, ut, line);
+                condbr(binary("<=", biased, ut, one2, ut, b, line), check, done, line);
                 m_block = check;
-                IrInst enter = make(IrInst::Call, m_semaTypes.basic(sema::Type::Int), line);
-                enter.sub = "cppparse_static_enter";
-                enter.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(b))));
-                condbr(emit(enter), doInit, done, line);
+                IrInst enter = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+                enter.sub = "_Init_thread_header";
+                enter.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(it))));
+                emit(enter);
+                int g1 = load(gl, it, line);
+                int minus1 = constant(-1, it, line);
+                condbr(binary("==", g1, it, minus1, it, b, line), doInit, done, line);
                 m_block = doInit;
                 LValue lv; lv.kind = LValue::Global; lv.global = gname; lv.type = m_semaTypes.unref(var->type);
                 initObject(lv, var->type, var, id, line);
                 endFullExpr(line);
                 if (destroyed) registerAtExit(gname, lv.type, line);
                 IrInst leave = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
-                leave.sub = "cppparse_static_leave";
-                leave.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(b))));
+                leave.sub = "_Init_thread_footer";
+                leave.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(it))));
                 emit(leave);
                 br(done, line);
                 m_block = done;
@@ -2158,7 +2177,7 @@ void IrGen::prologue(Symbol* fn)
     m_block = m_bodyBlock;
     m_unwindId = m_tryCount++;
     m_tryStack.push_back(m_unwindId);
-    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0;
+    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0; m_guardCount = 0;
     for (size_t i = 0; i < inRegister.size(); ++i) {
         // the object lives in a local of the callee; the parameter name reaches it through a pointer, as for
         // objects passed by address

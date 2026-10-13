@@ -995,8 +995,14 @@ exercised the old pipeline (`analyzer/`), folder mode, the reports and the worke
 threads in self-built code for the first time and found these defects:
 static locals were initialised under a plain guard byte, so two workers
 could both run the initializer or use an object not yet built (the guard
-is now taken through a recursive lock in the runtime,
-`cppparse_static_enter`/`leave`, as cl's thread-safe statics do); the
+is now cl's own protocol: an int guard named as cl names it,
+`?$TSS<n>@...`, a COMDAT for an inline function, with the CRT's
+`_Init_thread_header`/`_Init_thread_footer`, so an inline function's
+static object shared with cl-compiled units is built once whichever side
+reaches it first, tested by `examples/sample-statics` in Test 13; the fast
+path tests the guard for 0 or -1 where cl compares it with the thread's
+epoch, and an initializer that throws leaves the guard taken where cl
+calls `_Init_thread_abort`); the
 register allocator's linear intervals did not cover loop headers that only
 pass a value on when the value's copies sit in edge blocks laid out after
 the loop, so the header's comparison could take the value's register

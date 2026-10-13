@@ -246,7 +246,9 @@ void cppparse_rethrow(void)
 long cppparse_interlocked_increment(long volatile* value) { return _InterlockedIncrement(value); }
 long cppparse_interlocked_decrement(long volatile* value) { return _InterlockedDecrement(value); }
 
-/* static locals that need construction: the generated code tests the guard byte and, when it is clear, calls
+/* no longer used by generated code, which guards static locals with cl's protocol (an int $TSS guard and the
+   CRT's _Init_thread_header/_Init_thread_footer), kept for objects built by older versions.
+   static locals that need construction: the generated code tests the guard byte and, when it is clear, calls
    cppparse_static_enter, which returns 1 with the lock held when this thread is to run the initializer (it
    then calls cppparse_static_leave) and 0 when another thread finished it meanwhile. One lock serves every
    static local and is recursive, since an initializer may reach another static local. An initializer that

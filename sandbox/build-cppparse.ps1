@@ -631,6 +631,25 @@ try {
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   abidriver$lvl.exe: class arguments and results cross cl and cppparse both ways (-O$lvl)" }
         else { Write-Host "  FAIL abidriver$lvl.exe (-O$lvl):"; Write-Host ($run.Split("`n") | Where-Object { $_ -match 'FAIL' }); $failed++ }
     }
+    # static locals of inline functions shared with cl (cl's $TSS guards and _Init_thread_header/footer): a
+    # cl /O2 driver (which inlines them) and cppparse's unit reach each object first in turn, linked in both
+    # orders (so either compiler's copy of the functions is kept); every object is constructed once
+    & $cl /nologo /c /O2 /EHsc /W3 "/Foout\x64\driver-statics.obj" /I..\examples\sample-statics "..\examples\sample-statics-driver\driver-statics.cpp" | Out-Null
+    foreach ($lvl in @(0, 2)) {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n "statics$lvl" "..\examples\sample-statics\statics.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\statics${lvl}6.obj") -or $c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL sample-statics at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        foreach ($order in @("cppparse-first", "cl-first")) {
+            $objs = if ($order -eq "cl-first") { @("out\x64\driver-statics.obj", "out\x64\statics${lvl}6.obj") } else { @("out\x64\statics${lvl}6.obj", "out\x64\driver-statics.obj") }
+            $sexe = "out\x64\staticsdriver$lvl-$order.exe"
+            $lo = & $cl /nologo "/Fe$sexe" @objs "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the statics driver (-O$lvl, $order):"; Write-Host $lo; $failed++; continue }
+            $run = & ".\$sexe" 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   staticsdriver$lvl-${order}: shared static locals constructed once from cl and cppparse (-O$lvl)" }
+            else { Write-Host "  FAIL staticsdriver$lvl-$order (-O$lvl):"; Write-Host ($run.Split("`n") | Where-Object { $_ -match 'FAIL' }); $failed++ }
+        }
+    }
     if ($failed -ne 0) { throw "$failed version 6 compile check(s) failed" }
 
     Write-Host ""

@@ -841,8 +841,11 @@ virtual inheritance; front.cpp `mpsize::`). A direct base that is also a
 base of another direct base is diagnosed as cl does (Sema::declareClass;
 `ambiguous-base.cpp`): S141, an error, where cl gives C2584
 (`struct F : virtual V, W {}` with `W : V`), S142, a warning, where cl
-gives C4584 (`struct G : V, W {}`); ambiguous conversions to a base and
-ambiguous member access (cl C2594, C2385) are not diagnosed yet.
+gives C4584 (`struct G : V, W {}`); ambiguous conversions to a base (cl C2594: S143 for
+casts, S105 for implicit conversions) and unqualified access to a member of
+a base held more than once (cl C2385: S144) are errors (Sema::baseSubobjects,
+`ambiguous.cpp`); `d.B::a` and `d.C::f()` go through the named base
+(IrGen namingBase: they used the first path; front.cpp `ambig::`).
 Likewise an override with a covariant return
 type whose conversion moves the pointer (`CD* self()` over `SB* self()`
 with SB at 16 in CD) would need cl's return-adjusting thunk: S131

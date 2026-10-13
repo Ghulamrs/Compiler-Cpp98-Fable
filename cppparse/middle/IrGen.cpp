@@ -127,6 +127,25 @@ const Type* IrGen::oldType(const sema::Type* t)
     return r;
 }
 
+namespace {
+
+// the class a qualified member access names ("d.C::a": C), searched by name among the bases of the object's
+// class; 0 when unqualified or not found. A base held more than once must be reached through it (sema S144
+// refuses the ambiguous forms)
+Symbol* namingBase(const cxx::Expr* member, Symbol* cls, int depth = 0)
+{
+    if (!member || !cls || member->name.parts.size() < 2 || depth > 32) return 0;
+    const std::string& q = member->name.parts[member->name.parts.size() - 2].ident;
+    for (size_t i = 0; i < cls->bases.size(); ++i) {
+        Symbol* b = cls->bases[i].cls;
+        if (b && b->name == q) return b;
+    }
+    for (size_t i = 0; i < cls->bases.size(); ++i) { Symbol* r = namingBase(member, cls->bases[i].cls, depth + 1); if (r) return r; }
+    return 0;
+}
+
+} // namespace
+
 bool IrGen::baseOffset(Symbol* derived, Symbol* base, int& offset, int depth) const
 {
     if (!derived || !base || depth > 32) return false;
@@ -682,6 +701,13 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
         }
         objT = m_semaTypes.unqualified(objT);
         int off = s->offset;
+        // "d.C::a": through the named base first, the path to the member's class from there
+        Symbol* naming = objT->kind == sema::Type::Class ? namingBase(e, objT->decl) : 0;
+        if (naming && naming != s->ownerClass && s->ownerClass) {
+            int b1 = 0, b2 = 0;
+            if (baseOffset(objT->decl, naming, b1) && baseOffset(naming, s->ownerClass, b2)) off += b1 + b2;
+            else { base = toBase(base, objT->decl, naming, line); base = toBase(base, naming, s->ownerClass, line); }
+        } else
         if (objT->kind == sema::Type::Class && objT->decl && s->ownerClass && objT->decl != s->ownerClass) { int bo = 0; if (baseOffset(objT->decl, s->ownerClass, bo)) off += bo; else base = toBase(base, objT->decl, s->ownerClass, line); }
         IrInst in = make(IrInst::AddrField, m_semaTypes.pointer(lv.type), line);
         in.sub = s->name;
@@ -1507,6 +1533,12 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
             if (objT->kind == sema::Type::Pointer) objT = objT->inner;
         } else { LValue ol = lvalue(obj); thisPtr = ol.kind == LValue::None ? value(obj) : load(ol, objT, line); }
         objT = m_semaTypes.unqualified(objT);
+        Symbol* naming = objT->kind == sema::Type::Class ? namingBase(callee, objT->decl) : 0;
+        if (naming && naming != fn->ownerClass) {
+            // "d.C::f()": through the named base first
+            thisPtr = convert(thisPtr, m_semaTypes.pointer(objT), m_semaTypes.pointer(m_semaTypes.classType(naming)), line);
+            objT = m_semaTypes.classType(naming);
+        }
         if (objT->kind == sema::Type::Class && objT->decl && objT->decl != fn->ownerClass) thisPtr = convert(thisPtr, m_semaTypes.pointer(objT), m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass)), line);
         virtualCall = callee->name.parts.size() == 1;
     } else if (callee->kind != cxx::Expr::Member && !objectCall && fn->ownerClass && !fn->isStatic && m_out->hasThis) {

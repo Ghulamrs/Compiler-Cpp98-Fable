@@ -315,6 +315,29 @@ void show()
 }
 }
 
+// a base held twice (D : B, C with B : A, C : A): reached through a named base or an unambiguous path; d.C::a
+// used to be B's A (the first path), and the ambiguous forms compiled silently (now S143/S144, ambiguous.cpp)
+namespace ambig {
+struct A { int a; int f() const { return a * 10; } };
+struct B : A { int b; };
+struct C : A { int c; };
+struct D : B, C { int d; };
+struct V2 { int v; };
+struct E1 : virtual V2 { };
+struct E2 : virtual V2 { };
+struct G : E1, E2 { };
+int viaB(A* p) { return p->a; }
+void show()
+{
+    D d; d.B::a = 1; d.C::a = 2; d.b = 3; d.c = 4; d.d = 5;
+    A* pb = (B*)&d; A* pc = static_cast<C*>(&d);
+    B& rb = d; C* cp = &d;
+    std::printf("ambig %d %d %d %d %d %d %d %d\n", d.B::a, d.C::a, pb->a, pc->a, rb.a, cp->a, d.B::f(), d.C::f() + viaB(cp));
+    G g; g.v = 7; V2* v = &g; E1* e1 = &g;
+    std::printf("ambig virtual %d %d %d\n", g.v, v->v, e1->v);
+}
+}
+
 int main()
 {
     predefined();
@@ -330,6 +353,7 @@ int main()
     conv::runtimeD(); conv::runtimeF(); conv::consts(); conv::toFloating();
     mpsize::show();
     lit::show();
+    ambig::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

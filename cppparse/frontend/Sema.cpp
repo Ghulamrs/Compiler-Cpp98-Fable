@@ -1243,6 +1243,42 @@ bool Sema::derivesFrom(Symbol* derived, Symbol* base, int* offset, int depth)
 
 namespace {
 
+// the paths from cls down to base that take no virtual edge (cls itself counts when it is base)
+int nonVirtualPaths(const Symbol* cls, const Symbol* base, int depth)
+{
+    if (!cls || depth > 32) return 0;
+    if (cls == base) return 1;
+    int n = 0;
+    for (size_t i = 0; i < cls->bases.size(); ++i) if (!cls->bases[i].isVirtual) n += nonVirtualPaths(cls->bases[i].cls, base, depth + 1);
+    return n;
+}
+
+// every virtual base of cls, direct or inherited, once
+void virtualBases(const Symbol* cls, std::vector<const Symbol*>& out, int depth)
+{
+    if (!cls || depth > 32) return;
+    for (size_t i = 0; i < cls->bases.size(); ++i) {
+        const Symbol* b = cls->bases[i].cls;
+        if (cls->bases[i].isVirtual && std::find(out.begin(), out.end(), b) == out.end()) out.push_back(b);
+        virtualBases(b, out, depth + 1);
+    }
+}
+
+} // namespace
+
+// how many subobjects of class 'base' an object of 'derived' holds: more than one makes a conversion to it or an
+// unqualified use of its non-static members ambiguous (cl C2594, C2385); a virtual base counts once
+int Sema::baseSubobjects(Symbol* derived, Symbol* base)
+{
+    int n = nonVirtualPaths(derived, base, 0);
+    std::vector<const Symbol*> vb;
+    virtualBases(derived, vb, 0);
+    for (size_t i = 0; i < vb.size(); ++i) n += nonVirtualPaths(vb[i], base, 0);
+    return n;
+}
+
+namespace {
+
 // the alignment __declspec(align(N)) demands of a type, which #pragma pack cannot lower: declared on its class or
 // inherited from an aligned member or base (Symbol::declAlign of a laid-out class)
 int declaredFloor(const Type* t)

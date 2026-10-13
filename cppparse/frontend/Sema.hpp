@@ -327,6 +327,7 @@ private:
     const Type* instantiateClassTemplate(Symbol* tmpl, const std::vector<cxx::TemplateArg>& args, Scope* from, const cxx::Loc& loc);
     bool   templateArgText(const std::vector<cxx::TemplateArg>& args, Scope* from, std::vector<const Type*>& types, std::vector<long>& ints, std::string& text);
     bool   derivesFrom(Symbol* derived, Symbol* base, int* offset, int depth = 0);
+    int    baseSubobjects(Symbol* derived, Symbol* base);   // subobjects of base in derived (C2594 / C2385 when > 1)
 
     // expressions
     const Type* expr(cxx::Expr* e, Scope* in);

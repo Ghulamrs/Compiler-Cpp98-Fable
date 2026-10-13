@@ -33,6 +33,8 @@ the default), with the items found since. Each was reproduced with a small progr
   X86.cpp addThunk); calls through every base, by both compilers, are in sample-layout.
 - 15, destructor slot: a virtual destructor's slot holds the scalar deleting destructor (`??_G`, IrGen.cpp
   genDeletingDestructors); `delete` calls it with flags 1, so a secondary base pointer frees the complete object.
+- A destructor stores its own class's vptrs on entry (IrGen.cpp genFunction), so a virtual call in a base's
+  destructor reaches the base's function; sample-layout checks it in constructors and destructors, both compilers.
 - 18, callee side: a variadic function keeps its parameters in their home slots and its prologue spills rcx,
   rdx, r8 and r9 there (named floats from xmm0-xmm3); `include/cstdarg`, `stdarg.h` and `vprintf`/`vfprintf`/
   `vsprintf` in `cstdio` give va_list/va_start/va_arg/va_end over that area, as MSVC's vadefs.h (X86.cpp).
@@ -68,8 +70,10 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 
 | # | Item | Effect today | Size | Lane |
 |---|---|---|---|---|
-| 14 | 23: virtual bases laid out inline, no vbptr | wrong values | large | layout (later) |
+| 14 | 23: virtual bases. `--compile6` refuses a class with one (S130, driver/main.cpp) instead of laying it out inline; left: the vbptr and vbtable (`??_8D@@7B@`), virtual base subobjects placed once at the end of the most-derived object (shared in a diamond), conversions and member access through the vbtable, the constructors' hidden "most derived" flag (virtual bases built once), destruction order, vtordisp where MSVC emits it | refused (S130) | large | layout (later) |
 | 15 | 22: `_MSC_VER`, `_MT`, `_CPPUNWIND` not predefined (common/Target.cpp) | by choice so far | small | decision |
+| 17 | `delete[]` of an array of a polymorphic class across compilers: cl calls the vector deleting destructor (`??_E`, flags bit 1) through the slot, which holds cppparse's scalar one | wrong free in mixed links | small | layout |
+| 18 | member pointers to virtual functions (cl's vcall thunks `??_9`) and covariant return thunks | not supported | medium | layout |
 
 ## Deferred
 

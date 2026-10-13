@@ -138,20 +138,21 @@ int polyX(const NP* p)
 }
 
 int g_dtorLog = 0;
+int g_sbCtorSaw = 0, g_sbDtorSaw = 0, g_sdDtorSaw = 0;
 SA::SA() : sa(10) {}
 int SA::a() const { return 1; }
 int SA::f() const { return 2; }
-SB::SB() : sb(20) {}
+SB::SB() : sb(20) { g_sbCtorSaw = g(); }      // SB::g: the object is an SB while SB is built
 int SB::b() const { return 3; }
 int SB::f() const { return 4; }
 int SB::g() const { return 5; }
-SB::~SB() { g_dtorLog = g_dtorLog * 10 + 2; }
+SB::~SB() { g_dtorLog = g_dtorLog * 10 + 2; g_sbDtorSaw = g(); }   // SB::g again while SB is destroyed
 SD::SD() : sd(30) {}
 int SD::f() const { return 100 + sd; }
 int SD::g() const { return 200 + sa + sb + sd; }   // this arrives at the SB subobject and is moved back to SD
 int SD::b() const { return 300 + sa; }
 int SD::h() const { return 400 + g(); }            // a call through this: moved to SB again
-SD::~SD() { g_dtorLog = g_dtorLog * 10 + 1; }
+SD::~SD() { g_dtorLog = g_dtorLog * 10 + 1; g_sdDtorSaw = h(); }   // SD::h, SD::g, not SE::g
 SE::SE() : se('e') { x = 7; }
 int SE::g() const { return 500 + se; }
 int SE::a() const { return 600 + x; }

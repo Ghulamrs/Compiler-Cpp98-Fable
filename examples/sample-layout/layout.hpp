@@ -155,6 +155,7 @@ int  polyX(const NP* p);                       // p->x
 
 // two polymorphic bases: virtual calls made by cppparse through each base, and the destructors' order
 extern int g_dtorLog;                          // each destructor appends its digit: ~SE 3, ~SD 1, ~SB 2
+extern int g_sbCtorSaw, g_sbDtorSaw, g_sdDtorSaw;   // what g() (h() in ~SD) returned in SB() / ~SB() / ~SD()
 int  saCall(const SA* p, int which);           // 0 a(), 1 f()
 int  sbCall(const SB* p, int which);           // 0 b(), 1 f(), 2 g()
 int  sdCall(const SD* p, int which);           // 0 f(), 1 g(), 2 b(), 3 h(), 4 a(), 5 SD::g() (not virtual)

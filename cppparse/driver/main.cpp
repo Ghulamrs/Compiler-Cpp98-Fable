@@ -131,6 +131,16 @@ bool writeOut(const std::string& path, const std::string& content, bool quiet, s
     return true;
 }
 
+// a virtual base, direct or inherited: --compile6 does not lay those out as cl does yet (no vbptr, no shared
+// subobject), so it refuses the class rather than emit wrong code (S130)
+bool hasVirtualBase(const sema::Symbol* cls, int depth)
+{
+    if (!cls || depth > 32) return false;
+    for (size_t b = 0; b < cls->bases.size(); ++b)
+        if (cls->bases[b].isVirtual || hasVirtualBase(cls->bases[b].cls, depth + 1)) return true;
+    return false;
+}
+
 // a unit that is not compiled leaves no object, listing or map: one of an earlier run would be taken for its own
 void removeUnitOutputs(const std::string& base)
 {
@@ -319,10 +329,20 @@ int main(int argc, char* argv[])
                 std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
                 std::vector<std::string> written;
                 if (!outDir.empty() || !outName.empty()) writeOut(base + "-sym6.txt", sema.dumpSymbols(), quiet, written);
-                if (compile6 && errors + sema.errorCount() > 0) {
+                int unsupported = 0;
+                if (compile6)
+                    for (size_t k = 0; k < program.symbols.size(); ++k) {
+                        const sema::Symbol* s = program.symbols[k];
+                        if (s->kind != sema::Symbol::Class || !s->isDefinition || s->isDependentContext || !hasVirtualBase(s, 0)) continue;
+                        std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
+                                  << "): error S130: '" << s->qualifiedName() << "' has a virtual base class: virtual base classes are not supported yet by --compile6 (they would not be laid out as cl lays them out)\n";
+                        ++unsupported;
+                    }
+                totalErrors += unsupported;
+                if (compile6 && errors + sema.errorCount() + unsupported > 0) {
                     // a unit with syntax or semantic errors is not compiled, as cl does: an object built on
                     // unresolved names and error types would reach the linker
-                    std::cout << "  compile6: not compiled, " << (errors + sema.errorCount()) << " error(s)\n";
+                    std::cout << "  compile6: not compiled, " << (errors + sema.errorCount() + unsupported) << " error(s)\n";
                     removeUnitOutputs(base);
                 }
                 else if (compile6) {

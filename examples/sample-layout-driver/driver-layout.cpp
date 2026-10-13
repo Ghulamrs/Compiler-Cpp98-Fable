@@ -151,6 +151,24 @@ int main()
         g_dtorLog = 0;
         delete r;
         expect("SD deleted by cl through SD*", g_dtorLog, 12);
+
+        // virtual calls inside constructors and destructors reach the class being built or destroyed
+        g_sbCtorSaw = g_sbDtorSaw = g_sdDtorSaw = 0;
+        SB* s = new SE;
+        expect("g() in SB() of an SE built by cl", g_sbCtorSaw, 5);
+        delete s;
+        expect("g() in ~SB() of an SE deleted by cl through SB*", g_sbDtorSaw, 5);
+        expect("h() in ~SD() of an SE deleted by cl through SB*", g_sdDtorSaw, 660);
+        g_sbCtorSaw = g_sbDtorSaw = g_sdDtorSaw = 0;
+        SE* t = new SE;
+        delete t;
+        expect("g() in ~SB() of an SE deleted by cl through SE*", g_sbDtorSaw, 5);
+        expect("h() in ~SD() of an SE deleted by cl through SE*", g_sdDtorSaw, 660);
+        g_sbCtorSaw = g_sbDtorSaw = g_sdDtorSaw = 0;
+        expect("deleteThroughSB(SE) again", deleteThroughSB(1), 312);
+        expect("g() in SB() of an SE built by cppparse", g_sbCtorSaw, 5);
+        expect("g() in ~SB() of an SE deleted by cppparse", g_sbDtorSaw, 5);
+        expect("h() in ~SD() of an SE deleted by cppparse", g_sdDtorSaw, 660);
     }
 
     if (failures) { printf("%d FAILED\n", failures); return 1; }

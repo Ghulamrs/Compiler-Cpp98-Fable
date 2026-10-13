@@ -720,7 +720,8 @@ try {
     # (a stale object of an earlier run is put in place first: it must be removed, not taken for the result)
     $rejects = @(
         @{ unit = "errors"; expect = @("error S103: call to undeclared function 'undeclared_fn'", "error S101: undeclared identifier 'nosuchvar'") },
-        @{ unit = "sizeof-incomplete"; expect = @("error S113: sizeof of incomplete class 'Inc'", "error S113: sizeof of incomplete class 'std::", "error S113: sizeof of incomplete class 'Self'", "error S113: sizeof of void") }
+        @{ unit = "sizeof-incomplete"; expect = @("error S113: sizeof of incomplete class 'Inc'", "error S113: sizeof of incomplete class 'std::", "error S113: sizeof of incomplete class 'Self'", "error S113: sizeof of void") },
+        @{ unit = "vbase"; expect = @("error S130: 'VL' has a virtual base class", "error S130: 'VR' has a virtual base class", "error S130: 'VD' has a virtual base class") }
     )
     foreach ($r in $rejects) {
         $nm = "front-$($r.unit)"
@@ -733,6 +734,12 @@ try {
         if ($rc -ne 0 -and $missing.Count -eq 0 -and $left.Count -eq 0) { Write-Host "  ok   $($r.unit).cpp: errors reported, exit code $rc, no object, listing or map" }
         else { Write-Host "  FAIL $($r.unit).cpp (exit $rc, missing diagnostics: $($missing -join ' | '), left behind: $($left -join ', ')):"; Write-Host $c6; $failed++ }
     }
+    # S130 is a refusal of code generation only: the analysis of the same unit accepts its virtual bases
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $s6 = & $exe --sema6 -I ..\include -o out\x64 -n front-vbase-sema "..\examples\sample-front\vbase.cpp" 2>&1 | Out-String
+    $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+    if ($rc -eq 0 -and $s6 -match 'sema: 0 error' -and -not $s6.Contains("S130")) { Write-Host "  ok   vbase.cpp: --sema6 accepts the virtual bases (exit 0, no S130)" }
+    else { Write-Host "  FAIL vbase.cpp under --sema6 (exit $rc):"; Write-Host $s6; $failed++ }
     # front.cpp: built by cl (the reference) and by cppparse at -O0 and -O2; the programs must print the same lines
     $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\front_cl.exe" "..\examples\sample-front\front.cpp" 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\front.cpp" }

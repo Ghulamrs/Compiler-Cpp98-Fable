@@ -2324,6 +2324,9 @@ void IrGen::genFunction(Symbol* fn)
     m_slots.clear(); m_loops.clear(); m_tryStack.clear(); m_tryCount = 0;
     prologue(fn);
     if (fn->isConstructor) constructorInit(fn, def);
+    // as cl: a destructor stores its own class's vptrs first, so a virtual call made while it (or a base's
+    // destructor after it) runs reaches this class's functions, not those of the derived object being destroyed
+    if (fn->isDestructor && fn->ownerClass) storeVptr(fn->ownerClass, thisTemp(def->loc.line), def->loc.line);
     stmt(def->body);
     if (!terminated()) {
         IrInst r = make(IrInst::Ret, 0, def->loc.line);

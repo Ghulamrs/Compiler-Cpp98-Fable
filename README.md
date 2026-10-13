@@ -769,7 +769,14 @@ takes the complete object, so its secondary slots are thunks.
 A virtual destructor's slot holds MSVC's scalar deleting destructor
 (`??_GSD@@UEAAPEAXI@Z`: destroy, then free when bit 0 of its flags is
 set), so `delete` through any base frees the complete object and cl's
-`delete` of cppparse's objects (and the other way round) works.
+`delete` of cppparse's objects (and the other way round) works. A
+destructor stores its own class's vptrs on entry, as a constructor does
+after its bases, so a virtual call made while a base part is built or
+destroyed reaches that base's function. Virtual base classes are not laid
+out as cl lays them out yet (no vbptr, no shared subobject): `--compile6`
+refuses a class that has one, directly or through a base, with S130 and
+writes no object (test 17, `examples/sample-front/vbase.cpp`); `--sema6`
+and the reports accept them.
 Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment;

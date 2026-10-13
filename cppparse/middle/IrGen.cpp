@@ -1118,6 +1118,17 @@ void IrGen::runCleanup(const Cleanup& c, bool guarded, int line)
         condbr(toBool(load(fl, b, line), b, line), doBlock, next, line);
         m_block = doBlock;
     }
+    if (!c.abortGuard.empty()) {
+        // a static local's initializer threw: the guard goes back to "not built", so a later call retries
+        LValue gl; gl.kind = LValue::Global; gl.global = c.abortGuard; gl.type = c.type;
+        IrInst ab = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+        ab.sub = "_Init_thread_abort";
+        ab.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(c.type))));
+        emit(ab);
+        store(fl, constant(0, b, line), b, line);
+        if (guarded) { br(next, line); m_block = next; }
+        return;
+    }
     int addr;
     if (c.viaPointer) { LValue pl; pl.kind = LValue::Local; pl.local = c.slot; pl.type = m_semaTypes.pointer(c.type); addr = load(pl, pl.type, line); }
     else { LValue ol; ol.kind = LValue::Local; ol.local = c.slot; ol.type = c.type; addr = addressOf(ol, line); }
@@ -1820,9 +1831,22 @@ void IrGen::localDecl(cxx::Decl* d)
                 int minus1 = constant(-1, it, line);
                 condbr(binary("==", g1, it, minus1, it, b, line), doInit, done, line);
                 m_block = doInit;
+                // an initializer that throws hands the guard to _Init_thread_abort (as cl's unwind funclet
+                // does): an unwind-only cleanup whose flag is set while the initializer runs
+                Cleanup ac;
+                ac.type = it;
+                ac.unwindOnly = true;
+                ac.abortGuard = guard.name;
+                ac.flag = newLocal("flag." + guard.name, b, true);
+                LValue afl; afl.kind = LValue::Local; afl.local = ac.flag; afl.type = b;
+                int on = constant(1, b, line);
+                store(afl, on, b, line);
+                m_flagged.push_back(ac);
                 LValue lv; lv.kind = LValue::Global; lv.global = gname; lv.type = m_semaTypes.unref(var->type);
                 initObject(lv, var->type, var, id, line);
                 endFullExpr(line);
+                int off = constant(0, b, line);
+                store(afl, off, b, line);
                 if (destroyed) registerAtExit(gname, lv.type, line);
                 IrInst leave = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
                 leave.sub = "_Init_thread_footer";

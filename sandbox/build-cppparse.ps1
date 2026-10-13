@@ -645,7 +645,8 @@ try {
             $sexe = "out\x64\staticsdriver$lvl-$order.exe"
             $lo = & $cl /nologo "/Fe$sexe" @objs "out\x64\cppparse_rt.obj" 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the statics driver (-O$lvl, $order):"; Write-Host $lo; $failed++; continue }
-            $run = & ".\$sexe" 2>&1 | Out-String
+            $sargs = @(); if ($order -eq "cl-first") { $sargs = @("cl-copies") }
+            $run = & ".\$sexe" @sargs 2>&1 | Out-String
             if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   staticsdriver$lvl-${order}: shared static locals constructed once from cl and cppparse (-O$lvl)" }
             else { Write-Host "  FAIL staticsdriver$lvl-$order (-O$lvl):"; Write-Host ($run.Split("`n") | Where-Object { $_ -match 'FAIL' }); $failed++ }
         }

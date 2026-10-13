@@ -71,6 +71,7 @@ private:
         int               flag;        // local byte: 1 while the object is constructed
         bool              guarded;     // the normal-path destruction must test the flag (temporary of a conditional arm)
         bool              unwindOnly;  // a member built by a constructor: destroyed only when the body throws
+        std::string       abortGuard;  // a static local's initializer: its guard global, handed to _Init_thread_abort
         Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false) {}
     };
     struct ExitThunk {                 // destroys a global or static local at exit; registered with atexit once it is built

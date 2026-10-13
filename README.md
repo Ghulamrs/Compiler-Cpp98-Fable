@@ -681,6 +681,9 @@ a scope stack of the type names it has seen (typedefs, classes, enums,
 template parameters, injected class names, names brought in by using
 directives and anonymous namespaces) and the members of every named
 class or namespace, so `T * x` is a declaration only when `T` is a type,
+`f < x` starts template arguments only when the innermost scope that
+declares `f` declares it as a template (a local variable, a parameter or a
+function named `count` hides `std::count` of `<algorithm>`),
 constructors are recognised by their name, out-of-line members see
 their class's nested types, and reopened namespaces remember their
 earlier parts. Unknown qualified names such as `std::vector<int>` are

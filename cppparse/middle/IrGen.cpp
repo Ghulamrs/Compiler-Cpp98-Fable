@@ -760,6 +760,8 @@ int IrGen::callFunction(Symbol* fn, int thisPtr, int sretAddr, const std::vector
     for (size_t a = firstArg; a < args.size(); ++a) {
         size_t p = a - firstArg;
         const sema::Type* pt = ft && p < ft->params.size() ? ft->params[p] : 0;
+        // a class past the named parameters (variadic) goes as a by-value parameter of its type would
+        if (!pt && isClassType(exprType(args[a])) && !isReference(exprType(args[a]))) pt = m_semaTypes.unqualified(m_semaTypes.unref(exprType(args[a])));
         int v = argument(args[a], pt, line);
         in.args.push_back(IrOperand::temp(v, oldType(pt ? (isReference(pt) ? m_semaTypes.pointer(m_semaTypes.unref(pt)) : (isClassType(pt) ? (regParamType(pt) ? regParamType(pt) : m_semaTypes.pointer(pt)) : pt)) : m_semaTypes.decay(exprType(args[a])))));
     }
@@ -856,14 +858,30 @@ bool IrGen::podForReturn(const sema::Type* t, int depth) const
     const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
     while (u && u->kind == sema::Type::Array) u = m_semaTypes.unqualified(u->inner);
     if (!u || depth > 32) return false;
-    if (u->kind != sema::Type::Class) return true;
+    if (u->kind != sema::Type::Class) return false;
     Symbol* cls = u->decl;
     if (!cls || cls->hasUserCtor || cls->hasCopyCtor || cls->hasDtor || cls->hasCopyAssign || cls->isPolymorphic || !cls->bases.empty()) return false;
     for (size_t f = 0; f < cls->fields.size(); ++f) {
         Symbol* m = cls->fields[f];
-        if (m->access == cxx::AccessPrivate || m->access == cxx::AccessProtected || isReference(m->type) || !podForReturn(m->type, depth + 1)) return false;
+        if (m->access == cxx::AccessPrivate || m->access == cxx::AccessProtected) return false;
     }
-    return true;
+    // members count only through the class's implicit members: a trivial destructor and a trivial,
+    // not deleted copy assignment (a const or reference member deletes it)
+    return !needsDtor(u) && !needsCopyAssign(u) && !copyAssignDeleted(u, 0);
+}
+
+bool IrGen::copyAssignDeleted(const sema::Type* t, int depth) const
+{
+    const sema::Type* u = m_semaTypes.unref(t);
+    if (!u || depth > 32) return false;
+    if (isReference(t)) return true;
+    while (u->kind == sema::Type::Array) { if (u->isConst) return true; u = u->inner; }
+    if (u->isConst) return true;
+    u = m_semaTypes.unqualified(u);
+    if (u->kind != sema::Type::Class || !u->decl || u->decl->hasCopyAssign) return false;
+    for (size_t b = 0; b < u->decl->bases.size(); ++b) if (u->decl->bases[b].cls && copyAssignDeleted(u->decl->bases[b].cls->type, depth + 1)) return true;
+    for (size_t f = 0; f < u->decl->fields.size(); ++f) if (copyAssignDeleted(u->decl->fields[f]->type, depth + 1)) return true;
+    return false;
 }
 
 // the integer type a class result of fn comes back in (rax), or 0 for the hidden result pointer; member
@@ -1275,6 +1293,12 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
     if (!fn || fn->kind != Symbol::Function) {
         // function pointer or undeclared function
         IrInst in = make(IrInst::Call, rt, line);
+        // (*fp)(x), (fp)(x): the pointer itself is called
+        while ((callee->kind == cxx::Expr::Paren || (callee->kind == cxx::Expr::Unary && callee->text == "*")) && callee->kids.size() == 1 && !callee->semaSym) {
+            const sema::Type* kt = m_semaTypes.unref(exprType(callee->kids[0]));
+            if (!kt || !((kt->kind == sema::Type::Pointer && kt->inner->kind == sema::Type::Function) || kt->kind == sema::Type::Function || callee->kind == cxx::Expr::Paren)) break;
+            callee = callee->kids[0];
+        }
         const sema::Type* ct = m_semaTypes.unref(exprType(callee));
         if (ct->kind == sema::Type::Pointer && ct->inner->kind == sema::Type::Function) {
             int fp = value(callee);

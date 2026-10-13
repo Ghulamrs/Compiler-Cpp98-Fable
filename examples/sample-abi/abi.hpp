@@ -6,6 +6,8 @@
 #ifndef SAMPLE_ABI_HPP
 #define SAMPLE_ABI_HPP
 
+#include <cstdarg>
+
 struct S1 { char a; };
 struct S2 { short a; };
 struct S4 { int a; };
@@ -66,6 +68,48 @@ struct N {
     S8 pair(S4 a) const;
     static S8 make(int s);
 };
+
+// returned in rax by cl's rule, which looks at the class's own members only: a member with a constructor or
+// private data does not matter; a const member deletes the copy assignment (then the hidden pointer)
+struct In { In() : x(0) {} int x; };
+struct Out { In i; };
+struct AI { In i[2]; };
+struct Pv { int get() const { return x; } void set(int v) { x = v; } private: int x; };
+struct OutP { Pv p; };
+struct Kc { const int a; };
+struct S24 { long long a, b, c; };
+Out c_mkOut(int s); Out k_mkOut(int s);
+AI c_mkAI(int s); AI k_mkAI(int s);
+OutP c_mkOutP(int s); OutP k_mkOutP(int s);
+Kc c_mkKc(int s); Kc k_mkKc(int s);
+S24 c_mk24(int s); S24 k_mk24(int s);
+
+// variadic: a class past the named parameters goes as a by-value parameter would (S4, S8 by value, S12 by
+// address of a copy); n triples of S4, S8, S12 read with va_arg
+int c_va(int n, ...); int k_va(int n, ...);
+
+// calls through pointers to functions (local, dereferenced, returned by a call), to cl's and cppparse's
+typedef S8 (*Mk8)(int);
+int c_viaPointers(Mk8 f8, S12 (*f12)(int), S24 (*f24)(int), C4 (*fc)(int), int (*fuse)(int, S8, S8));
+
+// the same definitions for both compilers (P: c or k)
+#define ABI_MORE_DEFINE(P) \
+    Out P##_mkOut(int s) { Out r; r.i.x = s; return r; } \
+    AI P##_mkAI(int s) { AI r; r.i[0].x = s; r.i[1].x = s * 2; return r; } \
+    OutP P##_mkOutP(int s) { OutP r; r.p.set(s); return r; } \
+    Kc P##_mkKc(int s) { Kc r = { s }; return r; } \
+    S24 P##_mk24(int s) { S24 r; r.a = s; r.b = s * 2; r.c = s * 3; return r; } \
+    int P##_va(int n, ...) { \
+        va_list ap; va_start(ap, n); int sum = 0; \
+        for (int i = 0; i < n; ++i) { S4 a = va_arg(ap, S4); S8 b = va_arg(ap, S8); S12 c = va_arg(ap, S12); sum += val(a) + val(b) * 3 + val(c) * 5; } \
+        va_end(ap); return sum; }
+
+// failures of the P_ functions above as seen by the caller (Q: the caller's check function)
+#define ABI_MORE_CHECK(P, Q) \
+    { Q(P##_mkOut(5).i.x == 5); AI ai = P##_mkAI(6); Q(ai.i[0].x == 6 && ai.i[1].x == 12); Q(P##_mkOutP(7).p.get() == 7); \
+      Q(P##_mkKc(8).a == 8); S24 w = P##_mk24(9); Q(w.a == 9 && w.b == 18 && w.c == 27); \
+      S4 a; fill(a, 1); S8 b; fill(b, 2); S12 c; fill(c, 3); S4 a2; fill(a2, 4); S8 b2; fill(b2, 5); S12 c2; fill(c2, 6); \
+      Q(P##_va(2, a, b, c, a2, b2, c2) == val(a) + val(b) * 3 + val(c) * 5 + val(a2) + val(b2) * 3 + val(c2) * 5); }
 
 int c_callsK();   // cppparse calling cl: the number of failed checks
 

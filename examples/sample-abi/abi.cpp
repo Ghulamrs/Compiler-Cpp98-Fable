@@ -5,6 +5,22 @@
     T c_mk##T(int s) { T r; fill(r, s); return r; } \
     int c_use##T(int k, T a, T b) { return val(a) * k + val(b); }
 ABI_TYPES(ABI_DEFINE)
+ABI_MORE_DEFINE(c)
+
+static Mk8 pick(Mk8 f) { return f; }
+
+int c_viaPointers(Mk8 f8, S12 (*f12)(int), S24 (*f24)(int), C4 (*fc)(int), int (*fuse)(int, S8, S8))
+{
+    int bad = 0;
+    S8 e8; fill(e8, 3); S8 a = f8(3); if (val(a) != val(e8)) bad |= 1;
+    Mk8 lp = f8; S8 b = (*lp)(4); S8 e4; fill(e4, 4); if (val(b) != val(e4)) bad |= 2;
+    S12 c = (*f12)(5); S12 e5; fill(e5, 5); if (val(c) != val(e5)) bad |= 4;
+    S24 d = f24(6); if (d.a != 6 || d.b != 12 || d.c != 18) bad |= 8;
+    C4 e = fc(7); C4 e7; fill(e7, 7); if (val(e) != val(e7)) bad |= 16;
+    if (fuse(2, a, b) != val(a) * 2 + val(b)) bad |= 32;
+    S8 g = pick(f8)(8); S8 e88; fill(e88, 8); if (val(g) != val(e88)) bad |= 64;
+    return bad;
+}
 
 int c_many(S1 a, S2 b, S4 c, S8 d, F2 e, D1 f, S3 g, C4 h)
 {
@@ -27,6 +43,9 @@ int c_callsK()
 {
     g_failed = 0;
     ABI_TYPES(ABI_CALL)
+    ABI_MORE_CHECK(k, check)
+    check(c_viaPointers(k_mkS8, k_mkS12, k_mk24, k_mkC4, k_useS8) == 0);
+    check(c_viaPointers(c_mkS8, c_mkS12, c_mk24, c_mkC4, c_useS8) == 0);
     S1 a; fill(a, 1); S2 b; fill(b, 2); S4 c; fill(c, 3); S8 d; fill(d, 4); F2 e; fill(e, 5); D1 f; fill(f, 6); S3 g; fill(g, 7); C4 h; fill(h, 8);
     check(k_many(a, b, c, d, e, f, g, h) == c_many(a, b, c, d, e, f, g, h));
     N n; n.base = 40;

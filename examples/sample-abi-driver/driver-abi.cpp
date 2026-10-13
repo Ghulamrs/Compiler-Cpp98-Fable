@@ -8,6 +8,7 @@
     T k_mk##T(int s) { T r; fill(r, s); return r; } \
     int k_use##T(int k, T a, T b) { return val(a) * k + val(b); }
 ABI_TYPES(ABI_DEFINE)
+ABI_MORE_DEFINE(k)
 
 int k_many(S1 a, S2 b, S4 c, S8 d, F2 e, D1 f, S3 g, C4 h)
 {
@@ -19,6 +20,8 @@ S8 N::pair(S4 a) const { S8 r; r.a = base; r.b = a.a; return r; }
 S8 N::make(int s) { S8 r; r.a = s; r.b = s + 1; return r; }
 
 static int failures = 0;
+static int failures0 = 0;
+static void check(bool ok) { if (!ok) { printf("  FAIL a check of ABI_MORE_CHECK\n"); ++failures; } }
 static void expect(const char* what, int got, int want)
 {
     if (got == want) printf("  ok   %-24s %d\n", what, got);
@@ -41,6 +44,11 @@ int main()
     S8 p = m.pair(q); expect("M::pair", p.a * 100 + p.b, 4009);
     S8 s = M::make(7); expect("M::make", s.a * 100 + s.b, 708);
     expect("c_callsK failures", c_callsK(), 0);
+    failures0 = failures;
+    ABI_MORE_CHECK(c, check)
+    expect("c_viaPointers (cl functions)", c_viaPointers(k_mkS8, k_mkS12, k_mk24, k_mkC4, k_useS8), 0);
+    expect("c_viaPointers (own functions)", c_viaPointers(c_mkS8, c_mkS12, c_mk24, c_mkC4, c_useS8), 0);
+    expect("Out/AI/OutP/Kc/S24/va from cl", failures - failures0, 0);
     if (failures == 0) printf("ALL OK\n");
     return failures == 0 ? 0 : 1;
 }

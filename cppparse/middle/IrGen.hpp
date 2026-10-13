@@ -103,6 +103,7 @@ private:
     const sema::Type* regParamType(const sema::Type* t) const;
     const sema::Type* regReturnType(sema::Symbol* fn, const sema::Type* rt) const;
     bool podForReturn(const sema::Type* t, int depth) const;
+    bool copyAssignDeleted(const sema::Type* t, int depth) const;
     void callSpecial(sema::Symbol* fn, int thisPtr, int argPtr, int line);
     void copyBytes(int dst, int src, int size, int line);
     void bitField(LValue& lv, const sema::Symbol* field) const;   // marks lv as the bit-field field (when it is one)

@@ -973,7 +973,11 @@ no private or protected or reference members, members alike) is returned in
 hidden result pointer (after 	his for member functions), also through
 pointers to functions. examples/sample-abi with its cl-compiled driver
 (Test 13) crosses S1/S2/S4/S8/F2/D1/S3/S12/S16 and classes with
-constructors both ways. The remaining differences from cl's ABI (the
+constructors both ways, calls through pointers to functions (`(*fp)(x)`,
+pointers returned by calls), variadic class arguments (passed as by-value
+parameters would be) and members cl ignores for the result rule (a member
+with a constructor or private data still allows `rax`; a const or reference
+member, which deletes the copy assignment, does not). The remaining differences from cl's ABI (the
 virtual destructor slot holds the destructor rather than a scalar deleting
 destructor, a non-polymorphic first base is laid out before a polymorphic
 one) are not

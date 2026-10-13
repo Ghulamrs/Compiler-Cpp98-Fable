@@ -815,7 +815,7 @@ void IrGen::copyConstruct(const sema::Type* t, int dst, int src, int line)
     }
     Symbol* ctor = u->kind == sema::Type::Class && needsCopyCtor(u) ? findSpecial(u->decl, 'c') : 0;
     if (ctor) callSpecial(ctor, dst, src, line);
-    else copyBytes(dst, src, sizeOf(u), line);
+    else copyBytes(dst, src, copySize(u), line);
 }
 
 void IrGen::copyAssign(const sema::Type* t, int dst, int src, int line)
@@ -834,7 +834,7 @@ void IrGen::copyAssign(const sema::Type* t, int dst, int src, int line)
     }
     Symbol* op = u->kind == sema::Type::Class && needsCopyAssign(u) ? findSpecial(u->decl, 'a') : 0;
     if (op) callSpecial(op, dst, src, line);
-    else copyBytes(dst, src, sizeOf(u), line);
+    else copyBytes(dst, src, copySize(u), line);
 }
 
 void IrGen::constructDefault(const sema::Type* t, int addr, int line)

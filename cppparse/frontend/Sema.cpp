@@ -222,7 +222,8 @@ const Type* TypeTable::arithmeticResult(const Type* a, const Type* b)
 
 Symbol::Symbol()
     : kind(Variable), scope(0), type(0), access(cxx::AccessPublic), members(0), isDefinition(false), isStruct(false), isUnion(false),
-      isPolymorphic(false), isAbstract(false), layoutDone(false), size(0), align(1), vptrOffset(-1), classAst(0),
+      isPolymorphic(false), isAbstract(false), layoutDone(false), size(0), align(1), nvSize(0),
+      leadsWithZeroSized(false), endsWithZeroSized(false), vptrOffset(-1), classAst(0),
       isVirtual(false), isPureVirtual(false), isStatic(false), isExtern(false), isInline(false), isExplicit(false), isConstructor(false),
       isDestructor(false), isConversion(false), isOperator(false), isFriendDecl(false), hasBody(false), isExternC(false),
       definition(0), declAst(0), body(0), vtableSlot(-1), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
@@ -1073,6 +1074,11 @@ void Sema::layoutClass(Symbol* cls)
     int floor = cls->classAst ? cls->classAst->declAlign : 0;
     int off = 0, align = 1;
     bool vptr = false;
+    // MSVC's empty bases: a base takes its size without the byte an empty class is given (nvSize), so an empty
+    // base takes no space; a byte of padding separates a base that ends with a zero-sized subobject from a
+    // following base that leads with one (E, E2 { int w; }: E at 0, E2 at 1, w at 4)
+    const Symbol* prev = 0;
+    bool leadsZero = false, endsZero = false;
     for (size_t b = 0; b < cls->bases.size(); ++b) {
         Symbol* bc = cls->bases[b].cls;
         if (!bc) continue;
@@ -1081,9 +1087,13 @@ void Sema::layoutClass(Symbol* cls)
         int a = pack > 0 && bc->align > pack ? pack : bc->align;
         if (bc->declAlign > a) a = bc->declAlign;
         if (bc->declAlign > floor) floor = bc->declAlign;
+        if (prev && prev->endsWithZeroSized && bc->leadsWithZeroSized) ++off;
+        if (!prev) leadsZero = bc->leadsWithZeroSized;
         off = (off + a - 1) / a * a;
         cls->bases[b].offset = off;
-        off += bc->size;
+        off += bc->nvSize;
+        endsZero = bc->endsWithZeroSized;
+        prev = bc;
         if (a > align) align = a;
     }
     bool ownVirtuals = false;
@@ -1104,6 +1114,7 @@ void Sema::layoutClass(Symbol* cls)
         const Type* elem = ft;
         while (elem && elem->kind == Type::Array) elem = elem->inner;
         if (elem && elem->kind == Type::Class && elem->decl && !elem->decl->layoutDone) layoutClass(elem->decl);
+        if (elem && elem->kind == Type::Class && elem->decl) endsZero = elem->decl->endsWithZeroSized;   // a member of class type has its full size
         int s = m_types.sizeOf(ft), a = m_types.alignOf(ft);
         if (ft->kind == Type::Reference) { s = 8; a = 8; }
         if (pack > 0 && a > pack) a = pack;
@@ -1115,8 +1126,18 @@ void Sema::layoutClass(Symbol* cls)
         if (a > align) align = a;
     }
     if (floor > align) align = floor;
-    if (off == 0) off = 1;
-    cls->size = (off + align - 1) / align * align;
+    cls->nvSize = (off + align - 1) / align * align;
+    cls->size = cls->nvSize;
+    if (cls->size == 0) {
+        // an empty class: size 1 as a complete object, nothing as a base; it leads and ends with itself
+        cls->size = 1;
+        leadsZero = endsZero = true;
+    }
+    cls->leadsWithZeroSized = leadsZero;
+    cls->endsWithZeroSized = endsZero;
+    // an empty base left at the very end of the class sits on its last byte (D8, E {}: E at 7, size 8)
+    for (size_t b = 0; b < cls->bases.size(); ++b)
+        if (cls->bases[b].cls && cls->bases[b].cls->nvSize == 0 && cls->bases[b].offset >= cls->size) cls->bases[b].offset = cls->size - 1;
     cls->align = align;
     cls->declAlign = floor;
     cls->layoutDone = true;

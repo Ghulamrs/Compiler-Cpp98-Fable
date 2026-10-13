@@ -605,6 +605,19 @@ try {
         if ($p.Count -eq 0) { Write-Host "  ok   align${lvl}6.map: functions 16-aligned, sizes consistent, addresses match dumpbin, g_align64 64-aligned" }
         else { Write-Host "  FAIL align${lvl}6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
     }
+    # MSVC's class layout (empty bases): every size and offset cppparse computes for layout.hpp against a
+    # cl-compiled driver that evaluates the same expressions, and objects shared between the two compilers
+    foreach ($lvl in @(0, 1, 2, 3)) {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n "layout$lvl" "..\examples\sample-layout\layout.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\layout${lvl}6.obj") -or $c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL sample-layout at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\layoutdriver$lvl.exe" /I..\examples\sample-layout "..\examples\sample-layout-driver\driver-layout.cpp" "out\x64\layout${lvl}6.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the layout driver (-O$lvl):"; Write-Host $clOut; $failed++; continue }
+        $run = & ".\out\x64\layoutdriver$lvl.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   layoutdriver$lvl.exe: class layouts equal cl's, shared objects read back (-O$lvl)" }
+        else { Write-Host "  FAIL layoutdriver$lvl.exe (-O$lvl):"; Write-Host ($run.Split("`n") | Where-Object { $_ -match 'FAIL' }); $failed++ }
+    }
     if ($failed -ne 0) { throw "$failed version 6 compile check(s) failed" }
 
     Write-Host ""

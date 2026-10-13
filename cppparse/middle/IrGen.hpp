@@ -76,6 +76,9 @@ private:
     const Type* oldType(const sema::Type* t);
     const ClassInfo* classInfo(sema::Symbol* cls);
     int  sizeOf(const sema::Type* t) const { return m_semaTypes.sizeOf(t); }
+    // the bytes a trivial copy moves: none for an empty class, whose byte may belong to a member of the
+    // derived object when it is a base subobject (MSVC places empty bases over other members)
+    int  copySize(const sema::Type* t) const { return t && t->kind == sema::Type::Class && t->decl && t->decl->layoutDone && t->decl->nvSize == 0 ? 0 : sizeOf(t); }
     int  alignOf(const sema::Type* t) const { return m_semaTypes.alignOf(t); }
     bool isClassType(const sema::Type* t) const { t = m_semaTypes.unref(t); return t && t->kind == sema::Type::Class; }
     bool baseOffset(sema::Symbol* derived, sema::Symbol* base, int& offset, int depth = 0) const;

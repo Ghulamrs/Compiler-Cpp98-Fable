@@ -733,9 +733,16 @@ inherited by classes that contain such a member); `alignas` is C++11 and
 not accepted. Globals are placed at their alignment (at least the
 natural boundary of their size, up to 8 bytes, as cl does), and a data
 section is marked with the largest alignment it holds (S129 warns that
-`__declspec(align)` on a local variable is ignored). Test 13 links
+`__declspec(align)` on a local variable is ignored). Empty bases follow
+MSVC without `__declspec(empty_bases)`: an empty base takes no space
+(`struct EB : E { int w; }` is 4 bytes, w at 0), a byte of padding
+separates a base ending with a zero-sized subobject from a following base
+that leads with one (`EM : E, E2 { int w; }` is 8, w at 4), and an empty
+base left at the end of a class sits on its last byte. Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
-size and offset with cl's and checks the globals' values and alignment. Class templates are instantiated from the syntax tree
+size and offset with cl's and checks the globals' values and alignment;
+`examples/sample-layout/` does the same for MSVC's class layout rules at
+-O0 to -O3, with objects written by one compiler and read by the other. Class templates are instantiated from the syntax tree
 with the parameters bound in an instantiation scope (defaults, partial
 specialisations, out-of-line members); function templates are
 instantiated by deduction from the argument types. Diagnostics carry

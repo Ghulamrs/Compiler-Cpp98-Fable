@@ -14,6 +14,9 @@ the default), with the items found since. Each was reproduced with a small progr
   namespace carries a per-unit id); an out-of-class `inline` definition is `f i`.
 - 22, partly: a missing include is fatal; an undeclared function is error S103.
 - 23, partly: a class used before its layout is done and array fields of class type are laid out as cl does.
+- 5 (plan 8): empty bases laid out as MSVC does: no space for an empty base, a padding byte between
+  zero-sized subobjects, an empty base at the end on the last byte (Sema.cpp layoutClass); test 13 runs
+  examples/sample-layout against a cl-compiled driver at -O0..-O3.
 - Lazy instantiation of class template member bodies (MatrixTest.cpp's first blocker).
 - README "known limit" (untyped library results): with the headers included the version 6 front end types
   `strtod` and `std::string::size`; the paragraph describes the legacy self-compile.
@@ -32,7 +35,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | 5 | `using namespace std; printf(...)` ambiguous: candidates not deduplicated (SemaExpr.cpp:390-444) | false error | small | front end |
 | 6 | 21: global destructors never registered with atexit (IrGen.cpp genInitializer) | never run | small-medium | back end |
 | 7 | 18, callee side: variadic prologue does not home rdx/r8/r9; no stdarg.h | garbage | medium | back end |
-| 8 | 5: empty base takes a byte (Sema.cpp:1076-1088) | wrong size | small | layout |
 | 9 | 23: bit-fields ignored; anonymous union/struct members cannot be named | wrong size, false error | medium | layout |
 | 10 | 23: polymorphic base not first: own vptr, not moved first (Sema.cpp:1080, 1093, 1155) | wrong layout | medium | layout |
 | 11 | MatrixTest.cpp: injected class name with arguments (Sema.cpp:368-379); a redeclared function template is a second candidate (Sema.cpp:1033); member templates do not see the enclosing parameters (SemaExpr.cpp:544-572) | does not compile | small-medium | front end |

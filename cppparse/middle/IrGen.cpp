@@ -2609,7 +2609,9 @@ Symbol* IrGen::classOperatorDelete(Symbol* cls, int depth, const char* name, siz
 {
     if (!cls || !cls->members || depth > 32) return 0;
     const std::vector<Symbol*>* v = cls->members->find(name);
-    if (v) for (size_t i = 0; i < v->size(); ++i) if ((*v)[i]->kind == Symbol::Function && !(*v)[i]->params.empty() && (*v)[i]->params.size() <= maxParams) return (*v)[i];
+    // the one-parameter form when the class declares both (C++98, as cl), else the sized one
+    if (v) for (size_t n = 1; n <= maxParams; ++n)
+        for (size_t i = 0; i < v->size(); ++i) if ((*v)[i]->kind == Symbol::Function && (*v)[i]->params.size() == n) return (*v)[i];
     for (size_t b = 0; b < cls->bases.size(); ++b) { Symbol* d = classOperatorDelete(cls->bases[b].cls, depth + 1, name, maxParams); if (d) return d; }
     return 0;
 }

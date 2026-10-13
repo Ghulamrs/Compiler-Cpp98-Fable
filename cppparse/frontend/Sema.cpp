@@ -1381,18 +1381,28 @@ void Sema::completeClass(Symbol* cls)
             tables.back().offset += cls->bases[b].offset;
         }
     }
-    std::map<std::string, size_t> firstOfName;   // where each virtual function's name is first declared
+    std::map<std::string, size_t> firstOfName;   // where each member function's name is first declared
     std::vector<std::pair<std::pair<size_t, size_t>, Symbol*> > fresh;   // new virtuals: (first of name, ~index)
     for (size_t i = 0; i < cls->members->order.size(); ++i) {
         Symbol* m = cls->members->order[i];
         if (m->kind != Symbol::Function || m->isStatic) continue;
-        // does it override a virtual function of a base?
+        // cl groups overloads where the name is first declared, a non-virtual declaration included
+        if (firstOfName.find(m->name) == firstOfName.end()) firstOfName[m->name] = i;
+        // does it override a virtual function of a base? Every slot of the bases' tables is searched, not the
+        // names lookup finds: a middle class may hide an overload it does not override (YB::f(double) over
+        // YA::f(int), YA::f(double): YC::f(int) still overrides YA::f(int))
         Symbol* over = 0;
         for (size_t b = 0; b < cls->bases.size() && !over; ++b) {
-            std::vector<Symbol*> out;
-            lookupMember(cls->bases[b].cls, m->isDestructor ? "~" + cls->bases[b].cls->ctorName() : m->name, out);
-            for (size_t k = 0; k < out.size() && !over; ++k)
-                if (out[k]->kind == Symbol::Function && out[k]->isVirtual && (m->isDestructor || sameSignature(out[k]->type, m->type))) over = out[k];
+            Symbol* bc = cls->bases[b].cls;
+            if (!bc || !bc->isPolymorphic) continue;
+            const size_t nt = bc->vftables.empty() ? 1 : bc->vftables.size();
+            for (size_t t = 0; t < nt && !over; ++t) {
+                const std::vector<Symbol*>& fns = bc->vftables.empty() ? bc->vtable : bc->vftables[t].fns;
+                for (size_t k = 0; k < fns.size() && !over; ++k) {
+                    Symbol* v = fns[k];
+                    if (v && (m->isDestructor ? v->isDestructor : (!v->isDestructor && v->name == m->name && sameSignature(v->type, m->type)))) over = v;
+                }
+            }
         }
         if (over) { m->isVirtual = true; m->overrides = over; }
         if (!m->isVirtual) continue;
@@ -1426,7 +1436,6 @@ void Sema::completeClass(Symbol* cls)
             v.fns[hits[h].second] = m;
             v.thunks[hits[h].second] = v.offset - m->thisAdjust;
         }
-        if (firstOfName.find(m->name) == firstOfName.end()) firstOfName[m->name] = i;
         if (!placed) fresh.push_back(std::make_pair(std::make_pair(firstOfName[m->name], ~i), m));
     }
     // the new virtual functions, as cl orders them: by declaration, but overloads of a name together where the

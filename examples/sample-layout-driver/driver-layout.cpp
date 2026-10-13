@@ -331,6 +331,35 @@ int main()
         deleteTNGlobal(makeTNGlobal());
         expect("::new and ::delete bypass TN's operators", g_tnNew + g_tnDel, 0);
     }
+    printf("review fixes: grouping with a non-virtual name, hidden overrides, both operator delete[] forms\n");
+    {
+        ZG z;
+        const long wantZ[4] = { 1, 2, 3, 4 };
+        char what[64];
+        for (int k = 0; k < 4; ++k) {
+            sprintf(what, "zgCall(&z, %d)", k); expect(what, zgCall(&z, k), wantZ[k]);
+        }
+        expect("cl's z.g()", static_cast<const ZG&>(z).g(), 1);
+        expect("cl's z.f(int)", static_cast<const ZG&>(z).f(1), 2);
+        expect("cl's z.f(double)", static_cast<const ZG&>(z).f(1.0), 3);
+        YA* ya = makeYC();
+        expect("yaCall(YC, f(int))", yaCall(ya, 0), 31);
+        expect("yaCall(YC, f(double))", yaCall(ya, 1), 22);
+        expect("cl's YA* f(int) of cppparse's YC", ya->f(1), 31);
+        expect("cl's YA* f(double) of cppparse's YC", ya->f(1.0), 22);
+        expect("cl's YC* k()", static_cast<YC*>(ya)->k(), 33);
+        YC yc;
+        expect("ycCall(cl's YC, f(int))", ycCall(&yc, 0), 31);
+        expect("ycCall(cl's YC, k())", ycCall(&yc, 1), 33);
+        expect("yaCall(cl's YC, f(int))", yaCall(&yc, 0), 31);
+        delete static_cast<YC*>(ya);
+        g_dnForm = 0;
+        delete[] makeDNArray(2);
+        expect("DN array of cppparse deleted by cl: operator delete[](void*)", g_dnForm, 1);
+        g_dnForm = 0;
+        deleteDNArray(new DN[2]);
+        expect("DN array of cl deleted by cppparse: operator delete[](void*)", g_dnForm, 1);
+    }
     if (failures) { printf("%d FAILED\n", failures); return 1; }
     printf("ALL OK\n");
     return 0;

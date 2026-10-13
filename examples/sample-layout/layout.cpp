@@ -299,3 +299,32 @@ void deleteTNArray(TN* p) { delete[] p; }
 void deleteTMArray(TM* p) { delete[] p; }
 TN* makeTNGlobal() { return ::new TN; }
 void deleteTNGlobal(TN* p) { ::delete p; }
+int ZG::f(char) const { return 4; }
+int ZG::g() const { return 1; }
+int ZG::f(int) const { return 2; }
+int ZG::f(double) const { return 3; }
+int zgCall(const ZG* p, int which)
+{
+    switch (which) {
+    case 0: return p->g();
+    case 1: return p->f(1);
+    case 2: return p->f(1.0);
+    case 3: return p->f('c');
+    }
+    return -1;
+}
+int YA::f(int) const { return 11; }
+int YA::f(double) const { return 12; }
+int YB::f(double) const { return 22; }
+int YC::f(int) const { return 31; }
+int YC::k() const { return 33; }
+int yaCall(const YA* p, int which) { return which == 0 ? p->f(1) : p->f(1.0); }
+int ycCall(const YC* p, int which) { return which == 0 ? p->f(1) : p->k(); }
+YA* makeYC() { return new YC; }
+int g_dnForm = 0;
+DN::DN() : d(1) {}
+DN::~DN() {}
+void DN::operator delete[](void* p) { g_dnForm = 1; free(p); }
+void DN::operator delete[](void* p, size_t) { g_dnForm = 2; free(p); }
+DN* makeDNArray(int n) { return new DN[n]; }
+void deleteDNArray(DN* p) { delete[] p; }

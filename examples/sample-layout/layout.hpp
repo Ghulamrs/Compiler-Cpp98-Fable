@@ -145,6 +145,21 @@ void deleteTNArray(TN* p);
 void deleteTMArray(TM* p);
 TN*  makeTNGlobal();                           // ::new TN
 void deleteTNGlobal(TN* p);                    // ::delete p
+// slot grouping counts a non-virtual declaration of the name (ZG: f(double), f(int), g), and an override of a
+// function a middle class hides is found in the base's table (YC::f(int) overrides YA::f(int) past YB)
+struct ZG { int f(char) const; virtual int g() const; virtual int f(int) const; virtual int f(double) const; };
+struct YA { virtual int f(int) const; virtual int f(double) const; };
+struct YB : YA { virtual int f(double) const; };
+struct YC : YB { virtual int f(int) const; virtual int k() const; };
+int  zgCall(const ZG* p, int which);           // 0 g(), 1 f(1), 2 f(1.0), 3 f('c')
+int  yaCall(const YA* p, int which);           // 0 f(1), 1 f(1.0)
+int  ycCall(const YC* p, int which);           // 0 f(1), 1 k()
+YA*  makeYC();
+// both forms of operator delete[]: the one-parameter one is used (C++98, as cl)
+struct DN { DN(); ~DN(); static void operator delete[](void* p); static void operator delete[](void* p, size_t n); int d; };
+extern int g_dnForm;                           // 1 or 2: which operator delete[] ran
+DN*  makeDNArray(int n);
+void deleteDNArray(DN* p);
 
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \

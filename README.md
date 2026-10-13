@@ -766,7 +766,9 @@ A class's new virtual functions take their slots in declaration order,
 except that the overloads of a name sit together where the name is first
 declared in the class (an overrider counts) and the last declared comes
 first, as cl orders them (`a, f(int), b, f(double), ~V` gives `a,
-f(double), f(int), b, ~V`; layout.hpp OV, OW).
+f(double), f(int), b, ~V`; layout.hpp OV, OW); a non-virtual declaration
+of the name counts too. An override is found among the slots of the
+bases' tables, so a function a middle class hides is still overridden.
 Every other polymorphic base subobject keeps its own vfptr, and the class
 gets a secondary vftable for each (`Symbol::vftables`, named as cl names
 them: `??_7SD@@6BSB@@@`), which the constructor stores next to the primary

@@ -248,6 +248,7 @@ private:
     void   layoutClass(Symbol* cls);
     Symbol* findClassSymbolForQualifier(const cxx::QualifiedName& n, Scope* from);
     Scope* scopeForQualifier(const cxx::QualifiedName& n, Scope* from);
+    Symbol* injectedTemplate(Symbol* s, const cxx::NameComponent& c) const;   // the template an injected name with arguments names
 
     // bodies
     struct PendingBody { Symbol* fn; cxx::Decl* def; Scope* scope; };
@@ -295,6 +296,7 @@ private:
     cxx::Expr*  braceElement(const Type* t, std::vector<cxx::Expr*>& items, size_t& pos, Scope* in);
     void        braceDeclInit(Symbol* var, cxx::Initializer& init, Scope* in);
     const Type* completedArray(const Type* t, const cxx::Initializer& init);
+    bool   completeForSizeof(const Type* t, Scope* in, const cxx::Loc& loc);   // false, with S113, for an incomplete type
     bool   constantValue(cxx::Expr* e, long& out);
     Symbol* classOperator(const std::string& op, cxx::Expr* e, const std::vector<cxx::Expr*>& operands, Scope* in, const Type*& result);
     Symbol* resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report);

@@ -29,7 +29,23 @@ the default), with the items found since. Each was reproduced with a small progr
   globals and functions (arrays, plain aggregates, pointers) is static data with relocations, in .rdata when
   const, as cl emits it; classes with bit-fields stay on the dynamic path (IrGen.cpp, X86.cpp).
 - README "known limit" (untyped library results): with the headers included the version 6 front end types
-  `strtod` and `std::string::size`; the paragraph describes the legacy self-compile.
+  `strtod` and `std::string::size`; the paragraph describes the legacy self-compile. Rewritten: the README now
+  describes the version 6 behaviour (typed results, S103 and no object without a declaration); test 17 checks both.
+- 4 (plan 1): a unit with syntax or semantic errors is not compiled: no object, `.asm` or map (stale ones removed),
+  exit code 1 (main.cpp); test 17, `examples/sample-front/errors.cpp`.
+- 3 (plan 3): `sizeof(T&)` is `sizeof(T)`; sizeof of a declared-only class, of a class inside its own members, of
+  `void` or a function type is S113 (SemaExpr.cpp completeForSizeof); test 17, `sample-front/sizeof-incomplete.cpp`.
+- plan 4: variables, parameters and functions are recorded per parser scope; template-name lookup stops at the
+  innermost scope that declares the name (CxxParser.cpp isTemplateName); test 17, `sample-front/front.cpp`.
+- plan 5: overload candidates are deduplicated by entity before resolution (SemaExpr.cpp resolveOverload), so
+  `using namespace std; printf(...)` is no longer ambiguous; test 17, `sample-front/front.cpp`.
+- plan 11a: the injected class name with template arguments names that specialisation, as a type and as a
+  qualifier (Sema.cpp injectedTemplate); test 17, `sample-front/front.cpp`.
+- plan 11b: a function template declared and then defined is one symbol, matched by its written signature; the
+  definition keeps the declaration's default arguments (Sema.cpp declareTemplate); test 17, `sample-front/front.cpp`.
+- plan 11c: deduction against a template-id in a member template evaluates the arguments that are not its own
+  parameters where the template is (the enclosing instantiation's bound R, a literal) and compares them (SemaExpr.cpp
+  deduce). MatrixTest.cpp now compiles and prints what cl's build prints at -O0 and -O2 (test 17).
 
 ## Plan
 
@@ -38,14 +54,9 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 
 | # | Item | Effect today | Size | Lane |
 |---|---|---|---|---|
-| 1 | 4: object written after errors (driver/main.cpp:313) | broken objects reach the linker | small | front end |
-| 3 | 3: sizeof of an incomplete type accepted, sizeof(T&) = 8 (SemaExpr.cpp:1256) | silent 8 | small | front end |
-| 4 | a local variable does not hide a function template (CxxParser.cpp:211-217) | wrong result | small-medium | front end |
-| 5 | `using namespace std; printf(...)` ambiguous: candidates not deduplicated (SemaExpr.cpp:390-444) | false error | small | front end |
 | 8 | 5: empty base takes a byte (Sema.cpp:1076-1088) | wrong size | small | layout |
 | 9 | 23: bit-fields ignored; anonymous union/struct members cannot be named | wrong size, false error | medium | layout |
 | 10 | 23: polymorphic base not first: own vptr, not moved first (Sema.cpp:1080, 1093, 1155) | wrong layout | medium | layout |
-| 11 | MatrixTest.cpp: injected class name with arguments (Sema.cpp:368-379); a redeclared function template is a second candidate (Sema.cpp:1033); member templates do not see the enclosing parameters (SemaExpr.cpp:544-572) | does not compile | small-medium | front end |
 | 14 | 23: virtual bases laid out inline, no vbptr | wrong values | large | layout (later) |
 | 15 | 22: `_MSC_VER`, `_MT`, `_CPPUNWIND` not predefined (common/Target.cpp) | by choice so far | small | decision |
 

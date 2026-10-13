@@ -318,6 +318,8 @@ private:
 
 // text dump of a translation unit (one node per line, indented), used by --parse6 and the tests
 std::string dumpTranslationUnit(const TranslationUnit& tu);
+// an expression as source-like text, as the dump shows it ("R - 1")
+std::string expressionText(const Expr* e);
 
 struct Counts {
     int namespaces, classes, enums, functionsDefined, functionsDeclared, variables, typedefs, templates, statements, expressions, usings;

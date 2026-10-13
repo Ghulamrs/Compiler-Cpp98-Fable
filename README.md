@@ -304,8 +304,10 @@ Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend`
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
-`obj/debug`. `-NoTests` stops after the build. The test groups (16 as of
-version 6) run against whichever configuration was built.
+`obj/debug`. `-NoTests` stops after the build. The test groups (17 as of
+version 6) run against whichever configuration was built. Test 17 holds the
+front-end regressions of `examples/sample-front/`: units that must be
+rejected with their diagnostics and no object.
 
 A Visual Studio 2022 solution does the same build inside the IDE:
 `cpp\cppparse.sln` with the project `cppparse\cppparse.vcxproj` (x64,
@@ -605,7 +607,9 @@ Every target also has `__cplusplus=199711L`, `__cppparse__=6` and `__STDC__=1`. 
 predefined: code under them is MSVC's alone. The Linux sizes and macros agree with
 `clang --target=x86_64-linux-gnu`, which will be the reference for the Linux back end as cl is for Windows.
 `--compile6` refuses a target without a back end, and stops at a missing include file instead of compiling
-against undeclared names (the analysis modes only warn).
+against undeclared names (the analysis modes only warn). A unit with syntax or semantic errors is not compiled
+either, as with cl: the errors are listed, the exit code is 1, and no object, `.asm` or map is written (one left
+by an earlier run is removed; test 17 checks this on `examples/sample-front/errors.cpp`).
 
 The host is a different matter from the target: cppparse's own sources are strict C++98, and every call outside
 the standard library sits behind `#ifdef _WIN32` with a standard fallback. `common/Parallel.cpp` uses Windows
@@ -677,6 +681,9 @@ a scope stack of the type names it has seen (typedefs, classes, enums,
 template parameters, injected class names, names brought in by using
 directives and anonymous namespaces) and the members of every named
 class or namespace, so `T * x` is a declaration only when `T` is a type,
+`f < x` starts template arguments only when the innermost scope that
+declares `f` declares it as a template (a local variable, a parameter or a
+function named `count` hides `std::count` of `<algorithm>`),
 constructors are recognised by their name, out-of-line members see
 their class's nested types, and reopened namespaces remember their
 earlier parts. Unknown qualified names such as `std::vector<int>` are
@@ -720,7 +727,9 @@ bodies once their class is complete, and for every expression records
 its type, value category, constant value and the entity it refers to.
 Name lookup is unqualified through enclosing scopes and base classes,
 qualified through namespaces and classes, and for members with
-inheritance. Calls, constructors, conversions and operators on class
+inheritance; an entity found along two paths (`::printf` directly and
+through `std`'s `using ::printf` after `using namespace std`) is one
+candidate. Calls, constructors, conversions and operators on class
 operands go through overload resolution with the C++98 implicit
 conversion sequences (exact, promotion, standard, user-defined through
 converting constructors and conversion operators, reference binding,
@@ -737,11 +746,25 @@ section is marked with the largest alignment it holds (S129 warns that
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment. Class templates are instantiated from the syntax tree
 with the parameters bound in an instantiation scope (defaults, partial
-specialisations, out-of-line members); function templates are
-instantiated by deduction from the argument types. Diagnostics carry
+specialisations, out-of-line members); inside an instantiation the
+template's name alone is the injected class name, and with arguments
+(`Matrix<T, C, R>` inside `Matrix<T, R, C>`) it names that specialisation,
+also as a qualifier. Function templates are
+instantiated by deduction from the argument types; a function template
+declared and later defined is one template (the definition takes the
+declaration's default arguments). A member template of a class template
+is declared with each instantiation of the class, so it sees the class's
+bound parameters: deduction against `Matrix<T, R, K>` matches `T` and `R`
+with their values and deduces only `K`. With these, `MatrixTest.cpp`
+(`Matrix.hpp`, `Vector.hpp`) compiles and prints what cl's build prints
+at `-O0` and `-O2` (test 17). Diagnostics carry
 S codes (S100 unknown type, S101 undeclared identifier, S102 no such
 member, S103 undeclared function, S104 const assignment, S105
-conversion, S106 ambiguity, S107 no matching function, ...). The
+conversion, S106 ambiguity, S107 no matching function, S113 incomplete
+type, ...). `sizeof` follows 5.3.3: `sizeof(T&)` is `sizeof(T)`, and a
+class that is only declared, a class inside its own member declarations,
+`void` and function types are rejected with S113 as cl rejects them
+(C2027, C2070) instead of measuring 8 bytes. The
 `--sema6` mode prints the counts and writes `<name>-sym6.txt` with the
 symbols, layouts, vtable slots and instantiations. Test 12 checks
 `sample-opt` (no errors, every name and call resolved, `Buffer<int,4>`
@@ -937,7 +960,7 @@ difference fails the script, and the summary says how many units the
 self-built compiler compiles exactly as the MSVC-built one (all 36). The
 stage takes about three minutes (`-SkipBootstrap` leaves it out).
 `build-cppparse.ps1 -Exe sandbox/out/selfhost/cppparse-self.exe` skips the
-MSVC build and runs all 16 test groups with the self-built compiler. That
+MSVC build and runs all test groups with the self-built compiler. That
 exercised the old pipeline (`analyzer/`), folder mode, the reports and the worker
 threads in self-built code for the first time and found these defects:
 static locals were initialised under a plain guard byte, so two workers
@@ -990,11 +1013,17 @@ const, as cl does: such a table is valid before any initializer runs,
 whatever the link order (the driver's own initializer reads
 `constantTables()` before `self.obj`'s runs).
 
-Known limit: when cppparse compiles its own 51 sources, 23 of about
-290,000 generated lines mix an XMM register with an integer operand.
-They come from calls to library functions that the front end has no
-declaration for (`strtod`, `std::string::size`, ...): their results carry
-no type, so the register allocator and the instruction emitter disagree
-about the register class. ml64 rejects those lines as well; the COFF
-writer reports them by line number. Real declarations for library
-functions are part of the version 6 front end.
+Library calls and their result types: the version 6 front end compiles
+against cppparse's own headers (`include/`), so `strtod` returns `double`
+and `std::string::size` returns `size_t` like any other declared
+function, and a call to a function without a declaration is error S103,
+after which no object is written. All of cppparse's own units compile
+this way (`selfhost.ps1`), and test 17 checks such library results
+against cl's build. The old pipeline (`analyzer/`, versions 3 to 5) still
+has no declarations for library functions: their results carry no type,
+which, when it compiled cppparse's own sources, made the register
+allocator and the instruction emitter disagree about the register class
+(an XMM register with an integer operand, rejected by ml64 and reported by
+the COFF writer). It compiles only part of those sources today (templates,
+function-try-blocks and `std::` classes by value are skipped) and serves
+the reports, not the self-build.

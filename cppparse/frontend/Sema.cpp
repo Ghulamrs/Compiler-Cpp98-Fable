@@ -353,6 +353,16 @@ Symbol* Sema::lookupUnqualified(const std::string& name, Scope* from, bool types
     return 0;
 }
 
+// inside an instantiation the template's name is the injected class name, a typedef of the instantiation; written
+// with template arguments ("Matrix<T, C, R>" inside Matrix<T, R, C>) it names the template, so those arguments
+// select the specialisation (14.6.1/1). Returns the class template then, 0 otherwise
+Symbol* Sema::injectedTemplate(Symbol* s, const cxx::NameComponent& c) const
+{
+    if (!s || !c.hasTemplateArgs || s->kind != Symbol::Typedef || !s->type || s->type->kind != Type::Class || !s->type->decl) return 0;
+    Symbol* tmpl = s->type->decl->instantiatedFrom;
+    return tmpl && tmpl->kind == Symbol::ClassTemplate && tmpl->name == s->name ? tmpl : 0;
+}
+
 Scope* Sema::scopeForQualifier(const cxx::QualifiedName& n, Scope* from)
 {
     // the scope denoted by all components but the last
@@ -376,6 +386,7 @@ Scope* Sema::scopeForQualifier(const cxx::QualifiedName& n, Scope* from)
             }
         }
         if (!s) return 0;
+        if (Symbol* tmpl = injectedTemplate(s, c)) s = tmpl;    // "M<T, C, R>::" inside M<T, R, C>: another instantiation
         if (s->kind == Symbol::Typedef) { const Type* t = s->type; if (t && t->kind == Type::Class && t->decl) s = t->decl; else return 0; }
         if (s->kind == Symbol::ClassTemplate && !c.hasTemplateArgs) {
             // the template's name inside one of its instantiations is the injected class name
@@ -478,6 +489,7 @@ const Type* Sema::namedType(const cxx::QualifiedName& n, Scope* in, const std::s
         }
         return instantiateClassTemplate(s, last.templateArgs, in, loc);
     }
+    if (Symbol* tmpl = injectedTemplate(s, last)) return instantiateClassTemplate(tmpl, last.templateArgs, in, loc);
     if (s->kind == Symbol::Typedef) return s->type ? s->type : m_types.error();
     if (s->kind == Symbol::Class) return m_types.classType(s);
     if (s->kind == Symbol::Enum) return m_types.enumType(s);
@@ -766,6 +778,63 @@ bool sameSignature(const Type* a, const Type* b)
     return true;
 }
 
+// the written form of a function template's declaration, for matching a redeclaration or the definition with an
+// earlier declaration (14.5.5.1: the same template parameters, result and parameter types). Parameter names are
+// left out, template parameter names must agree, and template arguments that are expressions keep their text
+// ("Matrix<T, R - 1, C - 1>"), so two overloads that differ only there stay apart
+std::string nameShape(const cxx::QualifiedName& n);
+
+std::string specShape(const cxx::DeclSpec& s)
+{
+    if (s.kind != cxx::DeclSpec::Named) return s.text();
+    return std::string(s.isConst ? "const " : "") + (s.isVolatile ? "volatile " : "") + nameShape(s.name);
+}
+
+std::string declaratorShape(const cxx::Declarator* d)
+{
+    if (!d) return "";
+    cxx::Declarator unnamed = *d;
+    unnamed.name = cxx::QualifiedName();
+    return unnamed.text();
+}
+
+std::string nameShape(const cxx::QualifiedName& n)
+{
+    std::string s = n.global ? "::" : "";
+    for (size_t i = 0; i < n.parts.size(); ++i) {
+        const cxx::NameComponent& c = n.parts[i];
+        s += (i ? "::" : "") + c.ident;
+        if (!c.hasTemplateArgs) continue;
+        s += "<";
+        for (size_t a = 0; a < c.templateArgs.size(); ++a) {
+            const cxx::TemplateArg& ta = c.templateArgs[a];
+            s += a ? ", " : "";
+            if (ta.type) s += specShape(ta.type->spec) + " " + declaratorShape(ta.type->decl);
+            else s += cxx::expressionText(ta.expr);
+        }
+        s += ">";
+    }
+    return s;
+}
+
+std::string templateSignature(const cxx::Decl* tmpl, const cxx::Decl* inner, const cxx::Declarator* dcl)
+{
+    std::string s = "<";
+    for (size_t i = 0; i < tmpl->templateParams.size(); ++i) {
+        const cxx::TemplateParam* p = tmpl->templateParams[i];
+        s += (i ? ", " : "") + std::string(p->kind == cxx::TemplateParam::Type ? "typename " : p->kind == cxx::TemplateParam::Template ? "template " : "");
+        if (p->kind == cxx::TemplateParam::NonType && p->nonType) s += specShape(p->nonType->spec) + " " + declaratorShape(p->nonType->decl) + " ";
+        s += p->name;
+    }
+    // the result and the function's own declarator parts (const, variadic), then the parameters one by one
+    cxx::Declarator outer = *dcl;
+    if (!outer.parts.empty()) outer.parts.back().params.clear();
+    s += "> " + specShape(inner->spec) + " " + declaratorShape(&outer);
+    const cxx::DeclaratorPart* fp = dcl->functionPart();
+    for (size_t k = 0; fp && k < fp->params.size(); ++k) s += " | " + specShape(fp->params[k]->spec) + " " + declaratorShape(fp->params[k]->decl);
+    return s;
+}
+
 } // namespace
 
 Symbol* Sema::declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::DeclSpec& spec, Scope* in, cxx::Access access, const Type* ft, const std::vector<Symbol*>& params)
@@ -1029,6 +1098,26 @@ void Sema::declareTemplate(cxx::Decl* d, Scope* in, cxx::Access access)
             if (ct) { Symbol* mt = m_prog.newSymbol(Symbol::FunctionTemplate, name, tscope); mt->templateAst = d; mt->templateParams = tparams; mt->declAst = inner; mt->isDependentContext = true; mt->ownerClass = ct; ct->partialSpecs.push_back(mt); tscope->owner = mt; d->semaSym = mt; return; }
             Scope* qs = scopeForQualifier(dcl->name, in);
             if (qs) target = qs;
+        }
+        // a redeclaration, or the definition after a forward declaration, is the same template (one candidate):
+        // the definition takes the symbol over, keeping the default arguments only a declaration gave
+        const std::string sig = templateSignature(d, inner, dcl);
+        const std::vector<Symbol*>* same = target->find(name);
+        for (size_t i = 0; same && i < same->size(); ++i) {
+            Symbol* ex = (*same)[i];
+            if (ex->kind != Symbol::FunctionTemplate || ex->scope != target || !ex->templateAst || !ex->declAst) continue;
+            const cxx::Declarator* exd = ex->declAst->kind == cxx::Decl::Function ? ex->declAst->declarator : (ex->declAst->declarators.empty() ? 0 : ex->declAst->declarators[0].decl);
+            if (!exd || !exd->isFunction() || templateSignature(ex->templateAst, ex->declAst, exd) != sig) continue;
+            if (inner->kind == cxx::Decl::Function) {
+                if (ex->declAst->kind == cxx::Decl::Function) { error(d->loc, "S110", "redefinition of function template '" + ex->qualifiedName() + "'"); d->semaSym = ex; return; }
+                std::vector<cxx::Param*>& np = dcl->parts.back().params;
+                const std::vector<cxx::Param*>& op = exd->parts.back().params;
+                for (size_t k = 0; k < np.size() && k < op.size(); ++k) if (!np[k]->defaultValue) np[k]->defaultValue = op[k]->defaultValue;
+                ex->templateAst = d; ex->declAst = inner; ex->templateParams = tparams;
+                tscope->owner = ex;
+            }
+            d->semaSym = ex;
+            return;
         }
         Symbol* ft = m_prog.newSymbol(Symbol::FunctionTemplate, name, target);
         ft->loc = d->loc; ft->access = access; ft->templateAst = d; ft->templateParams = tparams; ft->declAst = inner; ft->isDependentContext = true;

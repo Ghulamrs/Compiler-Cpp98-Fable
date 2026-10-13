@@ -1,5 +1,6 @@
 // driver-statics.cpp - compiled by cl /O2 and linked with cppparse's statics.obj: sharedA is reached by cl first,
 // sharedB by cppparse first; every object must be constructed once and be the same object on both sides.
+#define STATICS_INLINE __forceinline   // cl's code for konstK is inlined here: it reads the statics as data
 #include "statics.hpp"
 
 #include <stdio.h>
@@ -37,6 +38,23 @@ int main(int argc, char**)
     expect("sharedC cppparse then cl", c2, c1);
     expect("sharedC value", c1, 11);
     expect("constructions after C", g_ctorCalls, 3);
+    // constant-initialised statics: cl (inlined) first, then cppparse, then cl, on the same objects
+    for (int k = 0; k < 3; ++k) {
+        KonstSeen s;
+        if (k == 1) cpp_konstK(s); else konstK(s);
+        float g = (float)(1.0/3) + 1;
+        for (int i = 0; i < k; ++i) g += 1;
+        char name[48];
+        sprintf(name, "konstK u (%s)", k == 1 ? "cppparse" : "cl"); expect(name, s.u, k);
+        sprintf(name, "konstK d == %d.25", k); expect(name, s.d == k + 0.25, 1);
+        sprintf(name, "konstK f == %d", 3 + k); expect(name, s.f == 3.0f + k, 1);
+        sprintf(name, "konstK g float exact"); expect(name, s.g == g, 1);
+        sprintf(name, "konstK z == -%d", k); expect(name, s.z == -k, 1);
+        sprintf(name, "konstK c"); expect(name, s.c, 'b' + k);
+        sprintf(name, "konstK b"); expect(name, s.b, k % 2 == 0);
+        sprintf(name, "konstK t, t2"); expect(name, s.t * 100 + s.t2, 405);
+    }
+    expect("constructions after konstK", g_ctorCalls, 5);
     // a throwing initializer: cppparse first (throws), then cl constructs; and the reverse. Only when
     // cppparse's copies of the inline functions are linked (an argument says they are not): through cl's
     // copy, cppparse's exception would have to unwind a cl frame, which the two runtimes do not support

@@ -23,7 +23,31 @@ struct FlakyQ { int which; FlakyQ(int w); };
 inline FlakyP& flakyX() { static FlakyP x(0); return x; }   // throws first from cppparse
 inline FlakyQ& flakyY() { static FlakyQ y(1); return y; }   // throws first from cl
 
+// statics cl initialises as constants: static data (the folded value, in the function's COMDATs) and no guard,
+// so the counted object after them gets $TSS0 and the second one $TSS1 on both sides. cl /O2 inlines konstK
+// into the driver (STATICS_INLINE is __forceinline there) and reads u, d, f, g, z, c, b as data from whichever
+// unit's COMDAT the linker keeps; each call returns the values and then moves them on, from either side
+#ifndef STATICS_INLINE
+#define STATICS_INLINE inline
+#endif
+struct KonstSeen { int u; double d; float f; float g; double z; char c; bool b; int t; int t2; };
+STATICS_INLINE void konstK(KonstSeen& s)
+{
+    static int u = int();
+    static double d = 1.0/4;
+    static float f = 1.5f*2;
+    static Counted t;
+    static float g = (float)(1.0/3) + 1;
+    static double z = double();
+    static char c = 'a' + 1;
+    static bool b = 0.5;
+    static Counted t2;
+    s.u = u; s.d = d; s.f = f; s.g = g; s.z = z; s.c = c; s.b = b; s.t = t.id; s.t2 = t2.id;
+    ++u; d += 1; f += 1; g += 1; z -= 1; ++c; b = !b;
+}
+
 // cppparse's side
+void cpp_konstK(KonstSeen& s);
 int cpp_touchA();
 int cpp_touchB();
 int cpp_touchC();

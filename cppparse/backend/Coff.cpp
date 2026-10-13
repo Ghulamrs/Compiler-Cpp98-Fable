@@ -922,6 +922,13 @@ bool Encoder::dataLine(const std::string& raw, int line)
         std::string val = values[v];
         std::string lv = lowerText(val);
         if (dir == "REAL8" || dir == "REAL4") {
+            // MASM's encoded real: "03FD0000000000000r", the bits in hex (a folded constant, exactly)
+            const size_t digits = dir == "REAL8" ? 16 : 8;
+            if (lv.size() == digits + 2 && lv[0] == '0' && lv[lv.size() - 1] == 'r' && lv.find_first_not_of("0123456789abcdef", 1) == lv.size() - 1) {
+                for (size_t i = 0; i < digits / 2; ++i)   // little-endian: the last pair of digits first
+                    byte(static_cast<unsigned char>(std::strtoul(lv.substr(lv.size() - 3 - 2 * i, 2).c_str(), 0, 16)));
+                continue;
+            }
             double d = strtod(val.c_str(), 0);
             if (dir == "REAL8") { unsigned char buf[8]; std::memcpy(buf, &d, 8); for (int i = 0; i < 8; ++i) byte(buf[i]); }
             else { float f = static_cast<float>(d); unsigned char buf[4]; std::memcpy(buf, &f, 4); for (int i = 0; i < 4; ++i) byte(buf[i]); }

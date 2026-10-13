@@ -1036,7 +1036,9 @@ reaches it first, tested by `examples/sample-statics` in Test 13; the fast
 path tests the guard for 0 or -1 where cl compares it with the thread's
 epoch, and an initializer that throws hands the guard to
 `_Init_thread_abort` from an unwind-only cleanup, as cl does, so a later call
-retries it); the
+retries it; a static that cl initialises as a constant, `static double d =
+1.0/4;`, `static int u = int();`, is static data with the bytes cl folds and no
+guard, so the guards after it are numbered as cl numbers them); the
 register allocator's linear intervals did not cover loop headers that only
 pass a value on when the value's copies sit in edge blocks laid out after
 the loop, so the header's comparison could take the value's register

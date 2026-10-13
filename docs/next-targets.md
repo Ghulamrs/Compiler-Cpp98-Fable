@@ -96,10 +96,10 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   guarded with cl's thread-safe-statics protocol and names is done (sample-statics in Test 13, with
   _Init_thread_abort for a throwing initializer); class results through pointers to functions,
   `(*fp)(x)`, variadic class arguments and cl's own-members rule for results in rax are done (sample-abi);
-  open: a static local cl initialises as a constant (`static int u = int();`, `static double d = 1.0/4;`,
-  floating constants, value-initialisation) still gets a guard from cppparse (IrGen localDecl,
-  scalarConstant), which shifts every later `$TSS<n>` of the function against cl's, so with cl inlining
-  the function such an object can be constructed twice (repro: review-e t6/d6, run.ps1 t6 d6). Giving such statics a private guard is not enough: cl reads them as static data from the shared COMDAT, so cppparse must emit their folded value as data (needs a floating constant evaluator for IrGlobal data); statics in nested blocks
+  a static local cl initialises as a constant (`static int u = int();`, `static double d = 1.0/4;`,
+  `static float f = 1.5f*2;`, value-initialisation, casts) is static data with cl's folded bytes and no
+  guard (IrGen::foldArith/convertFolded; the bits go out as MASM's encoded reals), so the `$TSS<n>` after
+  it match cl's (konstK in sample-statics, cl inlining it); open: statics in nested blocks
   use cppparse's block numbers, not cl's `?4`/`?6`/`?7` scheme; exceptions do not cross between cl's
   and cppparse's runtimes (a cl throw into a cppparse frame fails fast); vtable slots grouped by overload as MSVC does
   (Sema.cpp:1169-1174) (the destructor slot holding the scalar deleting destructor is done).

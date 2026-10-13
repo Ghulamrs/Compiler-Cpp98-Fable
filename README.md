@@ -961,11 +961,26 @@ recursed without end on a copy constructor when it looked for a converting
 constructor (`c ? T(1) : t`). For linking with MSVC-compiled code,
 constructors return `this` and functions with a hidden result pointer return
 it in `rax` as cl does, narrow results of calls are extended, the `new[]`
-cookie is 8 bytes and the exception runtime's frame chain is per thread. The
-remaining differences from cl's ABI (the virtual destructor slot holds the
-destructor rather than a scalar deleting destructor, classes of 1, 2, 4 or 8
-bytes are passed by address and returned through a hidden pointer, a
-non-polymorphic first base is laid out before a polymorphic one) are not
+cookie is 8 bytes and the exception runtime's frame chain is per thread.
+Class arguments and results follow cl's x64 rules (IrGen::regParamType,
+regReturnType): a class of 1, 2, 4 or 8 bytes without a non-trivial copy
+constructor is passed as an integer of that size in its register or stack
+slot (floats inside it too), any other by the address of a caller-made copy
+that the callee destroys; a C++03 aggregate of those sizes (no user-declared
+constructor, destructor or copy assignment, no bases, no virtual functions,
+no private or protected or reference members, members alike) is returned in
+ax by a non-member or static function, every other class through the
+hidden result pointer (after 	his for member functions), also through
+pointers to functions. examples/sample-abi with its cl-compiled driver
+(Test 13) crosses S1/S2/S4/S8/F2/D1/S3/S12/S16 and classes with
+constructors both ways, calls through pointers to functions (`(*fp)(x)`,
+pointers returned by calls), variadic class arguments (passed as by-value
+parameters would be) and members cl ignores for the result rule (a member
+with a constructor or private data still allows `rax`; a const or reference
+member, which deletes the copy assignment, does not). The remaining differences from cl's ABI (the
+virtual destructor slot holds the destructor rather than a scalar deleting
+destructor, a non-polymorphic first base is laid out before a polymorphic
+one) are not
 hit between the units of cppparse on `sample-opt`: `sandbox/scripts/mix.ps1`,
 which links each cppparse object among cl-built ones, runs every
 combination correctly.
@@ -984,8 +999,15 @@ exercised the old pipeline (`analyzer/`), folder mode, the reports and the worke
 threads in self-built code for the first time and found these defects:
 static locals were initialised under a plain guard byte, so two workers
 could both run the initializer or use an object not yet built (the guard
-is now taken through a recursive lock in the runtime,
-`cppparse_static_enter`/`leave`, as cl's thread-safe statics do); the
+is now cl's own protocol: an int guard named as cl names it,
+`?$TSS<n>@...`, a COMDAT for an inline function, with the CRT's
+`_Init_thread_header`/`_Init_thread_footer`, so an inline function's
+static object shared with cl-compiled units is built once whichever side
+reaches it first, tested by `examples/sample-statics` in Test 13; the fast
+path tests the guard for 0 or -1 where cl compares it with the thread's
+epoch, and an initializer that throws hands the guard to
+`_Init_thread_abort` from an unwind-only cleanup, as cl does, so a later call
+retries it); the
 register allocator's linear intervals did not cover loop headers that only
 pass a value on when the value's copies sit in edge blocks laid out after
 the loop, so the header's comparison could take the value's register

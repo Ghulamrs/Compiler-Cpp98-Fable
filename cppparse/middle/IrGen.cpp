@@ -42,8 +42,8 @@ void zeroData(std::vector<IrDataItem>& out, int n)
 } // namespace
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
-    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_tryCount(0),
-      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_staticCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
+    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_tryCount(0),
+      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_staticCount(0), m_guardCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
 {
@@ -733,7 +733,9 @@ int IrGen::argument(cxx::Expr* a, const sema::Type* pt, int line)
         const sema::Type* ct = m_semaTypes.unqualified(m_semaTypes.unref(pt));
         int slot = newLocal("tmp.arg", ct, true);
         LValue tl; tl.kind = LValue::Local; tl.local = slot; tl.type = ct;
-        return materialize(a, ct, addressOf(tl, line), line);
+        int addr = materialize(a, ct, addressOf(tl, line), line);
+        if (const sema::Type* it = regParamType(ct)) { LValue m; m.kind = LValue::Mem; m.addr = addr; m.type = it; return load(m, it, line); }   // its bytes in a register
+        return addr;
     }
     int v = value(a);
     if (pt) v = convert(v, exprType(a), pt, line);
@@ -746,19 +748,22 @@ int IrGen::callFunction(Symbol* fn, int thisPtr, int sretAddr, const std::vector
     const sema::Type* ft = fn->type;
     const sema::Type* rt = ft && ft->kind == sema::Type::Function ? ft->inner : m_semaTypes.basic(sema::Type::Void);
     bool sret = isClassType(rt) && !isReference(rt);
-    IrInst in = make(IrInst::Call, sret ? m_semaTypes.basic(sema::Type::Void) : rt, line);
+    const sema::Type* retReg = sret ? regReturnType(fn, rt) : 0;
+    IrInst in = make(IrInst::Call, retReg ? retReg : sret ? m_semaTypes.basic(sema::Type::Void) : rt, line);
     in.sub = irName(fn);
     if (thisPtr >= 0) in.args.push_back(IrOperand::temp(thisPtr, oldType(m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass)))));
     int retSlot = -1;
     if (sret) {
         if (sretAddr < 0) { retSlot = newLocal("tmp.ret", m_semaTypes.unqualified(rt), true); LValue tl; tl.kind = LValue::Local; tl.local = retSlot; tl.type = m_semaTypes.unqualified(rt); sretAddr = addressOf(tl, line); }
-        in.args.push_back(IrOperand::temp(sretAddr, oldType(m_semaTypes.pointer(rt))));
+        if (!retReg) in.args.push_back(IrOperand::temp(sretAddr, oldType(m_semaTypes.pointer(rt))));
     }
     for (size_t a = firstArg; a < args.size(); ++a) {
         size_t p = a - firstArg;
         const sema::Type* pt = ft && p < ft->params.size() ? ft->params[p] : 0;
+        // a class past the named parameters (variadic) goes as a by-value parameter of its type would
+        if (!pt && isClassType(exprType(args[a])) && !isReference(exprType(args[a]))) pt = m_semaTypes.unqualified(m_semaTypes.unref(exprType(args[a])));
         int v = argument(args[a], pt, line);
-        in.args.push_back(IrOperand::temp(v, oldType(pt ? (isReference(pt) ? m_semaTypes.pointer(m_semaTypes.unref(pt)) : (isClassType(pt) ? m_semaTypes.pointer(pt) : pt)) : m_semaTypes.decay(exprType(args[a])))));
+        in.args.push_back(IrOperand::temp(v, oldType(pt ? (isReference(pt) ? m_semaTypes.pointer(m_semaTypes.unref(pt)) : (isClassType(pt) ? (regParamType(pt) ? regParamType(pt) : m_semaTypes.pointer(pt)) : pt)) : m_semaTypes.decay(exprType(args[a])))));
     }
     // default arguments
     if (ft) for (size_t p = args.size() - firstArg; p < ft->params.size() && p < fn->params.size(); ++p) {
@@ -766,11 +771,12 @@ int IrGen::callFunction(Symbol* fn, int thisPtr, int sretAddr, const std::vector
         if (!def) break;
         std::vector<cxx::Expr*> one; one.push_back(def);
         int v = argument(def, ft->params[p], line);
-        in.args.push_back(IrOperand::temp(v, oldType(isReference(ft->params[p]) ? m_semaTypes.pointer(m_semaTypes.unref(ft->params[p])) : ft->params[p])));
+        in.args.push_back(IrOperand::temp(v, oldType(isReference(ft->params[p]) ? m_semaTypes.pointer(m_semaTypes.unref(ft->params[p])) : regParamType(ft->params[p]) ? regParamType(ft->params[p]) : isClassType(ft->params[p]) ? m_semaTypes.pointer(ft->params[p]) : ft->params[p])));
     }
     if (virtualCall && fn->isVirtual && fn->vtableSlot >= 0 && thisPtr >= 0) { in.op = IrInst::VCall; in.extra = fn->vtableSlot; }
     if (isReference(rt)) in.type = oldType(m_semaTypes.pointer(rt->inner));
     int r = emit(in);
+    if (retReg) { LValue m; m.kind = LValue::Mem; m.addr = sretAddr; m.type = retReg; store(m, r, retReg, line); }   // the result's bytes came in rax
     if (retSlot >= 0 && needsDtor(rt)) registerCleanup(retSlot, rt, false, 1, line);
     return sret ? sretAddr : r;
 }
@@ -827,6 +833,70 @@ bool IrGen::needsCopyCtor(const sema::Type* t, int depth) const
     for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->bases[b].cls && needsCopyCtor(cls->bases[b].cls->type, depth + 1)) return true;
     for (size_t f = 0; f < cls->fields.size(); ++f) if (!isReference(cls->fields[f]->type) && needsCopyCtor(cls->fields[f]->type, depth + 1)) return true;
     return false;
+}
+
+// MSVC x64: a class object of 1, 2, 4 or 8 bytes is passed as an integer of that size (in a register or its
+// stack slot) unless copying it needs a constructor; then, like any other size, by address of a copy
+const sema::Type* IrGen::regParamType(const sema::Type* t) const
+{
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    if (!u || u->kind != sema::Type::Class || !u->decl || isReference(t) || needsCopyCtor(u)) return 0;
+    for (size_t b = 0; b < u->decl->bases.size(); ++b) if (u->decl->bases[b].isVirtual) return 0;
+    switch (sizeOf(u)) {
+    case 1: return m_semaTypes.basic(sema::Type::UChar);
+    case 2: return m_semaTypes.basic(sema::Type::UShort);
+    case 4: return m_semaTypes.basic(sema::Type::UInt);
+    case 8: return m_semaTypes.basic(sema::Type::ULongLong);
+    default: return 0;
+    }
+}
+
+// a C++03 aggregate-like class (cl's rule): no user-declared constructor, destructor or copy assignment, no
+// bases, no virtual functions, no private or protected data members, no reference members, members alike
+bool IrGen::podForReturn(const sema::Type* t, int depth) const
+{
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    while (u && u->kind == sema::Type::Array) u = m_semaTypes.unqualified(u->inner);
+    if (!u || depth > 32) return false;
+    if (u->kind != sema::Type::Class) return false;
+    Symbol* cls = u->decl;
+    if (!cls || cls->hasUserCtor || cls->hasCopyCtor || cls->hasDtor || cls->hasCopyAssign || cls->isPolymorphic || !cls->bases.empty()) return false;
+    for (size_t f = 0; f < cls->fields.size(); ++f) {
+        Symbol* m = cls->fields[f];
+        if (m->access == cxx::AccessPrivate || m->access == cxx::AccessProtected) return false;
+    }
+    // members count only through the class's implicit members: a trivial destructor and a trivial,
+    // not deleted copy assignment (a const or reference member deletes it)
+    return !needsDtor(u) && !needsCopyAssign(u) && !copyAssignDeleted(u, 0);
+}
+
+bool IrGen::copyAssignDeleted(const sema::Type* t, int depth) const
+{
+    const sema::Type* u = m_semaTypes.unref(t);
+    if (!u || depth > 32) return false;
+    if (isReference(t)) return true;
+    while (u->kind == sema::Type::Array) { if (u->isConst) return true; u = u->inner; }
+    if (u->isConst) return true;
+    u = m_semaTypes.unqualified(u);
+    if (u->kind != sema::Type::Class || !u->decl || u->decl->hasCopyAssign) return false;
+    for (size_t b = 0; b < u->decl->bases.size(); ++b) if (u->decl->bases[b].cls && copyAssignDeleted(u->decl->bases[b].cls->type, depth + 1)) return true;
+    for (size_t f = 0; f < u->decl->fields.size(); ++f) if (copyAssignDeleted(u->decl->fields[f]->type, depth + 1)) return true;
+    return false;
+}
+
+// the integer type a class result of fn comes back in (rax), or 0 for the hidden result pointer; member
+// functions always use the hidden pointer (fn 0: a call through a pointer to function)
+const sema::Type* IrGen::regReturnType(Symbol* fn, const sema::Type* rt) const
+{
+    if ((fn && fn->ownerClass && !fn->isStatic) || !rt || isReference(rt) || !isClassType(rt)) return 0;
+    if (!podForReturn(rt, 0)) return 0;
+    switch (sizeOf(m_semaTypes.unqualified(rt))) {
+    case 1: return m_semaTypes.basic(sema::Type::UChar);
+    case 2: return m_semaTypes.basic(sema::Type::UShort);
+    case 4: return m_semaTypes.basic(sema::Type::UInt);
+    case 8: return m_semaTypes.basic(sema::Type::ULongLong);
+    default: return 0;
+    }
 }
 
 bool IrGen::needsCopyAssign(const sema::Type* t, int depth) const
@@ -1066,6 +1136,17 @@ void IrGen::runCleanup(const Cleanup& c, bool guarded, int line)
         condbr(toBool(load(fl, b, line), b, line), doBlock, next, line);
         m_block = doBlock;
     }
+    if (!c.abortGuard.empty()) {
+        // a static local's initializer threw: the guard goes back to "not built", so a later call retries
+        LValue gl; gl.kind = LValue::Global; gl.global = c.abortGuard; gl.type = c.type;
+        IrInst ab = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+        ab.sub = "_Init_thread_abort";
+        ab.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(c.type))));
+        emit(ab);
+        store(fl, constant(0, b, line), b, line);
+        if (guarded) { br(next, line); m_block = next; }
+        return;
+    }
     int addr;
     if (c.viaPointer) { LValue pl; pl.kind = LValue::Local; pl.local = c.slot; pl.type = m_semaTypes.pointer(c.type); addr = load(pl, pl.type, line); }
     else { LValue ol; ol.kind = LValue::Local; ol.local = c.slot; ol.type = c.type; addr = addressOf(ol, line); }
@@ -1212,6 +1293,12 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
     if (!fn || fn->kind != Symbol::Function) {
         // function pointer or undeclared function
         IrInst in = make(IrInst::Call, rt, line);
+        // (*fp)(x), (fp)(x): the pointer itself is called
+        while ((callee->kind == cxx::Expr::Paren || (callee->kind == cxx::Expr::Unary && callee->text == "*")) && callee->kids.size() == 1 && !callee->semaSym) {
+            const sema::Type* kt = m_semaTypes.unref(exprType(callee->kids[0]));
+            if (!kt || !((kt->kind == sema::Type::Pointer && kt->inner->kind == sema::Type::Function) || kt->kind == sema::Type::Function || callee->kind == cxx::Expr::Paren)) break;
+            callee = callee->kids[0];
+        }
         const sema::Type* ct = m_semaTypes.unref(exprType(callee));
         if (ct->kind == sema::Type::Pointer && ct->inner->kind == sema::Type::Function) {
             int fp = value(callee);
@@ -1222,8 +1309,27 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
             if (callee->kind == cxx::Expr::Member) { cxx::Expr* obj = callee->kids[0]; in.args.push_back(IrOperand::temp(callee->arrowMember ? value(obj) : addressOf(lvalue(obj), line), oldType(m_semaTypes.decay(exprType(obj))))); }
             in.sub = name + "?";
         }
-        for (size_t a = 1; a < e->kids.size(); ++a) { int v = value(e->kids[a]); in.args.push_back(IrOperand::temp(v, oldType(m_semaTypes.decay(exprType(e->kids[a]))))); }
+        const sema::Type* pft = ct->kind == sema::Type::Pointer && ct->inner->kind == sema::Type::Function ? ct->inner : 0;
+        for (size_t a = 1; a < e->kids.size(); ++a) {
+            const sema::Type* pt = pft && a - 1 < pft->params.size() ? pft->params[a - 1] : 0;
+            if (pt && isClassType(pt) && !isReference(pt)) { int v = argument(e->kids[a], pt, line); in.args.push_back(IrOperand::temp(v, oldType(regParamType(pt) ? regParamType(pt) : m_semaTypes.pointer(pt)))); continue; }
+            int v = value(e->kids[a]); in.args.push_back(IrOperand::temp(v, oldType(m_semaTypes.decay(exprType(e->kids[a])))));
+        }
         if (!rt || rt->kind == sema::Type::Error || rt->kind == sema::Type::Dependent) in.type = m_types.builtin(Type::Long);
+        if (pft && isClassType(rt) && !isReference(rt)) {
+            // a class result: the hidden result pointer after the callee, or the bytes in rax
+            const sema::Type* ru = m_semaTypes.unqualified(m_semaTypes.unref(rt));
+            int slot = sretAddr >= 0 ? -1 : newLocal("tmp.ret", ru, true);
+            int addr = sretAddr;
+            if (slot >= 0) { LValue tl; tl.kind = LValue::Local; tl.local = slot; tl.type = ru; addr = addressOf(tl, line); }
+            const sema::Type* retReg = regReturnType(0, ru);
+            if (retReg) in.type = oldType(retReg);
+            else { in.type = oldType(m_semaTypes.basic(sema::Type::Void)); in.args.insert(in.args.begin() + 1, IrOperand::temp(addr, oldType(m_semaTypes.pointer(ru)))); }
+            int r = emit(in);
+            if (retReg) { LValue m; m.kind = LValue::Mem; m.addr = addr; m.type = retReg; store(m, r, retReg, line); }
+            if (slot >= 0 && needsDtor(ru)) registerCleanup(slot, ru, false, 1, line);
+            return addr;
+        }
         return emit(in);
     }
     int thisPtr = -1;
@@ -1674,10 +1780,10 @@ void IrGen::localDecl(cxx::Decl* d)
             // emits the same symbol (the global is then a COMDAT like the function)
             std::string gname = m_out->name + "::" + var->name + "#" + numText(m_staticCount++);
             m_staticNames[var] = gname;
+            long block = 2;
             if (m_msvcNames && m_x86) {
                 // cl numbers the blocks of a function; the body is 2. A nested block gets 2 plus its position
                 // among the function's blocks: unique within the function, though not always cl's number
-                long block = 2;
                 if (var->scope && !(var->scope->parent && var->scope->parent->kind == Scope::Function)) {
                     long k = 0;
                     for (size_t si = 0; si < m_prog.scopes.size(); ++si) {
@@ -1710,33 +1816,65 @@ void IrGen::localDecl(cxx::Decl* d)
             const bool destroyed = !isReference(var->type) && needsDtor(vt);   // registered with atexit once built
             bool needsCode = !scalarConstant && (id.init.kind != cxx::Initializer::None || needsDefaultCtor(vt) || destroyed);
             if (needsCode) {
+                // cl's thread-safe statics, so that an inline function's object (a COMDAT shared with cl's units)
+                // is built once whichever side runs first: an int guard "$TSS<n>", 0 before, -1 while some
+                // thread builds the object, then the CRT's epoch (negative). A guard of 0 or -1 leads to
+                // _Init_thread_header, which leaves it -1 when this thread is to run the initializer (it then
+                // calls _Init_thread_footer) and waits for another thread that is running it. cl's fast path
+                // compares with the thread's epoch instead (a TLS read); this test is equivalent for its values
+                const sema::Type* it = m_semaTypes.basic(sema::Type::Int);
+                const sema::Type* ut = m_semaTypes.basic(sema::Type::UInt);
                 const sema::Type* b = m_semaTypes.basic(sema::Type::Bool);
                 IrGlobal guard;
                 guard.name = gname + "$guard";
-                guard.size = 1;
+                guard.size = 4;
+                guard.align = 4;
                 guard.isFloat = false;
                 guard.linkOnce = m_out->linkOnce;
                 guard.internal = !guard.linkOnce;
-                if (m_x86) m_x86->addGlobal(guard);
-                LValue gl; gl.kind = LValue::Global; gl.global = guard.name; gl.type = b;
-                // thread-safe as cl's: a clear guard leads to the runtime's lock, which says whether this
-                // thread runs the initializer (another one may have finished it meanwhile); the runtime sets
-                // the guard after the object is built and releases the lock
+                if (m_x86) {
+                    if (m_msvcNames) m_x86->registerGlobalName(guard.name, msvcMangleStaticGuard(*m_fn, block, m_guardCount));
+                    m_x86->addGlobal(guard);
+                }
+                ++m_guardCount;
+                LValue gl; gl.kind = LValue::Global; gl.global = guard.name; gl.type = it;
                 int done = m_out->newBlock("static.done"), check = m_out->newBlock("static.lock"), doInit = m_out->newBlock("static.init");
-                condbr(toBool(load(gl, b, line), b, line), done, check, line);
+                // one statement per emitted value: the order of a call's arguments differs between compilers,
+                // and the self-built compiler must produce the same code as the MSVC-built one
+                int g0 = load(gl, it, line);
+                int one = constant(1, ut, line);
+                int biased = binary("+", g0, ut, one, ut, ut, line);
+                int one2 = constant(1, ut, line);
+                condbr(binary("<=", biased, ut, one2, ut, b, line), check, done, line);
                 m_block = check;
-                IrInst enter = make(IrInst::Call, m_semaTypes.basic(sema::Type::Int), line);
-                enter.sub = "cppparse_static_enter";
-                enter.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(b))));
-                condbr(emit(enter), doInit, done, line);
+                IrInst enter = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+                enter.sub = "_Init_thread_header";
+                enter.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(it))));
+                emit(enter);
+                int g1 = load(gl, it, line);
+                int minus1 = constant(-1, it, line);
+                condbr(binary("==", g1, it, minus1, it, b, line), doInit, done, line);
                 m_block = doInit;
+                // an initializer that throws hands the guard to _Init_thread_abort (as cl's unwind funclet
+                // does): an unwind-only cleanup whose flag is set while the initializer runs
+                Cleanup ac;
+                ac.type = it;
+                ac.unwindOnly = true;
+                ac.abortGuard = guard.name;
+                ac.flag = newLocal("flag." + guard.name, b, true);
+                LValue afl; afl.kind = LValue::Local; afl.local = ac.flag; afl.type = b;
+                int on = constant(1, b, line);
+                store(afl, on, b, line);
+                m_flagged.push_back(ac);
                 LValue lv; lv.kind = LValue::Global; lv.global = gname; lv.type = m_semaTypes.unref(var->type);
                 initObject(lv, var->type, var, id, line);
                 endFullExpr(line);
+                int off = constant(0, b, line);
+                store(afl, off, b, line);
                 if (destroyed) registerAtExit(gname, lv.type, line);
                 IrInst leave = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
-                leave.sub = "cppparse_static_leave";
-                leave.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(b))));
+                leave.sub = "_Init_thread_footer";
+                leave.args.push_back(IrOperand::temp(addressOf(gl, line), oldType(m_semaTypes.pointer(it))));
                 emit(leave);
                 br(done, line);
                 m_block = done;
@@ -2043,7 +2181,8 @@ void IrGen::prologue(Symbol* fn)
     if (m_out->internal) m_out->linkOnce = false;   // every unit keeps its own copy
     const sema::Type* rt = fn->type && fn->type->kind == sema::Type::Function ? fn->type->inner : m_semaTypes.basic(sema::Type::Void);
     bool sret = isClassType(rt) && !isReference(rt);
-    m_out->retType = oldType(sret ? m_semaTypes.basic(sema::Type::Void) : (isReference(rt) ? m_semaTypes.pointer(rt->inner) : rt));
+    m_retReg = sret ? regReturnType(fn, rt) : 0;
+    m_out->retType = oldType(m_retReg ? m_retReg : sret ? m_semaTypes.basic(sema::Type::Void) : (isReference(rt) ? m_semaTypes.pointer(rt->inner) : rt));
     m_out->hasThis = fn->ownerClass && !fn->isStatic;
     if (m_out->hasThis) {
         const sema::Type* ct = m_semaTypes.classType(fn->ownerClass);
@@ -2054,15 +2193,22 @@ void IrGen::prologue(Symbol* fn)
         m_out->locals[static_cast<size_t>(slot)].nonNull = true;
     }
     m_sretSlot = -1;
-    if (sret) {
+    if (sret && !m_retReg) {
         m_sretSlot = newLocal("sret", m_semaTypes.pointer(rt), false);
         m_out->locals[static_cast<size_t>(m_sretSlot)].isParam = true;
         m_out->locals[static_cast<size_t>(m_sretSlot)].nonNull = true;
     }
     std::vector<std::pair<int, const sema::Type*> > byValue;   // class objects the callee owns
+    std::vector<std::pair<int, Symbol*> > inRegister;           // small class objects that arrive as an integer
     for (size_t p = 0; p < fn->params.size(); ++p) {
         Symbol* ps = fn->params[p];
         const sema::Type* pt = ps->type;
+        if (const sema::Type* it = regParamType(pt)) {
+            int slot = newLocal(ps->name.empty() ? "arg" + numText(static_cast<long>(p)) : ps->name + ".bits", it, false);
+            m_out->locals[static_cast<size_t>(slot)].isParam = true;
+            inRegister.push_back(std::make_pair(slot, ps));
+            continue;
+        }
         if (isClassType(pt) && !isReference(pt)) pt = m_semaTypes.pointer(pt);   // objects arrive by address
         int slot = newLocal(ps->name.empty() ? "arg" + numText(static_cast<long>(p)) : ps->name, pt, false);
         m_out->locals[static_cast<size_t>(slot)].isParam = true;
@@ -2079,7 +2225,37 @@ void IrGen::prologue(Symbol* fn)
     m_block = m_bodyBlock;
     m_unwindId = m_tryCount++;
     m_tryStack.push_back(m_unwindId);
-    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0;
+    m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0; m_guardCount = 0;
+    for (size_t i = 0; i < inRegister.size(); ++i) {
+        // the object lives in a local of the callee; the parameter name reaches it through a pointer, as for
+        // objects passed by address
+        Symbol* ps = inRegister[i].second;
+        const sema::Type* ct = m_semaTypes.unqualified(m_semaTypes.unref(ps->type));
+        const sema::Type* it = regParamType(ct);
+        int obj = newLocal(ps->name.empty() ? "argobj" : ps->name + ".obj", ct, true);
+        LValue ol; ol.kind = LValue::Local; ol.local = obj; ol.type = ct;
+        int addr = addressOf(ol, fn->loc.line);
+        LValue bl; bl.kind = LValue::Local; bl.local = inRegister[i].first; bl.type = it;
+        LValue ml; ml.kind = LValue::Mem; ml.addr = addr; ml.type = it;
+        store(ml, load(bl, it, fn->loc.line), it, fn->loc.line);
+        int ptr = newLocal(ps->name.empty() ? "argptr" : ps->name, m_semaTypes.pointer(ct), false);
+        m_out->locals[static_cast<size_t>(ptr)].nonNull = true;
+        LValue pl; pl.kind = LValue::Local; pl.local = ptr; pl.type = m_semaTypes.pointer(ct);
+        store(pl, addr, pl.type, fn->loc.line);
+        m_slots[ps] = ptr;
+        byValue.push_back(std::make_pair(ptr, ps->type));
+        ps->type = m_semaTypes.reference(ps->type);
+    }
+    if (m_retReg) {
+        // the result is built in a local and its bytes are returned in rax (abiResult)
+        int obj = newLocal("result", m_semaTypes.unqualified(rt), true);
+        LValue ol; ol.kind = LValue::Local; ol.local = obj; ol.type = m_semaTypes.unqualified(rt);
+        int addr = addressOf(ol, fn->loc.line);
+        m_sretSlot = newLocal("sret", m_semaTypes.pointer(rt), false);
+        m_out->locals[static_cast<size_t>(m_sretSlot)].nonNull = true;
+        LValue pl; pl.kind = LValue::Local; pl.local = m_sretSlot; pl.type = m_semaTypes.pointer(rt);
+        store(pl, addr, pl.type, fn->loc.line);
+    }
     for (size_t i = 0; i < byValue.size(); ++i)
         if (needsDtor(byValue[i].second)) registerCleanup(byValue[i].first, byValue[i].second, true, 0, fn->loc.line);
 }
@@ -2254,7 +2430,9 @@ void IrGen::abiResult(IrInst& r, int line)
     else if (m_sretSlot >= 0) {
         const IrLocal& l = m_out->locals[static_cast<size_t>(m_sretSlot)];
         IrInst ld = make(IrInst::LoadLocal, 0, line); ld.type = l.type; ld.args.push_back(IrOperand::local(m_sretSlot, l.type));
-        r.args.push_back(IrOperand::temp(emit(ld), l.type));
+        int p = emit(ld);
+        if (m_retReg) { LValue m; m.kind = LValue::Mem; m.addr = p; m.type = m_retReg; r.args.push_back(IrOperand::temp(load(m, m_retReg, line), oldType(m_retReg))); }   // the bytes in rax
+        else r.args.push_back(IrOperand::temp(p, l.type));
     }
 }
 

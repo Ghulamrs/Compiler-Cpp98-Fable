@@ -3,6 +3,7 @@
 #include "Sema.hpp"
 #include "PathUtil.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -223,7 +224,7 @@ const Type* TypeTable::arithmeticResult(const Type* a, const Type* b)
 Symbol::Symbol()
     : kind(Variable), scope(0), type(0), access(cxx::AccessPublic), members(0), isDefinition(false), isStruct(false), isUnion(false),
       isPolymorphic(false), isAbstract(false), layoutDone(false), size(0), align(1), nvSize(0),
-      leadsWithZeroSized(false), endsWithZeroSized(false), vptrOffset(-1), classAst(0),
+      leadsWithZeroSized(false), endsWithZeroSized(false), vptrOffset(-1), vbptrOffset(-1), classAst(0),
       isVirtual(false), isPureVirtual(false), isStatic(false), isExtern(false), isInline(false), isExplicit(false), isConstructor(false),
       isDestructor(false), isConversion(false), isOperator(false), isFriendDecl(false), hasBody(false), isExternC(false),
       definition(0), declAst(0), body(0), vtableSlot(-1), thisAdjust(0), vfptrOffset(0), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
@@ -1201,6 +1202,50 @@ int declaredFloor(const Type* t)
     return t && t->kind == Type::Class && t->decl && t->decl->layoutDone ? t->decl->declAlign : 0;
 }
 
+// MSVC's vbtables of a class whose virtual bases are placed: its own vbptr's (when it shares none) and those
+// inherited from its bases, the one it shares extended with its new virtual bases. Tables that would share a name
+// are named apart by the bases they come through, as cl (and clang's MicrosoftVTableContext) does
+void layoutVbtables(Symbol* cls, int sharedVb)
+{
+    std::vector<VbTable> tables;
+    if (sharedVb < 0) {
+        VbTable t;
+        t.offset = cls->vbptrOffset; t.introducedBy = cls; t.order = cls->vbases; t.nextToMangle = cls;
+        tables.push_back(t);
+    }
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        const BaseClass& bc = cls->bases[b];
+        if (!bc.cls) continue;
+        for (size_t k = 0; k < bc.cls->vbtables.size(); ++k) {
+            VbTable t = bc.cls->vbtables[k];
+            t.offset += bc.offset;
+            if (t.path.empty() || t.path.back() != bc.cls) t.nextToMangle = bc.cls;
+            if (static_cast<int>(b) == sharedVb && bc.cls->vbtables[k].offset == bc.cls->vbptrOffset)
+                for (size_t v = 0; v < cls->vbases.size(); ++v) if (std::find(t.order.begin(), t.order.end(), cls->vbases[v]) == t.order.end()) t.order.push_back(cls->vbases[v]);
+            tables.push_back(t);
+        }
+    }
+    for (size_t t = 0; t < tables.size(); ++t) {
+        VbTable& vt = tables[t];
+        const int self = vt.entries.empty() ? -vt.offset : vt.entries[0];
+        vt.entries.assign(1, self);
+        for (size_t k = 0; k < vt.order.size(); ++k) {
+            const size_t v = static_cast<size_t>(std::find(cls->vbases.begin(), cls->vbases.end(), vt.order[k]) - cls->vbases.begin());
+            vt.entries.push_back(v < cls->vbaseOffsets.size() ? cls->vbaseOffsets[v] - vt.offset : 0);
+        }
+    }
+    for (int round = 0; round < 32; ++round) {
+        bool moved = false;
+        std::vector<bool> clash(tables.size(), false);
+        for (size_t t = 0; t < tables.size(); ++t)
+            for (size_t u = 0; u < tables.size(); ++u) if (u != t && tables[u].path == tables[t].path) clash[t] = true;
+        for (size_t t = 0; t < tables.size(); ++t)
+            if (clash[t] && tables[t].nextToMangle && (tables[t].path.empty() || tables[t].path.back() != tables[t].nextToMangle)) { tables[t].path.push_back(tables[t].nextToMangle); moved = true; }
+        if (!moved) break;
+    }
+    cls->vbtables = tables;
+}
+
 } // namespace
 
 void Sema::layoutClass(Symbol* cls)
@@ -1222,6 +1267,7 @@ void Sema::layoutClass(Symbol* cls)
             Symbol* bc = cls->bases[b].cls;
             if (!bc) continue;
             if (!bc->layoutDone) layoutClass(bc);
+            if (cls->bases[b].isVirtual) continue;           // placed after the non-virtual part
             if (bc->isPolymorphic == (pass == 0)) baseOrder.push_back(b);
         }
     const Symbol* prev = 0;
@@ -1254,6 +1300,20 @@ void Sema::layoutClass(Symbol* cls)
         const int va = pack > 0 && pack < 8 ? pack : 8;
         if (align < va) align = va;
     } else if (vptr) cls->vptrOffset = 0;
+    // MSVC's virtual bases: every one, direct or inherited, in cl's order (a base's own virtual bases before it).
+    // The class shares the vbptr of its first non-virtual base that has one, or gets its own after the
+    // non-virtual bases (injected once the members are placed, as cl does: VN : NB, virtual VB { short n; }:
+    // NB at 0, vbptr at 8, n at 18)
+    const int baseEnd = off;
+    std::vector<Symbol*> vbases;
+    int sharedVb = -1;
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        Symbol* bc = cls->bases[b].cls;
+        if (!bc) continue;
+        for (size_t v = 0; v < bc->vbases.size(); ++v) if (std::find(vbases.begin(), vbases.end(), bc->vbases[v]) == vbases.end()) vbases.push_back(bc->vbases[v]);
+        if (cls->bases[b].isVirtual) { if (std::find(vbases.begin(), vbases.end(), bc) == vbases.end()) vbases.push_back(bc); }
+        else if (sharedVb < 0 && bc->vbptrOffset >= 0) sharedVb = static_cast<int>(b);
+    }
     // the members in declaration order, unnamed bit-fields included
     std::vector<Symbol*> members;
     for (size_t f = 0, u = 0; f <= cls->fields.size(); ++f) {
@@ -1307,9 +1367,42 @@ void Sema::layoutClass(Symbol* cls)
         else { off = (off + a - 1) / a * a; fld->offset = off; off += s; }
         if (a > align) align = a;
     }
+    if (!vbases.empty()) {
+        if (sharedVb >= 0) cls->vbptrOffset = cls->bases[static_cast<size_t>(sharedVb)].offset + cls->bases[static_cast<size_t>(sharedVb)].cls->vbptrOffset;
+        else {
+            // cl's injection: the vbptr at the next pointer boundary after the non-virtual bases, the members
+            // moved down by the distance to its end rounded up to the alignment so far
+            const int pa = pack > 0 && pack < 8 ? pack : 8;
+            cls->vbptrOffset = (baseEnd + pa - 1) / pa * pa;
+            int shift = cls->vbptrOffset + 8 - baseEnd;
+            if (align > 1) shift = (shift + align - 1) / align * align;
+            for (size_t f = 0; f < members.size(); ++f) members[f]->offset += shift;
+            off += shift;
+            if (align < pa) align = pa;
+        }
+    }
     if (floor > align) align = floor;
     cls->nvSize = (off + align - 1) / align * align;
     cls->size = cls->nvSize;
+    if (!vbases.empty()) {
+        // each virtual base once, after the non-virtual part, in cl's order
+        int voff = cls->nvSize;
+        for (size_t v = 0; v < vbases.size(); ++v) {
+            Symbol* vb = vbases[v];
+            int a = pack > 0 && vb->align > pack ? pack : vb->align;
+            if (vb->declAlign > a) a = vb->declAlign;
+            if (a > align) align = a;
+            voff = (voff + a - 1) / a * a;
+            cls->vbaseOffsets.push_back(voff);
+            voff += vb->nvSize;
+        }
+        cls->vbases = vbases;
+        cls->size = (voff + align - 1) / align * align;
+        for (size_t b = 0; b < cls->bases.size(); ++b)
+            if (cls->bases[b].isVirtual && cls->bases[b].cls)
+                cls->bases[b].offset = cls->vbaseOffsets[static_cast<size_t>(std::find(vbases.begin(), vbases.end(), cls->bases[b].cls) - vbases.begin())];
+        layoutVbtables(cls, sharedVb);
+    }
     if (cls->size == 0) {
         // an empty class: size 1 as a complete object, nothing as a base; it leads and ends with itself
         cls->size = 1;
@@ -1319,7 +1412,7 @@ void Sema::layoutClass(Symbol* cls)
     cls->endsWithZeroSized = endsZero;
     // an empty base left at the very end of the class sits on its last byte (D8, E {}: E at 7, size 8)
     for (size_t b = 0; b < cls->bases.size(); ++b)
-        if (cls->bases[b].cls && cls->bases[b].cls->nvSize == 0 && cls->bases[b].offset >= cls->size) cls->bases[b].offset = cls->size - 1;
+        if (cls->bases[b].cls && !cls->bases[b].isVirtual && cls->bases[b].cls->nvSize == 0 && cls->bases[b].offset >= cls->size) cls->bases[b].offset = cls->size - 1;
     // the members of anonymous unions and structs, now that the unnamed members holding them are placed
     for (size_t i = 0; i < cls->members->order.size(); ++i) {
         Symbol* m = cls->members->order[i];
@@ -1550,6 +1643,16 @@ void dumpScope(const Scope* s, int depth, std::ostringstream& out)
             out << pad << (y->isStruct ? "struct " : "class ") << y->name;
             for (size_t b = 0; b < y->bases.size(); ++b) out << (b ? ", " : " : ") << (y->bases[b].cls ? y->bases[b].cls->name : std::string("?")) << "@" << y->bases[b].offset;
             if (y->layoutDone) out << "  size " << y->size << " align " << y->align << (y->isPolymorphic ? " vptr" : "") << (y->isAbstract ? " abstract" : "");
+            if (y->layoutDone && y->vbptrOffset >= 0) {
+                out << " vbptr " << y->vbptrOffset << " vbases";
+                for (size_t v = 0; v < y->vbases.size(); ++v) out << " " << y->vbases[v]->name << "@" << y->vbaseOffsets[v];
+                for (size_t t = 0; t < y->vbtables.size(); ++t) {
+                    out << " vbtable";
+                    for (size_t p = 0; p < y->vbtables[t].path.size(); ++p) out << (p ? "/" : "@") << y->vbtables[t].path[p]->name;
+                    out << "@" << y->vbtables[t].offset << ":";
+                    for (size_t e = 0; e < y->vbtables[t].entries.size(); ++e) out << (e ? "," : "") << y->vbtables[t].entries[e];
+                }
+            }
             out << "\n";
             if (y->members) dumpScope(y->members, depth + 1, out);
             break;

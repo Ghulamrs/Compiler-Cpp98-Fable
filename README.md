@@ -780,11 +780,21 @@ complete class finds one (with the complete object's size for the
 two-parameter form), as a non-virtual `delete` does. A
 destructor stores its own class's vptrs on entry, as a constructor does
 after its bases, so a virtual call made while a base part is built or
-destroyed reaches that base's function. Virtual base classes are not laid
-out as cl lays them out yet (no vbptr, no shared subobject): `--compile6`
-refuses a class that has one, directly or through a base, with S130 and
-writes no object (test 17, `examples/sample-front/vbase.cpp`); `--sema6`
-and the reports accept them. Likewise an override with a covariant return
+destroyed reaches that base's function. Virtual base classes are laid out
+as cl lays them out (Sema::layoutClass): the class shares the vbptr of its
+first non-virtual base that has one, or gets its own after the non-virtual
+bases, the members moved down past it as cl injects it (`VN : NB, virtual
+VB { short n; }`: vbptr at 8, n at 18); every virtual base, direct or
+inherited, is placed once after the non-virtual part (nvSize), in cl's
+order, and each vbptr has its vbtable (entries and the bases that name it
+apart, `??_8VX@@7BVL@@@`); test 17 compares sizes and vbtables with cl's
+`/d1reportAllClassLayout` (`examples/sample-front/vbase-layout.cpp`). The
+code for them (vbtable data, conversions through the vbptr, the
+constructors' "most derived" flag, `??_D`) is not generated yet:
+`--compile6` refuses a class that has a virtual base, directly or through a
+base, with S130 and writes no object (test 17,
+`examples/sample-front/vbase.cpp`); `--sema6` and the reports accept them.
+Likewise an override with a covariant return
 type whose conversion moves the pointer (`CD* self()` over `SB* self()`
 with SB at 16 in CD) would need cl's return-adjusting thunk: S131
 (`covariant.cpp`).

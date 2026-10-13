@@ -774,6 +774,24 @@ try {
     $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
     if ($rc -eq 0 -and $s6 -match 'sema: 0 error' -and -not $s6.Contains("S130")) { Write-Host "  ok   vbase.cpp: --sema6 accepts the virtual bases (exit 0, no S130)" }
     else { Write-Host "  FAIL vbase.cpp under --sema6 (exit $rc):"; Write-Host $s6; $failed++ }
+    # vbase-layout.cpp: the layout of classes with virtual bases (sizes, vbtables and their names) against cl's
+    # /d1reportAllClassLayout
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $null = & $exe --sema6 -I ..\include -o out\x64 -n front-vbase-layout "..\examples\sample-front\vbase-layout.cpp" 2>&1
+    $rep = & $cl /nologo /c "/Foout\x64\vbase-layout_cl.obj" /d1reportAllClassLayout "..\examples\sample-front\vbase-layout.cpp" 2>&1 | Out-String
+    $ErrorActionPreference = $eap
+    $want = @([regex]::Matches($rep, '(?m)^class (V\w+)\s+size\((\d+)\)') | ForEach-Object { "$($_.Groups[1].Value) size $($_.Groups[2].Value)" })
+    $want += @([regex]::Matches($rep, '(?m)^(V\w+)::\$vbtable@(\w*)@?:\s*\r?\n((?:\s*\d+\s*\|\s*-?\d+.*\r?\n)+)') | ForEach-Object { "$($_.Groups[1].Value) vbtable@$($_.Groups[2].Value):" + ((@([regex]::Matches($_.Groups[3].Value, '\|\s*(-?\d+)')) | ForEach-Object { $_.Groups[1].Value }) -join ',') })
+    $got = @()
+    $sym = if (Test-Path "out\x64\front-vbase-layout-sym6.txt") { Get-Content "out\x64\front-vbase-layout-sym6.txt" } else { @() }
+    foreach ($ln in $sym) {
+        if ($ln -notmatch '^struct (V\w+)\b.*?  size (\d+)') { continue }
+        $c = $Matches[1]; $got += "$c size $($Matches[2])"
+        foreach ($m in [regex]::Matches($ln, 'vbtable(@[\w/]+)?@-?\d+:(\S+)')) { $got += "$c vbtable@$($m.Groups[1].Value.TrimStart('@')):$($m.Groups[2].Value)" }
+    }
+    $diff = @(Compare-Object ($want | Sort-Object) ($got | Sort-Object))
+    if ($want.Count -ge 20 -and $diff.Count -eq 0) { Write-Host "  ok   vbase-layout.cpp: sizes and vbtables of $(($want | Where-Object { $_ -match ' size ' }).Count) classes as cl lays them out" }
+    else { Write-Host "  FAIL vbase-layout.cpp layout differs from cl's:"; $diff | ForEach-Object { Write-Host "    $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
     # front.cpp: built by cl (the reference) and by cppparse at -O0 and -O2; the programs must print the same lines
     $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\front_cl.exe" "..\examples\sample-front\front.cpp" 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\front.cpp" }

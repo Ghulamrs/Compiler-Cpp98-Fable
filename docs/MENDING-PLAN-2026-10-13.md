@@ -106,3 +106,57 @@ Then ask the user, once: merge `import-cpp13` into `main` and push to `Compiler-
   mended tree, build `CPPParadise.sln` on the Windows box (v143, Debug and Release x64), check the IDE starts and
   its Compile / Present commands run, commit as its own commit, push only on the user's yes.
 - **cpp13:** it can then be retired or kept as the record of the verification; ask the user.
+
+## 7. Amendments from Fable 5.1's review of this plan (2026-10-13) - these override section 4 where they differ
+
+Who does what: Opus 5.5 can do M3-M8 and the housekeeping alone. For **M1, the stack-float half of M2 and M9**
+(unwind/ABI mechanisms where a wrong choice is a silent miscompile the suite does not see), write the design and
+the `dumpbin /unwindinfo` (or section) evidence down first and show it to the user before coding; the user may
+ask for a Fable review of it.
+
+Order: M1, then **M2**, then M4-M8, M3 only after its link-order check, **M9 last**.
+
+Extra gate per commit: `cpp13/docs/verification-2026-10-13/scripts/recompile.cmd` - the 64 verification objects
+must stay byte-identical except where the commit means to change them.
+
+- **M1, the root cause is known.** `X86.cpp:1226` writes `PROC FRAME:cppparse_eh_handler`, but the range table
+  exists only as `;@ehrange` comments (`X86.cpp:1357`); the direct COFF writer turns them into the `CPPX` table
+  after the handler RVA (`Coff.cpp:546-592`). ml64 has no directive for handler data, so the ml64 object's
+  UNWIND_INFO has the handler and **no table**: the runtime finds no region and fail-fasts. Recommended fix (a): a
+  side table - each function's ranges as data in a named section (`.rdata$cppx`: function start + ranges), found
+  by the runtime through `BeginAddress` from `RtlLookupFunctionEntry`; one mechanism for both paths (consider
+  moving the COFF path to it too). Alternative (b): hand-written `.pdata`/`.xdata` in MASM, then cxx1's CLAUDE.md
+  lessons apply (`OPTION DOTNAME`, the section is `.pdata` with the dot, `OPTION NOSCOPED`, `READONLY ALIGN(4)`,
+  offsets as label differences, `.pdata` order). Test: Test 6 and `examples/sample-eh` built through ml64 in table
+  and sjlj modes (today only `--obj` is tested).
+- **M2 is three faults:** (i) a 64-bit integer varargs argument is moved as 32 bits (`sumll`, `printf %lld`);
+  (ii) float->double promotion is missing at -O0 only; (iii) the caller stores 5th+ stack floats wrongly only when
+  parameters 1-4 are floats (likely the spill goes through an xmm still holding argument 1, the mirror of the
+  callee bug of row 19). cl's behaviour: 8-byte slots; a float vararg promoted to double and placed in both the
+  xmm and the integer register; a stack float `movss` into the low 4 bytes of `[rsp+32+8*(i-4)]`. Keep `mix2.cpp`
+  as a two-way mixed sample with a cl driver; the callee side is right today and must stay right.
+- **M3: check the link order before touching the guard.** In the verification the cl driver object came first,
+  so link may have kept **cl's** COMDAT copy of `flakyX()`, and the throw from cppparse's `FlakyP` constructor
+  then crossed a cl frame: the documented cross-runtime limit, not a guard defect. Decide with the link map (owner
+  of `?flakyX@@YAAEAUFlakyP@@XZ`) and by swapping the object order. Only if cppparse's copy was kept: check that
+  the cleanup region covers the constructor call and that the pad calls `_Init_thread_abort` (IrGen ~2053) before
+  `cppparse_resume`. It may end as a documentation item.
+- **M4: refuse, do not implement thunks this round.** `driver/main.cpp:175 needsReturnAdjustment` stops at the
+  first overridden function; check them all. Test: `vb3.cpp` refused with S131, `covariant.cpp` unchanged (CD
+  refused, PD accepted).
+- **M5:** mask and shift in the unit's width (64) and sign-extend from the field width (`c:33` = 5000000000 reads
+  -3589934592 in cl); test signed and unsigned, values >= 2^32, a field crossing bit 32.
+- **M6:** cl emits nothing for an in-class declaration (UNDEF where used). Trap: `static const int k = 3;` used by
+  value needs no definition; if odr-used, C++98 requires the out-of-class one - do not invent a COMDAT. Test
+  `sdm.cpp` both ways plus the `static const` case.
+- **M7:** cl calls the class's `operator delete[](void*)` with the block; the sized form gets `count*size` (+8 with
+  a cookie). Test both forms, with and without a cookie (`kl8.cpp` Q, `mix1.cpp` Cls).
+- **M8, cl 19.44's measured rule:** an empty base after a non-empty subobject goes at the current end of data
+  (`DE`: E at 8 = sizeof; `A7`: E2 at 1 after E1 at 0); a byte is inserted only between two zero-sized
+  subobjects. The sample's comment "at 7" came from another cl; the driver compares against the running cl.
+  cxx1's CLAUDE.md "A4" section has the fuller ends-with / leads-with rule.
+- **M9, cl's shape:** `.rdata` COMDAT, flags 40401040, 8-byte aligned, External, selection 6 (pick largest), with
+  `??_7` at +8 of a 16-byte section (slot 0 is the RTTI complete-object locator). Trap: making cppparse's table
+  External lets the linker pick one copy for both compilers, and cppparse's has no locator slot, so if it wins,
+  cl's `dynamic_cast`/`typeid` read garbage at -8. Either emit a (null) locator slot with the symbol at +8, or keep
+  it Static and only move it to `.rdata`. Test with a polymorphic class defined in both objects of a mixed link.

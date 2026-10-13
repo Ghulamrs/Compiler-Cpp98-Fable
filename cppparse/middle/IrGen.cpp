@@ -1925,6 +1925,7 @@ void IrGen::prologue(Symbol* fn)
 {
     m_out->name = irName(fn);
     m_out->fn = 0;
+    m_out->variadic = fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic;
     m_out->linkOnce = fn->isInline || fn->isImplicit || fn->instantiatedFrom != 0 || (fn->ownerClass && fn->ownerClass->instantiatedFrom != 0);
     m_out->internal = hasInternalLinkage(fn) || (fn->ownerClass && hasInternalLinkage(fn->ownerClass));
     if (m_out->internal) m_out->linkOnce = false;   // every unit keeps its own copy

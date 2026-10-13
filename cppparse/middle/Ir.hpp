@@ -114,10 +114,11 @@ struct IrFunction {
     bool                     hasTry;
     bool                     linkOnce;   // inline, template instantiation or implicit member: one copy survives linking (COMDAT)
     bool                     internal;   // internal linkage (a static function, a member of an anonymous namespace): not PUBLIC
+    bool                     variadic;   // ends in "...": the parameters live in their home slots, where va_start finds them
     std::vector<std::string> notes;      // constructs that were approximated
     std::map<int, const Type*> tempTypes;
 
-    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false), internal(false) {}
+    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false), internal(false), variadic(false) {}
     int  newTemp(const Type* t) { tempTypes[nextTemp] = t; return nextTemp++; }
     int  newBlock(const std::string& label);
     void computeCfg();

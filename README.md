@@ -803,7 +803,7 @@ block-local passes still run.
 sample-lib/`, test 15): cppparse's own C++98 headers, written so that
 the same files serve semantic analysis of cppparse's sources and real
 compilation. `cstddef`, `cstdlib`, `cstdio`, `cstring`, `cctype`,
-`cmath` and `ctime` declare the C runtime (`extern "C"`, with
+`cmath`, `ctime` and `cstdarg` declare the C runtime (`extern "C"`, with
 `using ::name` in `std`; `size_t` is the 64-bit type of this target);
 `exception`, `new`, `stdexcept`, `utility` and `algorithm` (pointer
 ranges: `sort`, `stable_sort`, `reverse`, `find`, `lower_bound`, ...)
@@ -968,7 +968,13 @@ overwrites the frame slot next to it nor the first parameter still in xmm0
 with a destructor are destroyed after `main`, newest first: once one is
 built, the module initialiser (or the guarded first pass of a static local)
 registers an internal thunk `cppparse_atexit_<n>` that destroys it with
-`atexit`, as cl does (the driver's output must end in the order `cba`).
+`atexit`, as cl does (the driver's output must end in the order `cba`);
+a variadic function keeps its parameters in their 8-byte home slots, which
+its prologue fills from `rcx`, `rdx`, `r8` and `r9` (a named `float` or
+`double` from its XMM register), so the `va_start`/`va_arg` of
+`include/cstdarg` walk the unnamed arguments as MSVC's `vadefs.h` does
+(`sumMixed`, called by cppparse code and by the driver, and a list passed
+on to `vsprintf`).
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

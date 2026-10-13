@@ -165,7 +165,12 @@ private:
     }
     std::string def(int temp, bool isFloat, const std::string& scratch, int& spill);
     void        finish(int temp, int spill, bool isFloat, const std::string& reg);
-    std::string localRef(int local) const { return "[rbp-" + intToString(m_localOffset[static_cast<size_t>(local)]) + "]"; }
+    // a negative offset is a parameter in its home slot above the return address (a variadic function's)
+    std::string localRef(int local) const
+    {
+        const int off = m_localOffset[static_cast<size_t>(local)];
+        return off < 0 ? "[rbp+" + intToString(-off) + "]" : "[rbp-" + intToString(off) + "]";
+    }
     std::string label(int b) const { return m_label + "_B" + intToString(b); }
     void        line(const std::string& s) { m_out << "        " << s << "\n"; ++m_stats.instructions; }
     void        directive(const std::string& s) { m_out << "        " << s << "\n"; }   // for the assembler, not an instruction
@@ -664,6 +669,9 @@ void X86Function::layoutFrame()
     int off = 8 * static_cast<int>(m_usedIntRegs.size());
     m_localOffset.assign(m_f.locals.size(), 0);
     for (size_t l = 0; l < m_f.locals.size(); ++l) {
+        // a variadic function keeps its parameters where MSVC's va_start expects them: in the 8-byte home slots of
+        // the caller's shadow space and stack arguments, so the unnamed arguments follow the last named one
+        if (m_f.variadic && static_cast<int>(l) < m_f.paramCount) { m_localOffset[l] = -(16 + 8 * static_cast<int>(l)); continue; }
         int size = m_f.locals[l].size > 0 ? m_f.locals[l].size : 8;
         int align = m_f.locals[l].align > 0 ? m_f.locals[l].align : 8;
         if (align > 16) align = 16;
@@ -1219,7 +1227,7 @@ void X86Function::emitBody()
     m_out << "        ; frame " << m_frameSize << " bytes";
     for (size_t l = 0; l < m_f.locals.size(); ++l) {
         if (l && l % 6 == 0) m_out << "\n        ;   ";
-        m_out << (l ? ", " : ": ") << m_f.locals[l].name << "@[rbp-" << m_localOffset[l] << "]";
+        m_out << (l ? ", " : ": ") << m_f.locals[l].name << "@" << localRef(static_cast<int>(l));
     }
     m_out << "\n";
     if (m_frameless) {
@@ -1260,7 +1268,17 @@ void X86Function::emitBody()
     directive(".endprolog");
     // incoming parameters by position
     static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
-    for (int p = 0; p < m_f.paramCount; ++p) {
+    if (m_f.variadic) {
+        // the four register arguments go to their home slots, the named ones in their own type, the unnamed ones
+        // from the integer registers (a caller passes a double there as well); the rest are on the stack already
+        for (int p = 0; p < 4; ++p) {
+            const std::string home = "[rbp+" + intToString(16 + 8 * p) + "]";
+            const IrLocal* l = p < m_f.paramCount ? &m_f.locals[static_cast<size_t>(p)] : 0;
+            if (l && isFloatType(l->type)) line(std::string(isSingle(l->type) ? "movss real4 ptr " : "movsd real8 ptr ") + home + ", xmm" + intToString(p) + "      ; param " + l->name);
+            else line("mov qword ptr " + home + ", " + argRegs[p] + (l ? "      ; param " + l->name : std::string("      ; variadic")));
+        }
+    }
+    for (int p = 0; p < m_f.paramCount && !m_f.variadic; ++p) {
         // a parameter read straight from its register, or never read at all, needs no copy in the frame
         if (m_paramInReg[static_cast<size_t>(p)] || !m_paramUsed[static_cast<size_t>(p)]) continue;
         const IrLocal& l = m_f.locals[static_cast<size_t>(p)];

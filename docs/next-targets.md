@@ -19,6 +19,9 @@ the default), with the items found since. Each was reproduced with a small progr
   slot, and the copy goes through xmm5, not xmm0 (which still held the first parameter at -O2) (X86.cpp).
 - 21, destructors of globals: after a global (or a static local) with a destructor is built, an internal thunk
   that destroys it is registered with atexit, as cl does, so they run after main newest first (IrGen.cpp).
+- 18, callee side: a variadic function keeps its parameters in their home slots and its prologue spills rcx,
+  rdx, r8 and r9 there (named floats from xmm0-xmm3); `include/cstdarg`, `stdarg.h` and `vprintf`/`vfprintf`/
+  `vsprintf` in `cstdio` give va_list/va_start/va_arg/va_end over that area, as MSVC's vadefs.h (X86.cpp).
 - README "known limit" (untyped library results): with the headers included the version 6 front end types
   `strtod` and `std::string::size`; the paragraph describes the legacy self-compile.
 
@@ -33,7 +36,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | 3 | 3: sizeof of an incomplete type accepted, sizeof(T&) = 8 (SemaExpr.cpp:1256) | silent 8 | small | front end |
 | 4 | a local variable does not hide a function template (CxxParser.cpp:211-217) | wrong result | small-medium | front end |
 | 5 | `using namespace std; printf(...)` ambiguous: candidates not deduplicated (SemaExpr.cpp:390-444) | false error | small | front end |
-| 7 | 18, callee side: variadic prologue does not home rdx/r8/r9; no stdarg.h | garbage | medium | back end |
 | 8 | 5: empty base takes a byte (Sema.cpp:1076-1088) | wrong size | small | layout |
 | 9 | 23: bit-fields ignored; anonymous union/struct members cannot be named | wrong size, false error | medium | layout |
 | 10 | 23: polymorphic base not first: own vptr, not moved first (Sema.cpp:1080, 1093, 1155) | wrong layout | medium | layout |

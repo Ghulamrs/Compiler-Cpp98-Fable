@@ -4,6 +4,7 @@
 #ifndef CPPPARSE_CSTDIO
 #define CPPPARSE_CSTDIO
 
+#include <cstdarg>
 #include <cstddef>
 
 struct _iobuf { void* _Placeholder; };
@@ -35,6 +36,9 @@ extern "C" {
     int    fprintf(FILE* f, const char* format, ...);
     int    sprintf(char* buffer, const char* format, ...);
     int    _snprintf(char* buffer, size_t n, const char* format, ...);
+    int    vprintf(const char* format, va_list args);
+    int    vfprintf(FILE* f, const char* format, va_list args);
+    int    vsprintf(char* buffer, const char* format, va_list args);
     int    sscanf(const char* s, const char* format, ...);
     int    remove(const char* name);
     int    rename(const char* from, const char* to);
@@ -60,6 +64,7 @@ namespace std {
     using ::fopen; using ::fclose; using ::fflush; using ::fread; using ::fwrite; using ::fseek; using ::ftell;
     using ::feof; using ::ferror; using ::fgetc; using ::fgets; using ::fputc; using ::fputs; using ::getc; using ::putc;
     using ::getchar; using ::putchar; using ::puts; using ::ungetc; using ::printf; using ::fprintf; using ::sprintf;
+    using ::vprintf; using ::vfprintf; using ::vsprintf;
     using ::sscanf; using ::remove; using ::rename; using ::setvbuf; using ::perror;
 }
 

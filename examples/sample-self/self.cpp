@@ -1,6 +1,7 @@
 // self.cpp - constructs of cppparse's own sources that the self-built compiler got wrong, compiled by
 // cppparse --compile6 with its own headers and driven by examples/sample-self-driver/driver-self.cpp
 // (built with MSVC). Every function returns a number the driver compares with cl's result.
+#include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -448,4 +449,51 @@ int exitOrder()                            // globals and static locals are dest
 {
     static AtExit third('c');
     return g_exitCount * 100 + third.tag;
+}
+
+// a variadic function finds its unnamed arguments in the home slots its prologue fills from rcx, rdx, r8 and r9
+// (a double travels in the integer register too) and on the caller's stack after them; also called by the driver
+double sumMixed(int n, ...)
+{
+    va_list ap;
+    va_start(ap, n);
+    double s = 0;
+    for (int i = 0; i < n; ++i) {
+        if (i % 2 == 0) s += va_arg(ap, double);
+        else s += va_arg(ap, int) * 100;
+    }
+    va_end(ap);
+    return s;
+}
+
+namespace {
+
+double scaled(double k, int n, ...)        // a named double: homed from xmm0, the integers follow it
+{
+    va_list ap;
+    va_start(ap, n);
+    int s = 0;
+    for (int i = 0; i < n; ++i) s += va_arg(ap, int);
+    va_end(ap);
+    return k * s;
+}
+
+int formatInto(char* buf, const char* fmt, ...)   // passes its list on to the C library
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = std::vsprintf(buf, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+}
+
+int varargs()
+{
+    double a = sumMixed(6, 1.5, 2, 2.25, 3, 4.0, 5);
+    char buf[64];
+    int n = formatInto(buf, "%d-%.2f-%s", 42, 2.5, "ok");
+    int r = static_cast<int>(a * 100) + static_cast<int>(scaled(0.5, 3, 10, 20, 30)) + n * 1000000;
+    return r + (std::strcmp(buf, "42-2.50-ok") == 0 ? 100000000 : 0);
 }

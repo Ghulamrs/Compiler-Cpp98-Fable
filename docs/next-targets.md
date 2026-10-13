@@ -59,7 +59,10 @@ the default), with the items found since. Each was reproduced with a small progr
   an external symbol named after the member: the callee now carries the member's type (SemaExpr.cpp exprCall), so
   the call is indirect through its value; parentheses around the callee are dropped (`(e.scale)(x)`), and `(*fp)(x)`
   and `(*f)(x)` call through the pointer (IrGen.cpp call); test 17, `sample-front/front.cpp`.
-
+- mapcompare.ps1 (was deferred): cl's functions come from its objects (`dumpbin /symbols`), not from link's map, so
+  methods inlined everywhere are listed as "removed by link" in part B (`Matrix::rows()` 3 bytes and `cols()` 4 in
+  both compilers), and a part C compares whole classes (`mx::Matrix`: 1.66 times cl's bytes over all its members,
+  1.85 over the 17 both emit; cl's link keeps 5 of its 19, ours 13 of 18).
 ## Plan
 
 Three lanes, worked in parallel on their own branches; each item gets a regression test, and each fix runs
@@ -78,5 +81,3 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   (Sema.cpp:1169-1174); the destructor slot holding a scalar deleting destructor.
 - design-table-exceptions.md section 7: an exception edge from every call to its landing pad, then GVN and
   register values across handlers; the main lever on code size (1.57 times cl's on the matrix sample).
-- mapcompare.ps1: take cl's functions from its objects, not from link's map, so methods inlined everywhere
-  (`Matrix::rows()`, 3 bytes in both compilers) and whole classes can be compared.

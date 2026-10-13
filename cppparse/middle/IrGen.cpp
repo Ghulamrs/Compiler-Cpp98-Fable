@@ -154,7 +154,8 @@ bool IrGen::virtualBasePath(Symbol* derived, Symbol* base, int& index, int& rest
 
 void IrGen::unsupported(int line, const std::string& what)
 {
-    m_unsupported.push_back("line " + numText(static_cast<long>(line)) + ": " + what);
+    const std::string m = "line " + numText(static_cast<long>(line)) + ": " + what;
+    if (std::find(m_unsupported.begin(), m_unsupported.end(), m) == m_unsupported.end()) m_unsupported.push_back(m);   // once per line
 }
 
 // a class some class in the program has as a virtual base
@@ -168,15 +169,24 @@ bool IrGen::isVirtualBaseAnywhere(Symbol* cls) const
     return false;
 }
 
-// .* and ->* on a class with virtual bases: cl's member pointers into virtual bases carry a vbtable index (S132)
+// pointers to members are not generated yet (cl: a 4-byte offset with null -1 for data, a code pointer with a
+// this adjustment and vcall thunks for functions): .* and ->* and every value of a member pointer type are
+// refused (S132) rather than compiled as void*; on a class with virtual bases the message says so
 void IrGen::memberPointerCheck(cxx::Expr* e)
 {
-    if (e->kind != cxx::Expr::Binary || (e->text != ".*" && e->text != "->*") || e->kids.empty()) return;
-    const sema::Type* ot = m_semaTypes.unref(exprType(e->kids[0]));
-    if (ot && ot->kind == sema::Type::Pointer) ot = ot->inner;
-    ot = ot ? m_semaTypes.unqualified(ot) : 0;
-    if (ot && ot->kind == sema::Type::Class && hasVbases(ot->decl))
-        unsupported(e->loc.line, "pointer to member of '" + ot->decl->qualifiedName() + "', a class with virtual bases, is not supported yet by --compile6");
+    if (!e) return;
+    if (e->kind == cxx::Expr::Binary && (e->text == ".*" || e->text == "->*") && !e->kids.empty()) {
+        const sema::Type* ot = m_semaTypes.unref(exprType(e->kids[0]));
+        if (ot && ot->kind == sema::Type::Pointer) ot = ot->inner;
+        ot = ot ? m_semaTypes.unqualified(ot) : 0;
+        if (ot && ot->kind == sema::Type::Class && hasVbases(ot->decl))
+            unsupported(e->loc.line, "pointer to member of '" + ot->decl->qualifiedName() + "', a class with virtual bases, is not supported yet by --compile6");
+        else unsupported(e->loc.line, "'" + e->text + "' (pointer to member) is not supported yet by --compile6");
+        return;
+    }
+    const sema::Type* t = e->semaType ? m_semaTypes.unqualified(m_semaTypes.unref(e->semaType)) : 0;
+    if (t && t->kind == sema::Type::MemberPointer)
+        unsupported(e->loc.line, "a value of pointer to member type '" + t->text() + "' is not supported yet by --compile6");
 }
 
 // MSVC's conversion to a virtual base: the vbptr's table holds the base's distance from the vbptr

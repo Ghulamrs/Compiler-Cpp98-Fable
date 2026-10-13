@@ -830,7 +830,14 @@ reports accept them. S132 (found while generating code, no object
 written; `examples/sample-front/vbase-refused.cpp`) refuses a `catch` of
 a class used as a virtual base, `.*`/`->*` on a class with virtual bases
 and a cast from a virtual base down to a derived class (ill-formed, cl's
-C2635).
+C2635). Pointers to members are not generated yet: S132 also refuses
+`.*`/`->*` and every value of a member pointer type on any class (they
+compiled as `void*`: `->*` read garbage, a null data member pointer was 0
+where cl's is -1) and a class with a member of such a type
+(`memptr-refused.cpp`, `memptr-field.cpp`); calls through them stay a sema
+error (S109). Their sizes are cl's (TypeTable::sizeOf by the inheritance
+model: data 4, 8 with virtual bases; functions 8, 16 with multiple or
+virtual inheritance; front.cpp `mpsize::`).
 Likewise an override with a covariant return
 type whose conversion moves the pointer (`CD* self()` over `SB* self()`
 with SB at 16 in CD) would need cl's return-adjusting thunk: S131

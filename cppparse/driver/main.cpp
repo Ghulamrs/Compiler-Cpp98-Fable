@@ -383,6 +383,21 @@ int main(int argc, char* argv[])
                             ++unsupported;
                             continue;
                         }
+                        if (s->kind == sema::Symbol::Class && s->isDefinition && !s->isDependentContext) {
+                            // a member of pointer-to-member type: copies and value-initialisation (cl's null data
+                            // member pointer is -1) are not generated for it yet
+                            const sema::Symbol* mp = 0;
+                            for (size_t f = 0; f < s->fields.size() && !mp; ++f) {
+                                const sema::Type* ft = s->fields[f]->type;
+                                while (ft && ft->kind == sema::Type::Array) ft = ft->inner;
+                                if (ft && ft->kind == sema::Type::MemberPointer) mp = s->fields[f];
+                            }
+                            if (mp) {
+                                std::cout << "  " << (mp->loc.file >= 0 && mp->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(mp->loc.file)] : "?") << "(" << mp->loc.line
+                                          << "): error S132: '" << mp->qualifiedName() << "' is a pointer to member: not supported yet by --compile6\n";
+                                ++unsupported;
+                            }
+                        }
                         if (s->kind != sema::Symbol::Class || !s->isDefinition || s->isDependentContext || !hasVirtualBase(s, 0)) continue;
                         const char* why = s->layoutDone ? virtualBaseRefusal(s) : "a class not laid out";
                         if (!why) continue;

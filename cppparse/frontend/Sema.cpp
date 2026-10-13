@@ -155,6 +155,18 @@ const Type* TypeTable::decay(const Type* t)
     return t;
 }
 
+// cl's inheritance model of a class for its member pointers: multiple when it or a base has several direct
+// bases, virtual when it has a virtual base anywhere
+void TypeTable::memberPointerModel(const Symbol* cls, bool& multiple, bool& virt, int depth)
+{
+    if (!cls || depth > 64) return;
+    if (cls->bases.size() > 1) multiple = true;
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        if (cls->bases[b].isVirtual) virt = true;
+        memberPointerModel(cls->bases[b].cls, multiple, virt, depth + 1);
+    }
+}
+
 int TypeTable::sizeOf(const Type* t) const
 {
     if (!t) return 8;
@@ -167,7 +179,17 @@ int TypeTable::sizeOf(const Type* t) const
     case Type::Long: case Type::ULong: return m_longSize;
     case Type::LongLong: case Type::ULongLong: case Type::Double: return 8;
     case Type::LongDouble: return m_longDoubleSize;
-    case Type::Pointer: case Type::Reference: case Type::NullPtr: case Type::MemberPointer: return m_pointerSize;
+    case Type::Pointer: case Type::Reference: case Type::NullPtr: return m_pointerSize;
+    case Type::MemberPointer: {
+        // cl's representations by the class's inheritance model: data, a 4-byte offset (plus a vbtable index
+        // with virtual bases); functions, a code pointer (plus a this adjustment with multiple inheritance, plus
+        // a vbtable index with virtual bases), rounded to the pointer's alignment
+        bool multiple = false, virt = false;
+        memberPointerModel(t->memberClass ? t->memberClass->decl : 0, multiple, virt, 0);
+        if (!t->inner || t->inner->kind != Type::Function) return virt ? 8 : 4;
+        const int n = m_pointerSize + (multiple || virt ? 4 : 0) + (virt ? 4 : 0);
+        return (n + m_pointerSize - 1) / m_pointerSize * m_pointerSize;
+    }
     case Type::Array: return t->arraySize > 0 ? static_cast<int>(t->arraySize) * sizeOf(t->inner) : 0;
     case Type::Class: return t->decl && t->decl->layoutDone ? t->decl->size : 8;
     default: return 8;
@@ -179,6 +201,7 @@ int TypeTable::alignOf(const Type* t) const
     if (!t) return 8;
     if (t->kind == Type::Array) return alignOf(t->inner);
     if (t->kind == Type::Class) return t->decl && t->decl->layoutDone ? t->decl->align : 8;
+    if (t->kind == Type::MemberPointer) return t->inner && t->inner->kind == Type::Function ? m_pointerSize : 4;
     int s = sizeOf(t);
     return s > m_maxAlign ? m_maxAlign : (s < 1 ? 1 : s);
 }

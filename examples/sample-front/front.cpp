@@ -268,6 +268,24 @@ void toFloating()
 }
 }
 
+// sizes of pointers to members by cl's inheritance models (data 4, 8 with virtual bases; functions 8, 16 with
+// multiple or virtual inheritance); they were all 8
+namespace mpsize {
+struct P { int a; int f(); };
+struct M { int m; };
+struct Q : M, P { int q; };
+struct R : Q { };
+struct V { int v; };
+struct W : virtual V { int w; int g(); };
+struct S1 : P { };
+void show()
+{
+    std::printf("member pointer sizes: %d %d %d %d %d %d %d %d %d\n", (int)sizeof(int P::*), (int)sizeof(int (P::*)()), (int)sizeof(int Q::*),
+        (int)sizeof(int (Q::*)()), (int)sizeof(int R::*), (int)sizeof(int (R::*)()), (int)sizeof(int W::*), (int)sizeof(int (W::*)()),
+        (int)sizeof(int (S1::*)()));
+}
+}
+
 int main()
 {
     predefined();
@@ -281,6 +299,7 @@ int main()
     conditionDeclarations();
     foldedGlobals();
     conv::runtimeD(); conv::runtimeF(); conv::consts(); conv::toFloating();
+    mpsize::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

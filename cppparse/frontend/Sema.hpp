@@ -82,6 +82,7 @@ public:
     const Type* unref(const Type* t) const { return t && t->kind == Type::Reference ? t->inner : t; }
     int  sizeOf(const Type* t) const;
     int  alignOf(const Type* t) const;
+    static void memberPointerModel(const Symbol* cls, bool& multiple, bool& virt, int depth);
     int  rank(const Type* t) const;        // integer conversion rank
     const Type* promoted(const Type* t);   // integral / floating promotion
     const Type* arithmeticResult(const Type* a, const Type* b);   // usual arithmetic conversions

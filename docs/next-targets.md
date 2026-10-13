@@ -19,6 +19,8 @@ the default), with the items found since. Each was reproduced with a small progr
   `strtod` and `std::string::size`; the paragraph describes the legacy self-compile.
 - 4 (plan 1): a unit with syntax or semantic errors is not compiled: no object, `.asm` or map (stale ones removed),
   exit code 1 (main.cpp); test 17, `examples/sample-front/errors.cpp`.
+- 3 (plan 3): `sizeof(T&)` is `sizeof(T)`; sizeof of a declared-only class, of a class inside its own members, of
+  `void` or a function type is S113 (SemaExpr.cpp completeForSizeof); test 17, `sample-front/sizeof-incomplete.cpp`.
 
 ## Plan
 
@@ -28,7 +30,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | # | Item | Effect today | Size | Lane |
 |---|---|---|---|---|
 | 2 | 19: stack-passed float parameter homed with movsd (X86.cpp:1274) | wrong value | small | back end |
-| 3 | 3: sizeof of an incomplete type accepted, sizeof(T&) = 8 (SemaExpr.cpp:1256) | silent 8 | small | front end |
 | 4 | a local variable does not hide a function template (CxxParser.cpp:211-217) | wrong result | small-medium | front end |
 | 5 | `using namespace std; printf(...)` ambiguous: candidates not deduplicated (SemaExpr.cpp:390-444) | false error | small | front end |
 | 6 | 21: global destructors never registered with atexit (IrGen.cpp genInitializer) | never run | small-medium | back end |

@@ -745,7 +745,11 @@ specialisations, out-of-line members); function templates are
 instantiated by deduction from the argument types. Diagnostics carry
 S codes (S100 unknown type, S101 undeclared identifier, S102 no such
 member, S103 undeclared function, S104 const assignment, S105
-conversion, S106 ambiguity, S107 no matching function, ...). The
+conversion, S106 ambiguity, S107 no matching function, S113 incomplete
+type, ...). `sizeof` follows 5.3.3: `sizeof(T&)` is `sizeof(T)`, and a
+class that is only declared, a class inside its own member declarations,
+`void` and function types are rejected with S113 as cl rejects them
+(C2027, C2070) instead of measuring 8 bytes. The
 `--sema6` mode prints the counts and writes `<name>-sym6.txt` with the
 symbols, layouts, vtable slots and instantiations. Test 12 checks
 `sample-opt` (no errors, every name and call resolved, `Buffer<int,4>`

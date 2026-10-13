@@ -694,7 +694,8 @@ try {
     # units with errors: each must report its diagnostics, exit non-zero and leave no object, listing or map
     # (a stale object of an earlier run is put in place first: it must be removed, not taken for the result)
     $rejects = @(
-        @{ unit = "errors"; expect = @("error S103: call to undeclared function 'undeclared_fn'", "error S101: undeclared identifier 'nosuchvar'") }
+        @{ unit = "errors"; expect = @("error S103: call to undeclared function 'undeclared_fn'", "error S101: undeclared identifier 'nosuchvar'") },
+        @{ unit = "sizeof-incomplete"; expect = @("error S113: sizeof of incomplete class 'Inc'", "error S113: sizeof of incomplete class 'std::", "error S113: sizeof of incomplete class 'Self'", "error S113: sizeof of void") }
     )
     foreach ($r in $rejects) {
         $nm = "front-$($r.unit)"
@@ -706,6 +707,22 @@ try {
         $left = @(@("6.obj", "6.asm", "6.map") | Where-Object { Test-Path "out\x64\$nm$_" })
         if ($rc -ne 0 -and $missing.Count -eq 0 -and $left.Count -eq 0) { Write-Host "  ok   $($r.unit).cpp: errors reported, exit code $rc, no object, listing or map" }
         else { Write-Host "  FAIL $($r.unit).cpp (exit $rc, missing diagnostics: $($missing -join ' | '), left behind: $($left -join ', ')):"; Write-Host $c6; $failed++ }
+    }
+    # front.cpp: built by cl (the reference) and by cppparse at -O0 and -O2; the programs must print the same lines
+    $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\front_cl.exe" "..\examples\sample-front\front.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\front.cpp" }
+    $want = & ".\out\x64\front_cl.exe" 2>&1 | Out-String
+    foreach ($lvl in @(0, 2)) {
+        $nm = "front$lvl"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\front.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\front.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
+        $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $got -eq $want) { Write-Host "  ok   front.cpp (-O$lvl) prints what cl's build prints ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
+        else { Write-Host "  FAIL front.cpp (-O$lvl, exit $LASTEXITCODE) differs from cl's build:"; Write-Host "  cl:"; Write-Host $want; Write-Host "  cppparse:"; Write-Host $got; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed front-end check(s) failed" }
 

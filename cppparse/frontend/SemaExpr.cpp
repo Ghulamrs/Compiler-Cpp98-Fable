@@ -143,6 +143,24 @@ const Type* Sema::completedArray(const Type* t, const cxx::Initializer& init)
     return m_types.array(t->inner, braceCount(t, init.args));
 }
 
+// the operand type of sizeof (references already removed) must be complete (C++98 5.3.3; cl C2027, C2070): a class
+// only declared, a class whose own member declarations are still being read, void or a function type is an error.
+// A defined class that is not laid out yet is laid out here, so that its size is the real one
+bool Sema::completeForSizeof(const Type* t, Scope* in, const cxx::Loc& loc)
+{
+    while (t && t->kind == Type::Array) t = t->inner;
+    if (!t) return true;
+    if (t->kind == Type::Void) { error(loc, "S113", "sizeof of void"); return false; }
+    if (t->kind == Type::Function) { error(loc, "S113", "sizeof of a function type"); return false; }
+    if (t->kind != Type::Class || !t->decl || t->decl->layoutDone || t->decl->isDependentContext) return true;
+    Symbol* cls = t->decl;
+    bool beingDefined = false;
+    for (Scope* s = in; s && !beingDefined; s = s->parent) if (s->kind == Scope::Class && s->owner == cls) beingDefined = true;
+    if (!cls->isDefinition || beingDefined) { error(loc, "S113", "sizeof of incomplete class '" + cls->qualifiedName() + "'"); return false; }
+    layoutClass(cls);
+    return true;
+}
+
 // the initializers from items[pos] on initialise an object of aggregate type t
 cxx::Expr* Sema::braceInit(const Type* t, std::vector<cxx::Expr*>& items, size_t& pos, Scope* in, const cxx::Loc& loc, long* count)
 {
@@ -1252,8 +1270,15 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         if (to->kind == Type::Reference) e->semaLvalue = true;
         break;
     }
-    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.sizeType(); if (ot->kind != Type::Dependent && ot->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
-    case cxx::Expr::SizeofType: { const Type* st = typeOf(e->type->spec, in); if (e->type->decl) st = applyDeclarator(st, *e->type->decl, in, 0); t = m_types.sizeType(); if (st->kind != Type::Dependent && st->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(st); } break; }
+    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.sizeType(); if (ot->kind != Type::Dependent && ot->kind != Type::Error && completeForSizeof(ot, in, e->loc)) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
+    case cxx::Expr::SizeofType: {
+        const Type* st = typeOf(e->type->spec, in);
+        if (e->type->decl) st = applyDeclarator(st, *e->type->decl, in, 0);
+        st = m_types.unref(st);                 // sizeof(T&) is sizeof(T) (5.3.3/2)
+        t = m_types.sizeType();
+        if (st->kind != Type::Dependent && st->kind != Type::Error && completeForSizeof(st, in, e->loc)) { e->semaConst = true; e->semaValue = m_types.sizeOf(st); }
+        break;
+    }
     case cxx::Expr::New: t = exprNew(e, in); break;
     case cxx::Expr::Delete: { expr(e->kids[0], in); const Type* pt = valueType(e->kids[0]); if (pt->kind != Type::Pointer && pt->kind != Type::Dependent && pt->kind != Type::Error) error(e->loc, "S109", "delete of a non-pointer of type " + pt->text()); t = m_types.basic(Type::Void); break; }
     case cxx::Expr::Throw: if (!e->kids.empty()) expr(e->kids[0], in); t = m_types.basic(Type::Void); break;

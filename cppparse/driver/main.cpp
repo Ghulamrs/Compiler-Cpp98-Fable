@@ -51,6 +51,7 @@
 #include "Symbols.hpp"
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -86,6 +87,8 @@ void usage()
         "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
         "  --obj            version 5: write <name>.obj with cppparse's own COFF writer (no ml64 needed)\n"
         "  --msvc-mangling  version 5: MSVC-compatible decorated names (?square@@YAHH@Z) so MSVC code links with plain C++ declarations\n"
+        "  --eh=table|sjlj  try regions as unwind range tables with landing pads, no code on the normal path (the\n"
+        "                   default), or as setjmp frames (version 5's model)\n"
         "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling;\n"
         "                   never more than the number of files read)\n"
         "  -E              version 6: preprocess the input files only and print the result (like cl /EP)\n"
@@ -100,7 +103,7 @@ void usage()
         "  --target NAME    version 6: x86_64-windows (default; COFF objects, MSVC ABI) or x86_64-linux\n"
         "                   (LP64 sizes and macros for -E, --parse6, --sema6; no back end yet)\n"
         "                   predefined always: __cplusplus=199711L, __cppparse__=6, __STDC__=1; for\n"
-        "                   x86_64-windows also _WIN32=1, _WIN64=1, _M_X64=100 (not _MSC_VER, not _DEBUG);\n"
+        "                   x86_64-windows also _WIN32=1, _WIN64=1, _M_X64=100, _MT=1, _CPPUNWIND=1 (not _MSC_VER, not _DEBUG);\n"
         "                   for x86_64-linux __linux__, __unix__, __x86_64__, __LP64__, __ELF__\n"
         "                   --compile6 stops at a missing include file (the other modes warn)\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
@@ -126,6 +129,67 @@ bool writeOut(const std::string& path, const std::string& content, bool quiet, s
     written.push_back(path + "  (" + intToString(static_cast<int>(content.size() / 1024)) + " KB)");
     if (!quiet) std::cout << "  wrote " << path << "\n";
     return true;
+}
+
+// a virtual base, direct or inherited: --compile6 does not lay those out as cl does yet (no vbptr, no shared
+// subobject), so it refuses the class rather than emit wrong code (S130)
+bool hasVirtualBase(const sema::Symbol* cls, int depth)
+{
+    if (!cls || depth > 32) return false;
+    for (size_t b = 0; b < cls->bases.size(); ++b)
+        if (cls->bases[b].isVirtual || hasVirtualBase(cls->bases[b].cls, depth + 1)) return true;
+    return false;
+}
+
+// what --compile6 cannot generate yet for a class with virtual bases (0: it can): it lays out and builds
+// non-polymorphic classes with virtual bases, as cl does (vbptrs, vbtables, the
+// "most derived" flag, ??_D); polymorphic ones need the vfptr inside the virtual base and vtordisp (S130)
+const char* virtualBaseRefusal(const sema::Symbol* cls)
+{
+    if (cls->isPolymorphic) return "a polymorphic class with virtual bases (vfptrs in virtual bases, vtordisp)";
+    if (cls->classAst && cls->classAst->pack > 0) return "#pragma pack with virtual bases";
+    if (cls->declAlign > 0 || cls->endsWithZeroSized) return "virtual bases after an over-aligned or zero-sized part";
+    for (size_t v = 0; v < cls->vbases.size(); ++v) {
+        const sema::Symbol* vb = cls->vbases[v];
+        if (vb->nvSize == 0 || vb->leadsWithZeroSized || vb->endsWithZeroSized || vb->declAlign > 0) return "an empty or over-aligned virtual base";
+        if (vb->isPolymorphic) return "a polymorphic virtual base (vtordisp)";
+    }
+    for (size_t t = 0; t < cls->vbtables.size(); ++t) if (cls->vbtables[t].path.size() > 1) return "a vbtable named by a path of several bases";
+    return 0;
+}
+
+// the offset of base in derived (-1: not a base)
+int baseOffsetIn(const sema::Symbol* derived, const sema::Symbol* base, int depth)
+{
+    if (!derived || !base || depth > 32) return -1;
+    if (derived == base) return 0;
+    for (size_t b = 0; b < derived->bases.size(); ++b) {
+        const int o = baseOffsetIn(derived->bases[b].cls, base, depth + 1);
+        if (o >= 0) return derived->bases[b].offset + o;
+    }
+    return -1;
+}
+
+// an override with a covariant return type whose conversion to the overridden function's return type moves the
+// pointer (CD* to SB* with SB at 16): it needs a return-adjusting thunk, which --compile6 does not make yet (S131)
+bool needsReturnAdjustment(const sema::Symbol* fn)
+{
+    if (!fn->overrides || !fn->type || !fn->overrides->type || fn->type->kind != sema::Type::Function || fn->overrides->type->kind != sema::Type::Function) return false;
+    const sema::Type* r = fn->type->inner;
+    const sema::Type* o = fn->overrides->type->inner;
+    if (!r || !o || (r->kind != sema::Type::Pointer && r->kind != sema::Type::Reference) || r->kind != o->kind) return false;
+    const sema::Type* rc = r->inner;
+    const sema::Type* oc = o->inner;
+    if (!rc || !oc || rc->kind != sema::Type::Class || oc->kind != sema::Type::Class || rc->decl == oc->decl) return false;
+    return baseOffsetIn(rc->decl, oc->decl, 0) != 0;
+}
+
+// a unit that is not compiled leaves no object, listing or map: one of an earlier run would be taken for its own
+void removeUnitOutputs(const std::string& base)
+{
+    std::remove((base + "6.obj").c_str());
+    std::remove((base + "6.asm").c_str());
+    std::remove((base + "6.map").c_str());
 }
 
 } // namespace
@@ -209,6 +273,8 @@ int main(int argc, char* argv[])
         else if (a == "--assemble") assemble = true;
         else if (a == "--obj") obj = true;
         else if (a == "--msvc-mangling") copt.msvcNames = true;
+        else if (a == "--eh=table") copt.tableEh = true;
+        else if (a == "--eh=sjlj") copt.tableEh = false;
         else if (a == "-E" || a == "--preprocess") preprocessOnly = true;
         else if (a == "--parse6") parse6 = true;
         else if (a == "--sema6") { parse6 = true; sema6 = true; }
@@ -306,16 +372,51 @@ int main(int argc, char* argv[])
                 std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
                 std::vector<std::string> written;
                 if (!outDir.empty() || !outName.empty()) writeOut(base + "-sym6.txt", sema.dumpSymbols(), quiet, written);
-                if (compile6) {
+                int unsupported = 0;
+                if (compile6)
+                    for (size_t k = 0; k < program.symbols.size(); ++k) {
+                        const sema::Symbol* s = program.symbols[k];
+                        if (s->kind == sema::Symbol::Function && s->isVirtual && s->ownerClass && !s->ownerClass->isDependentContext && !s->isDependentContext && needsReturnAdjustment(s)) {
+                            std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
+                                      << "): error S131: '" << s->qualifiedName() << "' overrides '" << s->overrides->qualifiedName()
+                                      << "' with a covariant return type whose conversion moves the pointer: return-adjusting thunks are not supported yet by --compile6\n";
+                            ++unsupported;
+                            continue;
+                        }
+                        if (s->kind != sema::Symbol::Class || !s->isDefinition || s->isDependentContext || !hasVirtualBase(s, 0)) continue;
+                        const char* why = s->layoutDone ? virtualBaseRefusal(s) : "a class not laid out";
+                        if (!why) continue;
+                        std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
+                                  << "): error S130: '" << s->qualifiedName() << "' has a virtual base class: " << why << " is not supported yet by --compile6\n";
+                        ++unsupported;
+                    }
+                totalErrors += unsupported;
+                if (compile6 && errors + sema.errorCount() + unsupported > 0) {
+                    // a unit with syntax or semantic errors is not compiled, as cl does: an object built on
+                    // unresolved names and error types would reach the linker
+                    std::cout << "  compile6: not compiled, " << (errors + sema.errorCount() + unsupported) << " error(s)\n";
+                    removeUnitOutputs(base);
+                }
+                else if (compile6) {
                     // version 6 stage 4: IR from the analysed tree, then the shared back end
                     IrGen gen(program, types);
                     std::vector<IrFunction*> functions;
                     X86Module x86(copt.msvcNames);
+                    x86.setTableExceptions(copt.tableEh);
                     unsigned long unitId = 2166136261UL;   // FNV-1a of the input path: this unit's anonymous namespace id
                     for (size_t k = 0; k < inputs[i].size(); ++k) unitId = (unitId ^ static_cast<unsigned char>(inputs[i][k])) * 16777619UL;
                     setMangleUnitId(unitId & 0xFFFFFFFFUL);
                     gen.registerMetadata(x86, copt.msvcNames);   // first: it queues the vtable members and the dynamic initialisers
                     gen.generate(functions);
+                    if (!gen.unsupported().empty()) {
+                        // constructs with virtual bases that would compile to wrong code: nothing is written (S132)
+                        const std::vector<std::string>& bad = gen.unsupported();
+                        for (size_t k = 0; k < bad.size(); ++k) std::cout << "  " << inputs[i] << ": error S132: " << bad[k] << "\n";
+                        totalErrors += static_cast<int>(bad.size());
+                        removeUnitOutputs(base);
+                        for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
+                        continue;
+                    }
                     if (!gen.failedMembersUsed().empty()) {
                         // a member of a class template instantiation whose body has errors is needed after all
                         // (an implicit call sema does not see): its held-back diagnostics are real, nothing is written
@@ -328,6 +429,7 @@ int main(int argc, char* argv[])
                                           << "(" << (*held)[h].loc.line << "): " << (*held)[h].code << ": " << (*held)[h].message << "\n";
                         }
                         totalErrors += static_cast<int>(bad.size());
+                        removeUnitOutputs(base);
                         for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
                         continue;
                     }

@@ -163,6 +163,12 @@ void Parser::declareNamespace(const std::string& name)
     if (!m_scopes.back().name.empty() && !m_qualifierStack.empty()) m_named[m_qualifierStack.back()].namespaces.insert(name);
 }
 
+void Parser::declareOther(const std::string& name)
+{
+    if (name.empty() || m_scopes.empty()) return;
+    m_scopes.back().others.insert(name);
+}
+
 std::string Parser::currentClassName() const
 {
     for (size_t i = m_scopes.size(); i > 0; --i) if (m_scopes[i - 1].isClass) return m_scopes[i - 1].name;
@@ -213,7 +219,12 @@ bool Parser::isTemplateName(const QualifiedName& n) const
     if (n.parts.empty()) return false;
     const std::string& id = n.parts.back().ident;
     if (n.parts.size() == 1 && !n.global) {
-        for (size_t i = m_scopes.size(); i > 0; --i) if (m_scopes[i - 1].templates.count(id)) return true;
+        // the innermost scope that declares the name decides: a local variable, a parameter or a function
+        // hides a template of the same name further out ("int count = 0; count < n" after <algorithm>)
+        for (size_t i = m_scopes.size(); i > 0; --i) {
+            if (m_scopes[i - 1].templates.count(id)) return true;
+            if (m_scopes[i - 1].others.count(id)) return false;
+        }
         return false;
     }
     const NamedScope* ns = findNamedScope(n, n.parts.size() - 1);
@@ -650,6 +661,7 @@ void Parser::registerDeclaredNames(const DeclSpec& spec, const Declarator& d)
 {
     if (d.name.parts.size() != 1 || d.name.global) return;
     if (spec.isTypedef) declareType(d.name.parts[0].ident);
+    else declareOther(d.name.parts[0].ident);
 }
 
 bool Parser::braceElements(std::vector<Expr*>& out)
@@ -704,6 +716,17 @@ bool Parser::memInitializers(Decl* fn)
     return true;
 }
 
+// a declarator, or in a class an unnamed bit-field ": width" (": 0" closes the bit-field allocation unit)
+bool Parser::memberDeclarator(Declarator& d, bool inClass)
+{
+    if (inClass && at(":")) {
+        advance();
+        d.bitfield = conditional();
+        return d.bitfield != 0;
+    }
+    return declarator(d, false, true, false);
+}
+
 Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, bool firstParsed, Declarator* first)
 {
     Declarator* d = first;
@@ -715,7 +738,7 @@ Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, boo
             return decl;
         }
         d = m_arena.declarator();
-        if (!declarator(*d, false, true, false)) return 0;
+        if (!memberDeclarator(*d, inClass)) return 0;
     }
     // function definition?
     if (d->isFunction() && (at("{") || at(":") || at("try"))) {
@@ -732,7 +755,11 @@ Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, boo
             m_scopes.push_back(s); pushedClass = true;
         }
         pushScope("", false);
-        // parameter names are not types; template parameters of the enclosing template are already in scope
+        // parameter names are not types; template parameters of the enclosing template are already in scope.
+        // They hide templates of the same name in the body
+        if (const DeclaratorPart* fp = d->functionPart())
+            for (size_t k = 0; k < fp->params.size(); ++k)
+                if (fp->params[k]->decl && fp->params[k]->decl->name.parts.size() == 1) declareOther(fp->params[k]->decl->name.parts[0].ident);
         if (accept(":")) { if (!memInitializers(fn)) { popScope(); if (pushedClass) m_scopes.pop_back(); return 0; } }
         if (at("try")) { Loc tl = loc(); advance(); if (accept(":")) { if (!memInitializers(fn)) { popScope(); if (pushedClass) m_scopes.pop_back(); return 0; } } fn->body = tryBlock(tl); }
         else fn->body = compound();
@@ -752,9 +779,8 @@ Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, boo
         decl->declarators.push_back(id);
         if (!accept(",")) break;
         d = m_arena.declarator();
-        if (!declarator(*d, false, true, false)) return 0;
+        if (!memberDeclarator(*d, inClass)) return 0;
     }
-    (void)inClass;
     if (!expect(";", "after the declaration")) return 0;
     return decl;
 }
@@ -1117,13 +1143,14 @@ Stmt* Parser::declarationStatement()
     size_t errs = m_diags.size();
     int errorsBefore = m_errors;
     Loc here = loc();
+    const std::set<std::string> othersBefore = m_scopes.back().others;   // a failed attempt declares nothing
     ++m_tentative;
     DeclSpec spec;
     bool any = declSpecifiers(spec, false, true);
     Decl* d = 0;
     if (any && spec.hasType()) d = simpleOrFunction(false, spec, here, false, 0);
     --m_tentative;
-    if (!d) { m_pos = save; m_diags.resize(errs); m_errors = errorsBefore; return 0; }
+    if (!d) { m_pos = save; m_diags.resize(errs); m_errors = errorsBefore; m_scopes.back().others = othersBefore; return 0; }
     Stmt* s = m_arena.stmt(Stmt::DeclStmt, here);
     s->decl = d;
     return s;
@@ -1150,6 +1177,7 @@ bool Parser::condition(Stmt* s)
             InitDeclarator id; id.decl = d; id.init.kind = Initializer::Assign; id.init.args.push_back(e);
             decl->declarators.push_back(id);
             s->decl = decl;
+            registerDeclaredNames(spec, *d);
             return true;
         }
         m_pos = save; m_diags.resize(errs); m_errors = eb;
@@ -1425,7 +1453,7 @@ Expr* Parser::unary()
             return u;
         }
         if (op == "(") { Expr* c; if (tryCastExpr(c)) return c; }
-        if (op == "::" && (peek().text == "new" || peek().text == "delete")) advance();
+        if (op == "::" && (peek().text == "new" || peek().text == "delete")) { advance(); Expr* g = unary(); if (g && (g->kind == Expr::New || g->kind == Expr::Delete)) g->globalScope = true; return g; }
     }
     if (cur().kind == PpToken::Ident) {
         const std::string& w = cur().text;

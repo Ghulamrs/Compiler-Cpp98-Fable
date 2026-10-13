@@ -3,6 +3,7 @@
 #include "Sema.hpp"
 #include "PathUtil.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -222,11 +223,13 @@ const Type* TypeTable::arithmeticResult(const Type* a, const Type* b)
 
 Symbol::Symbol()
     : kind(Variable), scope(0), type(0), access(cxx::AccessPublic), members(0), isDefinition(false), isStruct(false), isUnion(false),
-      isPolymorphic(false), isAbstract(false), layoutDone(false), size(0), align(1), vptrOffset(-1), classAst(0),
+      isPolymorphic(false), isAbstract(false), layoutDone(false), size(0), align(1), nvSize(0),
+      leadsWithZeroSized(false), endsWithZeroSized(false), vptrOffset(-1), vbptrOffset(-1), classAst(0),
       isVirtual(false), isPureVirtual(false), isStatic(false), isExtern(false), isInline(false), isExplicit(false), isConstructor(false),
       isDestructor(false), isConversion(false), isOperator(false), isFriendDecl(false), hasBody(false), isExternC(false),
-      definition(0), declAst(0), body(0), vtableSlot(-1), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
-      isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), templateAst(0), instantiatedFrom(0),
+      definition(0), declAst(0), body(0), vtableSlot(-1), thisAdjust(0), vfptrOffset(0), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
+      isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), bitWidth(-1), bitOffset(0),
+      anonHost(0), anonOf(0), templateAst(0), instantiatedFrom(0),
       isDependentContext(false), isImplicitInstantiation(false), isLazyInstantiation(false), instantiationFailed(false), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
       hasCopyAssign(false), hasDefaultCtor(false) {}
 
@@ -353,6 +356,16 @@ Symbol* Sema::lookupUnqualified(const std::string& name, Scope* from, bool types
     return 0;
 }
 
+// inside an instantiation the template's name is the injected class name, a typedef of the instantiation; written
+// with template arguments ("Matrix<T, C, R>" inside Matrix<T, R, C>) it names the template, so those arguments
+// select the specialisation (14.6.1/1). Returns the class template then, 0 otherwise
+Symbol* Sema::injectedTemplate(Symbol* s, const cxx::NameComponent& c) const
+{
+    if (!s || !c.hasTemplateArgs || s->kind != Symbol::Typedef || !s->type || s->type->kind != Type::Class || !s->type->decl) return 0;
+    Symbol* tmpl = s->type->decl->instantiatedFrom;
+    return tmpl && tmpl->kind == Symbol::ClassTemplate && tmpl->name == s->name ? tmpl : 0;
+}
+
 Scope* Sema::scopeForQualifier(const cxx::QualifiedName& n, Scope* from)
 {
     // the scope denoted by all components but the last
@@ -376,6 +389,7 @@ Scope* Sema::scopeForQualifier(const cxx::QualifiedName& n, Scope* from)
             }
         }
         if (!s) return 0;
+        if (Symbol* tmpl = injectedTemplate(s, c)) s = tmpl;    // "M<T, C, R>::" inside M<T, R, C>: another instantiation
         if (s->kind == Symbol::Typedef) { const Type* t = s->type; if (t && t->kind == Type::Class && t->decl) s = t->decl; else return 0; }
         if (s->kind == Symbol::ClassTemplate && !c.hasTemplateArgs) {
             // the template's name inside one of its instantiations is the injected class name
@@ -478,6 +492,7 @@ const Type* Sema::namedType(const cxx::QualifiedName& n, Scope* in, const std::s
         }
         return instantiateClassTemplate(s, last.templateArgs, in, loc);
     }
+    if (Symbol* tmpl = injectedTemplate(s, last)) return instantiateClassTemplate(tmpl, last.templateArgs, in, loc);
     if (s->kind == Symbol::Typedef) return s->type ? s->type : m_types.error();
     if (s->kind == Symbol::Class) return m_types.classType(s);
     if (s->kind == Symbol::Enum) return m_types.enumType(s);
@@ -631,7 +646,11 @@ void Sema::declare(cxx::Decl* d, Scope* in, cxx::Access access)
         for (size_t i = 0; i < all.size(); ++i) in->add(all[i]);
         break;
     }
-    case cxx::Decl::Class: d->semaSym = declareClass(d->classDef, in, access, 0); break;
+    case cxx::Decl::Class:
+        d->semaSym = declareClass(d->classDef, in, access, 0);
+        // "union { int i; double d; };" in a class: an unnamed member whose members belong to the class
+        if (in->kind == Scope::Class && d->classDef->name.parts.empty() && d->classDef->isDefinition) declareAnonymousMember(d->semaSym, in, access);
+        break;
     case cxx::Decl::Enum: d->semaSym = declareEnum(d->enumDef, in, access); break;
     case cxx::Decl::Simple: declareSimple(d, in, access); break;
     case cxx::Decl::Function: {
@@ -749,6 +768,28 @@ Symbol* Sema::declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Sym
     return cls;
 }
 
+// an anonymous union or struct inside a class: an unnamed member of that type holds it, and every member of it
+// (nested anonymous members included) is named in the class by a symbol placed at the same bytes and bits;
+// layoutClass sets the offsets once the unnamed member has its own
+void Sema::declareAnonymousMember(Symbol* anon, Scope* in, cxx::Access access)
+{
+    Symbol* owner = in->owner;
+    if (!owner || !anon || !anon->members) return;
+    Symbol* host = m_prog.newSymbol(Symbol::Variable, "", 0);
+    host->type = anon->type; host->loc = anon->loc; host->access = access; host->isMember = true; host->ownerClass = owner;
+    host->isDefinition = true; host->isDependentContext = owner->isDependentContext;
+    host->index = static_cast<int>(owner->fields.size());
+    owner->fields.push_back(host);
+    for (size_t i = 0; i < anon->members->order.size(); ++i) {
+        Symbol* m = anon->members->order[i];
+        if (m->kind != Symbol::Variable || !m->isMember || m->isStatic || m->name.empty()) continue;
+        Symbol* p = m_prog.newSymbol(Symbol::Variable, m->name, in);
+        p->type = m->type; p->loc = m->loc; p->access = access; p->isMember = true; p->ownerClass = owner; p->isMutable = m->isMutable;
+        p->isDefinition = true; p->isDependentContext = owner->isDependentContext; p->declAst = m->declAst; p->index = -1;
+        p->bitWidth = m->bitWidth; p->bitOffset = m->bitOffset; p->anonHost = host; p->anonOf = m;
+    }
+}
+
 namespace {
 
 bool sameSignature(const Type* a, const Type* b)
@@ -764,6 +805,63 @@ bool sameSignature(const Type* a, const Type* b)
         if ((!x || !y) && a->params[i]->kind != b->params[i]->kind) return false;
     }
     return true;
+}
+
+// the written form of a function template's declaration, for matching a redeclaration or the definition with an
+// earlier declaration (14.5.5.1: the same template parameters, result and parameter types). Parameter names are
+// left out, template parameter names must agree, and template arguments that are expressions keep their text
+// ("Matrix<T, R - 1, C - 1>"), so two overloads that differ only there stay apart
+std::string nameShape(const cxx::QualifiedName& n);
+
+std::string specShape(const cxx::DeclSpec& s)
+{
+    if (s.kind != cxx::DeclSpec::Named) return s.text();
+    return std::string(s.isConst ? "const " : "") + (s.isVolatile ? "volatile " : "") + nameShape(s.name);
+}
+
+std::string declaratorShape(const cxx::Declarator* d)
+{
+    if (!d) return "";
+    cxx::Declarator unnamed = *d;
+    unnamed.name = cxx::QualifiedName();
+    return unnamed.text();
+}
+
+std::string nameShape(const cxx::QualifiedName& n)
+{
+    std::string s = n.global ? "::" : "";
+    for (size_t i = 0; i < n.parts.size(); ++i) {
+        const cxx::NameComponent& c = n.parts[i];
+        s += (i ? "::" : "") + c.ident;
+        if (!c.hasTemplateArgs) continue;
+        s += "<";
+        for (size_t a = 0; a < c.templateArgs.size(); ++a) {
+            const cxx::TemplateArg& ta = c.templateArgs[a];
+            s += a ? ", " : "";
+            if (ta.type) s += specShape(ta.type->spec) + " " + declaratorShape(ta.type->decl);
+            else s += cxx::expressionText(ta.expr);
+        }
+        s += ">";
+    }
+    return s;
+}
+
+std::string templateSignature(const cxx::Decl* tmpl, const cxx::Decl* inner, const cxx::Declarator* dcl)
+{
+    std::string s = "<";
+    for (size_t i = 0; i < tmpl->templateParams.size(); ++i) {
+        const cxx::TemplateParam* p = tmpl->templateParams[i];
+        s += (i ? ", " : "") + std::string(p->kind == cxx::TemplateParam::Type ? "typename " : p->kind == cxx::TemplateParam::Template ? "template " : "");
+        if (p->kind == cxx::TemplateParam::NonType && p->nonType) s += specShape(p->nonType->spec) + " " + declaratorShape(p->nonType->decl) + " ";
+        s += p->name;
+    }
+    // the result and the function's own declarator parts (const, variadic), then the parameters one by one
+    cxx::Declarator outer = *dcl;
+    if (!outer.parts.empty()) outer.parts.back().params.clear();
+    s += "> " + specShape(inner->spec) + " " + declaratorShape(&outer);
+    const cxx::DeclaratorPart* fp = dcl->functionPart();
+    for (size_t k = 0; fp && k < fp->params.size(); ++k) s += " | " + specShape(fp->params[k]->spec) + " " + declaratorShape(fp->params[k]->decl);
+    return s;
 }
 
 } // namespace
@@ -891,6 +989,26 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
             if (fn) { if (id.pureVirtual) { fn->isPureVirtual = true; fn->isVirtual = true; } if (d->spec.isFriend) fn->isFriendDecl = true; }
             continue;
         }
+        // a bit-field: its width is a constant; an unnamed one (": n") only shapes the layout
+        long width = -1;
+        if (dcl->bitfield && in->kind == Scope::Class && in->owner) {
+            if (!in->owner->isDependentContext) {
+                expr(dcl->bitfield, in);
+                const int bits = 8 * m_types.sizeOf(t);
+                if (!t->isIntegral()) error(dcl->loc, "S105", "bit-field '" + name + "' must have an integral or enumeration type");
+                else if (!constantValue(dcl->bitfield, width)) { error(dcl->loc, "S114", "bit-field width is not a constant"); width = -1; }
+                else if (width < 0 || width > bits || (width == 0 && !name.empty())) { error(dcl->loc, "S114", "bit-field width " + intToString(static_cast<int>(width)) + " is out of range for " + t->text()); width = -1; }
+            }
+            if (name.empty()) {
+                if (width >= 0) {
+                    Symbol* u = m_prog.newSymbol(Symbol::Variable, "", 0);
+                    u->type = t; u->loc = dcl->loc; u->isMember = true; u->ownerClass = in->owner; u->bitWidth = static_cast<int>(width);
+                    u->index = static_cast<int>(in->owner->fields.size());
+                    in->owner->unnamedBitFields.push_back(u);
+                }
+                continue;
+            }
+        }
         // variable, field or static member
         Scope* target = in;
         Symbol* var = 0;
@@ -918,6 +1036,7 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
             var->isDefinition = var->isDefinition || !d->spec.isExtern;
         }
         dcl->semaSym = var;
+        if (width >= 0 && var->isMember && !var->isStatic) var->bitWidth = static_cast<int>(width);
         if (d->spec.align > var->declAlign) var->declAlign = d->spec.align;
         if (!var->declAst || id.init.kind != cxx::Initializer::None) var->declAst = d;   // the declaration carrying the initializer
         if (id.init.kind != cxx::Initializer::None) {
@@ -1030,6 +1149,26 @@ void Sema::declareTemplate(cxx::Decl* d, Scope* in, cxx::Access access)
             Scope* qs = scopeForQualifier(dcl->name, in);
             if (qs) target = qs;
         }
+        // a redeclaration, or the definition after a forward declaration, is the same template (one candidate):
+        // the definition takes the symbol over, keeping the default arguments only a declaration gave
+        const std::string sig = templateSignature(d, inner, dcl);
+        const std::vector<Symbol*>* same = target->find(name);
+        for (size_t i = 0; same && i < same->size(); ++i) {
+            Symbol* ex = (*same)[i];
+            if (ex->kind != Symbol::FunctionTemplate || ex->scope != target || !ex->templateAst || !ex->declAst) continue;
+            const cxx::Declarator* exd = ex->declAst->kind == cxx::Decl::Function ? ex->declAst->declarator : (ex->declAst->declarators.empty() ? 0 : ex->declAst->declarators[0].decl);
+            if (!exd || !exd->isFunction() || templateSignature(ex->templateAst, ex->declAst, exd) != sig) continue;
+            if (inner->kind == cxx::Decl::Function) {
+                if (ex->declAst->kind == cxx::Decl::Function) { error(d->loc, "S110", "redefinition of function template '" + ex->qualifiedName() + "'"); d->semaSym = ex; return; }
+                std::vector<cxx::Param*>& np = dcl->parts.back().params;
+                const std::vector<cxx::Param*>& op = exd->parts.back().params;
+                for (size_t k = 0; k < np.size() && k < op.size(); ++k) if (!np[k]->defaultValue) np[k]->defaultValue = op[k]->defaultValue;
+                ex->templateAst = d; ex->declAst = inner; ex->templateParams = tparams;
+                tscope->owner = ex;
+            }
+            d->semaSym = ex;
+            return;
+        }
         Symbol* ft = m_prog.newSymbol(Symbol::FunctionTemplate, name, target);
         ft->loc = d->loc; ft->access = access; ft->templateAst = d; ft->templateParams = tparams; ft->declAst = inner; ft->isDependentContext = true;
         ft->ownerClass = target->kind == Scope::Class ? target->owner : 0;
@@ -1063,6 +1202,67 @@ int declaredFloor(const Type* t)
     return t && t->kind == Type::Class && t->decl && t->decl->layoutDone ? t->decl->declAlign : 0;
 }
 
+// MSVC's vbtables of a class whose virtual bases are placed: its own vbptr's (when it shares none) and those
+// inherited from its bases, the one it shares extended with its new virtual bases. Tables that would share a name
+// are named apart by the bases they come through, as cl (and clang's MicrosoftVTableContext) does
+void layoutVbtables(Symbol* cls, int sharedVb)
+{
+    std::vector<VbTable> tables;
+    if (sharedVb < 0) {
+        VbTable t;
+        t.offset = cls->vbptrOffset; t.introducedBy = cls; t.order = cls->vbases; t.nextToMangle = cls;
+        tables.push_back(t);
+    }
+    // the vbptrs of the non-virtual bases' non-virtual parts, then those of every virtual base (once, at its
+    // place in this class)
+    std::vector<std::pair<Symbol*, int> > parts;
+    std::vector<int> partIndex;
+    for (size_t b = 0; b < cls->bases.size(); ++b)
+        if (cls->bases[b].cls && !cls->bases[b].isVirtual) { parts.push_back(std::make_pair(cls->bases[b].cls, cls->bases[b].offset)); partIndex.push_back(static_cast<int>(b)); }
+    for (size_t v = 0; v < cls->vbases.size(); ++v) { parts.push_back(std::make_pair(cls->vbases[v], cls->vbaseOffsets[v])); partIndex.push_back(-1); }
+    for (size_t p = 0; p < parts.size(); ++p) {
+        Symbol* bc = parts[p].first;
+        for (size_t k = 0; k < bc->vbtables.size(); ++k) {
+            if (bc->vbtables[k].offset >= bc->nvSize) continue;   // in its virtual part: placed by this class
+            VbTable t = bc->vbtables[k];
+            t.offset += parts[p].second;
+            Symbol* via = bc;
+            // a virtual base inherited through a direct base keeps the name that base gives its table
+            for (size_t b = 0; partIndex[p] < 0 && via == bc && b < cls->bases.size(); ++b) {
+                Symbol* d = cls->bases[b].cls;
+                if (!d || d == bc) continue;
+                const size_t v = static_cast<size_t>(std::find(d->vbases.begin(), d->vbases.end(), bc) - d->vbases.begin());
+                if (v >= d->vbases.size()) continue;
+                for (size_t u = 0; u < d->vbtables.size(); ++u)
+                    if (d->vbtables[u].offset == d->vbaseOffsets[v] + bc->vbtables[k].offset) { t.path = d->vbtables[u].path; t.nextToMangle = d->vbtables[u].nextToMangle; via = d; }
+            }
+            if (t.path.empty() || t.path.back() != via) t.nextToMangle = via;
+            if (sharedVb >= 0 && partIndex[p] == sharedVb && bc->vbtables[k].offset == bc->vbptrOffset)
+                for (size_t v = 0; v < cls->vbases.size(); ++v) if (std::find(t.order.begin(), t.order.end(), cls->vbases[v]) == t.order.end()) t.order.push_back(cls->vbases[v]);
+            tables.push_back(t);
+        }
+    }
+    for (size_t t = 0; t < tables.size(); ++t) {
+        VbTable& vt = tables[t];
+        const int self = vt.entries.empty() ? -vt.offset : vt.entries[0];
+        vt.entries.assign(1, self);
+        for (size_t k = 0; k < vt.order.size(); ++k) {
+            const size_t v = static_cast<size_t>(std::find(cls->vbases.begin(), cls->vbases.end(), vt.order[k]) - cls->vbases.begin());
+            vt.entries.push_back(v < cls->vbaseOffsets.size() ? cls->vbaseOffsets[v] - vt.offset : 0);
+        }
+    }
+    for (int round = 0; round < 32; ++round) {
+        bool moved = false;
+        std::vector<bool> clash(tables.size(), false);
+        for (size_t t = 0; t < tables.size(); ++t)
+            for (size_t u = 0; u < tables.size(); ++u) if (u != t && tables[u].path == tables[t].path) clash[t] = true;
+        for (size_t t = 0; t < tables.size(); ++t)
+            if (clash[t] && tables[t].nextToMangle && (tables[t].path.empty() || tables[t].path.back() != tables[t].nextToMangle)) { tables[t].path.push_back(tables[t].nextToMangle); moved = true; }
+        if (!moved) break;
+    }
+    cls->vbtables = tables;
+}
+
 } // namespace
 
 void Sema::layoutClass(Symbol* cls)
@@ -1073,17 +1273,36 @@ void Sema::layoutClass(Symbol* cls)
     int floor = cls->classAst ? cls->classAst->declAlign : 0;
     int off = 0, align = 1;
     bool vptr = false;
-    for (size_t b = 0; b < cls->bases.size(); ++b) {
+    // MSVC's empty bases: a base takes its size without the byte an empty class is given (nvSize), so an empty
+    // base takes no space; a byte of padding separates a base that ends with a zero-sized subobject from a
+    // following base that leads with one (E, E2 { int w; }: E at 0, E2 at 1, w at 4)
+    // MSVC places the polymorphic bases first, in declaration order, then the others: the first polymorphic base
+    // (the primary base) is at offset 0 and the class shares its vptr (NP, PB { virtual }: PB at 0, NP after it)
+    std::vector<size_t> baseOrder;
+    for (size_t pass = 0; pass < 2; ++pass)
+        for (size_t b = 0; b < cls->bases.size(); ++b) {
+            Symbol* bc = cls->bases[b].cls;
+            if (!bc) continue;
+            if (!bc->layoutDone) layoutClass(bc);
+            if (cls->bases[b].isVirtual) continue;           // placed after the non-virtual part
+            if (bc->isPolymorphic == (pass == 0)) baseOrder.push_back(b);
+        }
+    const Symbol* prev = 0;
+    bool leadsZero = false, endsZero = false;
+    for (size_t k = 0; k < baseOrder.size(); ++k) {
+        const size_t b = baseOrder[k];
         Symbol* bc = cls->bases[b].cls;
-        if (!bc) continue;
-        if (!bc->layoutDone) layoutClass(bc);
-        if (b == 0 && bc->isPolymorphic) vptr = true;        // share the primary base's vptr
+        if (k == 0 && bc->isPolymorphic) vptr = true;        // share the primary base's vptr
         int a = pack > 0 && bc->align > pack ? pack : bc->align;
         if (bc->declAlign > a) a = bc->declAlign;
         if (bc->declAlign > floor) floor = bc->declAlign;
+        if (prev && prev->endsWithZeroSized && bc->leadsWithZeroSized) ++off;
+        if (!prev) leadsZero = bc->leadsWithZeroSized;
         off = (off + a - 1) / a * a;
         cls->bases[b].offset = off;
-        off += bc->size;
+        off += bc->nvSize;
+        endsZero = bc->endsWithZeroSized;
+        prev = bc;
         if (a > align) align = a;
     }
     bool ownVirtuals = false;
@@ -1098,25 +1317,124 @@ void Sema::layoutClass(Symbol* cls)
         const int va = pack > 0 && pack < 8 ? pack : 8;
         if (align < va) align = va;
     } else if (vptr) cls->vptrOffset = 0;
-    for (size_t f = 0; f < cls->fields.size(); ++f) {
-        Symbol* fld = cls->fields[f];
+    // MSVC's virtual bases: every one, direct or inherited, in cl's order (a base's own virtual bases before it).
+    // The class shares the vbptr of its first non-virtual base that has one, or gets its own after the
+    // non-virtual bases (injected once the members are placed, as cl does: VN : NB, virtual VB { short n; }:
+    // NB at 0, vbptr at 8, n at 18)
+    const int baseEnd = off;
+    std::vector<Symbol*> vbases;
+    int sharedVb = -1;
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        Symbol* bc = cls->bases[b].cls;
+        if (!bc) continue;
+        for (size_t v = 0; v < bc->vbases.size(); ++v) if (std::find(vbases.begin(), vbases.end(), bc->vbases[v]) == vbases.end()) vbases.push_back(bc->vbases[v]);
+        if (cls->bases[b].isVirtual) { if (std::find(vbases.begin(), vbases.end(), bc) == vbases.end()) vbases.push_back(bc); }
+        else if (sharedVb < 0 && bc->vbptrOffset >= 0) sharedVb = static_cast<int>(b);
+    }
+    // the members in declaration order, unnamed bit-fields included
+    std::vector<Symbol*> members;
+    for (size_t f = 0, u = 0; f <= cls->fields.size(); ++f) {
+        for (; u < cls->unnamedBitFields.size() && cls->unnamedBitFields[u]->index <= static_cast<int>(f); ++u) members.push_back(cls->unnamedBitFields[u]);
+        if (f < cls->fields.size()) members.push_back(cls->fields[f]);
+    }
+    // MSVC's bit-fields: a bit-field takes a unit of its declared type's size, at that type's alignment; the
+    // next one shares the unit, from the low bit up, when its type has the same size and its bits fit. A
+    // zero-width bit-field ends the unit and aligns to its type, and is ignored unless it follows a bit-field.
+    // In a union, bit-fields are at offset 0 and do not raise the alignment.
+    bool inUnit = false;                 // the previous member is a bit-field of width > 0
+    int unitSize = 0, bitsLeft = 0;
+    for (size_t f = 0; f < members.size(); ++f) {
+        Symbol* fld = members[f];
         const Type* ft = fld->type;
         const Type* elem = ft;
         while (elem && elem->kind == Type::Array) elem = elem->inner;
         if (elem && elem->kind == Type::Class && elem->decl && !elem->decl->layoutDone) layoutClass(elem->decl);
+        if (elem && elem->kind == Type::Class && elem->decl) endsZero = elem->decl->endsWithZeroSized;   // a member of class type has its full size
         int s = m_types.sizeOf(ft), a = m_types.alignOf(ft);
         if (ft->kind == Type::Reference) { s = 8; a = 8; }
         if (pack > 0 && a > pack) a = pack;
         const int need = fld->declAlign > declaredFloor(ft) ? fld->declAlign : declaredFloor(ft);
         if (need > a) a = need;
         if (need > floor) floor = need;
+        if (fld->bitWidth >= 0) {
+            fld->bitOffset = 0;
+            if (fld->bitWidth == 0) {
+                if (!inUnit) { fld->offset = cls->isUnion ? 0 : off; continue; }
+                inUnit = false;
+                if (cls->isUnion) { fld->offset = 0; if (s > off) off = s; continue; }
+                off = (off + a - 1) / a * a; fld->offset = off;
+                if (a > align) align = a;
+                continue;
+            }
+            if (!cls->isUnion && inUnit && unitSize == s && fld->bitWidth <= bitsLeft) {
+                fld->offset = off - s;
+                fld->bitOffset = 8 * s - bitsLeft;
+                bitsLeft -= fld->bitWidth;
+                continue;
+            }
+            inUnit = true; unitSize = s;
+            if (cls->isUnion) { fld->offset = 0; if (s > off) off = s; continue; }
+            off = (off + a - 1) / a * a; fld->offset = off; off += s;
+            bitsLeft = 8 * s - fld->bitWidth;
+            if (a > align) align = a;
+            continue;
+        }
+        inUnit = false;
         if (cls->isUnion) { fld->offset = 0; if (s > off) off = s; }
         else { off = (off + a - 1) / a * a; fld->offset = off; off += s; }
         if (a > align) align = a;
     }
+    if (!vbases.empty()) {
+        if (sharedVb >= 0) cls->vbptrOffset = cls->bases[static_cast<size_t>(sharedVb)].offset + cls->bases[static_cast<size_t>(sharedVb)].cls->vbptrOffset;
+        else {
+            // cl's injection: the vbptr at the next pointer boundary after the non-virtual bases, the members
+            // moved down by the distance to its end rounded up to the alignment so far
+            const int pa = pack > 0 && pack < 8 ? pack : 8;
+            cls->vbptrOffset = (baseEnd + pa - 1) / pa * pa;
+            int shift = cls->vbptrOffset + 8 - baseEnd;
+            if (align > 1) shift = (shift + align - 1) / align * align;
+            for (size_t f = 0; f < members.size(); ++f) members[f]->offset += shift;
+            off += shift;
+            if (align < pa) align = pa;
+        }
+    }
     if (floor > align) align = floor;
-    if (off == 0) off = 1;
-    cls->size = (off + align - 1) / align * align;
+    cls->nvSize = (off + align - 1) / align * align;
+    cls->size = cls->nvSize;
+    if (!vbases.empty()) {
+        // each virtual base once, after the non-virtual part, in cl's order
+        int voff = cls->nvSize;
+        for (size_t v = 0; v < vbases.size(); ++v) {
+            Symbol* vb = vbases[v];
+            int a = pack > 0 && vb->align > pack ? pack : vb->align;
+            if (vb->declAlign > a) a = vb->declAlign;
+            if (a > align) align = a;
+            voff = (voff + a - 1) / a * a;
+            cls->vbaseOffsets.push_back(voff);
+            voff += vb->nvSize;
+        }
+        cls->vbases = vbases;
+        cls->size = (voff + align - 1) / align * align;
+        for (size_t b = 0; b < cls->bases.size(); ++b)
+            if (cls->bases[b].isVirtual && cls->bases[b].cls)
+                cls->bases[b].offset = cls->vbaseOffsets[static_cast<size_t>(std::find(vbases.begin(), vbases.end(), cls->bases[b].cls) - vbases.begin())];
+        layoutVbtables(cls, sharedVb);
+    }
+    if (cls->size == 0) {
+        // an empty class: size 1 as a complete object, nothing as a base; it leads and ends with itself
+        cls->size = 1;
+        leadsZero = endsZero = true;
+    }
+    cls->leadsWithZeroSized = leadsZero;
+    cls->endsWithZeroSized = endsZero;
+    // an empty base left at the very end of the class sits on its last byte (D8, E {}: E at 7, size 8)
+    for (size_t b = 0; b < cls->bases.size(); ++b)
+        if (cls->bases[b].cls && !cls->bases[b].isVirtual && cls->bases[b].cls->nvSize == 0 && cls->bases[b].offset >= cls->size) cls->bases[b].offset = cls->size - 1;
+    // the members of anonymous unions and structs, now that the unnamed members holding them are placed
+    for (size_t i = 0; i < cls->members->order.size(); ++i) {
+        Symbol* m = cls->members->order[i];
+        if (m->kind == Symbol::Variable && m->anonHost && m->anonOf) { m->offset = m->anonHost->offset + m->anonOf->offset; m->bitOffset = m->anonOf->bitOffset; }
+    }
     cls->align = align;
     cls->declAlign = floor;
     cls->layoutDone = true;
@@ -1151,30 +1469,99 @@ void Sema::completeClass(Symbol* cls)
     }
     if (cls->isDependentContext) return;
     layoutClass(cls);
-    // vtable: the primary base's table first, then overrides and new virtuals
-    if (!cls->bases.empty() && cls->bases[0].cls) cls->vtable = cls->bases[0].cls->vtable;
+    // vtable: the primary base's table first (the first polymorphic base, at offset 0), then overrides and new virtuals
+    size_t primary = cls->bases.size();
+    for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->bases[b].cls && cls->bases[b].cls->isPolymorphic) { primary = b; break; }
+    if (primary < cls->bases.size()) cls->vtable = cls->bases[primary].cls->vtable;
+    // MSVC's secondary vftables: every vfptr of the bases other than the one at offset 0 (those of the other
+    // polymorphic bases, and the primary base's own secondary ones) keeps a table of its own at its offset here,
+    // which starts as the base's and takes this class's overriders, through adjustor thunks where needed
+    std::vector<VfTable> tables(1);
+    tables[0].introducedBy = cls;
+    if (primary < cls->bases.size() && !cls->bases[primary].cls->vftables.empty()) {
+        tables[0].introducedBy = cls->bases[primary].cls->vftables[0].introducedBy;
+        tables[0].thunks = cls->bases[primary].cls->vftables[0].thunks;
+    }
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        Symbol* bc = cls->bases[b].cls;
+        if (!bc || !bc->isPolymorphic) continue;
+        for (size_t t = b == primary ? 1 : 0; t < bc->vftables.size(); ++t) {
+            tables.push_back(bc->vftables[t]);
+            tables.back().offset += cls->bases[b].offset;
+        }
+    }
+    std::map<std::string, size_t> firstOfName;   // where each member function's name is first declared
+    std::vector<std::pair<std::pair<size_t, size_t>, Symbol*> > fresh;   // new virtuals: (first of name, ~index)
     for (size_t i = 0; i < cls->members->order.size(); ++i) {
         Symbol* m = cls->members->order[i];
         if (m->kind != Symbol::Function || m->isStatic) continue;
-        // does it override a virtual function of a base?
+        // cl groups overloads where the name is first declared, a non-virtual declaration included
+        if (firstOfName.find(m->name) == firstOfName.end()) firstOfName[m->name] = i;
+        // does it override a virtual function of a base? Every slot of the bases' tables is searched, not the
+        // names lookup finds: a middle class may hide an overload it does not override (YB::f(double) over
+        // YA::f(int), YA::f(double): YC::f(int) still overrides YA::f(int))
         Symbol* over = 0;
         for (size_t b = 0; b < cls->bases.size() && !over; ++b) {
-            std::vector<Symbol*> out;
-            lookupMember(cls->bases[b].cls, m->isDestructor ? "~" + cls->bases[b].cls->ctorName() : m->name, out);
-            for (size_t k = 0; k < out.size() && !over; ++k)
-                if (out[k]->kind == Symbol::Function && out[k]->isVirtual && (m->isDestructor || sameSignature(out[k]->type, m->type))) over = out[k];
+            Symbol* bc = cls->bases[b].cls;
+            if (!bc || !bc->isPolymorphic) continue;
+            const size_t nt = bc->vftables.empty() ? 1 : bc->vftables.size();
+            for (size_t t = 0; t < nt && !over; ++t) {
+                const std::vector<Symbol*>& fns = bc->vftables.empty() ? bc->vtable : bc->vftables[t].fns;
+                for (size_t k = 0; k < fns.size() && !over; ++k) {
+                    Symbol* v = fns[k];
+                    if (v && (m->isDestructor ? v->isDestructor : (!v->isDestructor && v->name == m->name && sameSignature(v->type, m->type)))) over = v;
+                }
+            }
         }
         if (over) { m->isVirtual = true; m->overrides = over; }
         if (!m->isVirtual) continue;
         bool placed = false;
         for (size_t s = 0; s < cls->vtable.size() && !placed; ++s) {
             Symbol* v = cls->vtable[s];
-            if (v == over || (over && v->overrides && v->name == m->name && sameSignature(v->type, m->type)) || (m->isDestructor && v->isDestructor)) { cls->vtable[s] = m; m->vtableSlot = static_cast<int>(s); placed = true; }
+            if (v == over || (over && v->overrides && v->name == m->name && sameSignature(v->type, m->type)) || (m->isDestructor && v->isDestructor)) {
+                cls->vtable[s] = m; m->vtableSlot = static_cast<int>(s); placed = true;
+                if (tables[0].thunks.size() > s) tables[0].thunks[s] = 0;
+            }
         }
-        if (!placed) { m->vtableSlot = static_cast<int>(cls->vtable.size()); cls->vtable.push_back(m); }
+        // the slots of the secondary tables m overrides; m is reached through the first of them (lowest offset)
+        // when the primary table does not hold it, and then expects this at that vfptr (MSVC's this adjustor)
+        std::vector<std::pair<size_t, size_t> > hits;
+        for (size_t t = 1; t < tables.size(); ++t)
+            for (size_t s = 0; s < tables[t].fns.size(); ++s) {
+                Symbol* v = tables[t].fns[s];
+                if (m->isDestructor ? v->isDestructor : (!v->isDestructor && v->name == m->name && sameSignature(v->type, m->type))) hits.push_back(std::make_pair(t, s));
+            }
+        size_t first = 0;
+        for (size_t h = 0; h < hits.size(); ++h) if (first == 0 || tables[hits[h].first].offset < tables[first].offset) first = hits[h].first;
+        m->thisAdjust = m->vfptrOffset = 0;
+        if (!placed && first > 0) {
+            for (size_t h = 0; h < hits.size(); ++h) if (hits[h].first == first) m->vtableSlot = static_cast<int>(hits[h].second);
+            m->vfptrOffset = tables[first].offset;
+            m->thisAdjust = m->isDestructor ? 0 : m->vfptrOffset;   // a destructor always takes the complete object
+            placed = true;
+        }
+        for (size_t h = 0; h < hits.size(); ++h) {
+            VfTable& v = tables[hits[h].first];
+            v.fns[hits[h].second] = m;
+            v.thunks[hits[h].second] = v.offset - m->thisAdjust;
+        }
+        if (!placed) fresh.push_back(std::make_pair(std::make_pair(firstOfName[m->name], ~i), m));
     }
+    // the new virtual functions, as cl orders them: by declaration, but overloads of a name together where the
+    // name is first declared (an overrider counts), the last declared first (a, f(int), b, f(double): a,
+    // f(double), f(int), b)
+    std::sort(fresh.begin(), fresh.end());
+    for (size_t k = 0; k < fresh.size(); ++k) {
+        Symbol* m = fresh[k].second;
+        m->vtableSlot = static_cast<int>(cls->vtable.size());
+        cls->vtable.push_back(m);
+    }
+    tables[0].fns = cls->vtable;
+    tables[0].thunks.resize(cls->vtable.size(), 0);
+    if (cls->isPolymorphic) cls->vftables = tables;
     cls->isAbstract = false;
-    for (size_t s = 0; s < cls->vtable.size(); ++s) if (cls->vtable[s]->isPureVirtual) cls->isAbstract = true;
+    for (size_t t = 0; t < cls->vftables.size(); ++t)
+        for (size_t s = 0; s < cls->vftables[t].fns.size(); ++s) if (cls->vftables[t].fns[s]->isPureVirtual) cls->isAbstract = true;
 }
 
 
@@ -1294,6 +1681,16 @@ void dumpScope(const Scope* s, int depth, std::ostringstream& out)
             out << pad << (y->isStruct ? "struct " : "class ") << y->name;
             for (size_t b = 0; b < y->bases.size(); ++b) out << (b ? ", " : " : ") << (y->bases[b].cls ? y->bases[b].cls->name : std::string("?")) << "@" << y->bases[b].offset;
             if (y->layoutDone) out << "  size " << y->size << " align " << y->align << (y->isPolymorphic ? " vptr" : "") << (y->isAbstract ? " abstract" : "");
+            if (y->layoutDone && y->vbptrOffset >= 0) {
+                out << " vbptr " << y->vbptrOffset << " vbases";
+                for (size_t v = 0; v < y->vbases.size(); ++v) out << " " << y->vbases[v]->name << "@" << y->vbaseOffsets[v];
+                for (size_t t = 0; t < y->vbtables.size(); ++t) {
+                    out << " vbtable";
+                    for (size_t p = 0; p < y->vbtables[t].path.size(); ++p) out << (p ? "/" : "@") << y->vbtables[t].path[p]->name;
+                    out << "@" << y->vbtables[t].offset << ":";
+                    for (size_t e = 0; e < y->vbtables[t].entries.size(); ++e) out << (e ? "," : "") << y->vbtables[t].entries[e];
+                }
+            }
             out << "\n";
             if (y->members) dumpScope(y->members, depth + 1, out);
             break;

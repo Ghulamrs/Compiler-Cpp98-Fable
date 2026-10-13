@@ -21,6 +21,11 @@
 // scalar type name come from the generated code) and longjmps to the innermost frame. The
 // frame stack, the exception in flight and the caught ones are per thread.
 //
+// With --eh=table the generated code has no frames: a try region is a list of code ranges in the
+// function's unwind info, each with its landing pad (the dispatch stub above, without the pop).
+// "throw" walks the stack with the Windows unwind tables (dispatch below) and enters the first
+// landing pad whose range holds a frame's call site. Both models can be mixed in one program.
+//
 // Build: cl /c /EHsc cppparse_rt.cpp, then link the object with the cppparse-generated .obj.
 // Strict C++98 (C subset).
 #ifndef _WIN32
@@ -75,14 +80,52 @@ void cppparse_pop_frame(struct cppparse_frame* f)
     g_top = f->prev;
 }
 
+/* the handler named in the unwind info of a function with table-based try regions (--eh=table). Windows calls it
+   only when its own SEH dispatch passes such a frame (an access violation, a cl throw); cppparse's exceptions do not
+   go through SEH, so it always lets the search go on. Its range table follows it in the unwind info */
+EXCEPTION_DISPOSITION cppparse_eh_handler(struct _EXCEPTION_RECORD* record, void* frame, struct _CONTEXT* context, void* dispatcher)
+{
+    (void)record; (void)frame; (void)context; (void)dispatcher;
+    return ExceptionContinueSearch;
+}
+
+#define CPPPARSE_EH_MAGIC 0x58505043UL   /* "CPPX", the first word of the range table */
+
+/* sends the exception in flight to the nearest place that takes it, walking the stack from here with the unwind
+   tables: a table landing pad (the range of the frame's call site, --eh=table) is entered with RtlRestoreContext,
+   which gives the frame back its callee-saved registers as they were at that call; a setjmp frame (the default
+   model) is entered with longjmp once the walk has passed the stack frame that holds it. With neither, the
+   exception is unhandled: nothing has been unwound, the program stops */
 static void dispatch(void)
 {
-    struct cppparse_frame* f = g_top;
-    if (!f) {
-        fprintf(stderr, "cppparse runtime: unhandled exception of type %s\n", g_inflight.type ? g_inflight.type : "?");
-        abort();
+    CONTEXT ctx;
+    int i;
+    RtlCaptureContext(&ctx);
+    for (i = 0; i < 100000 && ctx.Rip; ++i) {
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, 0);
+        if (!rf) { ctx.Rip = *(DWORD64*)ctx.Rsp; ctx.Rsp += 8; }      /* a leaf without a table entry */
+        else {
+            CONTEXT frame = ctx;                                       /* this function, at its call site */
+            void* data = 0;
+            DWORD64 establisher = 0;
+            PEXCEPTION_ROUTINE handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, base, ctx.Rip, rf, &ctx, &data, &establisher, 0);
+            if (handler && data && ((const unsigned long*)data)[0] == CPPPARSE_EH_MAGIC) {
+                const unsigned long* t = (const unsigned long*)data;
+                const DWORD64 at = frame.Rip - base - 1;               /* inside the call instruction */
+                unsigned long k;
+                for (k = 0; k < t[1]; ++k)
+                    if (at >= t[2 + 3 * k] && at < t[3 + 3 * k]) {
+                        frame.Rip = base + t[4 + 3 * k];
+                        RtlRestoreContext(&frame, 0);
+                    }
+            }
+        }
+        /* the walk has left the stack frame that holds the innermost setjmp frame */
+        if (g_top && (DWORD64)g_top < ctx.Rsp) longjmp(g_top->buf, 1);
     }
-    longjmp(f->buf, 1);
+    fprintf(stderr, "cppparse runtime: unhandled exception of type %s\n", g_inflight.type ? g_inflight.type : "?");
+    abort();
 }
 
 void cppparse_throw(const void* object, const char* type, unsigned long size)
@@ -175,6 +218,21 @@ void cppparse_catch_end(void)
     }
 }
 
+/* an exception is leaving a handler (the landing pad around a handler body calls this, having just caught it): the
+   exception that handler handled ends, unless it is the one leaving ("throw;" in the handler) */
+void cppparse_catch_unwind(void* handled)
+{
+    int k;
+    if (g_caughtCount == 0 || g_caught[g_caughtCount - 1].object == handled) return;
+    for (k = g_caughtCount - 2; k >= 0; --k)
+        if (g_caught[k].object == handled) {
+            dropException(&g_caught[k]);
+            for (; k + 1 < g_caughtCount; ++k) g_caught[k] = g_caught[k + 1];
+            --g_caughtCount;
+            return;
+        }
+}
+
 void cppparse_rethrow(void)
 {
     if (!g_inflight.type) {                       /* "throw;" inside a handler */
@@ -188,7 +246,9 @@ void cppparse_rethrow(void)
 long cppparse_interlocked_increment(long volatile* value) { return _InterlockedIncrement(value); }
 long cppparse_interlocked_decrement(long volatile* value) { return _InterlockedDecrement(value); }
 
-/* static locals that need construction: the generated code tests the guard byte and, when it is clear, calls
+/* no longer used by generated code, which guards static locals with cl's protocol (an int $TSS guard and the
+   CRT's _Init_thread_header/_Init_thread_footer), kept for objects built by older versions.
+   static locals that need construction: the generated code tests the guard byte and, when it is clear, calls
    cppparse_static_enter, which returns 1 with the lock held when this thread is to run the initializer (it
    then calls cppparse_static_leave) and 0 when another thread finished it meanwhile. One lock serves every
    static local and is recursive, since an initializer may reach another static local. An initializer that
@@ -232,5 +292,47 @@ int cppparse_frame_depth(void)
 }
 
 int cppparse_caught_depth(void) { return g_caughtCount; }
+
+/* for tests of the unwind tables: walks the stack from the caller with RtlVirtualUnwind, as an exception does,
+   counting the frames of the function that starts at 'counted', up to the first frame of the function that starts
+   at 'stop'; there it stores the callee-saved registers as the unwind restored them (rbx rbp rsi rdi r12 r13 r14
+   r15, then the low halves of xmm6..xmm15) and returns the count. -1 when 'stop' is not reached */
+static const char* functionStart(const void* p)
+{
+    /* an incrementally linked image gives the address of a jump thunk: follow its jmp rel32 */
+    const unsigned char* c = (const unsigned char*)p;
+    if (c[0] == 0xE9) { int rel; memcpy(&rel, c + 1, sizeof rel); return (const char*)(c + 5 + rel); }
+    return (const char*)p;
+}
+
+int cppparse_walk_frames(const void* stop, const void* counted, unsigned long long* ints, unsigned long long* xmms)
+{
+    CONTEXT ctx;
+    int frames = 0, i;
+    stop = functionStart(stop);
+    counted = functionStart(counted);
+    RtlCaptureContext(&ctx);
+    for (i = 0; i < 1024 && ctx.Rip; ++i) {
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, 0);
+        const char* begin = rf ? (const char*)base + rf->BeginAddress : 0;
+        if (begin && begin == (const char*)stop) {
+            const M128A* x = &ctx.Xmm6;
+            int k;
+            ints[0] = ctx.Rbx; ints[1] = ctx.Rbp; ints[2] = ctx.Rsi; ints[3] = ctx.Rdi;
+            ints[4] = ctx.R12; ints[5] = ctx.R13; ints[6] = ctx.R14; ints[7] = ctx.R15;
+            for (k = 0; k < 10; ++k) xmms[k] = x[k].Low;
+            return frames;
+        }
+        if (begin && begin == (const char*)counted) ++frames;
+        if (!rf) { ctx.Rip = *(DWORD64*)ctx.Rsp; ctx.Rsp += 8; }      /* a leaf without a table entry */
+        else {
+            void* handlerData = 0;
+            DWORD64 establisher = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &handlerData, &establisher, 0);
+        }
+    }
+    return -1;
+}
 
 }

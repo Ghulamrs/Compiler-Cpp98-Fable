@@ -648,12 +648,56 @@ int Optimizer::simplifyCfg(IrFunction& f)
     return changes;
 }
 
+namespace {
+
+bool isFloatingType(const Type* t) { return t && (t->kind == Type::Float || t->kind == Type::Double); }
+
+// an address that is valid for the whole function: a field (of a field ...) of *this, of an object a reference
+// parameter refers to, or of a local object. A load from it may be done early without risk of a fault.
+bool dereferenceable(const IrFunction& f, const IrOperand& o, const std::map<int, IrInst>& defs, int depth)
+{
+    if (o.kind != IrOperand::Temp || depth > 8) return false;
+    std::map<int, IrInst>::const_iterator d = defs.find(o.id);
+    if (d == defs.end()) return false;
+    const IrInst& in = d->second;
+    if (in.op == IrInst::AddrField || in.op == IrInst::Copy) return !in.args.empty() && dereferenceable(f, in.args[0], defs, depth + 1);
+    if (in.op == IrInst::AddrLocal) return true;
+    if (in.op == IrInst::LoadLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local) {
+        const int id = in.args[0].id;
+        const IrLocal& l = f.locals[static_cast<size_t>(id)];
+        if (l.isParam) return l.isThis || l.nonNull || (l.type && l.type->kind == Type::Reference);
+        // a local assigned exactly once, from such an address (an inlined call's copy of 'this' or of a reference)
+        if (l.addressTaken) return false;
+        const IrOperand* value = 0;
+        int stores = 0;
+        for (size_t b = 0; b < f.blocks.size(); ++b)
+            for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+                const IrInst& s = f.blocks[b].insts[i];
+                if (s.op == IrInst::StoreLocal && s.args.size() == 2 && s.args[0].kind == IrOperand::Local && s.args[0].id == id) { ++stores; value = &s.args[1]; }
+            }
+        return stores == 1 && dereferenceable(f, *value, defs, depth + 1);
+    }
+    return false;
+}
+
+} // namespace
+
 int Optimizer::licm(IrFunction& f)
 {
     int changes = 0;
     f.computeCfg();
     std::vector<LoopInfo> loops;
     naturalLoops(f, loops);
+    // every temp's defining instruction (temps are assigned once before SSA), for the dereferenceability test;
+    // copies, since hoisting moves instructions between blocks
+    std::map<int, IrInst> defs;
+    for (size_t b = 0; b < f.blocks.size(); ++b)
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i)
+            if (f.blocks[b].insts[i].dst >= 0) {
+                const int d = f.blocks[b].insts[i].dst;
+                if (defs.count(d)) defs[d] = IrInst();   // a temp assigned twice is not trusted (a Nop proves nothing)
+                else defs[d] = f.blocks[b].insts[i];
+            }
     for (size_t L = 0; L < loops.size(); ++L) {
         LoopInfo& loop = loops[L];
         std::set<int> inLoop(loop.blocks.begin(), loop.blocks.end());
@@ -661,13 +705,18 @@ int Optimizer::licm(IrFunction& f)
         std::set<int> loopTemps;
         std::set<int> modifiedLocals;
         bool hasCall = false;
+        bool onlyFloatStores = true;   // every store in the loop writes a double / float (C++ aliasing: no int or pointer)
         for (size_t k = 0; k < loop.blocks.size(); ++k) {
             const IrBlock& blk = f.blocks[static_cast<size_t>(loop.blocks[k])];
             for (size_t i = 0; i < blk.insts.size(); ++i) {
                 const IrInst& in = blk.insts[i];
                 if (in.dst >= 0) loopTemps.insert(in.dst);
                 if ((in.op == IrInst::StoreLocal || in.op == IrInst::AddrLocal) && !in.args.empty() && in.args[0].kind == IrOperand::Local) modifiedLocals.insert(in.args[0].id);
-                if (in.op == IrInst::Call || in.op == IrInst::VCall) hasCall = true;
+                if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Throw || in.op == IrInst::TryBegin ||
+                    in.op == IrInst::TryEnd || in.op == IrInst::CatchParam || in.op == IrInst::CatchEnd) hasCall = true;
+                if ((in.op == IrInst::StoreMem || in.op == IrInst::StoreGlobal ||
+                     (in.op == IrInst::StoreLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local && f.locals[static_cast<size_t>(in.args[0].id)].addressTaken)) &&
+                    !isFloatingType(in.type)) onlyFloatStores = false;
             }
         }
         // preheader: the unique predecessor of the header outside the loop
@@ -686,9 +735,14 @@ int Optimizer::licm(IrFunction& f)
                 IrBlock& blk = f.blocks[static_cast<size_t>(loop.blocks[k])];
                 for (size_t i = 0; i < blk.insts.size(); ++i) {
                     IrInst& in = blk.insts[i];
-                    bool candidate = in.pure() && in.dst >= 0 && in.op != IrInst::Copy;
+                    // never a phi: its value depends on the edge it is entered by, even when every argument is a constant
+                    bool candidate = in.pure() && in.dst >= 0 && in.op != IrInst::Copy && in.op != IrInst::Phi;
                     if (in.op == IrInst::LoadLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local && !modifiedLocals.count(in.args[0].id) &&
                         !f.locals[static_cast<size_t>(in.args[0].id)].addressTaken && !hasCall) candidate = true;
+                    // an int or pointer field the loop cannot change (no call, only floating-point stores) at an
+                    // address that cannot fault: b.cols(), the data pointer of a vector member
+                    if (in.op == IrInst::LoadMem && in.dst >= 0 && !hasCall && onlyFloatStores && in.type && !isFloatingType(in.type) &&
+                        !in.args.empty() && dereferenceable(f, in.args[0], defs, 0)) candidate = true;
                     if (!candidate) continue;
                     bool invariant = true;
                     for (size_t a = 0; a < in.args.size(); ++a)
@@ -708,8 +762,19 @@ int Optimizer::licm(IrFunction& f)
     return changes;
 }
 
-int Optimizer::inlineCalls(IrFunction& f, int maxInsts)
+int Optimizer::inlineCalls(IrFunction& f, int maxInsts, int maxInstsInLoop)
 {
+    // a budget per caller, as cl, clang and gcc limit inlining by the caller's growth (a count per module
+    // would stop inlining in every function after the first few)
+    const int growthLimit = f.instCount() * 4 + 400;
+    const int maxPerCaller = 200;
+    // larger callees only where a call repeats: in a loop (blocks a call inlined there adds are in it too)
+    f.computeCfg();
+    std::vector<LoopInfo> loops;
+    naturalLoops(f, loops);
+    std::vector<bool> inLoop(f.blocks.size(), false);
+    for (size_t L = 0; L < loops.size(); ++L)
+        for (size_t k = 0; k < loops[L].blocks.size(); ++k) inLoop[static_cast<size_t>(loops[L].blocks[k])] = true;
     int changes = 0;
     for (size_t b = 0; b < f.blocks.size(); ++b) {
         for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
@@ -718,7 +783,9 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts)
             std::map<std::string, IrFunction*>::const_iterator it = m_functions.find(call.sub);
             if (it == m_functions.end()) continue;
             const IrFunction& g = *it->second;
-            if (&g == &f || g.name == f.name || g.hasTry || g.instCount() > maxInsts || m_inlined > 50) continue;
+            const bool hot = b < inLoop.size() && inLoop[b];
+            if (&g == &f || g.name == f.name || g.hasTry || g.instCount() > (hot ? maxInstsInLoop : maxInsts)) continue;
+            if (changes >= maxPerCaller || f.instCount() + g.instCount() > growthLimit) continue;
             if (g.blocks.empty()) continue;
             bool hasUnreachable = false;
             for (size_t gb = 0; gb < g.blocks.size() && !hasUnreachable; ++gb)
@@ -787,6 +854,7 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts)
                 ld.args.push_back(IrOperand::local(resultLocal, call.type));
                 f.blocks[static_cast<size_t>(contId)].insts.insert(f.blocks[static_cast<size_t>(contId)].insts.begin(), ld);
             }
+            inLoop.resize(f.blocks.size(), hot);   // the continuation and the copied blocks: where the call was
             ++changes;
             ++m_inlined;
             break;   // the block changed: continue with the next block (the continuation is scanned later)
@@ -965,10 +1033,15 @@ void Optimizer::runLocal(IrFunction& f, std::vector<std::string>& log)
 void Optimizer::runInterprocedural(IrFunction& f, std::vector<std::string>& log)
 {
     if (m_level < 2) return;
-    int n = inlineCalls(f, 12); if (n) log.push_back("    inlining (small functions): " + intToString(n));
+    // accessors of a line or two (rows(), cols(): 4 instructions) everywhere; in a loop also operators of a few
+    // lines (operator()(r, c) calling index(r, c) is about 15). 24 everywhere made the matrix sample 31% faster
+    // and 66% larger; 8 everywhere slower than no change
+    int n = inlineCalls(f, 8, 24); if (n) log.push_back("    inlining (small functions): " + intToString(n));
     level1(f, log);
+    // the code inlined into a loop brings loop-invariant work with it (b.cols(), i * cols, data pointers)
+    if (n) { int h = licm(f); if (h) { log.push_back("    loop-invariant code motion after inlining: " + intToString(h)); level1(f, log); } }
     if (m_level >= 3) {
-        n = inlineCalls(f, 40); if (n) log.push_back("    inlining (larger functions): " + intToString(n));
+        n = inlineCalls(f, 40, 40); if (n) log.push_back("    inlining (larger functions): " + intToString(n));
         n = unrollLoops(f, 8, 40); if (n) log.push_back("    loop unrolling: " + intToString(n));
         level1(f, log);
         n = licm(f); if (n) log.push_back("    loop-invariant code motion: " + intToString(n));
@@ -984,12 +1057,131 @@ void Optimizer::run(IrFunction& f, std::vector<std::string>& log, std::string* s
     runSsa(f, log, ssaForm);
 }
 
+namespace {
+
+// a function with try regions can still keep most of its locals in registers when no handler ever resumes the
+// normal code: the handlers (a cleanup that destroys the objects built so far and rethrows) are entered by
+// longjmp, which restores only the callee-saved registers as they were at the setjmp, so the locals a handler
+// reads must stay in memory; every other local is read only on the normal path and can be promoted. Marks the
+// locals the handlers use as address-taken (in memory) and returns true, or returns false, changing nothing,
+// when a handler can flow back into the normal code (a catch that does not rethrow).
+bool pinHandlerLocals(IrFunction& f)
+{
+    f.computeCfg();
+    const size_t n = f.blocks.size();
+    // the normal code: reachable from the entry through branches only
+    std::vector<bool> normal(n, false), handler(n, false);
+    std::vector<int> work(1, 0);
+    if (n) normal[0] = true;
+    while (!work.empty()) {
+        int b = work.back(); work.pop_back();
+        const IrBlock& blk = f.blocks[static_cast<size_t>(b)];
+        for (size_t i = 0; i < blk.insts.size(); ++i) {
+            const IrInst& in = blk.insts[i];
+            if (in.op != IrInst::Br && in.op != IrInst::CondBr) continue;
+            for (size_t a = 0; a < in.args.size(); ++a)
+                if (in.args[a].kind == IrOperand::Block && in.args[a].id >= 0 && static_cast<size_t>(in.args[a].id) < n && !normal[static_cast<size_t>(in.args[a].id)]) {
+                    normal[static_cast<size_t>(in.args[a].id)] = true; work.push_back(in.args[a].id);
+                }
+        }
+    }
+    // the handler code: everything reachable from a handler entry
+    for (size_t b = 0; b < n; ++b)
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = f.blocks[b].insts[i];
+            if (in.op != IrInst::TryBegin) continue;
+            for (size_t a = 0; a < in.args.size(); ++a)
+                if (in.args[a].kind == IrOperand::Block && in.args[a].id >= 0 && static_cast<size_t>(in.args[a].id) < n && !handler[static_cast<size_t>(in.args[a].id)]) {
+                    handler[static_cast<size_t>(in.args[a].id)] = true; work.push_back(in.args[a].id);
+                }
+        }
+    while (!work.empty()) {
+        int b = work.back(); work.pop_back();
+        const std::vector<int>& s = f.blocks[static_cast<size_t>(b)].succs;
+        for (size_t k = 0; k < s.size(); ++k)
+            if (s[k] >= 0 && static_cast<size_t>(s[k]) < n && !handler[static_cast<size_t>(s[k])]) { handler[static_cast<size_t>(s[k])] = true; work.push_back(s[k]); }
+    }
+    for (size_t b = 0; b < n; ++b) if (handler[b] && normal[b]) return false;   // a handler resumes the normal code
+    for (size_t b = 0; b < n; ++b) {
+        if (!handler[b]) continue;
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = f.blocks[b].insts[i];
+            for (size_t a = 0; a < in.args.size(); ++a)
+                if (in.args[a].kind == IrOperand::Local && in.args[a].id >= 0 && static_cast<size_t>(in.args[a].id) < f.locals.size())
+                    f.locals[static_cast<size_t>(in.args[a].id)].addressTaken = true;
+        }
+    }
+    return true;
+}
+
+// the blocks reachable from a handler entry (a TryBegin's handler operands)
+std::vector<bool> handlerBlocks(IrFunction& f)
+{
+    f.computeCfg();
+    const size_t n = f.blocks.size();
+    std::vector<bool> handler(n, false);
+    std::vector<int> work;
+    for (size_t b = 0; b < n; ++b)
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = f.blocks[b].insts[i];
+            if (in.op != IrInst::TryBegin) continue;
+            for (size_t a = 0; a < in.args.size(); ++a)
+                if (in.args[a].kind == IrOperand::Block && in.args[a].id >= 0 && static_cast<size_t>(in.args[a].id) < n && !handler[static_cast<size_t>(in.args[a].id)]) {
+                    handler[static_cast<size_t>(in.args[a].id)] = true; work.push_back(in.args[a].id);
+                }
+        }
+    while (!work.empty()) {
+        int b = work.back(); work.pop_back();
+        const std::vector<int>& s = f.blocks[static_cast<size_t>(b)].succs;
+        for (size_t k = 0; k < s.size(); ++k)
+            if (s[k] >= 0 && static_cast<size_t>(s[k]) < n && !handler[static_cast<size_t>(s[k])]) { handler[static_cast<size_t>(s[k])] = true; work.push_back(s[k]); }
+    }
+    return handler;
+}
+
+// after the SSA phase: a handler, entered by longjmp, may use only values it computes itself or values computed
+// at the entry before the first try region begins (setjmp saves the registers holding them, nothing changes them
+// later). A value computed after a setjmp would be read from a register longjmp has reset.
+bool handlersSelfContained(IrFunction& f)
+{
+    std::vector<bool> handler = handlerBlocks(f);
+    // the entry instructions before the first TryBegin
+    size_t firstTry = 0;
+    if (!f.blocks.empty()) {
+        const std::vector<IrInst>& e = f.blocks[0].insts;
+        while (firstTry < e.size() && e[firstTry].op != IrInst::TryBegin) ++firstTry;
+    }
+    std::set<int> allowed, forbidden;
+    for (size_t b = 0; b < f.blocks.size(); ++b)
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+            const int d = f.blocks[b].insts[i].dst;
+            if (d < 0) continue;
+            if (handler[b] || (b == 0 && i < firstTry)) allowed.insert(d); else forbidden.insert(d);
+        }
+    for (size_t b = 0; b < f.blocks.size(); ++b) {
+        if (!handler[b]) continue;
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = f.blocks[b].insts[i];
+            for (size_t a = 0; a < in.args.size(); ++a)
+                if (in.args[a].kind == IrOperand::Temp && (forbidden.count(in.args[a].id) || !allowed.count(in.args[a].id))) return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 void Optimizer::runSsa(IrFunction& f, std::vector<std::string>& log, std::string* ssaForm)
 {
     if (m_level <= 0) return;
     int before = f.instCount();
     // SSA phase last: promote scalars, value-number over the dominator tree, fold, leave SSA, clean up
-    if (!f.hasTry) {
+    if (!f.hasTry || pinHandlerLocals(f)) {
+        // with try regions: no global value numbering (it would hand a handler a value computed after the
+        // setjmp), and the result is checked; the function is kept as it was if a handler still needs one
+        const bool guarded = f.hasTry;
+        IrFunction saved;
+        if (guarded) saved = f;
         SsaStats ss;
         toSsa(f, ss);
         log.push_back("    SSA construction: " + intToString(ss.promotedLocals) + " locals promoted, " + intToString(ss.phisInserted) + " phis");
@@ -998,17 +1190,32 @@ void Optimizer::runSsa(IrFunction& f, std::vector<std::string>& log, std::string
             n = constantFold(f);   c += n; if (n) log.push_back("    [ssa] constant-fold: " + intToString(n));
             n = copyPropagation(f); c += n; if (n) log.push_back("    [ssa] copy-propagation: " + intToString(n));
             n = algebraic(f);      c += n; if (n) log.push_back("    [ssa] algebraic simplification: " + intToString(n));
-            n = gvn(f);            c += n; if (n) log.push_back("    [ssa] global value numbering: " + intToString(n));
+            n = guarded ? 0 : gvn(f); c += n; if (n) log.push_back("    [ssa] global value numbering: " + intToString(n));
             n = simplifyPhis(f);   c += n; if (n) log.push_back("    [ssa] phi simplification: " + intToString(n));
             n = deadCode(f);       c += n; if (n) log.push_back("    [ssa] dead code elimination: " + intToString(n));
             n = simplifyCfg(f);    c += n; if (n) log.push_back("    [ssa] branch folding / block merging: " + intToString(n));
             if (!c) break;
         }
+        if (m_level >= 2) {
+            // in SSA form a value is assigned once, so invariance is exact: what inlining stored into a local copy
+            // in every iteration (the callee's 'this') is now the value from outside the loop it always was
+            int h = licm(f);
+            if (h) {
+                log.push_back("    [ssa] loop-invariant code motion: " + intToString(h));
+                int n;
+                n = copyPropagation(f); if (n) log.push_back("    [ssa] copy-propagation: " + intToString(n));
+                n = deadCode(f);        if (n) log.push_back("    [ssa] dead code elimination: " + intToString(n));
+            }
+        }
         if (ssaForm) *ssaForm = printIr(f);
         fromSsa(f, ss);
         log.push_back("    SSA destruction: " + intToString(ss.phisRemoved) + " phis replaced by " + intToString(ss.copiesInserted) + " copies, " + intToString(ss.edgesSplit) + " critical edges split");
+        if (guarded && !handlersSelfContained(f)) {
+            f = saved;
+            log.push_back("    SSA undone: a handler would read a value computed after its setjmp");
+        }
     } else {
-        log.push_back("    SSA skipped: function has try/catch regions");
+        log.push_back("    SSA skipped: a catch handler resumes the normal code");
     }
     level1(f, log);
     int after = f.instCount();

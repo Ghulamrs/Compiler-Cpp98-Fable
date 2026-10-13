@@ -48,6 +48,7 @@ private:
         std::set<std::string> types;        // type names declared here
         std::set<std::string> templates;    // template names declared here
         std::set<std::string> namespaces;
+        std::set<std::string> others;       // variables, parameters, functions declared here: they hide outer templates
         std::string           name;         // class or namespace name ("" for blocks)
         bool                  isClass;
         Scope() : isClass(false) {}
@@ -80,6 +81,7 @@ private:
     void  declareType(const std::string& name);
     void  declareTemplate(const std::string& name);
     void  declareNamespace(const std::string& name);
+    void  declareOther(const std::string& name);      // a name that is neither a type nor a template
     bool  isTypeName(const QualifiedName& n) const;
     bool  isTemplateName(const QualifiedName& n) const;
     bool  isNamespaceName(const std::string& n) const;
@@ -90,6 +92,7 @@ private:
 
     // declarations
     Decl* declaration(bool inClass, Access& access);
+    bool  memberDeclarator(Declarator& d, bool inClass);
     Decl* simpleOrFunction(bool inClass, const DeclSpec& spec, Loc at, bool firstDeclaratorParsed, Declarator* first);
     bool  declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef);
     bool  declarator(Declarator& d, bool abstractAllowed, bool nameRequired, bool inParams);

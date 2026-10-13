@@ -305,6 +305,7 @@ void Compiler::run()
 
     // x86 metadata: vtables, globals and decorated names come from the version 3 model
     X86Module x86(m_opt.msvcNames);
+    x86.setTableExceptions(m_opt.tableEh);
     for (size_t c = 0; c < classes.size(); ++c) collectVtable(classes[c], layouts, x86);
     for (size_t c = 0; c < instantiator.classes().size(); ++c) collectVtable(instantiator.classes()[c], layouts, x86);
     collectGlobals(m_cb, types, layouts, x86, m_opt.msvcNames);

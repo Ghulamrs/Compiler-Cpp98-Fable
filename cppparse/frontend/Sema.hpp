@@ -105,6 +105,31 @@ struct BaseClass {
     BaseClass() : cls(0), access(cxx::AccessPublic), isVirtual(false), offset(0) {}
 };
 
+// one vfptr of a polymorphic class and the table it points to (MSVC: one vftable per polymorphic base subobject
+// that does not share the vfptr at offset 0). fns[s] is the final overrider in slot s; thunks[s] is how far the
+// entry moves this down (from the vfptr's subobject to where the overrider expects it): non-zero means the slot
+// holds an adjustor thunk ("sub rcx, n; jmp f")
+struct VfTable {
+    int                  offset;          // of the vfptr in the class
+    Symbol*              introducedBy;    // the class whose own vfptr this is (names the table: ??_7D@@6BPB@@@)
+    std::vector<Symbol*> fns;
+    std::vector<int>     thunks;
+    VfTable() : offset(0), introducedBy(0) {}
+};
+
+// one vbptr of a class with virtual bases and its vbtable (MSVC: ??_8D@@7B@): entries[0] is the offset of the
+// vbptr from the start of the subobject that owns it (negated), entries[k] the offset of the virtual base
+// order[k - 1] from the vbptr, in a complete object of the class
+struct VbTable {
+    int                  offset;          // of the vbptr in the class
+    Symbol*              introducedBy;    // the class whose own vbptr this is
+    std::vector<Symbol*> order;           // the virtual bases indexed by the table (index k + 1)
+    std::vector<int>     entries;
+    std::vector<Symbol*> path;            // the bases that name the table apart (cl's ??_8VX@@7BVL@@@)
+    Symbol*              nextToMangle;    // the base appended to path when two tables would share a name
+    VbTable() : offset(0), introducedBy(0), nextToMangle(0) {}
+};
+
 struct Symbol {
     enum Kind { Namespace, Class, Enum, Typedef, Variable, Function, Enumerator, TemplateParam, ClassTemplate, FunctionTemplate, Label };
     Kind          kind;
@@ -119,9 +144,23 @@ struct Symbol {
     std::vector<BaseClass>   bases;
     bool          isDefinition, isStruct, isUnion, isPolymorphic, isAbstract, layoutDone;
     int           size, align;
+    // MSVC's empty-base rules: the size without the byte an empty class is given (0 for an empty class), and
+    // whether the class starts / ends with a zero-sized subobject (see Sema::layoutClass)
+    int           nvSize;
+    bool          leadsWithZeroSized, endsWithZeroSized;
     std::vector<Symbol*>     fields;      // non-static data members in order (offset in Symbol::offset)
+    std::vector<Symbol*>     unnamedBitFields;   // ": n" members, not named and not initialised: laid out before fields[index]
     std::vector<Symbol*>     vtable;      // virtual functions in slot order (including inherited)
+    std::vector<VfTable>     vftables;    // every vfptr of the class: [0] the one at offset 0 (fns == vtable), then the secondary ones
     int           vptrOffset;             // -1 when no vptr
+    // MSVC's virtual bases (Sema::layoutClass): every virtual base, direct or inherited, in cl's order (depth
+    // first, a base's own virtual bases before it), each placed once after the non-virtual part (nvSize) at
+    // vbaseOffsets[i] of a complete object; vbptrOffset is the vbptr whose table indexes them all (own or shared
+    // with the first non-virtual base that has one), -1 without virtual bases; vbtables: every vbptr
+    std::vector<Symbol*>     vbases;
+    std::vector<int>         vbaseOffsets;
+    std::vector<VbTable>     vbtables;
+    int           vbptrOffset;
     cxx::ClassDecl* classAst;
     // functions
     std::vector<Symbol*>     params;
@@ -129,7 +168,11 @@ struct Symbol {
     cxx::Decl*    definition;             // the function definition (or 0)
     cxx::Decl*    declAst;                // the declaration this symbol came from
     Scope*        body;                   // function scope (parameters) when defined
-    int           vtableSlot;
+    int           vtableSlot;             // in the vftable at thisAdjust
+    int           thisAdjust;             // virtual function: MSVC's this adjustor, the offset in its class of the vfptr
+                                          // whose table first holds it; callers pass this + thisAdjust (0 for destructors)
+    int           vfptrOffset;            // virtual function: the vfptr (in its class) whose table holds it at vtableSlot;
+                                          // equal to thisAdjust except for a destructor reached through a secondary table
     Symbol*       overrides;
     Symbol*       ownerClass;             // member functions / static members / fields
     // variables, enumerators, fields
@@ -141,6 +184,11 @@ struct Symbol {
     bool          hasConstValue;
     long          constValue;
     int           declAlign;              // __declspec(align(N)) on a variable or field (0: none)
+    int           bitWidth, bitOffset;    // bit-field: its width (-1: not a bit-field) and first bit in the unit at offset
+    // a member of an anonymous union or struct, seen as a member of the enclosing class: the unnamed member
+    // holding the anonymous object and the member of it this symbol names (offset = anonHost's + anonOf's)
+    Symbol*       anonHost;
+    Symbol*       anonOf;
     // templates
     cxx::Decl*    templateAst;            // the template declaration (Decl::Template)
     std::vector<Symbol*>     templateParams;
@@ -242,12 +290,14 @@ private:
     void   declareSimple(cxx::Decl* d, Scope* in, cxx::Access access);
     Symbol* declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::DeclSpec& spec, Scope* in, cxx::Access access, const Type* ft, const std::vector<Symbol*>& params);
     Symbol* declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Symbol* existing);
+    void   declareAnonymousMember(Symbol* anon, Scope* in, cxx::Access access);
     Symbol* declareEnum(cxx::EnumDecl* e, Scope* in, cxx::Access access);
     void   declareTemplate(cxx::Decl* d, Scope* in, cxx::Access access);
     void   completeClass(Symbol* cls);          // layout, vtable, implicit members
     void   layoutClass(Symbol* cls);
     Symbol* findClassSymbolForQualifier(const cxx::QualifiedName& n, Scope* from);
     Scope* scopeForQualifier(const cxx::QualifiedName& n, Scope* from);
+    Symbol* injectedTemplate(Symbol* s, const cxx::NameComponent& c) const;   // the template an injected name with arguments names
 
     // bodies
     struct PendingBody { Symbol* fn; cxx::Decl* def; Scope* scope; };
@@ -295,6 +345,7 @@ private:
     cxx::Expr*  braceElement(const Type* t, std::vector<cxx::Expr*>& items, size_t& pos, Scope* in);
     void        braceDeclInit(Symbol* var, cxx::Initializer& init, Scope* in);
     const Type* completedArray(const Type* t, const cxx::Initializer& init);
+    bool   completeForSizeof(const Type* t, Scope* in, const cxx::Loc& loc);   // false, with S113, for an incomplete type
     bool   constantValue(cxx::Expr* e, long& out);
     Symbol* classOperator(const std::string& op, cxx::Expr* e, const std::vector<cxx::Expr*>& operands, Scope* in, const Type*& result);
     Symbol* resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report);

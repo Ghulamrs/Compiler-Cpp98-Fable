@@ -51,6 +51,8 @@ public:
     // members of class template instantiations whose bodies had errors (Symbol::instantiationFailed) that the
     // generated code needs all the same, e.g. through an implicit destructor call: the unit cannot be compiled
     const std::vector<sema::Symbol*>& failedMembersUsed() const { return m_failedUsed; }
+    // constructs with virtual bases --compile6 cannot generate correctly (S132): "line: message"
+    const std::vector<std::string>& unsupported() const { return m_unsupported; }
 
 private:
     struct LValue {
@@ -59,7 +61,9 @@ private:
         std::string global;
         int         addr;
         const sema::Type* type;      // the object's sema type (unreferenced)
-        LValue() : kind(None), local(-1), addr(-1), type(0) {}
+        int         bitWidth;        // a bit-field (Mem only): its width (0: not a bit-field) and first bit in the unit at addr
+        int         bitOffset;
+        LValue() : kind(None), local(-1), addr(-1), type(0), bitWidth(0), bitOffset(0) {}
     };
     struct LoopTargets { int breakBlock, continueBlock; size_t tryDepth, cleanupDepth; };
     struct Cleanup {
@@ -69,16 +73,38 @@ private:
         int               flag;        // local byte: 1 while the object is constructed
         bool              guarded;     // the normal-path destruction must test the flag (temporary of a conditional arm)
         bool              unwindOnly;  // a member built by a constructor: destroyed only when the body throws
-        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false) {}
+        bool              baseSubobject;   // a base part: destroyed without its virtual bases
+        std::string       abortGuard;  // a static local's initializer: its guard global, handed to _Init_thread_abort
+        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false) {}
+    };
+    struct ExitThunk {                 // destroys a global or static local at exit; registered with atexit once it is built
+        sema::Symbol*     fn;
+        std::string       global;      // the object's IR name
+        const sema::Type* type;
     };
 
     // types
     const Type* oldType(const sema::Type* t);
     const ClassInfo* classInfo(sema::Symbol* cls);
     int  sizeOf(const sema::Type* t) const { return m_semaTypes.sizeOf(t); }
+    // the bytes a trivial copy moves: none for an empty class, whose byte may belong to a member of the
+    // derived object when it is a base subobject (MSVC places empty bases over other members)
+    int  copySize(const sema::Type* t) const { return t && t->kind == sema::Type::Class && t->decl && t->decl->layoutDone && t->decl->nvSize == 0 ? 0 : sizeOf(t); }
     int  alignOf(const sema::Type* t) const { return m_semaTypes.alignOf(t); }
     bool isClassType(const sema::Type* t) const { t = m_semaTypes.unref(t); return t && t->kind == sema::Type::Class; }
-    bool baseOffset(sema::Symbol* derived, sema::Symbol* base, int& offset, int depth = 0) const;
+    bool baseOffset(sema::Symbol* derived, sema::Symbol* base, int& offset, int depth = 0) const;   // not through virtual bases
+    // MSVC's virtual bases: base is reached through the virtual base at entry index of derived's vbtable (the
+    // one at its vbptrOffset), then rest bytes further; toBase converts a non-null address either way
+    bool virtualBasePath(sema::Symbol* derived, sema::Symbol* base, int& index, int& rest) const;
+    bool isBaseOf(sema::Symbol* derived, sema::Symbol* base) const { int o = 0, i = 0, r = 0; return baseOffset(derived, base, o) || virtualBasePath(derived, base, i, r); }
+    static bool hasVbases(const sema::Symbol* cls) { return cls && !cls->vbases.empty(); }
+    int  toBase(int addr, sema::Symbol* derived, sema::Symbol* base, int line);
+    bool isVirtualBaseAnywhere(sema::Symbol* cls) const;
+    void memberPointerCheck(cxx::Expr* e);
+    static std::string vbtableName(const sema::Symbol* cls, size_t t);
+    void storeVbptrs(sema::Symbol* cls, int objAddr, int line);
+    sema::Symbol* vbaseDestructor(sema::Symbol* cls);   // cl's ??_D: the destructor of a complete object
+    void genVbaseDestructor(sema::Symbol* fn);
     std::string throwDescriptorFor(const sema::Type* t) const;
 
     // special members
@@ -87,14 +113,24 @@ private:
     bool needsCopyCtor(const sema::Type* t, int depth = 0) const;
     bool needsCopyAssign(const sema::Type* t, int depth = 0) const;
     bool needsDefaultCtor(const sema::Type* t, int depth = 0) const;
+    // MSVC x64: a class of 1, 2, 4 or 8 bytes without a non-trivial copy constructor travels in an integer
+    // register; a POD-like one of those sizes is returned in rax by a non-member or static function
+    const sema::Type* regParamType(const sema::Type* t) const;
+    const sema::Type* regReturnType(sema::Symbol* fn, const sema::Type* rt) const;
+    bool podForReturn(const sema::Type* t, int depth) const;
+    bool copyAssignDeleted(const sema::Type* t, int depth) const;
     void callSpecial(sema::Symbol* fn, int thisPtr, int argPtr, int line);
     void copyBytes(int dst, int src, int size, int line);
+    void bitField(LValue& lv, const sema::Symbol* field) const;   // marks lv as the bit-field field (when it is one)
+    int  loadBits(const LValue& lv, const sema::Type* t, int line);
+    void storeBits(const LValue& lv, int temp, const sema::Type* t, int line);
+    int  bitConstant(unsigned long long v, const sema::Type* t, int line);
     void copyConstruct(const sema::Type* t, int dst, int src, int line);
     void copyAssign(const sema::Type* t, int dst, int src, int line);
     void constructDefault(const sema::Type* t, int addr, int line);
     void forEachElement(const sema::Type* elem, int base, int count, bool construct, int line);
     int  materialize(cxx::Expr* e, const sema::Type* t, int dst, int line);
-    void destroy(const sema::Type* t, int objAddr, int line, bool viaVtable);
+    void destroy(const sema::Type* t, int objAddr, int line, bool viaVtable, bool complete = true);   // complete: with its virtual bases
 
     // lifetimes
     int  registerCleanup(int slot, const sema::Type* t, bool viaPointer, int mode, int line);
@@ -113,10 +149,30 @@ private:
     void genFunction(sema::Symbol* fn);
     void genImplicit(sema::Symbol* fn);
     void genInitializer();
+    bool staticInit(sema::Symbol* var, IrGlobal& g);
+    bool staticData(const sema::Type* t, const cxx::Initializer& init, std::vector<IrDataItem>& out);
+    bool constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataItem>& out, int depth);
+    bool foldArith(cxx::Expr* x, double& v, int depth);
+    bool convertFolded(const sema::Type* t, double& v) const;
+    static bool floatRoundsOnce(double d);
+    bool aggregateData(const sema::Type* t, const std::vector<cxx::Expr*>* elems, std::vector<IrDataItem>& out, int depth);
+    bool readOnlyObject(const sema::Type* t) const;
+    void registerAtExit(const std::string& global, const sema::Type* t, int line);
+    void genExitThunks();
+    void drainQueue();
     void prologue(sema::Symbol* fn);
     void constructorInit(sema::Symbol* fn, cxx::Decl* def);
     void destructorCleanup(sema::Symbol* fn);
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
+    static std::string vtableName(const sema::Symbol* cls, size_t t);
+    // MSVC's vector deleting destructor of a virtual destructor (what its vtable slot holds): with bit 1 of its
+    // flags clear it destroys the complete object, with bit 1 set the array whose count is in the cookie before
+    // it, and frees it when bit 0 is set; made on first use, generated after the other functions
+    std::string deletingDestructor(sema::Symbol* dtor, X86Module& x86, bool msvc);
+    void genDeletingDestructors();
+    sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth, const char* name = "operator delete", size_t maxParams = 2) const;
+    bool freeObject(sema::Symbol* cls, int p, int line);
+    void freeArray(sema::Symbol* cls, int cookie, int count, int line);
     void need(sema::Symbol* fn);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
     int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);
@@ -153,6 +209,8 @@ private:
     void   stmt(cxx::Stmt* s);
     int    labelBlock(const std::string& name);
     void   localDecl(cxx::Decl* d);
+    int    conditionDecl(cxx::Decl* d, const sema::Type*& t, int line);
+    void   declLoop(cxx::Stmt* s, int cb, int next, int xb, int line);
     void   initObject(const LValue& lv, const sema::Type* t, sema::Symbol* var, cxx::InitDeclarator& id, int line);
     void   abiResult(IrInst& r, int line);
     void   initAggregate(const sema::Type* t, int addr, const std::vector<cxx::Expr*>& elems, bool zeroRest, int line);
@@ -175,15 +233,31 @@ private:
     int                        m_generated;
     std::vector<sema::Symbol*> m_dynamicGlobals;   // globals built by the module's initialiser, in declaration order
     sema::Symbol*              m_initSymbol;
+    std::vector<ExitThunk>     m_exitThunks;       // destructor thunks registered with atexit; generated after the functions
+    size_t                     m_exitThunksDone;
     X86Module*                 m_x86;              // receives the globals that static locals become
+    bool                       m_msvcNames;        // --msvc-mangling: static locals get cl's decorated names
     std::map<sema::Symbol*, std::string> m_staticNames;   // static local -> its global's IR name
+    std::map<sema::Symbol*, long> m_staticBlocks;         // static local of the current function -> cl's block number
+    void numberStaticBlocks(cxx::Stmt* s, long& next, long current);
+    std::map<sema::Symbol*, sema::Symbol*> m_deleting;     // virtual destructor -> its deleting destructor
+    std::vector<sema::Symbol*> m_deletingOrder;            // the virtual destructors, in the order their deleting ones were made
+    size_t                     m_deletingDone;
+    std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtors;   // class -> its vbase destructor (??_D)
+    std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtorOf;  // vbase destructor -> its class
+    int                        m_ctorFlag;      // the "most derived" flag the next constructor call passes (1, 0 for a base)
+    int                        m_vbFlagSlot;
+    std::vector<std::string>   m_unsupported;
+    void unsupported(int line, const std::string& what);    // the constructor's own flag parameter, or -1
     int                        m_staticCount;
+    int                        m_guardCount;    // guarded static locals so far in the function (cl's $TSS<n>)
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block
 
     IrFunction*                m_out;
     sema::Symbol*              m_fn;
     int                        m_block;
     int                        m_sretSlot;
+    const sema::Type*          m_retReg;        // the integer type a small class result returns in, else 0
     std::map<sema::Symbol*, int> m_slots;
     std::vector<LoopTargets>   m_loops;
     std::vector<int>           m_tryStack;      // region ids, -1 inside a handler body

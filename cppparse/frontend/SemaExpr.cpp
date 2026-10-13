@@ -56,9 +56,7 @@ void foldWide(cxx::Expr* e, const std::string& op, long a, long b, bool isUnsign
     else if (op == "^") r = ux ^ uy;
     else ok = false;
     const long long s = static_cast<long long>(r);
-    // the range is spelled out: a round trip through long tests 32 bits only where long is 32 bits (MSVC), and on
-    // an LP64 host it would accept every value, which the IR then truncates (npos / 2 became -1 on macOS)
-    e->semaConst = ok && s >= -2147483647LL - 1 && s <= 2147483647LL;
+    e->semaConst = ok && static_cast<long long>(static_cast<long>(s)) == s;
     e->semaValue = e->semaConst ? static_cast<long>(s) : 0;
 }
 
@@ -143,6 +141,24 @@ const Type* Sema::completedArray(const Type* t, const cxx::Initializer& init)
     if (isStringInit(t, init)) return m_types.array(t->inner, stringLiteralLength(init.args[0]->text) + 1);   // char s[] = "..."
     if (init.kind != cxx::Initializer::Brace) return t;
     return m_types.array(t->inner, braceCount(t, init.args));
+}
+
+// the operand type of sizeof (references already removed) must be complete (C++98 5.3.3; cl C2027, C2070): a class
+// only declared, a class whose own member declarations are still being read, void or a function type is an error.
+// A defined class that is not laid out yet is laid out here, so that its size is the real one
+bool Sema::completeForSizeof(const Type* t, Scope* in, const cxx::Loc& loc)
+{
+    while (t && t->kind == Type::Array) t = t->inner;
+    if (!t) return true;
+    if (t->kind == Type::Void) { error(loc, "S113", "sizeof of void"); return false; }
+    if (t->kind == Type::Function) { error(loc, "S113", "sizeof of a function type"); return false; }
+    if (t->kind != Type::Class || !t->decl || t->decl->layoutDone || t->decl->isDependentContext) return true;
+    Symbol* cls = t->decl;
+    bool beingDefined = false;
+    for (Scope* s = in; s && !beingDefined; s = s->parent) if (s->kind == Scope::Class && s->owner == cls) beingDefined = true;
+    if (!cls->isDefinition || beingDefined) { error(loc, "S113", "sizeof of incomplete class '" + cls->qualifiedName() + "'"); return false; }
+    layoutClass(cls);
+    return true;
 }
 
 // the initializers from items[pos] on initialise an object of aggregate type t
@@ -379,10 +395,6 @@ int compareConversions(const Conversion& a, const Conversion& b)
     return 0;
 }
 
-// a candidate still in the running in resolveOverload; declared here because C++98 accepts no local type
-// as a template argument (std::vector<Viable>)
-struct Viable { Symbol* fn; std::vector<Conversion> convs; bool exactThis; };
-
 } // namespace
 
 Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report)
@@ -391,8 +403,17 @@ Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vect
     for (size_t a = firstArg; a < args.size(); ++a) if (!args[a]->semaType) expr(args[a], in);
     for (size_t a = firstArg; a < args.size(); ++a) if (args[a]->semaType && args[a]->semaType->kind == Type::Dependent) return cands.empty() ? 0 : cands[0];
 
+    struct Viable { Symbol* fn; std::vector<Conversion> convs; bool exactThis; };
     std::vector<Viable> viable;
-    std::vector<Symbol*> all = cands;
+    // one entity reached twice is one candidate: "using namespace std; printf(...)" finds ::printf directly and
+    // again through the using-declaration "using ::printf;" in std
+    std::vector<Symbol*> all;
+    for (size_t i = 0; i < cands.size(); ++i) {
+        bool seen = false;
+        for (size_t k = 0; k < all.size() && !seen; ++k) seen = all[k] == cands[i];
+        if (!seen) all.push_back(cands[i]);
+    }
+    const size_t candidates = all.size();
     // function templates: deduce and instantiate, then take part like ordinary functions
     for (size_t i = 0; i < all.size(); ++i) {
         if (all[i]->kind == Symbol::FunctionTemplate) {
@@ -428,7 +449,7 @@ Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vect
         if (report && !anyErrorArg) {
             std::string sig;
             for (size_t a = firstArg; a < args.size(); ++a) sig += (a > firstArg ? ", " : "") + (args[a]->semaType ? valueType(args[a])->text() : std::string("?"));
-            error(loc, "S107", "no matching function for call to " + what + "(" + sig + ")" + (cands.empty() ? "" : " among " + numText(static_cast<long>(cands.size())) + " candidate(s)"));
+            error(loc, "S107", "no matching function for call to " + what + "(" + sig + ")" + (candidates == 0 ? "" : " among " + numText(static_cast<long>(candidates)) + " candidate(s)"));
         }
         return 0;
     }
@@ -522,12 +543,23 @@ bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::
             for (size_t k = 0; k < c.templateArgs.size(); ++k) {
                 const cxx::TemplateArg& ta = c.templateArgs[k];
                 if (ta.type) { cxx::Param sub; sub.spec = ta.type->spec; sub.decl = ta.type->decl; if (!a->decl->templateArgs[k] || !deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints)) return false; }
-                else if (ta.expr && ta.expr->kind == cxx::Expr::Name && ta.expr->name.parts.size() == 1) {
-                    const std::string& pn = ta.expr->name.parts[0].ident;
+                else if (ta.expr) {
+                    // a parameter of this template is deduced; any other argument is a value that must match: a
+                    // literal, or a parameter of the enclosing class template bound in its instantiation
+                    // ("Matrix<T, R, K>" in a member template of Matrix<T, R, C>), evaluated where the template is
+                    const bool single = ta.expr->kind == cxx::Expr::Name && ta.expr->name.parts.size() == 1;
+                    const std::string pn = single ? ta.expr->name.parts[0].ident : std::string("");
                     bool np = false;
-                    if (tscope) { const std::vector<Symbol*>* v = tscope->find(pn); if (v) np = !v->empty(); }
-                    if (np) { if (a->decl->templateArgs[k]) { cxx::Param sub; sub.spec.kind = cxx::DeclSpec::Named; sub.spec.name = ta.expr->name; if (!deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints)) return false; } else ints[pn] = a->decl->templateIntArgs[k]; }
-                    else { long v; if (!constantValue(ta.expr, v) || a->decl->templateArgs[k] || v != a->decl->templateIntArgs[k]) return false; }
+                    if (single && tscope) { const std::vector<Symbol*>* v = tscope->find(pn); if (v) np = !v->empty(); }
+                    if (np) {
+                        if (a->decl->templateArgs[k]) { cxx::Param sub; sub.spec.kind = cxx::DeclSpec::Named; sub.spec.name = ta.expr->name; if (!deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints)) return false; }
+                        else if (ints.count(pn) && ints[pn] != a->decl->templateIntArgs[k]) return false;
+                        else ints[pn] = a->decl->templateIntArgs[k];
+                    } else {
+                        if (!ta.expr->semaType && tscope) expr(ta.expr, tscope);
+                        long v;
+                        if (!constantValue(ta.expr, v) || a->decl->templateArgs[k] || v != a->decl->templateIntArgs[k]) return false;
+                    }
                 } else return false;
             }
             return true;
@@ -735,6 +767,8 @@ const Type* Sema::exprMember(cxx::Expr* e, Scope* in)
 
 const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
 {
+    // "(f)(x)", "(e.scale)(x)": the parentheses do not change what is called
+    while (e->kids[0]->kind == cxx::Expr::Paren && e->kids[0]->kids.size() == 1) e->kids[0] = e->kids[0]->kids[0];
     cxx::Expr* callee = e->kids[0];
     std::vector<Symbol*> cands;
     cxx::Expr* thisExpr = 0;
@@ -785,6 +819,8 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
             if (ot && ot->kind == Type::Class && ot->decl) { if (callee->name.parts.size() > 1) { Scope* q = scopeForQualifier(callee->name, ot->decl->members); if (q && q->kind == Scope::Class) lookupMember(q->owner, s->name, cands); } else lookupMember(ot->decl, s->name, cands); }
             thisExpr = callee->kids[0];
         } else {
+            // a data member: a function pointer (called through its value) or a class with operator()
+            callee->semaType = mt;
             const Type* vt = m_types.unref(mt);
             if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); return vt->inner->inner; }
             if (vt->kind == Type::Class && vt->decl) { lookupMember(vt->decl, "operator()", cands); thisExpr = callee; }
@@ -1257,8 +1293,15 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         if (to->kind == Type::Reference) e->semaLvalue = true;
         break;
     }
-    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.sizeType(); if (ot->kind != Type::Dependent && ot->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
-    case cxx::Expr::SizeofType: { const Type* st = typeOf(e->type->spec, in); if (e->type->decl) st = applyDeclarator(st, *e->type->decl, in, 0); t = m_types.sizeType(); if (st->kind != Type::Dependent && st->kind != Type::Error) { e->semaConst = true; e->semaValue = m_types.sizeOf(st); } break; }
+    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.sizeType(); if (ot->kind != Type::Dependent && ot->kind != Type::Error && completeForSizeof(ot, in, e->loc)) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
+    case cxx::Expr::SizeofType: {
+        const Type* st = typeOf(e->type->spec, in);
+        if (e->type->decl) st = applyDeclarator(st, *e->type->decl, in, 0);
+        st = m_types.unref(st);                 // sizeof(T&) is sizeof(T) (5.3.3/2)
+        t = m_types.sizeType();
+        if (st->kind != Type::Dependent && st->kind != Type::Error && completeForSizeof(st, in, e->loc)) { e->semaConst = true; e->semaValue = m_types.sizeOf(st); }
+        break;
+    }
     case cxx::Expr::New: t = exprNew(e, in); break;
     case cxx::Expr::Delete: { expr(e->kids[0], in); const Type* pt = valueType(e->kids[0]); if (pt->kind != Type::Pointer && pt->kind != Type::Dependent && pt->kind != Type::Error) error(e->loc, "S109", "delete of a non-pointer of type " + pt->text()); t = m_types.basic(Type::Void); break; }
     case cxx::Expr::Throw: if (!e->kids.empty()) expr(e->kids[0], in); t = m_types.basic(Type::Void); break;

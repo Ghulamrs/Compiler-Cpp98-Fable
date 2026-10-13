@@ -28,21 +28,39 @@ struct IrVtable {
     std::vector<std::string> entries;      // IR function names in slot order; "" for a pure virtual slot
 };
 
+// one piece of a global's initial contents, emitted as data: zero bytes, an integer, a floating-point literal, the
+// address of a string literal, or the address of a global or function (a relocation)
+struct IrDataItem {
+    enum Kind { Zero, Int, Float, String, Address };
+    Kind        kind;
+    int         size;        // bytes; Zero: the length of the run
+    long        value;       // Int
+    std::string text;        // Float: the literal; String: the literal with its quotes; Address: the IR name
+    IrDataItem() : kind(Zero), size(0), value(0) {}
+};
+
 struct IrGlobal {
     std::string name;        // qualified variable name as the IR refers to it
     int         size;
     bool        isFloat;
     std::string init;        // numeric initialiser text, or empty for zero
+    std::vector<IrDataItem> data;   // when not empty: the contents item by item (a constant table, an address)
+    bool        readOnly;    // a const object with static contents: .rdata (.const), as cl places it
     bool        linkOnce;    // a static local of an inline function: every unit emits it, one copy survives (COMDAT)
     bool        internal;    // internal linkage: a static variable at namespace scope or a static local of an internal function
     int         align;       // the type's alignment or a larger __declspec(align(N)); 0: from the size only
-    IrGlobal() : size(8), isFloat(false), linkOnce(false), internal(false), align(0) {}
+    IrGlobal() : size(8), isFloat(false), readOnly(false), linkOnce(false), internal(false), align(0) {}
 };
 
 class X86Module {
 public:
     explicit X86Module(bool msvcNames = false);
+    // try regions as range tables with landing pads (--eh=table) instead of setjmp frames
+    void        setTableExceptions(bool on) { m_tableEh = on; }
+    bool        tableExceptions() const { return m_tableEh; }
     void        addVtable(const IrVtable& v) { m_vtables.push_back(v); }
+    // an adjustor thunk a vtable slot names: "sub rcx, adjust; jmp target" (COMDAT, as cl emits it); once per name
+    void        addThunk(const std::string& irName, const std::string& target, int adjust);
     void        addGlobal(const IrGlobal& g) { m_globals.push_back(g); }
     void        addInitializer(const std::string& irName) { m_initializers.push_back(irName); }   // run by the CRT before main
     void        registerSymbolName(const std::string& irName, const std::string& decorated);   // MSVC name of a function
@@ -63,6 +81,7 @@ private:
 
     std::string              m_code;
     std::string              m_data;
+    std::string              m_rdata;           // const objects with static contents, emitted in .const
     std::map<std::string, std::string> m_strings;   // label -> literal; labels are derived from the contents so
     std::map<std::string, double>      m_floats;    // that the output is the same whatever the thread timing
     std::set<std::string>    m_externs;
@@ -71,10 +90,14 @@ private:
     std::set<std::string>    m_globalsUsed;     // mangled global names referenced
     Mutex                    m_mutex;           // guards the pools above while functions are generated in parallel
     bool                               m_msvc;
+    bool                               m_tableEh;
     std::map<std::string, std::string> m_functionNames;   // IR function name -> decorated name (read-only while generating)
     std::map<std::string, std::string> m_globalNames;     // qualified variable name -> decorated name
     std::set<std::string>              m_dataSymbols;     // symbols already made PUBLIC in .data
     std::vector<IrVtable>              m_vtables;
+    struct Thunk { std::string name, target; int adjust; };
+    std::vector<Thunk>                 m_thunks;
+    std::set<std::string>              m_thunkNames;
     std::vector<IrGlobal>              m_globals;
     std::vector<std::string>           m_initializers;
     std::string floatLabel(double v);

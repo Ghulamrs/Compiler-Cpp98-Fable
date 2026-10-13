@@ -2,6 +2,7 @@
 #include "statics.hpp"
 
 void cpp_konstK(KonstSeen& s) { konstK(s); }
+void cpp_nestedN(int k, NestedSeen& n) { nestedN(k, n); }
 int cpp_touchA() { return sharedA().id; }
 int cpp_touchB() { return sharedB().id; }
 int cpp_touchC() { return sharedC(); }

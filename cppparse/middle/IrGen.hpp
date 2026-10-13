@@ -218,6 +218,8 @@ private:
     X86Module*                 m_x86;              // receives the globals that static locals become
     bool                       m_msvcNames;        // --msvc-mangling: static locals get cl's decorated names
     std::map<sema::Symbol*, std::string> m_staticNames;   // static local -> its global's IR name
+    std::map<sema::Symbol*, long> m_staticBlocks;         // static local of the current function -> cl's block number
+    void numberStaticBlocks(cxx::Stmt* s, long& next, long current);
     std::map<sema::Symbol*, sema::Symbol*> m_deleting;     // virtual destructor -> its deleting destructor
     std::vector<sema::Symbol*> m_deletingOrder;            // the virtual destructors, in the order their deleting ones were made
     size_t                     m_deletingDone;

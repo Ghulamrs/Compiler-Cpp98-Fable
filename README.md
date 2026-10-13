@@ -1075,8 +1075,11 @@ function is `?name@@9`) and is internal unless its function is inline,
 when every unit's copy is one COMDAT, so a cl-built and a cppparse-built
 copy of an inline function count in the same variable (`sharedCounter`;
 test 15 compares the names and linkage of `sample-mangle`'s static locals
-with cl's). A static in a nested block gets a unique block number, not
-always the one cl gives it. A global or static local whose initializer is
+with cl's). A static in a nested block gets cl's block number: counted
+in source order from the body (2), each compound statement, `if` and each
+of its branches, and each loop and `switch` takes the next one, so the
+static and its guard are shared with cl's inlined copy (`nestedN` in
+`sample-statics`). A global or static local whose initializer is
 made of constants, string literals and addresses of globals and functions
 (an array, a plain aggregate without constructors, bases or bit-fields, a
 pointer) is emitted as static data, item by item, with `DQ OFFSET` for the

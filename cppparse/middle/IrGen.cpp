@@ -1832,9 +1832,11 @@ void IrGen::localDecl(cxx::Decl* d)
             m_staticNames[var] = gname;
             long block = 2;
             if (m_msvcNames && m_x86) {
-                // cl numbers the blocks of a function; the body is 2. A nested block gets 2 plus its position
-                // among the function's blocks: unique within the function, though not always cl's number
-                if (var->scope && !(var->scope->parent && var->scope->parent->kind == Scope::Function)) {
+                // cl numbers the blocks of a function; the body is 2 (numberStaticBlocks). Without that number
+                // (no body walked): 2 plus the block's position among the function's blocks, unique only
+                std::map<Symbol*, long>::const_iterator nb = m_staticBlocks.find(var);
+                if (nb != m_staticBlocks.end()) block = nb->second;
+                else if (var->scope && !(var->scope->parent && var->scope->parent->kind == Scope::Function)) {
                     long k = 0;
                     for (size_t si = 0; si < m_prog.scopes.size(); ++si) {
                         const Scope* sc = m_prog.scopes[si];
@@ -2508,6 +2510,45 @@ void IrGen::abiResult(IrInst& r, int line)
     }
 }
 
+// cl's numbers for the blocks of a function, which name its static locals and their guards ("?1" for the body,
+// 2): counted in source order from the body, a compound statement takes the next number; an if takes one, and
+// each of its branches one more (the branch's scope) before its own statements; for, while, do and switch take
+// one before their body; a try block and a handler are their compound statements. Found from cl's objects
+// (static locals in blocks, branches, loops, switch, try/catch, labels, conditions with declarations)
+void IrGen::numberStaticBlocks(cxx::Stmt* s, long& next, long current)
+{
+    if (!s) return;
+    switch (s->kind) {
+    case cxx::Stmt::Compound: {
+        const long mine = next++;
+        (void)current;
+        for (size_t i = 0; i < s->kids.size(); ++i) numberStaticBlocks(s->kids[i], next, mine);
+        return;
+    }
+    case cxx::Stmt::DeclStmt:
+        if (s->decl)
+            for (size_t i = 0; i < s->decl->declarators.size(); ++i) {
+                Symbol* v = s->decl->declarators[i].decl ? s->decl->declarators[i].decl->semaSym : 0;
+                if (v && v->kind == Symbol::Variable && v->isStatic) m_staticBlocks[v] = current;
+            }
+        return;
+    case cxx::Stmt::If:
+        ++next;
+        for (size_t i = 0; i < s->kids.size() && i < 2; ++i) { const long branch = next++; numberStaticBlocks(s->kids[i], next, branch); }
+        return;
+    case cxx::Stmt::For: case cxx::Stmt::While: case cxx::Stmt::DoWhile: case cxx::Stmt::Switch: {
+        const long mine = next++;
+        numberStaticBlocks(s->init, next, mine);
+        for (size_t i = 0; i < s->kids.size(); ++i) numberStaticBlocks(s->kids[i], next, mine);
+        return;
+    }
+    default:
+        numberStaticBlocks(s->init, next, current);
+        for (size_t i = 0; i < s->kids.size(); ++i) numberStaticBlocks(s->kids[i], next, current);
+        return;
+    }
+}
+
 void IrGen::genFunction(Symbol* fn)
 {
     cxx::Decl* def = fn->definition;
@@ -2520,6 +2561,8 @@ void IrGen::genFunction(Symbol* fn)
     // as cl: a destructor stores its own class's vptrs first, so a virtual call made while it (or a base's
     // destructor after it) runs reaches this class's functions, not those of the derived object being destroyed
     if (fn->isDestructor && fn->ownerClass) storeVptr(fn->ownerClass, thisTemp(def->loc.line), def->loc.line);
+    m_staticBlocks.clear();
+    if (m_msvcNames) { long next = 2; numberStaticBlocks(def->body, next, 2); }
     stmt(def->body);
     if (!terminated()) {
         IrInst r = make(IrInst::Ret, 0, def->loc.line);

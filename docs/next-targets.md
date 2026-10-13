@@ -42,7 +42,7 @@ the default), with the items found since. Each was reproduced with a small progr
   `vsprintf` in `cstdio` give va_list/va_start/va_arg/va_end over that area, as MSVC's vadefs.h (X86.cpp).
 - 20, static locals: cl's names (`?n@?1??counterA@@YAHXZ@4HA`, MangleSema.cpp) and Static linkage, External in
   one COMDAT only for an inline function, so cl and cppparse copies share the variable. A static in a nested
-  block gets a unique block number that is not always cl's.
+  block gets cl's block number (IrGen::numberStaticBlocks).
 - 21, constant tables: a global or static local initialised by constants, string literals and addresses of
   globals and functions (arrays, plain aggregates, pointers) is static data with relocations, in .rdata when
   const, as cl emits it; classes with bit-fields stay on the dynamic path (IrGen.cpp, X86.cpp).
@@ -99,8 +99,11 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   a static local cl initialises as a constant (`static int u = int();`, `static double d = 1.0/4;`,
   `static float f = 1.5f*2;`, value-initialisation, casts) is static data with cl's folded bytes and no
   guard (IrGen::foldArith/convertFolded; the bits go out as MASM's encoded reals), so the `$TSS<n>` after
-  it match cl's (konstK in sample-statics, cl inlining it); open: statics in nested blocks
-  use cppparse's block numbers, not cl's `?4`/`?6`/`?7` scheme; exceptions do not cross between cl's
+  it match cl's (konstK in sample-statics, cl inlining it); statics in nested blocks get cl's block
+  numbers (IrGen::numberStaticBlocks: the body 2, then in source order each compound statement, if and
+  each of its branches, for/while/do/switch; checked against cl for blocks, branches, else-if chains,
+  loops, switch, try/catch, labels and conditions with declarations; nestedN in sample-statics); open:
+  statics inside the member functions of a local class are not checked against cl; exceptions do not cross between cl's
   and cppparse's runtimes (a cl throw into a cppparse frame fails fast); vtable slots grouped by overload as MSVC does
   (Sema.cpp:1169-1174) (the destructor slot holding the scalar deleting destructor is done).
 - design-table-exceptions.md section 7: an exception edge from every call to its landing pad, then GVN and
@@ -112,6 +115,8 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   `delete` through a base pointer skips the base destructors, and one from a stack object's destructor is not
   caught at all ("unhandled exception of type int"). Repro: review-v w.cpp.
 - Calls through pointers to members (`(obj.*pmf)(x)`, `(p->*pmf)(x)`) are rejected by sema (an error, not wrong code).
+- A `while` whose condition declares a variable crashes `--compile6` (access violation, with or without
+  `--msvc-mangling`, -O0 and -O2). Repro: `int f(int k){int r=0; while (int y = k--) { r += y; } return r;}`.
 
 ## Code size against cl /O2 (analysis of the matrix sample, 2026-10-13)
 

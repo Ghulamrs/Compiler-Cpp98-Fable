@@ -46,8 +46,23 @@ STATICS_INLINE void konstK(KonstSeen& s)
     ++u; d += 1; f += 1; g += 1; z -= 1; ++c; b = !b;
 }
 
+// statics in nested blocks, named after cl's block numbers (the body 2; each compound statement, if, branch,
+// loop and switch takes the next one in source order), so cl's inlined copy and cppparse's reach the same
+// objects and guards
+struct NestedSeen { const Counted* p; const Counted* s; const Counted* x; const Counted* y; int w; };
+STATICS_INLINE void nestedN(int k, NestedSeen& n)
+{
+    n.p = 0; n.s = 0; n.x = 0; n.y = 0; n.w = 0;
+    if (k > 0) { static Counted p; n.p = &p; } else { static Counted q; n.p = &q; }
+    for (int i = 0; i < 1; ++i) { static Counted s; n.s = &s; { static int w = 7; n.w = w++; } }
+    while (k == 5) { static Counted never; n.x = &never; break; }
+    switch (k) { case 1: { static Counted x; n.x = &x; } break; default: break; }
+    { { static Counted y; n.y = &y; } }
+}
+
 // cppparse's side
 void cpp_konstK(KonstSeen& s);
+void cpp_nestedN(int k, NestedSeen& n);
 int cpp_touchA();
 int cpp_touchB();
 int cpp_touchC();

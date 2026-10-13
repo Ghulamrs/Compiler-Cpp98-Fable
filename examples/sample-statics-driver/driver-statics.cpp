@@ -55,6 +55,22 @@ int main(int argc, char**)
         sprintf(name, "konstK t, t2"); expect(name, s.t * 100 + s.t2, 405);
     }
     expect("constructions after konstK", g_ctorCalls, 5);
+    // statics in nested blocks: cl first for p, s, x, y, then cppparse; cppparse first for q, then cl
+    NestedSeen n1, n2, n3, n4;
+    nestedN(1, n1);
+    cpp_nestedN(1, n2);
+    expect("nested p same object", n1.p == n2.p && n1.p != 0, 1);
+    expect("nested s same object", n1.s == n2.s && n1.s != 0, 1);
+    expect("nested x same object", n1.x == n2.x && n1.x != 0, 1);
+    expect("nested y same object", n1.y == n2.y && n1.y != 0, 1);
+    expect("nested w cl, cppparse", n1.w * 10 + n2.w, 78);
+    expect("constructions after nested", g_ctorCalls, 9);
+    cpp_nestedN(-1, n3);
+    nestedN(-1, n4);
+    expect("nested q same object", n3.p == n4.p && n3.p != 0 && n3.p != n1.p, 1);
+    expect("nested s again", n3.s == n1.s && n4.s == n1.s, 1);
+    expect("nested w cppparse, cl", n3.w * 10 + n4.w, 9 * 10 + 10);
+    expect("constructions after nested q", g_ctorCalls, 10);
     // a throwing initializer: cppparse first (throws), then cl constructs; and the reverse. Only when
     // cppparse's copies of the inline functions are linked (an argument says they are not): through cl's
     // copy, cppparse's exception would have to unwind a cl frame, which the two runtimes do not support

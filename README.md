@@ -766,8 +766,10 @@ function moves `this` back on entry, and an override held by the primary
 table as well is reached from the secondary one through an adjustor thunk
 (`sub rcx, 16; jmp`, named `?f@SD@@WBA@EBAHXZ`, COMDAT); a destructor always
 takes the complete object, so its secondary slots are thunks.
-`delete` through a secondary base pointer still frees the base's address:
-the destructor slot holds the destructor, not MSVC's deleting destructor.
+A virtual destructor's slot holds MSVC's scalar deleting destructor
+(`??_GSD@@UEAAPEAXI@Z`: destroy, then free when bit 0 of its flags is
+set), so `delete` through any base frees the complete object and cl's
+`delete` of cppparse's objects (and the other way round) works.
 Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment;

@@ -141,6 +141,16 @@ int main()
         g_dtorLog = 0;
         pb->~SB();
         expect("SE destroyed by cl through SB*", g_dtorLog, 312);
+        expect("deleteThroughSB(SD)", deleteThroughSB(0), 12);
+        expect("deleteThroughSB(SE)", deleteThroughSB(1), 312);
+        SB* q = new SE;
+        g_dtorLog = 0;
+        delete q;                          // cl calls the slot's deleting destructor with flags 1
+        expect("SE deleted by cl through SB*", g_dtorLog, 312);
+        SD* r = new SD;
+        g_dtorLog = 0;
+        delete r;
+        expect("SD deleted by cl through SD*", g_dtorLog, 12);
     }
 
     if (failures) { printf("%d FAILED\n", failures); return 1; }

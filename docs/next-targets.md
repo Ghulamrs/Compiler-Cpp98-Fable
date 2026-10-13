@@ -30,8 +30,9 @@ the default), with the items found since. Each was reproduced with a small progr
   that destroys it is registered with atexit, as cl does, so they run after main newest first (IrGen.cpp).
 - 16 (plan 16): a second polymorphic base gets a secondary vftable (`??_7D@@6BPB@@@`), with MSVC's this adjustors
   and adjustor thunks (`?f@D@@WBA@EAAHXZ`) (Sema.cpp completeClass, IrGen.cpp storeVptr/callFunction/prologue,
-  X86.cpp addThunk); calls through every base, by both compilers, are in sample-layout. Left: `delete` through a
-  secondary base pointer frees the base's address, since the destructor slot is not a deleting destructor (15).
+  X86.cpp addThunk); calls through every base, by both compilers, are in sample-layout.
+- 15, destructor slot: a virtual destructor's slot holds the scalar deleting destructor (`??_G`, IrGen.cpp
+  genDeletingDestructors); `delete` calls it with flags 1, so a secondary base pointer frees the complete object.
 - 18, callee side: a variadic function keeps its parameters in their home slots and its prologue spills rcx,
   rdx, r8 and r9 there (named floats from xmm0-xmm3); `include/cstdarg`, `stdarg.h` and `vprintf`/`vfprintf`/
   `vsprintf` in `cstdio` give va_list/va_start/va_arg/va_end over that area, as MSVC's vadefs.h (X86.cpp).
@@ -74,7 +75,7 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 
 - 15 (MSVC ABI parity), only needed for mixed links with cl objects: classes of 1/2/4/8 bytes passed and
   returned in registers (IrGen.cpp:658, 671, 1930); vtable slots grouped by overload as MSVC does
-  (Sema.cpp:1169-1174); the destructor slot holding a scalar deleting destructor.
+  (Sema.cpp:1169-1174).
 - design-table-exceptions.md section 7: an exception edge from every call to its landing pad, then GVN and
   register values across handlers; the main lever on code size (1.57 times cl's on the matrix sample).
 - mapcompare.ps1: take cl's functions from its objects, not from link's map, so methods inlined everywhere

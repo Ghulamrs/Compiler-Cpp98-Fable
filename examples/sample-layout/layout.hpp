@@ -159,5 +159,6 @@ int  saCall(const SA* p, int which);           // 0 a(), 1 f()
 int  sbCall(const SB* p, int which);           // 0 b(), 1 f(), 2 g()
 int  sdCall(const SD* p, int which);           // 0 f(), 1 g(), 2 b(), 3 h(), 4 a(), 5 SD::g() (not virtual)
 long destroyThroughSB(int derived);            // builds an SD (or an SE) in place, destroys it through SB*: the log
+long deleteThroughSB(int derived);             // the same through new and delete: the log
 
 #endif

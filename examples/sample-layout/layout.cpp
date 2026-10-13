@@ -193,3 +193,11 @@ long destroyThroughSB(int derived)
     b->~SB();                              // the destructor slot of SB's table: a thunk to the complete object's
     return g_dtorLog;
 }
+
+long deleteThroughSB(int derived)
+{
+    SB* b = derived ? static_cast<SB*>(new SE) : static_cast<SB*>(new SD);
+    g_dtorLog = 0;
+    delete b;                              // the deleting destructor frees the complete object, not the SB part
+    return g_dtorLog;
+}

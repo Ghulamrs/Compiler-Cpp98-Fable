@@ -140,6 +140,10 @@ private:
     void destructorCleanup(sema::Symbol* fn);
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
     static std::string vtableName(const sema::Symbol* cls, size_t t);
+    // MSVC's scalar deleting destructor of a virtual destructor (what its vtable slot holds): destroys the complete
+    // object and frees it when bit 0 of its flags is set; made on first use, generated after the other functions
+    std::string deletingDestructor(sema::Symbol* dtor, X86Module& x86, bool msvc);
+    void genDeletingDestructors();
     void need(sema::Symbol* fn);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
     int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);
@@ -203,6 +207,9 @@ private:
     X86Module*                 m_x86;              // receives the globals that static locals become
     bool                       m_msvcNames;        // --msvc-mangling: static locals get cl's decorated names
     std::map<sema::Symbol*, std::string> m_staticNames;   // static local -> its global's IR name
+    std::map<sema::Symbol*, sema::Symbol*> m_deleting;     // virtual destructor -> its deleting destructor
+    std::vector<sema::Symbol*> m_deletingOrder;            // the virtual destructors, in the order their deleting ones were made
+    size_t                     m_deletingDone;
     int                        m_staticCount;
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block
 

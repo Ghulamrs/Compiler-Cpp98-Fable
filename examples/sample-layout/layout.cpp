@@ -220,3 +220,30 @@ int GQ2::fq() const { return 90 + p; }
 int GG::fp() const { return 10 + GQ1::p; }
 int ggCall(const GQ2* p) { return p->fp() * 100 + p->fq(); }
 GG* makeGG() { return new GG; }
+
+// virtual bases: built, converted, copied and destroyed by cppparse's code
+long g_vbLog = 0;
+VD::VD() : d(1) {}
+VD::~VD() { g_vbLog = g_vbLog * 10 + 5; }
+int  vbReadV(VL* p) { return p->v; }
+int  vbReadVR(const VR& r) { return r.v * 10 + r.r; }
+int  vbReadVM(VM* p) { return (int)(p->q * 2) + p->v + p->m; }
+int  vbReadVN(const VN& n) { return n.v * 10 + n.n; }
+VB*  vbToVB(VX* p) { return p; }
+VX*  vbMakeVX() { return new VX; }
+void vbDelete(VX* p) { delete p; }
+long vbOnStack() { g_vbLog = 0; { VX x; if (x.v != 7 || vbReadV(&x) != 7) return -1; } return g_vbLog; }
+int  vbCopy(const VX& x) { VX c(x); return c.v * 1000 + c.l * 100 + c.r * 10 + c.x; }
+long vbArray(int n)
+{
+    g_vbLog = 0;
+    VX* a = new VX[n];
+    long s = 0;
+    for (int i = 0; i < n; ++i) s += a[i].v + a[i].l;
+    long ok = g_vbLog == 12341234 && s == 18;
+    g_vbLog = 0;
+    delete[] a;
+    return ok * 10000 + g_vbLog;
+}
+int  vbSumVY(const VY& y) { return y.v + y.l + y.r + y.x + y.y; }
+int  vbSumVZ(const VZ& z) { const VR& r = z; return z.v * 1000 + r.r * 100 + z.z * 10 + z.x; }

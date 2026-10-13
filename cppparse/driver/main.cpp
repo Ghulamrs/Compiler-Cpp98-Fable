@@ -141,6 +141,24 @@ bool hasVirtualBase(const sema::Symbol* cls, int depth)
     return false;
 }
 
+// what --compile6 cannot generate yet for a class with virtual bases (0: it can): it lays out and builds
+// non-polymorphic classes whose virtual bases have none of their own, as cl does (vbptrs, vbtables, the
+// "most derived" flag, ??_D); polymorphic ones need the vfptr inside the virtual base and vtordisp (S130)
+const char* virtualBaseRefusal(const sema::Symbol* cls)
+{
+    if (cls->isPolymorphic) return "a polymorphic class with virtual bases (vfptrs in virtual bases, vtordisp)";
+    if (cls->classAst && cls->classAst->pack > 0) return "#pragma pack with virtual bases";
+    if (cls->declAlign > 0 || cls->endsWithZeroSized) return "virtual bases after an over-aligned or zero-sized part";
+    for (size_t v = 0; v < cls->vbases.size(); ++v) {
+        const sema::Symbol* vb = cls->vbases[v];
+        if (!vb->vbases.empty()) return "a virtual base that has virtual bases of its own";
+        if (vb->nvSize == 0 || vb->leadsWithZeroSized || vb->endsWithZeroSized || vb->declAlign > 0) return "an empty or over-aligned virtual base";
+        if (vb->isPolymorphic) return "a polymorphic virtual base (vtordisp)";
+    }
+    for (size_t t = 0; t < cls->vbtables.size(); ++t) if (cls->vbtables[t].path.size() > 1) return "a vbtable named by a path of several bases";
+    return 0;
+}
+
 // the offset of base in derived (-1: not a base)
 int baseOffsetIn(const sema::Symbol* derived, const sema::Symbol* base, int depth)
 {
@@ -367,8 +385,10 @@ int main(int argc, char* argv[])
                             continue;
                         }
                         if (s->kind != sema::Symbol::Class || !s->isDefinition || s->isDependentContext || !hasVirtualBase(s, 0)) continue;
+                        const char* why = s->layoutDone ? virtualBaseRefusal(s) : "a class not laid out";
+                        if (!why) continue;
                         std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
-                                  << "): error S130: '" << s->qualifiedName() << "' has a virtual base class: virtual base classes are not supported yet by --compile6 (they would not be laid out as cl lays them out)\n";
+                                  << "): error S130: '" << s->qualifiedName() << "' has a virtual base class: " << why << " is not supported yet by --compile6\n";
                         ++unsupported;
                     }
                 totalErrors += unsupported;

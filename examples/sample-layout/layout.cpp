@@ -212,3 +212,11 @@ KD::KD() : kd(6) {}
 KD::~KD() {}
 KB* makeKDasKB() { return new KD; }
 void deleteKB(KB* p) { delete p; }
+
+GP::GP() : p(8) {}
+GP::~GP() {}
+int GP::fp() const { return 80 + p; }
+int GQ2::fq() const { return 90 + p; }
+int GG::fp() const { return 10 + GQ1::p; }
+int ggCall(const GQ2* p) { return p->fp() * 100 + p->fq(); }
+GG* makeGG() { return new GG; }

@@ -2469,6 +2469,38 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             // one table per vfptr; a slot whose overrider expects this elsewhere holds an adjustor thunk, named
             // as cl names it (?f@D@@WBA@EAAHXZ: D::f`adjustor{16}')
             const size_t n = s->vftables.empty() ? 1 : s->vftables.size();
+            // the class each table is named for: the one that introduced its vfptr, or, when two tables share
+            // that, the base on the way down to it that tells them apart (G : Q1, Q2, both from P: Q1 and Q2)
+            std::vector<std::vector<Symbol*> > paths(n);
+            for (size_t t = 0; t < n && n > 1; ++t) {
+                const Symbol* cur = s;
+                int off = s->vftables[t].offset;
+                for (int guard = 0; guard < 32 && cur != s->vftables[t].introducedBy; ++guard) {
+                    const sema::BaseClass* hit = 0;
+                    for (size_t b = 0; b < cur->bases.size() && !hit; ++b) {
+                        const sema::BaseClass& bc = cur->bases[b];
+                        if (!bc.cls || !bc.cls->isPolymorphic) continue;
+                        for (size_t k = 0; k < bc.cls->vftables.size(); ++k) if (bc.cls->vftables[k].offset == off - bc.offset) hit = &bc;
+                    }
+                    if (!hit) break;
+                    paths[t].push_back(hit->cls);
+                    off -= hit->offset;
+                    cur = hit->cls;
+                }
+                if (paths[t].empty() || paths[t].back() != s->vftables[t].introducedBy) paths[t].push_back(s->vftables[t].introducedBy);
+            }
+            std::vector<size_t> pick(n, 0);
+            for (size_t t = 0; t < n; ++t) pick[t] = paths[t].empty() ? 0 : paths[t].size() - 1;
+            for (int round = 0; round < 32; ++round) {
+                bool moved = false;
+                for (size_t t = 0; t < n; ++t)
+                    for (size_t u = t + 1; u < n; ++u)
+                        if (!paths[t].empty() && !paths[u].empty() && paths[t][pick[t]] == paths[u][pick[u]]) {
+                            if (pick[t] > 0) { --pick[t]; moved = true; }
+                            if (pick[u] > 0) { --pick[u]; moved = true; }
+                        }
+                if (!moved) break;
+            }
             for (size_t t = 0; t < n; ++t) {
                 IrVtable v;
                 const std::string name = vtableName(s, t);
@@ -2488,7 +2520,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
                     if (msvc) x86.registerSymbolName(thunk, m->isDestructor ? deletingName(msvcMangleThunkSymbol(*m, adjust)) : msvcMangleThunkSymbol(*m, adjust));
                 }
                 x86.addVtable(v);
-                if (msvc) x86.registerGlobalName(name, msvcMangleVtableSymbol(*s, n > 1 ? s->vftables[t].introducedBy : 0));
+                if (msvc) x86.registerGlobalName(name, msvcMangleVtableSymbol(*s, n > 1 && !paths[t].empty() ? paths[t][pick[t]] : 0));
             }
         }
         if (s->kind == Symbol::Variable && !s->isLocal && !s->isParam && (!s->isMember || s->isStatic) && s->scope && !s->isDependentContext) {

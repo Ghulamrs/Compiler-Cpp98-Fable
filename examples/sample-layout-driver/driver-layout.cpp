@@ -178,6 +178,13 @@ int main()
         KB* kb = makeKDasKB();
         delete kb;
         expect("KB::operator delete size, delete by cl", g_kDeleted, (long)sizeof(KD));
+
+        // two tables introduced by the same class get distinct names (built and called by both compilers)
+        GG* gg = makeGG();
+        expect("ggCall(gg)", ggCall(gg), 18 * 100 + 98);
+        expect("gg fp() through cl's GQ1*", static_cast<GQ1*>(gg)->fp(), 18);
+        expect("gg fq() through cl's GQ2*", static_cast<GQ2*>(gg)->fq(), 98);
+        delete static_cast<GQ2*>(gg);
     }
 
     if (failures) { printf("%d FAILED\n", failures); return 1; }

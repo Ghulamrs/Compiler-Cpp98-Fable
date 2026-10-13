@@ -99,6 +99,12 @@ struct SE : NP, SD { SE(); int g() const; int a() const; ~SE(); char se; };     
 // deleting destructor is reached through a secondary base (KD : SA, KB)
 struct KB { KB(); virtual ~KB(); static void operator delete(void* p, size_t n); int k; };
 struct KD : SA, KB { KD(); ~KD(); int kd; };
+// two vfptrs introduced by the same class (GP through GQ1 and GQ2): the tables are named after GQ1 and GQ2, as
+// cl names them (??_7GG@@6BGQ1@@@, ??_7GG@@6BGQ2@@@), not twice after GP
+struct GP { GP(); virtual ~GP(); virtual int fp() const; int p; };
+struct GQ1 : GP { };
+struct GQ2 : GP { virtual int fq() const; };
+struct GG : GQ1, GQ2 { int fp() const; };
 
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \
@@ -168,5 +174,7 @@ long deleteThroughSB(int derived);             // the same through new and delet
 extern int g_kDeleted;                         // the size KB::operator delete was given (0: not called)
 KB*  makeKDasKB();
 void deleteKB(KB* p);                          // delete p in cppparse's code
+int  ggCall(const GQ2* p);                      // p->fp() * 100 + p->fq()
+GG*  makeGG();
 
 #endif

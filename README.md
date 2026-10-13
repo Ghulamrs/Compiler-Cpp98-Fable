@@ -959,6 +959,11 @@ the IR optimiser (`1ULL << 52` became `1 << 20`), which now fold them only
 while the result fits the sign-extended 32-bit immediates and otherwise
 leave the operation to run. The register, static-local and 64-bit constant
 defects are reproduced in `sample-self` and checked by test 16.
+Since then test 16 also checks the items fixed from
+[docs/next-targets.md](docs/next-targets.md): a `float` or `double` parameter
+passed on the stack is homed in its own size through xmm5, so it neither
+overwrites the frame slot next to it nor the first parameter still in xmm0
+(`stackFloats`, called by the cl-built driver).
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

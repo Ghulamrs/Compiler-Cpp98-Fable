@@ -409,3 +409,16 @@ int wideConstants()                        // constant expressions of 64-bit typ
     if ((mask >> 51) == 1 && (mask & 1) == 1) r += 1000000;
     return r;
 }
+
+// floats after the fourth parameter arrive in 8-byte stack slots whose upper half the caller leaves as it
+// was; each is homed in a 4-byte frame slot (the caller is the cl-built driver, which first passes doubles
+// through the same slots)
+double stackDoubles(double a, double b, double c, double d, double e, double f, double g)
+{
+    return a + b + c + d + e + f + g;
+}
+
+float stackFloats(float a, float b, float c, float d, float e, float f, float g)
+{
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7;
+}

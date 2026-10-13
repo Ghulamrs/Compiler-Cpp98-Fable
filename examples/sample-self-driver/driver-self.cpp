@@ -26,6 +26,8 @@ int carriedCounter(const int* left, int nl, const int* right, int nr, int* out);
 int sharedStatic();
 int nestedStatics();
 int wideConstants();
+double stackDoubles(double a, double b, double c, double d, double e, double f, double g);
+float stackFloats(float a, float b, float c, float d, float e, float f, float g);
 
 static int g_failures = 0;
 
@@ -64,6 +66,13 @@ static long staticFromThreads()            // the threads race into the initiali
     for (int i = 0; i < 4; ++i) if (g_shared[i] != g_shared[0]) return -g_shared[i];
     return g_shared[0];
 }
+static long floatsOnStack()               // the double arguments leave bits in the upper halves of the stack slots
+{
+    double d = stackDoubles(1e300, -1e300, 3.25e-300, 7.5, 1.0 / 3.0, -2.0 / 3.0, 1.0 / 7.0);
+    float f = stackFloats(0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f);
+    return static_cast<long>(f * 1000) + (d > 7.3 && d < 7.31 ? 1 : 0);
+}
+
 static void check(const char* what, long got, long expected)
 {
     if (got == expected) std::printf("  ok   %-28s = %ld\n", what, got);
@@ -91,6 +100,7 @@ int main()
     check("sharedStatic() in 4 threads", staticFromThreads(), 421);
     check("nestedStatics()", nestedStatics(), 1005);
     check("wideConstants()", wideConstants(), 1415111);
+    check("stackFloats()", floatsOnStack(), 70001);
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

@@ -683,7 +683,7 @@ try {
         $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\selfdriver$lvl.exe" "..\examples\sample-self-driver\driver-self.cpp" $obj "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the self-hosting driver:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\selfdriver$lvl.exe" 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   selfdriver$lvl.exe: all 18 self-hosting checks correct (-O$lvl)" }
+        if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   selfdriver$lvl.exe: all 19 self-hosting checks correct (-O$lvl)" }
         else { Write-Host "  FAIL selfdriver$lvl.exe (-O$lvl):"; Write-Host $run; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed self-hosting check(s) failed" }

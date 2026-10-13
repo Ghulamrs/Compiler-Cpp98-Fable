@@ -1271,7 +1271,10 @@ void X86Function::emitBody()
             else line("mov " + std::string(ptrWord(size)) + " " + localRef(p) + ", " + regSized(argRegs[p], size) + "      ; param " + l.name);
         } else {
             std::string home = "[rbp+" + intToString(16 + 8 * p) + "]";
-            if (fl) { line("movsd xmm0, real8 ptr " + home); line("movsd real8 ptr " + localRef(p) + ", xmm0      ; param " + l.name); }
+            // a float passed on the stack fills the low 4 bytes of its 8-byte slot, and its frame slot holds 4 bytes.
+            // The copy goes through xmm5 (rax for integers), which holds no parameter: xmm0-xmm3 may still be read
+            if (fl && isSingle(l.type)) { line("movss xmm5, real4 ptr " + home); line("movss real4 ptr " + localRef(p) + ", xmm5      ; param " + l.name); }
+            else if (fl) { line("movsd xmm5, real8 ptr " + home); line("movsd real8 ptr " + localRef(p) + ", xmm5      ; param " + l.name); }
             else { line("mov rax, qword ptr " + home); line("mov " + std::string(ptrWord(size)) + " " + localRef(p) + ", " + regSized("rax", size) + "      ; param " + l.name); }
         }
     }

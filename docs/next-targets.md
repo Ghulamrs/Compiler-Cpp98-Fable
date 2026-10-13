@@ -15,6 +15,8 @@ the default), with the items found since. Each was reproduced with a small progr
 - 22, partly: a missing include is fatal; an undeclared function is error S103.
 - 23, partly: a class used before its layout is done and array fields of class type are laid out as cl does.
 - Lazy instantiation of class template member bodies (MatrixTest.cpp's first blocker).
+- 19, stack-passed float parameters: a `float` after the fourth parameter is homed with movss into its 4-byte
+  slot, and the copy goes through xmm5, not xmm0 (which still held the first parameter at -O2) (X86.cpp).
 - README "known limit" (untyped library results): with the headers included the version 6 front end types
   `strtod` and `std::string::size`; the paragraph describes the legacy self-compile.
 
@@ -26,7 +28,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | # | Item | Effect today | Size | Lane |
 |---|---|---|---|---|
 | 1 | 4: object written after errors (driver/main.cpp:313) | broken objects reach the linker | small | front end |
-| 2 | 19: stack-passed float parameter homed with movsd (X86.cpp:1274) | wrong value | small | back end |
 | 3 | 3: sizeof of an incomplete type accepted, sizeof(T&) = 8 (SemaExpr.cpp:1256) | silent 8 | small | front end |
 | 4 | a local variable does not hide a function template (CxxParser.cpp:211-217) | wrong result | small-medium | front end |
 | 5 | `using namespace std; printf(...)` ambiguous: candidates not deduplicated (SemaExpr.cpp:390-444) | false error | small | front end |

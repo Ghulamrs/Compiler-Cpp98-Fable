@@ -353,6 +353,16 @@ Symbol* Sema::lookupUnqualified(const std::string& name, Scope* from, bool types
     return 0;
 }
 
+// inside an instantiation the template's name is the injected class name, a typedef of the instantiation; written
+// with template arguments ("Matrix<T, C, R>" inside Matrix<T, R, C>) it names the template, so those arguments
+// select the specialisation (14.6.1/1). Returns the class template then, 0 otherwise
+Symbol* Sema::injectedTemplate(Symbol* s, const cxx::NameComponent& c) const
+{
+    if (!s || !c.hasTemplateArgs || s->kind != Symbol::Typedef || !s->type || s->type->kind != Type::Class || !s->type->decl) return 0;
+    Symbol* tmpl = s->type->decl->instantiatedFrom;
+    return tmpl && tmpl->kind == Symbol::ClassTemplate && tmpl->name == s->name ? tmpl : 0;
+}
+
 Scope* Sema::scopeForQualifier(const cxx::QualifiedName& n, Scope* from)
 {
     // the scope denoted by all components but the last
@@ -376,6 +386,7 @@ Scope* Sema::scopeForQualifier(const cxx::QualifiedName& n, Scope* from)
             }
         }
         if (!s) return 0;
+        if (Symbol* tmpl = injectedTemplate(s, c)) s = tmpl;    // "M<T, C, R>::" inside M<T, R, C>: another instantiation
         if (s->kind == Symbol::Typedef) { const Type* t = s->type; if (t && t->kind == Type::Class && t->decl) s = t->decl; else return 0; }
         if (s->kind == Symbol::ClassTemplate && !c.hasTemplateArgs) {
             // the template's name inside one of its instantiations is the injected class name
@@ -478,6 +489,7 @@ const Type* Sema::namedType(const cxx::QualifiedName& n, Scope* in, const std::s
         }
         return instantiateClassTemplate(s, last.templateArgs, in, loc);
     }
+    if (Symbol* tmpl = injectedTemplate(s, last)) return instantiateClassTemplate(tmpl, last.templateArgs, in, loc);
     if (s->kind == Symbol::Typedef) return s->type ? s->type : m_types.error();
     if (s->kind == Symbol::Class) return m_types.classType(s);
     if (s->kind == Symbol::Enum) return m_types.enumType(s);

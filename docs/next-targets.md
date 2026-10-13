@@ -25,6 +25,8 @@ the default), with the items found since. Each was reproduced with a small progr
   innermost scope that declares the name (CxxParser.cpp isTemplateName); test 17, `sample-front/front.cpp`.
 - plan 5: overload candidates are deduplicated by entity before resolution (SemaExpr.cpp resolveOverload), so
   `using namespace std; printf(...)` is no longer ambiguous; test 17, `sample-front/front.cpp`.
+- plan 11a: the injected class name with template arguments names that specialisation, as a type and as a
+  qualifier (Sema.cpp injectedTemplate); test 17, `sample-front/front.cpp`.
 
 ## Plan
 
@@ -39,7 +41,7 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | 8 | 5: empty base takes a byte (Sema.cpp:1076-1088) | wrong size | small | layout |
 | 9 | 23: bit-fields ignored; anonymous union/struct members cannot be named | wrong size, false error | medium | layout |
 | 10 | 23: polymorphic base not first: own vptr, not moved first (Sema.cpp:1080, 1093, 1155) | wrong layout | medium | layout |
-| 11 | MatrixTest.cpp: injected class name with arguments (Sema.cpp:368-379); a redeclared function template is a second candidate (Sema.cpp:1033); member templates do not see the enclosing parameters (SemaExpr.cpp:544-572) | does not compile | small-medium | front end |
+| 11 | MatrixTest.cpp: a redeclared function template is a second candidate (Sema.cpp:1033); member templates do not see the enclosing parameters (SemaExpr.cpp:544-572) | does not compile | small-medium | front end |
 | 12 | 21: constant pointer tables initialised dynamically in .data, not .rdata with relocations | start-up order | medium | back end |
 | 13 | 20: static locals PUBLIC with a non-MSVC name (IrGen.cpp:1584) | duplicated in mixed links | small | back end |
 | 14 | 23: virtual bases laid out inline, no vbptr | wrong values | large | layout (later) |

@@ -746,7 +746,10 @@ section is marked with the largest alignment it holds (S129 warns that
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment. Class templates are instantiated from the syntax tree
 with the parameters bound in an instantiation scope (defaults, partial
-specialisations, out-of-line members); function templates are
+specialisations, out-of-line members); inside an instantiation the
+template's name alone is the injected class name, and with arguments
+(`Matrix<T, C, R>` inside `Matrix<T, R, C>`) it names that specialisation,
+also as a qualifier. Function templates are
 instantiated by deduction from the argument types. Diagnostics carry
 S codes (S100 unknown type, S101 undeclared identifier, S102 no such
 member, S103 undeclared function, S104 const assignment, S105

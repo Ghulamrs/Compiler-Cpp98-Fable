@@ -248,6 +248,7 @@ private:
     void   layoutClass(Symbol* cls);
     Symbol* findClassSymbolForQualifier(const cxx::QualifiedName& n, Scope* from);
     Scope* scopeForQualifier(const cxx::QualifiedName& n, Scope* from);
+    Symbol* injectedTemplate(Symbol* s, const cxx::NameComponent& c) const;   // the template an injected name with arguments names
 
     // bodies
     struct PendingBody { Symbol* fn; cxx::Decl* def; Scope* scope; };

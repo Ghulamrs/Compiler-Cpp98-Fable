@@ -38,6 +38,22 @@ void hiding()
                 templateStillSeen(), std::localHidesStd(6), other::localHidesUsing(3));
 }
 
+// inside Grid<T, R, C> the name Grid with arguments names a specialisation: Grid<T, C, R> is another class
+template <typename T, int R, int C> struct Grid {
+    T v[R * C];
+    static int cells() { return R * C * 100 + R * 10 + C; }
+    Grid<T, C, R> transposed() const { Grid<T, C, R> t; for (int i = 0; i < R; ++i) for (int j = 0; j < C; ++j) t.v[j * R + i] = v[i * C + j]; return t; }
+    int otherCells() const { return Grid<T, C, R>::cells(); }
+};
+
+void injected()
+{
+    Grid<int, 2, 3> g;
+    for (int i = 0; i < 6; ++i) g.v[i] = i + 1;
+    Grid<int, 3, 2> t = g.transposed();
+    std::printf("injected name with arguments: %d %d %d %d %d\n", t.v[1], t.v[4], (int)sizeof(t), g.otherCells(), t.otherCells());
+}
+
 // with a using-directive at file scope: std::count, std::min and std::max are visible unqualified
 using namespace std;
 int localHidesFileUsing(int n) { int count = 0, max = 2; while (count < n + max) ++count; return count; }
@@ -46,6 +62,7 @@ int main()
 {
     sizes();
     hiding();
+    injected();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

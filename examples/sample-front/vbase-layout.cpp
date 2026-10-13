@@ -14,7 +14,15 @@ struct VM : virtual VB, NB, virtual V2 { int m; };
 struct VY : VN, VD { int y; };
 struct VZ : NB, VX { int z; };
 struct VW : VD, VX { int w; };
+// virtual bases with virtual bases of their own: their vbptrs in the virtual part, tables named by the bases
+struct VNA { int a; VNA() : a(1) {} };
+struct VNB : virtual VNA { int b; VNB() : b(2) {} };
+struct VNC : virtual VNB { int c; VNC() : c(3) {} };
+struct VND : VNC { int d; VND() : d(4) {} };
+struct VNE : virtual VNB, virtual VNA { int e; };
+struct VNF : VNC, VNE { int f; };
+struct VNG : virtual VNC, virtual VNE { int g; };
 
-VD gd; VX gx; VN gn; VM gm; VY gy; VZ gz; VW gw;
+VD gd; VX gx; VN gn; VM gm; VY gy; VZ gz; VW gw; VNC gnc; VND gnd; VNE gne; VNF gnf; VNG gng;
 
 int main() { return 0; }

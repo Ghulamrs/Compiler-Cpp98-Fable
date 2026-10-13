@@ -142,7 +142,7 @@ bool hasVirtualBase(const sema::Symbol* cls, int depth)
 }
 
 // what --compile6 cannot generate yet for a class with virtual bases (0: it can): it lays out and builds
-// non-polymorphic classes whose virtual bases have none of their own, as cl does (vbptrs, vbtables, the
+// non-polymorphic classes with virtual bases, as cl does (vbptrs, vbtables, the
 // "most derived" flag, ??_D); polymorphic ones need the vfptr inside the virtual base and vtordisp (S130)
 const char* virtualBaseRefusal(const sema::Symbol* cls)
 {
@@ -151,7 +151,6 @@ const char* virtualBaseRefusal(const sema::Symbol* cls)
     if (cls->declAlign > 0 || cls->endsWithZeroSized) return "virtual bases after an over-aligned or zero-sized part";
     for (size_t v = 0; v < cls->vbases.size(); ++v) {
         const sema::Symbol* vb = cls->vbases[v];
-        if (!vb->vbases.empty()) return "a virtual base that has virtual bases of its own";
         if (vb->nvSize == 0 || vb->leadsWithZeroSized || vb->endsWithZeroSized || vb->declAlign > 0) return "an empty or over-aligned virtual base";
         if (vb->isPolymorphic) return "a polymorphic virtual base (vtordisp)";
     }

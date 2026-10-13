@@ -135,7 +135,8 @@ struct GG : GQ1, GQ2 { int fp() const; };
     X(sizeof(SE)) X(LAYOUT_BASE(SE, SB)) X(LAYOUT_BASE(SE, NP)) X(LAYOUT_FIELD(SE, se)) \
     X(sizeof(VB)) X(sizeof(VD)) X(LAYOUT_FIELD(VD, d)) X(sizeof(VL)) X(sizeof(VX)) X(LAYOUT_BASE(VX, VR)) \
     X(LAYOUT_FIELD(VX, x)) X(sizeof(VN)) X(LAYOUT_FIELD(VN, n)) X(sizeof(VM)) X(LAYOUT_FIELD(VM, m)) X(sizeof(VY)) \
-    X(LAYOUT_FIELD(VY, y)) X(sizeof(VZ)) X(LAYOUT_BASE(VZ, VX)) X(LAYOUT_FIELD(VZ, z))
+    X(LAYOUT_FIELD(VY, y)) X(sizeof(VZ)) X(LAYOUT_BASE(VZ, VX)) X(LAYOUT_FIELD(VZ, z)) \
+    X(sizeof(VNB)) X(sizeof(VNC)) X(sizeof(VNE)) X(sizeof(VNF)) X(LAYOUT_BASE(VNF, VNE)) X(LAYOUT_FIELD(VNF, f)) X(sizeof(VNG))
 
 // ---- virtual bases (MSVC: vbptr, vbtables, the "most derived" flag, the vbase destructor ??_D) -----------
 // A class with virtual bases shares the vbptr of its first non-virtual base that has one or gets its own after
@@ -166,6 +167,17 @@ int  vbCopy(const VX& x);                  // a copy's v l r x
 long vbArray(int n);                       // new VX[n], delete[]: the destructors' log
 int  vbSumVY(const VY& y);
 int  vbSumVZ(const VZ& z);
+// virtual bases with virtual bases of their own (their vbptrs in the virtual part): built once each
+struct VNA { int a; VNA() : a(1) { g_vbLog = g_vbLog * 10 + 1; } ~VNA() { g_vbLog = g_vbLog * 10 + 9; } };
+struct VNB : virtual VNA { int b; VNB() : b(2) { g_vbLog = g_vbLog * 10 + 2; } ~VNB() { g_vbLog = g_vbLog * 10 + 7; } };
+struct VNC : virtual VNB { int c; VNC() : c(3) { g_vbLog = g_vbLog * 10 + 3; } };
+struct VNE : virtual VNB, virtual VNA { int e; VNE() : e(5) { g_vbLog = g_vbLog * 10 + 5; } };
+struct VNF : VNC, VNE { int f; VNF() : f(6) {} };                              // VNA at 40, VNB at 48
+struct VNG : virtual VNC, virtual VNE { int g; VNG() : g(8) {} };              // four virtual bases
+int  vbNestedF(const VNF& f);              // a b c e f, through the bases
+int  vbNestedG(VNG* g);                    // a b c e g, through VNE* and VNC*
+VNA* vbToVNA(VNG* g);                      // through VNC's VNB
+long vbNestedLife();                       // a VNF and a VNG on cppparse's stack: built right, then the destructors' log
 
 // the value of the k-th expression of LAYOUT_VALUES as cppparse computes it; -1 past the end
 int layoutValue(int k);

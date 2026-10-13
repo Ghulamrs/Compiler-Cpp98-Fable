@@ -1213,14 +1213,31 @@ void layoutVbtables(Symbol* cls, int sharedVb)
         t.offset = cls->vbptrOffset; t.introducedBy = cls; t.order = cls->vbases; t.nextToMangle = cls;
         tables.push_back(t);
     }
-    for (size_t b = 0; b < cls->bases.size(); ++b) {
-        const BaseClass& bc = cls->bases[b];
-        if (!bc.cls) continue;
-        for (size_t k = 0; k < bc.cls->vbtables.size(); ++k) {
-            VbTable t = bc.cls->vbtables[k];
-            t.offset += bc.offset;
-            if (t.path.empty() || t.path.back() != bc.cls) t.nextToMangle = bc.cls;
-            if (static_cast<int>(b) == sharedVb && bc.cls->vbtables[k].offset == bc.cls->vbptrOffset)
+    // the vbptrs of the non-virtual bases' non-virtual parts, then those of every virtual base (once, at its
+    // place in this class)
+    std::vector<std::pair<Symbol*, int> > parts;
+    std::vector<int> partIndex;
+    for (size_t b = 0; b < cls->bases.size(); ++b)
+        if (cls->bases[b].cls && !cls->bases[b].isVirtual) { parts.push_back(std::make_pair(cls->bases[b].cls, cls->bases[b].offset)); partIndex.push_back(static_cast<int>(b)); }
+    for (size_t v = 0; v < cls->vbases.size(); ++v) { parts.push_back(std::make_pair(cls->vbases[v], cls->vbaseOffsets[v])); partIndex.push_back(-1); }
+    for (size_t p = 0; p < parts.size(); ++p) {
+        Symbol* bc = parts[p].first;
+        for (size_t k = 0; k < bc->vbtables.size(); ++k) {
+            if (bc->vbtables[k].offset >= bc->nvSize) continue;   // in its virtual part: placed by this class
+            VbTable t = bc->vbtables[k];
+            t.offset += parts[p].second;
+            Symbol* via = bc;
+            // a virtual base inherited through a direct base keeps the name that base gives its table
+            for (size_t b = 0; partIndex[p] < 0 && via == bc && b < cls->bases.size(); ++b) {
+                Symbol* d = cls->bases[b].cls;
+                if (!d || d == bc) continue;
+                const size_t v = static_cast<size_t>(std::find(d->vbases.begin(), d->vbases.end(), bc) - d->vbases.begin());
+                if (v >= d->vbases.size()) continue;
+                for (size_t u = 0; u < d->vbtables.size(); ++u)
+                    if (d->vbtables[u].offset == d->vbaseOffsets[v] + bc->vbtables[k].offset) { t.path = d->vbtables[u].path; t.nextToMangle = d->vbtables[u].nextToMangle; via = d; }
+            }
+            if (t.path.empty() || t.path.back() != via) t.nextToMangle = via;
+            if (sharedVb >= 0 && partIndex[p] == sharedVb && bc->vbtables[k].offset == bc->vbptrOffset)
                 for (size_t v = 0; v < cls->vbases.size(); ++v) if (std::find(t.order.begin(), t.order.end(), cls->vbases[v]) == t.order.end()) t.order.push_back(cls->vbases[v]);
             tables.push_back(t);
         }

@@ -247,3 +247,7 @@ long vbArray(int n)
 }
 int  vbSumVY(const VY& y) { return y.v + y.l + y.r + y.x + y.y; }
 int  vbSumVZ(const VZ& z) { const VR& r = z; return z.v * 1000 + r.r * 100 + z.z * 10 + z.x; }
+int  vbNestedF(const VNF& f) { const VNE& e = f; const VNB& b = e; return f.a * 10000 + b.b * 1000 + f.c * 100 + e.e * 10 + f.f; }
+int  vbNestedG(VNG* g) { VNE* e = g; VNC* c = g; VNB* b = c; return g->a * 10000 + b->b * 1000 + c->c * 100 + e->e * 10 + g->g; }
+VNA* vbToVNA(VNG* g) { VNC* c = g; return c; }
+long vbNestedLife() { g_vbLog = 0; long ok = 0; { VNF f; VNG g; ok = f.a + g.a == 2 && g_vbLog == 12351235; g_vbLog = 0; } return ok * 10000 + g_vbLog; }

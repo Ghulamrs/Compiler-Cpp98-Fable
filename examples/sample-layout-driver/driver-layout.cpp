@@ -229,6 +229,18 @@ int main()
         VD d;
         expect("VD v d", d.v * 10 + d.d, 71);
         g_vbLog = 0;
+        {
+            VNF f;
+            expect("VNF built by cl: log", g_vbLog, 1235);
+            expect("VNF read by cppparse", vbNestedF(f), 12356);
+            VNG g;
+            expect("VNG read by cppparse", vbNestedG(&g), 12358);
+            expect("VNG* to VNA* (cppparse)", (long)((char*)vbToVNA(&g) - (char*)&g), (long)((char*)static_cast<VNA*>(&g) - (char*)&g));
+            g_vbLog = 0;
+        }
+        expect("VNF and VNG destroyed by cl: log", g_vbLog, 7979);
+        expect("VNF and VNG on cppparse's stack: log", vbNestedLife(), 17979);
+        g_vbLog = 0;
     }
 
     if (failures) { printf("%d FAILED\n", failures); return 1; }

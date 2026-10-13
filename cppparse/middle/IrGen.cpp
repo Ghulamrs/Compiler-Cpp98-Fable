@@ -2514,7 +2514,7 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
         Symbol* chosen = 0;
         size_t nargs = mi ? mi->args.size() : 0;
         if (ctors) for (size_t i = 0; i < ctors->size() && !chosen; ++i) { Symbol* c = (*ctors)[i]; if (c->kind == Symbol::Function && c->isConstructor && nargs >= static_cast<size_t>(c->requiredParams) && nargs <= c->params.size()) chosen = c; }
-        m_ctorFlag = virtualPart[p] ? 1 : 0;
+        m_ctorFlag = 0;   // a base, virtual or not, never builds its own virtual bases here
         if (chosen) { std::vector<cxx::Expr*> none; construct(chosen, baddr, mi ? mi->args : none, 0, mi ? mi->loc.line : line); }
         else constructDefault(base->type, baddr, line);
         m_ctorFlag = 1;
@@ -2524,7 +2524,7 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
             int part = newLocal("part." + base->name, m_semaTypes.pointer(base->type), false);
             LValue pl; pl.kind = LValue::Local; pl.local = part; pl.type = m_semaTypes.pointer(base->type);
             store(pl, baddr, pl.type, line);
-            m_flagged[static_cast<size_t>(registerCleanup(part, base->type, true, 2, line))].baseSubobject = !virtualPart[p];
+            m_flagged[static_cast<size_t>(registerCleanup(part, base->type, true, 2, line))].baseSubobject = true;
         }
     }
     if (parts.size() == firstNonVirtual && joinBlock >= 0) { br(joinBlock, line); m_block = joinBlock; }
@@ -2641,7 +2641,10 @@ void IrGen::genImplicit(Symbol* fn)
             for (size_t v = 0; v < cls->vbases.size(); ++v) {
                 Symbol* base = cls->vbases[v];
                 int d = subobject(self, ct, "vbase " + base->name, cls->vbaseOffsets[v], base->type, line);
-                copyConstruct(base->type, d, toBase(src, cls, base, line), line);
+                const int s = toBase(src, cls, base, line);
+                m_ctorFlag = 0;
+                copyConstruct(base->type, d, s, line);
+                m_ctorFlag = 1;
             }
             br(jb, line);
             m_block = jb;

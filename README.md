@@ -798,12 +798,14 @@ creator passes 1, and the constructor then stores the vbptrs and builds the
 virtual bases first, while the non-virtual bases get 0; `~D` (`??1`)
 destroys only the non-virtual part and the vbase destructor (`??_D`),
 which stack objects, members, arrays and `delete` use, destroys the
-virtual bases after it (test 13, sample-layout: a diamond, shared and
-injected vbptrs, copies, arrays and logs, built and destroyed across both
-compilers). Still refused with S130 (test 17,
-`examples/sample-front/vbase.cpp`): polymorphic classes with virtual bases
-(the vfptr inside the virtual base, vtordisp), virtual bases with virtual
-bases of their own, empty or over-aligned virtual bases, `#pragma pack`,
+virtual bases after it. A virtual base with virtual bases of its own keeps
+its vbptr in the virtual part, stored by the most derived constructor, its
+table named after the base it comes through as cl names it (test 13,
+sample-layout: a diamond, shared and injected vbptrs, nested virtual bases,
+copies, arrays and logs, built and destroyed across both compilers). Still
+refused with S130 (test 17, `examples/sample-front/vbase.cpp`): polymorphic
+classes with virtual bases (the vfptr inside the virtual base, vtordisp),
+empty or over-aligned virtual bases, `#pragma pack`,
 and vbtables whose names need a path of several bases; `--sema6` and the
 reports accept them.
 Likewise an override with a covariant return

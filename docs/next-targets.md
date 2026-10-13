@@ -75,6 +75,10 @@ the default), with the items found since. Each was reproduced with a small progr
   methods inlined everywhere are listed as "removed by link" in part B (`Matrix::rows()` 3 bytes and `cols()` 4 in
   both compilers), and a part C compares whole classes (`mx::Matrix`: 1.66 times cl's bytes over all its members,
   1.85 over the 17 both emit; cl's link keeps 5 of its 19, ours 13 of 18).
+- 22, predefined macros (decided 2026-10-13): the Windows target defines `_MT=1` and `_CPPUNWIND=1`, as cl does for a
+  `/MT /EHsc` build (common/Target.cpp); `_MSC_VER` stays undefined, so code under it, written for MSVC's extensions,
+  is not compiled; test 17 (`sample-front/front.cpp`) checks the macros against cl.
+
 ## Plan
 
 Three lanes, worked in parallel on their own branches; each item gets a regression test, and each fix runs
@@ -83,7 +87,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 | # | Item | Effect today | Size | Lane |
 |---|---|---|---|---|
 | 14 | 23: virtual bases. `--compile6` refuses a class with one (S130, driver/main.cpp) instead of laying it out inline; left: the vbptr and vbtable (`??_8D@@7B@`), virtual base subobjects placed once at the end of the most-derived object (shared in a diamond), conversions and member access through the vbtable, the constructors' hidden "most derived" flag (virtual bases built once), destruction order, vtordisp where MSVC emits it | refused (S130) | large | layout (later) |
-| 15 | 22: `_MSC_VER`, `_MT`, `_CPPUNWIND` not predefined (common/Target.cpp) | by choice so far | small | decision |
 | 17 | `delete[]` of an array of a polymorphic class across compilers: cl calls the vector deleting destructor (`??_E`, flags bit 1) through the slot, which holds cppparse's scalar one | wrong free in mixed links | small | layout |
 | 20 | vftable names: two tables introduced by the same class are now named after the bases that tell them apart (`??_7G@@6BQ1@@@`, `??_7G@@6BQ2@@@`, IrGen.cpp registerMetadata); left: cl's full rule (clang's MicrosoftVTableContext MangledPath), e.g. `struct F : X, D` (D : A, B, C) where cl names one table `??_7F@@6B@` and cppparse `??_7F@@6BX@@@` (review repro t2.cpp); paths longer than one class | wrong names in mixed links (both COMDATs kept) | small | layout |
 | 18 | member pointers to virtual functions (cl's vcall thunks `??_9`) | not supported | medium | layout |

@@ -129,8 +129,19 @@ void functorMembers()
 using namespace std;
 int localHidesFileUsing(int n) { int count = 0, max = 2; while (count < n + max) ++count; return count; }
 
+// the macros cl defines for a /MT /EHsc build, which cppparse predefines too (not _MSC_VER: MSVC's extensions)
+void predefined()
+{
+#if defined(_MT) && defined(_CPPUNWIND) && defined(_WIN64) && defined(_M_X64)
+    std::printf("predefined: _MT %d _CPPUNWIND %d _M_X64 %d\n", _MT, _CPPUNWIND, _M_X64);
+#else
+    std::printf("predefined: missing\n");
+#endif
+}
+
 int main()
 {
+    predefined();
     sizes();
     hiding();
     injected();

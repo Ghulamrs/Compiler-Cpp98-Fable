@@ -103,7 +103,7 @@ void usage()
         "  --target NAME    version 6: x86_64-windows (default; COFF objects, MSVC ABI) or x86_64-linux\n"
         "                   (LP64 sizes and macros for -E, --parse6, --sema6; no back end yet)\n"
         "                   predefined always: __cplusplus=199711L, __cppparse__=6, __STDC__=1; for\n"
-        "                   x86_64-windows also _WIN32=1, _WIN64=1, _M_X64=100 (not _MSC_VER, not _DEBUG);\n"
+        "                   x86_64-windows also _WIN32=1, _WIN64=1, _M_X64=100, _MT=1, _CPPUNWIND=1 (not _MSC_VER, not _DEBUG);\n"
         "                   for x86_64-linux __linux__, __unix__, __x86_64__, __LP64__, __ELF__\n"
         "                   --compile6 stops at a missing include file (the other modes warn)\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"

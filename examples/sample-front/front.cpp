@@ -235,6 +235,43 @@ void longDouble()
 }
 }
 
+namespace fp {
+// comparisons: ucomiss for floats, ucomisd for doubles, and the parity flag: NaN is unequal to everything (itself
+// included) and every ordered comparison with it is false; as a condition -0.0 is false and NaN true
+bool fBool(float x) { return x; }
+bool dBool(double x) { return x; }
+bool fNot(float x) { return !x; }
+bool fEq(float a, float b) { return a == b; }
+bool fNe(float a, float b) { return a != b; }
+bool fLt(float a, float b) { return a < b; }
+bool fLe(float a, float b) { return a <= b; }
+bool fGt(float a, float b) { return a > b; }
+bool fGe(float a, float b) { return a >= b; }
+bool dEq(double a, double b) { return a == b; }
+bool dNe(double a, double b) { return a != b; }
+bool dLt(double a, double b) { return a < b; }
+bool dGe(double a, double b) { return a >= b; }
+int fIf(float x) { if (x) return 1; return 2; }
+int dIf(double x) { if (x) return 1; return 2; }
+int dEqIf(double a, double b) { if (a == b) return 1; return 2; }
+int dNeIf(double a, double b) { if (a != b) return 1; return 2; }
+int fEqIf(float a, float b) { if (a == b) return 1; return 2; }
+int fNotNeIf(float a, float b) { if (!(a != b)) return 1; return 2; }
+int fAnd(float a, float b) { return a && b ? 3 : 4; }
+int dCond(double a) { return a ? 5 : 6; }
+void comparisons()
+{
+    double nan = vzero / vzero, nz = -vzero; float fnan = (float)nan, fnz = (float)nz;
+    std::printf("fp to bool: %d %d %d %d %d %d %d\n", fBool(fnz), fBool(fnan), fBool(1.0f), dBool(nz), dBool(nan), fNot(fnz), fNot(fnan));
+    std::printf("fp float compares: %d%d%d%d%d%d %d%d%d%d%d%d %d%d%d%d%d%d\n", fEq(fnan, fnan), fNe(fnan, fnan), fLt(fnan, 1), fLe(fnan, 1), fGt(fnan, 1), fGe(fnan, 1),
+                fEq(1, 1), fNe(1, 2), fLt(1, 2), fLe(2, 2), fGt(3, 2), fGe(2, 3), fEq(fnz, 0), fNe(fnz, 0), fLt(fnz, 0), fLe(-1, fnan), fGt(1, fnan), fGe(1, fnan));
+    std::printf("fp double compares: %d%d%d%d %d%d%d%d\n", dEq(nan, nan), dNe(nan, nan), dLt(nan, 1), dGe(nan, 1), dEq(nan, 1), dNe(1, 1), dLt(1, 2), dGe(nz, 0));
+    std::printf("fp conditions: %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", fIf(fnz), fIf(fnan), dIf(nz), dIf(nan), dEqIf(nan, nan), dNeIf(nan, nan), fEqIf(fnan, fnan),
+                fNotNeIf(fnan, fnan), fAnd(fnan, 1), fAnd(fnz, 1), dCond(nan), dCond(nz), dEqIf(2, 2), dNeIf(2, 2));
+    std::printf("fp folded conditions: %d %d %d %d\n", (bool)-0.0, -0.0 == 0.0, (bool)-0.0f, fIf(-0.0f) + dCond(-0.0));
+}
+}
+
 int main()
 {
     predefined();
@@ -248,6 +285,7 @@ int main()
     conditionDeclarations();
     foldedGlobals();
     fp::longDouble();
+    fp::comparisons();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

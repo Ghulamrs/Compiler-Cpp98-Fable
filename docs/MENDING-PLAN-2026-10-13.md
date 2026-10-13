@@ -3,6 +3,28 @@
 For Claude Opus 5.5. Read this whole file before touching code. It says where the work stands, the rules the
 user has set, the defects to mend in order, and when the work counts as done.
 
+## 0. Who does what, and progress (update this table with every commit)
+
+The order is section 7's. "Opus, design first" means: write the design and the `dumpbin` / section evidence,
+show it to the user, and code only after the user agrees (the user may ask for a Fable 5.1 review of it). Fable
+5.1 does an item only if the user names Fable for it. When an item is done, fill in its commit and the Windows gate
+result (section 3) in the same commit that mends it.
+
+| Order | Item | Done by | Status | Commit | Windows gate |
+|---|---|---|---|---|---|
+| 1 | M1 table-based exceptions in the MASM (ml64) path | Opus 5.5, design first | not started | | |
+| 2 | M2 varargs: (i) 64-bit integers, (ii) float promotion at -O0 | Opus 5.5 | not started | | |
+| 2 | M2 (iii) 5th+ stack floats when params 1-4 are floats | Opus 5.5, design first | not started | | |
+| 3 | M4 covariant return through a second base: refuse with S131 | Opus 5.5 | not started | | |
+| 4 | M5 bit-fields wider than 32 bits | Opus 5.5 | not started | | |
+| 5 | M6 static data member defined in every unit | Opus 5.5 | not started | | |
+| 6 | M7 `delete[]` without a cookie skips the class's `operator delete[]` | Opus 5.5 | not started | | |
+| 7 | M8 trailing empty base offset | Opus 5.5 | not started | | |
+| 8 | M3 statics guard hang: link-order check first, then fix or document | Opus 5.5 | not started | | |
+| 9 | M9 vftables in writable `.data` instead of `.rdata` | Opus 5.5, design first | not started | | |
+| 10 | Housekeeping (stale script names, toolset v143, known limits, refused-unit dumps, the Mac/Linux note) | Opus 5.5 | not started | | |
+| last | Ask the user to merge `import-cpp13` into `main` and push | Opus 5.5 asks; the user decides | not started | | |
+
 ## 1. Where things stand
 
 | Tree | What it is | State |

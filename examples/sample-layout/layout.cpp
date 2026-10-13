@@ -220,3 +220,48 @@ int GQ2::fq() const { return 90 + p; }
 int GG::fp() const { return 10 + GQ1::p; }
 int ggCall(const GQ2* p) { return p->fp() * 100 + p->fq(); }
 GG* makeGG() { return new GG; }
+
+int g_ovLog = 0;
+OV::OV() : o(0) {}
+int OV::a() const { return 1 + o; }
+int OV::f(int) const { return 2 + o; }
+int OV::b() const { return 3 + o; }
+int OV::f(double) const { return 4 + o; }
+int OV::c() const { return 5 + o; }
+OV::~OV() { g_ovLog = g_ovLog * 10 + 1; }
+int OV::f(char) const { return 6 + o; }
+OW::OW() { o = 10; }
+int OW::f(double) const { return 104 + o; }
+int OW::g() const { return 107 + o; }
+int OW::f(long) const { return 108 + o; }
+int OW::a() const { return 101 + o; }
+int OW::g(int) const { return 109 + o; }
+int OW::f(short) const { return 110 + o; }
+OW::~OW() { g_ovLog = g_ovLog * 10 + 2; }
+
+int ovCall(const OV* p, int which)
+{
+    switch (which) {
+    case 0: return p->a();
+    case 1: return p->f(1);
+    case 2: return p->b();
+    case 3: return p->f(1.0);
+    case 4: return p->c();
+    case 5: return p->f('x');
+    }
+    return -1;
+}
+
+int owCall(const OW* p, int which)
+{
+    switch (which) {
+    case 6: return p->g();
+    case 7: return p->f(1L);
+    case 8: return p->g(1);
+    case 9: return p->f((short)1);
+    }
+    return ovCall(p, which);
+}
+
+OV* makeOW() { return new OW; }
+void deleteOV(OV* p) { delete p; }

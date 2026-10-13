@@ -3,6 +3,7 @@
 #include "Sema.hpp"
 #include "PathUtil.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -1380,6 +1381,8 @@ void Sema::completeClass(Symbol* cls)
             tables.back().offset += cls->bases[b].offset;
         }
     }
+    std::map<std::string, size_t> firstOfName;   // where each virtual function's name is first declared
+    std::vector<std::pair<std::pair<size_t, size_t>, Symbol*> > fresh;   // new virtuals: (first of name, ~index)
     for (size_t i = 0; i < cls->members->order.size(); ++i) {
         Symbol* m = cls->members->order[i];
         if (m->kind != Symbol::Function || m->isStatic) continue;
@@ -1423,7 +1426,17 @@ void Sema::completeClass(Symbol* cls)
             v.fns[hits[h].second] = m;
             v.thunks[hits[h].second] = v.offset - m->thisAdjust;
         }
-        if (!placed) { m->vtableSlot = static_cast<int>(cls->vtable.size()); cls->vtable.push_back(m); }
+        if (firstOfName.find(m->name) == firstOfName.end()) firstOfName[m->name] = i;
+        if (!placed) fresh.push_back(std::make_pair(std::make_pair(firstOfName[m->name], ~i), m));
+    }
+    // the new virtual functions, as cl orders them: by declaration, but overloads of a name together where the
+    // name is first declared (an overrider counts), the last declared first (a, f(int), b, f(double): a,
+    // f(double), f(int), b)
+    std::sort(fresh.begin(), fresh.end());
+    for (size_t k = 0; k < fresh.size(); ++k) {
+        Symbol* m = fresh[k].second;
+        m->vtableSlot = static_cast<int>(cls->vtable.size());
+        cls->vtable.push_back(m);
     }
     tables[0].fns = cls->vtable;
     tables[0].thunks.resize(cls->vtable.size(), 0);

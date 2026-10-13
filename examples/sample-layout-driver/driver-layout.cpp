@@ -1,6 +1,7 @@
 // driver-layout.cpp - compiled by cl and linked with cppparse's layout.obj: cl's value of every expression in
 // layout.hpp's LAYOUT_VALUES must equal cppparse's, and objects laid out by cppparse must read back right
 // through cl's view of the classes.
+#define _CRT_SECURE_NO_WARNINGS
 #include "layout.hpp"
 
 #include <new>
@@ -13,6 +14,39 @@ static void expect(const char* what, long got, long want)
     if (got == want) printf("  ok   %-40s %ld\n", what, got);
     else { printf("  FAIL %-40s %ld, expected %ld\n", what, got, want); ++failures; }
 }
+
+// the same calls as ovCall and owCall, made by cl: through cl's slots of cppparse's tables
+static int clOvCall(const OV* p, int which)
+{
+    switch (which) {
+    case 0: return p->a();
+    case 1: return p->f(1);
+    case 2: return p->b();
+    case 3: return p->f(1.0);
+    case 4: return p->c();
+    case 5: return p->f('x');
+    }
+    return -1;
+}
+
+static int clOwCall(const OW* p, int which)
+{
+    switch (which) {
+    case 6: return p->g();
+    case 7: return p->f(1L);
+    case 8: return p->g(1);
+    case 9: return p->f((short)1);
+    }
+    return clOvCall(p, which);
+}
+
+// a class cl derives from cppparse's OW: cppparse's calls reach its overriders through cl's table
+struct CW : OW {
+    int f(int) const { return 201; }
+    int f(short) const { return 202; }
+    int g() const { return 203; }
+    int b() const { return 204; }
+};
 
 int main()
 {
@@ -185,6 +219,36 @@ int main()
         expect("gg fp() through cl's GQ1*", static_cast<GQ1*>(gg)->fp(), 18);
         expect("gg fq() through cl's GQ2*", static_cast<GQ2*>(gg)->fq(), 98);
         delete static_cast<GQ2*>(gg);
+    }
+
+    printf("vftable slots of overloads\n");
+    {
+        static const long wantV[6] = { 1, 2, 3, 4, 5, 6 };
+        static const long wantW[10] = { 111, 12, 13, 114, 15, 16, 117, 118, 119, 120 };
+        static const long wantC[10] = { 111, 201, 204, 114, 15, 16, 203, 118, 119, 202 };
+        OV ov; OW ow; CW cw;
+        char what[64];
+        for (int k = 0; k < 6; ++k) {
+            sprintf(what, "ovCall(&ov, %d)", k); expect(what, ovCall(&ov, k), wantV[k]);
+            sprintf(what, "cl's ovCall(&ov, %d)", k); expect(what, clOvCall(&ov, k), wantV[k]);
+            sprintf(what, "ovCall(&ow, %d)", k); expect(what, ovCall(&ow, k), wantW[k]);
+            sprintf(what, "cl's ovCall(&ow, %d)", k); expect(what, clOvCall(&ow, k), wantW[k]);
+        }
+        for (int k = 0; k < 10; ++k) {
+            sprintf(what, "owCall(&ow, %d)", k); expect(what, owCall(&ow, k), wantW[k]);
+            sprintf(what, "cl's owCall(&ow, %d)", k); expect(what, clOwCall(&ow, k), wantW[k]);
+            sprintf(what, "owCall(&cw, %d) (cl's class)", k); expect(what, owCall(&cw, k), wantC[k]);
+            sprintf(what, "cl's owCall(&cw, %d)", k); expect(what, clOwCall(&cw, k), wantC[k]);
+        }
+        g_ovLog = 0;
+        delete makeOW();
+        expect("OW deleted by cl through OV*", g_ovLog, 21);
+        g_ovLog = 0;
+        deleteOV(makeOW());
+        expect("OW deleted by cppparse through OV*", g_ovLog, 21);
+        g_ovLog = 0;
+        deleteOV(new CW);
+        expect("CW (cl's) deleted by cppparse through OV*", g_ovLog, 21);
     }
 
     if (failures) { printf("%d FAILED\n", failures); return 1; }

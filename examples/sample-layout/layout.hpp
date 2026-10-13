@@ -105,6 +105,19 @@ struct GP { GP(); virtual ~GP(); virtual int fp() const; int p; };
 struct GQ1 : GP { };
 struct GQ2 : GP { virtual int fq() const; };
 struct GG : GQ1, GQ2 { int fp() const; };
+// vftable slots of overloads, as cl orders the new virtual functions of a class: by declaration, but the
+// overloads of a name together where the name is first declared (an overrider counts), the last declared
+// first. OV: a, f(char), f(double), f(int), b, c, ~OV. OW adds f(short), f(long), g(int), g() (f first: its
+// first declaration in OW is the overrider f(double)). The driver derives CW from OW, built by cl.
+struct OV { OV(); virtual int a() const; virtual int f(int) const; virtual int b() const; virtual int f(double) const;
+            virtual int c() const; virtual ~OV(); virtual int f(char) const; int o; };
+struct OW : OV { OW(); int f(double) const; virtual int g() const; virtual int f(long) const; int a() const;
+                 virtual int g(int) const; virtual int f(short) const; ~OW(); };
+extern int g_ovLog;                            // ~OW appends 2, ~OV 1
+int  ovCall(const OV* p, int which);           // 0 a(), 1 f(int), 2 b(), 3 f(double), 4 c(), 5 f(char)
+int  owCall(const OW* p, int which);           // 0-5 as ovCall, 6 g(), 7 f(long), 8 g(int), 9 f(short)
+OV*  makeOW();
+void deleteOV(OV* p);
 
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \

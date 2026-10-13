@@ -37,6 +37,10 @@ the default), with the items found since. Each was reproduced with a small progr
   does a non-virtual `delete` (IrGen.cpp freeObject; review repro u.cpp, KD : SA, K).
 - A destructor stores its own class's vptrs on entry (IrGen.cpp genFunction), so a virtual call in a base's
   destructor reaches the base's function; sample-layout checks it in constructors and destructors, both compilers.
+- 15, vtable slots grouped by overload: a class's new virtual functions are ordered as cl orders them, by
+  declaration but with the overloads of a name together where the name is first declared in the class (an
+  overrider counts), the last declared first (Sema.cpp completeClass); sample-layout OV/OW and cl's CW : OW, called
+  through base pointers by both compilers at -O0..-O3.
 - 18, callee side: a variadic function keeps its parameters in their home slots and its prologue spills rcx,
   rdx, r8 and r9 there (named floats from xmm0-xmm3); `include/cstdarg`, `stdarg.h` and `vprintf`/`vfprintf`/
   `vsprintf` in `cstdio` give va_list/va_start/va_arg/va_end over that area, as MSVC's vadefs.h (X86.cpp).
@@ -101,8 +105,8 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   scalarConstant), which shifts every later `$TSS<n>` of the function against cl's, so with cl inlining
   the function such an object can be constructed twice (repro: review-e t6/d6, run.ps1 t6 d6). Giving such statics a private guard is not enough: cl reads them as static data from the shared COMDAT, so cppparse must emit their folded value as data (needs a floating constant evaluator for IrGlobal data); statics in nested blocks
   use cppparse's block numbers, not cl's `?4`/`?6`/`?7` scheme; exceptions do not cross between cl's
-  and cppparse's runtimes (a cl throw into a cppparse frame fails fast); vtable slots grouped by overload as MSVC does
-  (Sema.cpp:1169-1174) (the destructor slot holding the scalar deleting destructor is done).
+  and cppparse's runtimes (a cl throw into a cppparse frame fails fast) (vtable slots grouped by overload and the
+  destructor slot holding the deleting destructor are done).
 - design-table-exceptions.md section 7: an exception edge from every call to its landing pad, then GVN and
   register values across handlers; the main lever on code size (1.57 times cl's on the matrix sample).
 

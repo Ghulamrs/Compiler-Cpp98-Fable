@@ -103,12 +103,13 @@ std::string X86Module::symbol(const std::string& irName)
 
 std::string X86Module::globalSymbol(const std::string& name)
 {
-    if (name.find('(') != std::string::npos) return symbol(name);                              // address of a function
-    if (startsWith(name, "vtable@")) return m_msvc ? msvcMangleVtable(name.substr(7)) : "vtable_" + mangle(name.substr(7));
+    // first: a static local's IR name ("f(int)::n#0") contains its function's parentheses
     if (m_msvc) {
         std::map<std::string, std::string>::const_iterator it = m_globalNames.find(name);
         if (it != m_globalNames.end()) return it->second;
     }
+    if (name.find('(') != std::string::npos) return symbol(name);                              // address of a function
+    if (startsWith(name, "vtable@")) return m_msvc ? msvcMangleVtable(name.substr(7)) : "vtable_" + mangle(name.substr(7));
     return "g_" + mangle(name);
 }
 
@@ -165,7 +166,12 @@ private:
     }
     std::string def(int temp, bool isFloat, const std::string& scratch, int& spill);
     void        finish(int temp, int spill, bool isFloat, const std::string& reg);
-    std::string localRef(int local) const { return "[rbp-" + intToString(m_localOffset[static_cast<size_t>(local)]) + "]"; }
+    // a negative offset is a parameter in its home slot above the return address (a variadic function's)
+    std::string localRef(int local) const
+    {
+        const int off = m_localOffset[static_cast<size_t>(local)];
+        return off < 0 ? "[rbp+" + intToString(-off) + "]" : "[rbp-" + intToString(off) + "]";
+    }
     std::string label(int b) const { return m_label + "_B" + intToString(b); }
     void        line(const std::string& s) { m_out << "        " << s << "\n"; ++m_stats.instructions; }
     void        directive(const std::string& s) { m_out << "        " << s << "\n"; }   // for the assembler, not an instruction
@@ -664,6 +670,9 @@ void X86Function::layoutFrame()
     int off = 8 * static_cast<int>(m_usedIntRegs.size());
     m_localOffset.assign(m_f.locals.size(), 0);
     for (size_t l = 0; l < m_f.locals.size(); ++l) {
+        // a variadic function keeps its parameters where MSVC's va_start expects them: in the 8-byte home slots of
+        // the caller's shadow space and stack arguments, so the unnamed arguments follow the last named one
+        if (m_f.variadic && static_cast<int>(l) < m_f.paramCount) { m_localOffset[l] = -(16 + 8 * static_cast<int>(l)); continue; }
         int size = m_f.locals[l].size > 0 ? m_f.locals[l].size : 8;
         int align = m_f.locals[l].align > 0 ? m_f.locals[l].align : 8;
         if (align > 16) align = 16;
@@ -1219,7 +1228,7 @@ void X86Function::emitBody()
     m_out << "        ; frame " << m_frameSize << " bytes";
     for (size_t l = 0; l < m_f.locals.size(); ++l) {
         if (l && l % 6 == 0) m_out << "\n        ;   ";
-        m_out << (l ? ", " : ": ") << m_f.locals[l].name << "@[rbp-" << m_localOffset[l] << "]";
+        m_out << (l ? ", " : ": ") << m_f.locals[l].name << "@" << localRef(static_cast<int>(l));
     }
     m_out << "\n";
     if (m_frameless) {
@@ -1260,7 +1269,17 @@ void X86Function::emitBody()
     directive(".endprolog");
     // incoming parameters by position
     static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
-    for (int p = 0; p < m_f.paramCount; ++p) {
+    if (m_f.variadic) {
+        // the four register arguments go to their home slots, the named ones in their own type, the unnamed ones
+        // from the integer registers (a caller passes a double there as well); the rest are on the stack already
+        for (int p = 0; p < 4; ++p) {
+            const std::string home = "[rbp+" + intToString(16 + 8 * p) + "]";
+            const IrLocal* l = p < m_f.paramCount ? &m_f.locals[static_cast<size_t>(p)] : 0;
+            if (l && isFloatType(l->type)) line(std::string(isSingle(l->type) ? "movss real4 ptr " : "movsd real8 ptr ") + home + ", xmm" + intToString(p) + "      ; param " + l->name);
+            else line("mov qword ptr " + home + ", " + argRegs[p] + (l ? "      ; param " + l->name : std::string("      ; variadic")));
+        }
+    }
+    for (int p = 0; p < m_f.paramCount && !m_f.variadic; ++p) {
         // a parameter read straight from its register, or never read at all, needs no copy in the frame
         if (m_paramInReg[static_cast<size_t>(p)] || !m_paramUsed[static_cast<size_t>(p)]) continue;
         const IrLocal& l = m_f.locals[static_cast<size_t>(p)];
@@ -1271,7 +1290,10 @@ void X86Function::emitBody()
             else line("mov " + std::string(ptrWord(size)) + " " + localRef(p) + ", " + regSized(argRegs[p], size) + "      ; param " + l.name);
         } else {
             std::string home = "[rbp+" + intToString(16 + 8 * p) + "]";
-            if (fl) { line("movsd xmm0, real8 ptr " + home); line("movsd real8 ptr " + localRef(p) + ", xmm0      ; param " + l.name); }
+            // a float passed on the stack fills the low 4 bytes of its 8-byte slot, and its frame slot holds 4 bytes.
+            // The copy goes through xmm5 (rax for integers), which holds no parameter: xmm0-xmm3 may still be read
+            if (fl && isSingle(l.type)) { line("movss xmm5, real4 ptr " + home); line("movss real4 ptr " + localRef(p) + ", xmm5      ; param " + l.name); }
+            else if (fl) { line("movsd xmm5, real8 ptr " + home); line("movsd real8 ptr " + localRef(p) + ", xmm5      ; param " + l.name); }
             else { line("mov rax, qword ptr " + home); line("mov " + std::string(ptrWord(size)) + " " + localRef(p) + ", " + regSized("rax", size) + "      ; param " + l.name); }
         }
     }
@@ -1415,7 +1437,21 @@ void X86Module::emitGlobals()
         std::string sym = globalSymbol(g.name);
         bool numeric = !g.init.empty();
         std::string def;
-        if (g.isFloat) def = sym + (g.size == 4 ? " REAL4 " : " REAL8 ") + (numeric ? g.init : std::string("0.0"));   // float is loaded with movss
+        if (!g.data.empty()) {
+            // a constant table: a label, then its items; an address is a DQ OFFSET the writer turns into a relocation
+            def = sym + " LABEL BYTE";
+            for (size_t k = 0; k < g.data.size(); ++k) {
+                const IrDataItem& it = g.data[k];
+                const char* dir = it.size == 1 ? "DB" : it.size == 2 ? "DW" : it.size == 4 ? "DD" : "DQ";
+                def += "\n        ";
+                if (it.kind == IrDataItem::Zero) def += "DB " + intToString(it.size) + " DUP (0)";
+                else if (it.kind == IrDataItem::Int) def += std::string(dir) + " " + intToString(static_cast<int>(it.value));
+                else if (it.kind == IrDataItem::Float) def += std::string(it.size == 4 ? "REAL4 " : "REAL8 ") + it.text;
+                else if (it.kind == IrDataItem::String) def += "DQ OFFSET " + stringLabel(it.text);
+                else { def += "DQ OFFSET " + globalSymbol(it.text); useGlobal(it.text); }
+            }
+        }
+        else if (g.isFloat) def = sym + (g.size == 4 ? " REAL4 " : " REAL8 ") + (numeric ? g.init : std::string("0.0"));   // float is loaded with movss
         else if (g.size == 1) def = sym + " DB " + (numeric ? g.init : std::string("0"));
         else if (g.size == 2) def = sym + " DW " + (numeric ? g.init : std::string("0"));
         else if (g.size == 4) def = sym + " DD " + (numeric ? g.init : std::string("0"));
@@ -1425,10 +1461,11 @@ void X86Module::emitGlobals()
         int align = g.size >= 8 ? 8 : g.size >= 4 ? 4 : g.size >= 2 ? 2 : 1;
         if (g.align > align) align = g.align;
         // a COMDAT item is a section of its own: its alignment goes to the section (on the marker), not into padding
-        if (g.linkOnce) m_data += ";@comdat any" + (align > 1 ? " align " + intToString(align) : std::string("")) + "\n";
-        m_data += (g.internal ? std::string("") : "        PUBLIC " + sym + "\n");
-        if (!g.linkOnce && align > 1) m_data += "        ALIGN " + intToString(align) + "\n";
-        m_data += def + "\n";
+        std::string& out = g.readOnly ? m_rdata : m_data;
+        if (g.linkOnce) out += ";@comdat any" + (align > 1 ? " align " + intToString(align) : std::string("")) + "\n";
+        out += (g.internal ? std::string("") : "        PUBLIC " + sym + "\n");
+        if (!g.linkOnce && align > 1) out += "        ALIGN " + intToString(align) + "\n";
+        out += def + "\n";
         m_defined.insert(sym);
         m_dataSymbols.insert(sym);
     }
@@ -1490,6 +1527,7 @@ std::string X86Module::finish()
             s << "\n";
         }
     }
+    s << m_rdata;   // after the literals: sign_mask keeps the section's 16-byte alignment
     if (!m_initializers.empty()) {
         // pointers to the dynamic initialisers of this module's globals: the CRT calls them before main
         s << "\nCRT$XCU SEGMENT ALIGN(8) ALIAS('.CRT$XCU') READ\n";

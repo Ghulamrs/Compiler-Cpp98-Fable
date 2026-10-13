@@ -803,7 +803,7 @@ block-local passes still run.
 sample-lib/`, test 15): cppparse's own C++98 headers, written so that
 the same files serve semantic analysis of cppparse's sources and real
 compilation. `cstddef`, `cstdlib`, `cstdio`, `cstring`, `cctype`,
-`cmath` and `ctime` declare the C runtime (`extern "C"`, with
+`cmath`, `ctime` and `cstdarg` declare the C runtime (`extern "C"`, with
 `using ::name` in `std`; `size_t` is the 64-bit type of this target);
 `exception`, `new`, `stdexcept`, `utility` and `algorithm` (pointer
 ranges: `sort`, `stable_sort`, `reverse`, `find`, `lower_bound`, ...)
@@ -821,7 +821,8 @@ section of its own (selection "any") by the COFF writer, vtables
 likewise, static const members with a constant initialiser are folded
 rather than emitted, and globals that need construction are built by a
 per-module initialiser registered in `.CRT$XCU`, so the C runtime runs
-it before `main`. The library exposed a long list of compiler defects
+it before `main` (and registers their destructors with `atexit`). The
+library exposed a long list of compiler defects
 that are now fixed: per-instantiation copies of template syntax trees,
 using-declarations, parameter names that are also type names, base
 class type names in derived bodies, qualified lookup from nested classes,
@@ -959,6 +960,35 @@ the IR optimiser (`1ULL << 52` became `1 << 20`), which now fold them only
 while the result fits the sign-extended 32-bit immediates and otherwise
 leave the operation to run. The register, static-local and 64-bit constant
 defects are reproduced in `sample-self` and checked by test 16.
+Since then test 16 also checks the items fixed from
+[docs/next-targets.md](docs/next-targets.md): a `float` or `double` parameter
+passed on the stack is homed in its own size through xmm5, so it neither
+overwrites the frame slot next to it nor the first parameter still in xmm0
+(`stackFloats`, called by the cl-built driver); globals and static locals
+with a destructor are destroyed after `main`, newest first: once one is
+built, the module initialiser (or the guarded first pass of a static local)
+registers an internal thunk `cppparse_atexit_<n>` that destroys it with
+`atexit`, as cl does (the driver's output must end in the order `cba`);
+a variadic function keeps its parameters in their 8-byte home slots, which
+its prologue fills from `rcx`, `rdx`, `r8` and `r9` (a named `float` or
+`double` from its XMM register), so the `va_start`/`va_arg` of
+`include/cstdarg` walk the unnamed arguments as MSVC's `vadefs.h` does
+(`sumMixed`, called by cppparse code and by the driver, and a list passed
+on to `vsprintf`); with `--msvc-mangling` a static local has cl's name
+(`?n@?1??counterA@@YAHXZ@4HA`: block 2 is the function's body, a C
+function is `?name@@9`) and is internal unless its function is inline,
+when every unit's copy is one COMDAT, so a cl-built and a cppparse-built
+copy of an inline function count in the same variable (`sharedCounter`;
+test 15 compares the names and linkage of `sample-mangle`'s static locals
+with cl's). A static in a nested block gets a unique block number, not
+always the one cl gives it. A global or static local whose initializer is
+made of constants, string literals and addresses of globals and functions
+(an array, a plain aggregate without constructors, bases or bit-fields, a
+pointer) is emitted as static data, item by item, with `DQ OFFSET` for the
+addresses (relocations in the COFF writer), and in `.rdata` when it is
+const, as cl does: such a table is valid before any initializer runs,
+whatever the link order (the driver's own initializer reads
+`constantTables()` before `self.obj`'s runs).
 
 Known limit: when cppparse compiles its own 51 sources, 23 of about
 290,000 generated lines mix an XMM register with an integer operand.

@@ -11,10 +11,10 @@ namespace {
 
 class SemaMangler {
 public:
-    std::string function(const sema::Symbol& f);
+    std::string function(const sema::Symbol& f, long thunk = 0);
     std::string variable(const sema::Symbol& v);
     std::string staticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
-    std::string vtable(const sema::Symbol& c);
+    std::string vtable(const sema::Symbol& c, const sema::Symbol* forBase);
 private:
     std::string storageType(const sema::Type* t);
     std::string number(long v);
@@ -224,7 +224,7 @@ std::string SemaMangler::operatorCode(const std::string& fname, bool& ok)
     return "";
 }
 
-std::string SemaMangler::function(const sema::Symbol& f)
+std::string SemaMangler::function(const sema::Symbol& f, long thunk)
 {
     const sema::Symbol* owner = f.ownerClass;
     if (f.isExternC) return f.name;
@@ -253,7 +253,9 @@ std::string SemaMangler::function(const sema::Symbol& f)
     if (owner && !f.isStatic) {
         char acc = access == cxx::AccessPrivate ? 'A' : access == cxx::AccessProtected ? 'I' : 'Q';
         if (f.isVirtual) acc = static_cast<char>(acc + 4);
+        if (thunk) acc = static_cast<char>(acc + 2);   // an adjustor thunk (G, O, W) and its adjustment
         out += acc;
+        if (thunk) out += number(thunk);
         out += "E";
         out += ft && ft->constMethod ? "B" : "A";
         out += "A";
@@ -335,12 +337,17 @@ std::string SemaMangler::storageType(const sema::Type* t)
     return out;
 }
 
-std::string SemaMangler::vtable(const sema::Symbol& c)
+// a class with several vftables names each after the class that introduced its vfptr: ??_7D@@6BPB@@@
+std::string SemaMangler::vtable(const sema::Symbol& c, const sema::Symbol* forBase)
 {
     std::string out = "??_7";
     out += symbolName(&c);
     out += scopesOf(c.scope);
-    return out + "@6B@";
+    if (!forBase) return out + "@6B@";
+    out += "@6B";
+    out += symbolName(forBase);
+    out += scopesOf(forBase->scope);
+    return out + "@@";
 }
 
 } // namespace
@@ -351,6 +358,7 @@ void setMangleUnitId(unsigned long id) { g_mangleUnitId = id; }
 
 std::string msvcMangleVariableSymbol(const sema::Symbol& v) { SemaMangler m; return m.variable(v); }
 std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator) { SemaMangler m; return m.staticLocal(v, fn, discriminator); }
-std::string msvcMangleVtableSymbol(const sema::Symbol& c) { SemaMangler m; return m.vtable(c); }
+std::string msvcMangleVtableSymbol(const sema::Symbol& c, const sema::Symbol* forBase) { SemaMangler m; return m.vtable(c, forBase); }
+std::string msvcMangleThunkSymbol(const sema::Symbol& fn, long adjust) { SemaMangler m; return m.function(fn, adjust); }
 
 } // namespace cppparse

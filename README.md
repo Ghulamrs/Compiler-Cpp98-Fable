@@ -757,9 +757,18 @@ union or struct in a class are members of the class, placed at the
 unnamed member that holds them. The polymorphic bases are placed first: the
 first one is at offset 0 and the class shares its vptr and extends its
 vtable (`DP : NP, PB` with a virtual PB is 24 bytes, PB at 0, NP at 16).
-A second polymorphic base keeps its own vtable: overriding one of its
-functions needs a secondary vtable with this-adjusting thunks, not done
-yet. Test 13 links
+Every other polymorphic base subobject keeps its own vfptr, and the class
+gets a secondary vftable for each (`Symbol::vftables`, named as cl names
+them: `??_7SD@@6BSB@@@`), which the constructor stores next to the primary
+one. As with MSVC, a virtual function first held by a secondary table
+expects `this` at that vfptr (its this adjustor): callers add it, the
+function moves `this` back on entry, and an override held by the primary
+table as well is reached from the secondary one through an adjustor thunk
+(`sub rcx, 16; jmp`, named `?f@SD@@WBA@EBAHXZ`, COMDAT); a destructor always
+takes the complete object, so its secondary slots are thunks.
+`delete` through a secondary base pointer still frees the base's address:
+the destructor slot holds the destructor, not MSVC's deleting destructor.
+Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment;
 `examples/sample-layout/` does the same for MSVC's class layout rules at

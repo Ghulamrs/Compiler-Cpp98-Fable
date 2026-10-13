@@ -226,7 +226,7 @@ Symbol::Symbol()
       leadsWithZeroSized(false), endsWithZeroSized(false), vptrOffset(-1), classAst(0),
       isVirtual(false), isPureVirtual(false), isStatic(false), isExtern(false), isInline(false), isExplicit(false), isConstructor(false),
       isDestructor(false), isConversion(false), isOperator(false), isFriendDecl(false), hasBody(false), isExternC(false),
-      definition(0), declAst(0), body(0), vtableSlot(-1), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
+      definition(0), declAst(0), body(0), vtableSlot(-1), thisAdjust(0), vfptrOffset(0), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
       isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), bitWidth(-1), bitOffset(0),
       anonHost(0), anonOf(0), templateAst(0), instantiatedFrom(0),
       isDependentContext(false), isImplicitInstantiation(false), isLazyInstantiation(false), instantiationFailed(false), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
@@ -1360,7 +1360,26 @@ void Sema::completeClass(Symbol* cls)
     if (cls->isDependentContext) return;
     layoutClass(cls);
     // vtable: the primary base's table first (the first polymorphic base, at offset 0), then overrides and new virtuals
-    for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->bases[b].cls && cls->bases[b].cls->isPolymorphic) { cls->vtable = cls->bases[b].cls->vtable; break; }
+    size_t primary = cls->bases.size();
+    for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->bases[b].cls && cls->bases[b].cls->isPolymorphic) { primary = b; break; }
+    if (primary < cls->bases.size()) cls->vtable = cls->bases[primary].cls->vtable;
+    // MSVC's secondary vftables: every vfptr of the bases other than the one at offset 0 (those of the other
+    // polymorphic bases, and the primary base's own secondary ones) keeps a table of its own at its offset here,
+    // which starts as the base's and takes this class's overriders, through adjustor thunks where needed
+    std::vector<VfTable> tables(1);
+    tables[0].introducedBy = cls;
+    if (primary < cls->bases.size() && !cls->bases[primary].cls->vftables.empty()) {
+        tables[0].introducedBy = cls->bases[primary].cls->vftables[0].introducedBy;
+        tables[0].thunks = cls->bases[primary].cls->vftables[0].thunks;
+    }
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        Symbol* bc = cls->bases[b].cls;
+        if (!bc || !bc->isPolymorphic) continue;
+        for (size_t t = b == primary ? 1 : 0; t < bc->vftables.size(); ++t) {
+            tables.push_back(bc->vftables[t]);
+            tables.back().offset += cls->bases[b].offset;
+        }
+    }
     for (size_t i = 0; i < cls->members->order.size(); ++i) {
         Symbol* m = cls->members->order[i];
         if (m->kind != Symbol::Function || m->isStatic) continue;
@@ -1377,12 +1396,41 @@ void Sema::completeClass(Symbol* cls)
         bool placed = false;
         for (size_t s = 0; s < cls->vtable.size() && !placed; ++s) {
             Symbol* v = cls->vtable[s];
-            if (v == over || (over && v->overrides && v->name == m->name && sameSignature(v->type, m->type)) || (m->isDestructor && v->isDestructor)) { cls->vtable[s] = m; m->vtableSlot = static_cast<int>(s); placed = true; }
+            if (v == over || (over && v->overrides && v->name == m->name && sameSignature(v->type, m->type)) || (m->isDestructor && v->isDestructor)) {
+                cls->vtable[s] = m; m->vtableSlot = static_cast<int>(s); placed = true;
+                if (tables[0].thunks.size() > s) tables[0].thunks[s] = 0;
+            }
+        }
+        // the slots of the secondary tables m overrides; m is reached through the first of them (lowest offset)
+        // when the primary table does not hold it, and then expects this at that vfptr (MSVC's this adjustor)
+        std::vector<std::pair<size_t, size_t> > hits;
+        for (size_t t = 1; t < tables.size(); ++t)
+            for (size_t s = 0; s < tables[t].fns.size(); ++s) {
+                Symbol* v = tables[t].fns[s];
+                if (m->isDestructor ? v->isDestructor : (!v->isDestructor && v->name == m->name && sameSignature(v->type, m->type))) hits.push_back(std::make_pair(t, s));
+            }
+        size_t first = 0;
+        for (size_t h = 0; h < hits.size(); ++h) if (first == 0 || tables[hits[h].first].offset < tables[first].offset) first = hits[h].first;
+        m->thisAdjust = m->vfptrOffset = 0;
+        if (!placed && first > 0) {
+            for (size_t h = 0; h < hits.size(); ++h) if (hits[h].first == first) m->vtableSlot = static_cast<int>(hits[h].second);
+            m->vfptrOffset = tables[first].offset;
+            m->thisAdjust = m->isDestructor ? 0 : m->vfptrOffset;   // a destructor always takes the complete object
+            placed = true;
+        }
+        for (size_t h = 0; h < hits.size(); ++h) {
+            VfTable& v = tables[hits[h].first];
+            v.fns[hits[h].second] = m;
+            v.thunks[hits[h].second] = v.offset - m->thisAdjust;
         }
         if (!placed) { m->vtableSlot = static_cast<int>(cls->vtable.size()); cls->vtable.push_back(m); }
     }
+    tables[0].fns = cls->vtable;
+    tables[0].thunks.resize(cls->vtable.size(), 0);
+    if (cls->isPolymorphic) cls->vftables = tables;
     cls->isAbstract = false;
-    for (size_t s = 0; s < cls->vtable.size(); ++s) if (cls->vtable[s]->isPureVirtual) cls->isAbstract = true;
+    for (size_t t = 0; t < cls->vftables.size(); ++t)
+        for (size_t s = 0; s < cls->vftables[t].fns.size(); ++s) if (cls->vftables[t].fns[s]->isPureVirtual) cls->isAbstract = true;
 }
 
 

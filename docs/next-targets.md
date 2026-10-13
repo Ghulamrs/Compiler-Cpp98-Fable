@@ -28,6 +28,10 @@ the default), with the items found since. Each was reproduced with a small progr
   slot, and the copy goes through xmm5, not xmm0 (which still held the first parameter at -O2) (X86.cpp).
 - 21, destructors of globals: after a global (or a static local) with a destructor is built, an internal thunk
   that destroys it is registered with atexit, as cl does, so they run after main newest first (IrGen.cpp).
+- 16 (plan 16): a second polymorphic base gets a secondary vftable (`??_7D@@6BPB@@@`), with MSVC's this adjustors
+  and adjustor thunks (`?f@D@@WBA@EAAHXZ`) (Sema.cpp completeClass, IrGen.cpp storeVptr/callFunction/prologue,
+  X86.cpp addThunk); calls through every base, by both compilers, are in sample-layout. Left: `delete` through a
+  secondary base pointer frees the base's address, since the destructor slot is not a deleting destructor (15).
 - 18, callee side: a variadic function keeps its parameters in their home slots and its prologue spills rcx,
   rdx, r8 and r9 there (named floats from xmm0-xmm3); `include/cstdarg`, `stdarg.h` and `vprintf`/`vfprintf`/
   `vsprintf` in `cstdio` give va_list/va_start/va_arg/va_end over that area, as MSVC's vadefs.h (X86.cpp).
@@ -65,7 +69,6 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 |---|---|---|---|---|
 | 14 | 23: virtual bases laid out inline, no vbptr | wrong values | large | layout (later) |
 | 15 | 22: `_MSC_VER`, `_MT`, `_CPPUNWIND` not predefined (common/Target.cpp) | by choice so far | small | decision |
-| 16 | a second polymorphic base (`D : PA, PB`) gets no secondary vtable: D's override of a PB function is not reached through a PB* (needs a vtable per polymorphic base subobject and this-adjusting thunks) | wrong call | medium | layout |
 
 ## Deferred
 

@@ -2,6 +2,8 @@
 // cl-compiled driver reads through its own view of the classes.
 #include "layout.hpp"
 
+#include <new>
+
 EM g_em;
 NE g_ne;
 BF    g_bf;
@@ -133,4 +135,61 @@ int polyCallG(const DQ& q)
 int polyX(const NP* p)
 {
     return p->x;
+}
+
+int g_dtorLog = 0;
+SA::SA() : sa(10) {}
+int SA::a() const { return 1; }
+int SA::f() const { return 2; }
+SB::SB() : sb(20) {}
+int SB::b() const { return 3; }
+int SB::f() const { return 4; }
+int SB::g() const { return 5; }
+SB::~SB() { g_dtorLog = g_dtorLog * 10 + 2; }
+SD::SD() : sd(30) {}
+int SD::f() const { return 100 + sd; }
+int SD::g() const { return 200 + sa + sb + sd; }   // this arrives at the SB subobject and is moved back to SD
+int SD::b() const { return 300 + sa; }
+int SD::h() const { return 400 + g(); }            // a call through this: moved to SB again
+SD::~SD() { g_dtorLog = g_dtorLog * 10 + 1; }
+SE::SE() : se('e') { x = 7; }
+int SE::g() const { return 500 + se; }
+int SE::a() const { return 600 + x; }
+SE::~SE() { g_dtorLog = g_dtorLog * 10 + 3; }
+
+int saCall(const SA* p, int which)
+{
+    return which == 0 ? p->a() : p->f();
+}
+
+int sbCall(const SB* p, int which)
+{
+    switch (which) {
+    case 0: return p->b();
+    case 1: return p->f();
+    case 2: return p->g();
+    }
+    return -1;
+}
+
+int sdCall(const SD* p, int which)
+{
+    switch (which) {
+    case 0: return p->f();
+    case 1: return p->g();
+    case 2: return p->b();
+    case 3: return p->h();
+    case 4: return p->a();
+    case 5: return p->SD::g();
+    }
+    return -1;
+}
+
+long destroyThroughSB(int derived)
+{
+    static double storage[8];
+    g_dtorLog = 0;
+    SB* b = derived ? static_cast<SB*>(new (storage) SE) : static_cast<SB*>(new (storage) SD);
+    b->~SB();                              // the destructor slot of SB's table: a thunk to the complete object's
+    return g_dtorLog;
 }

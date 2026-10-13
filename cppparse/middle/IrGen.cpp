@@ -748,7 +748,15 @@ int IrGen::callFunction(Symbol* fn, int thisPtr, int sretAddr, const std::vector
     bool sret = isClassType(rt) && !isReference(rt);
     IrInst in = make(IrInst::Call, sret ? m_semaTypes.basic(sema::Type::Void) : rt, line);
     in.sub = irName(fn);
-    if (thisPtr >= 0) in.args.push_back(IrOperand::temp(thisPtr, oldType(m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass)))));
+    const bool vcall = virtualCall && fn->isVirtual && fn->vtableSlot >= 0 && thisPtr >= 0;
+    if (thisPtr >= 0) {
+        // MSVC's this adjustor: a virtual function first held by a secondary vftable is called with the address of
+        // that vfptr (a virtual call loads the vptr there); a destructor takes the complete object
+        const int adjust = vcall ? fn->vfptrOffset : fn->thisAdjust;
+        const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));
+        if (adjust != 0) thisPtr = offsetAddress(thisPtr, cp, cp, adjust, line);
+        in.args.push_back(IrOperand::temp(thisPtr, oldType(cp)));
+    }
     int retSlot = -1;
     if (sret) {
         if (sretAddr < 0) { retSlot = newLocal("tmp.ret", m_semaTypes.unqualified(rt), true); LValue tl; tl.kind = LValue::Local; tl.local = retSlot; tl.type = m_semaTypes.unqualified(rt); sretAddr = addressOf(tl, line); }
@@ -768,7 +776,7 @@ int IrGen::callFunction(Symbol* fn, int thisPtr, int sretAddr, const std::vector
         int v = argument(def, ft->params[p], line);
         in.args.push_back(IrOperand::temp(v, oldType(isReference(ft->params[p]) ? m_semaTypes.pointer(m_semaTypes.unref(ft->params[p])) : ft->params[p])));
     }
-    if (virtualCall && fn->isVirtual && fn->vtableSlot >= 0 && thisPtr >= 0) { in.op = IrInst::VCall; in.extra = fn->vtableSlot; }
+    if (vcall) { in.op = IrInst::VCall; in.extra = fn->vtableSlot; }
     if (isReference(rt)) in.type = oldType(m_semaTypes.pointer(rt->inner));
     int r = emit(in);
     if (retSlot >= 0 && needsDtor(rt)) registerCleanup(retSlot, rt, false, 1, line);
@@ -862,6 +870,7 @@ void IrGen::callSpecial(Symbol* fn, int thisPtr, int argPtr, int line)
     const sema::Type* rt = fn->type && fn->type->kind == sema::Type::Function ? fn->type->inner : m_semaTypes.basic(sema::Type::Void);
     IrInst in = make(IrInst::Call, isReference(rt) ? m_semaTypes.pointer(rt->inner) : rt, line);
     in.sub = irName(fn);
+    if (fn->thisAdjust != 0) thisPtr = offsetAddress(thisPtr, pt, pt, fn->thisAdjust, line);
     in.args.push_back(IrOperand::temp(thisPtr, oldType(pt)));
     if (argPtr >= 0) in.args.push_back(IrOperand::temp(argPtr, oldType(pt)));
     emit(in);
@@ -2019,18 +2028,34 @@ void IrGen::need(Symbol* fn)
     if (fn->isImplicit || (fn->hasBody && fn->definition)) m_queue.push_back(fn);
 }
 
+// the IR name of a class's vftable t (0: the one at offset 0, "vtable@D"; then "vtable@D{for PB@16}")
+std::string IrGen::vtableName(const Symbol* cls, size_t t)
+{
+    std::string n = "vtable@" + cls->qualifiedName();
+    if (t == 0 || t >= cls->vftables.size()) return n;
+    const sema::VfTable& v = cls->vftables[t];
+    return n + "{for " + (v.introducedBy ? v.introducedBy->qualifiedName() : std::string("?")) + "@" + numText(v.offset) + "}";
+}
+
+// every vfptr of the object: the one at offset 0, then those of the secondary vftables at their offsets
 void IrGen::storeVptr(Symbol* cls, int objAddr, int line)
 {
     if (!cls->isPolymorphic) return;
     const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
-    IrInst vt = make(IrInst::AddrGlobal, vp, line);
-    vt.args.push_back(IrOperand::global("vtable@" + cls->qualifiedName(), oldType(m_semaTypes.basic(sema::Type::Void))));
-    int vtp = emit(vt);
-    IrInst st = make(IrInst::StoreMem, vp, line);
-    st.sub = "vptr";
-    st.args.push_back(IrOperand::temp(objAddr, oldType(m_semaTypes.pointer(m_semaTypes.classType(cls)))));
-    st.args.push_back(IrOperand::temp(vtp, oldType(vp)));
-    emit(st);
+    const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(cls));
+    const size_t n = cls->vftables.empty() ? 1 : cls->vftables.size();
+    for (size_t t = 0; t < n; ++t) {
+        IrInst vt = make(IrInst::AddrGlobal, vp, line);
+        vt.args.push_back(IrOperand::global(vtableName(cls, t), oldType(m_semaTypes.basic(sema::Type::Void))));
+        int vtp = emit(vt);
+        int at = objAddr;
+        if (t > 0) { IrInst fa = make(IrInst::AddrField, m_semaTypes.pointer(vp), line); fa.sub = "vptr"; fa.extra = cls->vftables[t].offset; fa.args.push_back(IrOperand::temp(objAddr, oldType(cp))); at = emit(fa); }
+        IrInst st = make(IrInst::StoreMem, vp, line);
+        st.sub = "vptr";
+        st.args.push_back(IrOperand::temp(at, oldType(t > 0 ? m_semaTypes.pointer(vp) : cp)));
+        st.args.push_back(IrOperand::temp(vtp, oldType(vp)));
+        emit(st);
+    }
 }
 
 void IrGen::prologue(Symbol* fn)
@@ -2080,6 +2105,12 @@ void IrGen::prologue(Symbol* fn)
     m_unwindId = m_tryCount++;
     m_tryStack.push_back(m_unwindId);
     m_cleanups.clear(); m_scopes.clear(); m_temps.clear(); m_flagged.clear(); m_labels.clear(); m_staticCount = 0;
+    if (m_out->hasThis && fn->thisAdjust != 0) {
+        // called with the address of the vfptr whose table first holds it (MSVC's this adjustor): back to the object
+        const sema::Type* tp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));
+        LValue tl; tl.kind = LValue::Local; tl.local = 0; tl.type = tp;
+        store(tl, offsetAddress(thisTemp(fn->loc.line), tp, tp, -fn->thisAdjust, fn->loc.line), tp, fn->loc.line);
+    }
     for (size_t i = 0; i < byValue.size(); ++i)
         if (needsDtor(byValue[i].second)) registerCleanup(byValue[i].first, byValue[i].second, true, 0, fn->loc.line);
 }
@@ -2318,15 +2349,28 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
     for (size_t i = 0; i < m_prog.symbols.size(); ++i) {
         Symbol* s = m_prog.symbols[i];
         if (s->kind == Symbol::Class && s->isDefinition && s->isPolymorphic && !s->isDependentContext && s->layoutDone) {
-            IrVtable v;
-            v.className = s->qualifiedName();
-            for (size_t k = 0; k < s->vtable.size(); ++k) {
-                Symbol* m = s->vtable[k];
-                v.entries.push_back(m->isPureVirtual ? std::string("") : irName(m));
-                if (!m->isPureVirtual) need(m);
+            // one table per vfptr; a slot whose overrider expects this elsewhere holds an adjustor thunk, named
+            // as cl names it (?f@D@@WBA@EAAHXZ: D::f`adjustor{16}')
+            const size_t n = s->vftables.empty() ? 1 : s->vftables.size();
+            for (size_t t = 0; t < n; ++t) {
+                IrVtable v;
+                const std::string name = vtableName(s, t);
+                v.className = name.substr(7);
+                const std::vector<Symbol*>& fns = s->vftables.empty() ? s->vtable : s->vftables[t].fns;
+                for (size_t k = 0; k < fns.size(); ++k) {
+                    Symbol* m = fns[k];
+                    const int adjust = s->vftables.empty() ? 0 : s->vftables[t].thunks[k];
+                    if (m->isPureVirtual) { v.entries.push_back(""); continue; }
+                    need(m);
+                    if (adjust == 0) { v.entries.push_back(irName(m)); continue; }
+                    const std::string thunk = irName(m) + " adjustor{" + numText(adjust) + "}";
+                    v.entries.push_back(thunk);
+                    x86.addThunk(thunk, irName(m), adjust);
+                    if (msvc) x86.registerSymbolName(thunk, msvcMangleThunkSymbol(*m, adjust));
+                }
+                x86.addVtable(v);
+                if (msvc) x86.registerGlobalName(name, msvcMangleVtableSymbol(*s, n > 1 ? s->vftables[t].introducedBy : 0));
             }
-            x86.addVtable(v);
-            if (msvc) x86.registerGlobalName("vtable@" + v.className, msvcMangleVtableSymbol(*s));
         }
         if (s->kind == Symbol::Variable && !s->isLocal && !s->isParam && (!s->isMember || s->isStatic) && s->scope && !s->isDependentContext) {
             // a static const member with a constant initializer is folded where it is used and not emitted

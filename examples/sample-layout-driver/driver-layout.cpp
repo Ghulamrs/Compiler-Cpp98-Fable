@@ -3,6 +3,7 @@
 // through cl's view of the classes.
 #include "layout.hpp"
 
+#include <new>
 #include <stdio.h>
 
 static int failures = 0;
@@ -102,6 +103,45 @@ int main()
     expect("polyX(&dp)", polyX(&dp), 1);
     expect("polyX(&dr)", polyX(&dr), 4);
     expect("dr.r", dr.r, 7);
+
+    printf("two polymorphic bases: secondary vftables and thunks\n");
+    {
+        SD d; SE e;
+        const SA& ra = d; const SB& rb = d;
+        expect("saCall(&d, a)", saCall(&d, 0), 1);
+        expect("saCall(&d, f)", saCall(&d, 1), 130);
+        expect("sbCall(&d, b)", sbCall(&d, 0), 310);
+        expect("sbCall(&d, f) (thunk)", sbCall(&d, 1), 130);
+        expect("sbCall(&d, g)", sbCall(&d, 2), 260);
+        expect("sdCall(&d, f)", sdCall(&d, 0), 130);
+        expect("sdCall(&d, g)", sdCall(&d, 1), 260);
+        expect("sdCall(&d, b)", sdCall(&d, 2), 310);
+        expect("sdCall(&d, h)", sdCall(&d, 3), 660);
+        expect("sdCall(&d, a)", sdCall(&d, 4), 1);
+        expect("sdCall(&d, SD::g)", sdCall(&d, 5), 260);
+        expect("d f() through cl's SA&", ra.f(), 130);
+        expect("d f() through cl's SB&", rb.f(), 130);
+        expect("d g() through cl's SB&", rb.g(), 260);
+        expect("d b() through cl's SB&", rb.b(), 310);
+        expect("d.g() called by cl", d.g(), 260);
+        expect("d.SD::g() called by cl", d.SD::g(), 260);
+        expect("d.h() called by cl", d.h(), 660);
+        expect("sbCall(&e, g)", sbCall(&e, 2), 601);
+        expect("sbCall(&e, f)", sbCall(&e, 1), 130);
+        expect("saCall(&e, a)", saCall(&e, 0), 607);
+        expect("sdCall(&e, g)", sdCall(&e, 1), 601);
+        expect("sdCall(&e, h)", sdCall(&e, 3), 1001);
+        expect("e g() through cl's SB&", static_cast<const SB&>(e).g(), 601);
+        expect("e.a() called by cl", e.a(), 607);
+        expect("e.sb, e.sd, e.x, e.se", e.sb + e.sd + e.x + e.se, 20 + 30 + 7 + 'e');
+        expect("destroyThroughSB(SD)", destroyThroughSB(0), 12);
+        expect("destroyThroughSB(SE)", destroyThroughSB(1), 312);
+        static double storage[8];
+        SB* pb = new (storage) SE;
+        g_dtorLog = 0;
+        pb->~SB();
+        expect("SE destroyed by cl through SB*", g_dtorLog, 312);
+    }
 
     if (failures) { printf("%d FAILED\n", failures); return 1; }
     printf("ALL OK\n");

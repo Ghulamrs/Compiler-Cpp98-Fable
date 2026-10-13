@@ -139,6 +139,7 @@ private:
     void constructorInit(sema::Symbol* fn, cxx::Decl* def);
     void destructorCleanup(sema::Symbol* fn);
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
+    static std::string vtableName(const sema::Symbol* cls, size_t t);
     void need(sema::Symbol* fn);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
     int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);

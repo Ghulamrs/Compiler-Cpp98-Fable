@@ -85,6 +85,17 @@ struct DP : NP, PB { DP(); int f() const; int z; };                        // PB
 struct DQ : NP, E, PB { DQ(); virtual int g() const; char q; };            // PB at 0, NP at 16, E and q at 20
 struct DR : DQ { DR(); int g() const; int f() const; char r; };            // r at 24, size 32
 
+// ---- a second polymorphic base: secondary vftables and adjustor thunks ----------------------------------
+// Every polymorphic base subobject but the one at offset 0 keeps its own vfptr and gets a table of its own
+// (??_7SD@@6BSB@@@). A function first held by such a table expects this at that vfptr (SD::g, SD::b: MSVC's
+// this adjustor 16); one also held by the primary table (SD::f overrides SA::f and SB::f) is reached from the
+// secondary table through a thunk (?f@SD@@WBA@EBAHXZ: this -= 16); the destructor always takes the complete
+// object, so its secondary slot is a thunk too.
+struct SA { SA(); virtual int a() const; virtual int f() const; int sa; };
+struct SB { SB(); virtual int b() const; virtual int f() const; virtual int g() const; virtual ~SB(); int sb; };
+struct SD : SA, SB { SD(); int f() const; int g() const; int b() const; virtual int h() const; ~SD(); int sd; };   // SB at 16, sd at 32, size 40
+struct SE : NP, SD { SE(); int g() const; int a() const; ~SE(); char se; };     // SD at 0, NP at 40, se at 44, size 48
+
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \
     X(sizeof(EM)) X(LAYOUT_FIELD(EM, w)) X(LAYOUT_BASE(EM, E2)) \
@@ -109,7 +120,9 @@ struct DR : DQ { DR(); int g() const; int f() const; char r; };            // r 
     X(sizeof(AUC)) X(LAYOUT_FIELD(AUC, iv)) X(LAYOUT_FIELD(AUC, fv)) \
     X(sizeof(DP)) X(LAYOUT_BASE(DP, NP)) X(LAYOUT_BASE(DP, PB)) X(LAYOUT_FIELD(DP, z)) \
     X(sizeof(DQ)) X(LAYOUT_BASE(DQ, NP)) X(LAYOUT_BASE(DQ, E)) X(LAYOUT_BASE(DQ, PB)) X(LAYOUT_FIELD(DQ, q)) \
-    X(sizeof(DR)) X(LAYOUT_BASE(DR, NP)) X(LAYOUT_BASE(DR, PB)) X(LAYOUT_FIELD(DR, r))
+    X(sizeof(DR)) X(LAYOUT_BASE(DR, NP)) X(LAYOUT_BASE(DR, PB)) X(LAYOUT_FIELD(DR, r)) \
+    X(sizeof(SD)) X(LAYOUT_BASE(SD, SA)) X(LAYOUT_BASE(SD, SB)) X(LAYOUT_FIELD(SD, sd)) \
+    X(sizeof(SE)) X(LAYOUT_BASE(SE, SB)) X(LAYOUT_BASE(SE, NP)) X(LAYOUT_FIELD(SE, se))
 
 // the value of the k-th expression of LAYOUT_VALUES as cppparse computes it; -1 past the end
 int layoutValue(int k);
@@ -139,5 +152,12 @@ long readBf7(const BF7* p, int which);         // 0 a, 1 b, 2 c
 int  polyCall(const PB* p);                    // p->f()
 int  polyCallG(const DQ& q);                   // q.g()
 int  polyX(const NP* p);                       // p->x
+
+// two polymorphic bases: virtual calls made by cppparse through each base, and the destructors' order
+extern int g_dtorLog;                          // each destructor appends its digit: ~SE 3, ~SD 1, ~SB 2
+int  saCall(const SA* p, int which);           // 0 a(), 1 f()
+int  sbCall(const SB* p, int which);           // 0 b(), 1 f(), 2 g()
+int  sdCall(const SD* p, int which);           // 0 f(), 1 g(), 2 b(), 3 h(), 4 a(), 5 SD::g() (not virtual)
+long destroyThroughSB(int derived);            // builds an SD (or an SE) in place, destroys it through SB*: the log
 
 #endif

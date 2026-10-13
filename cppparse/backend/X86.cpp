@@ -1412,8 +1412,25 @@ std::string X86Module::codeFor(const IrFunction& f, LowerStats& stats)
 
 void X86Module::appendCode(const std::string& code) { Lock l(m_mutex); m_code += code; }
 
+void X86Module::addThunk(const std::string& irName, const std::string& target, int adjust)
+{
+    if (!m_thunkNames.insert(irName).second) return;
+    Thunk t; t.name = irName; t.target = target; t.adjust = adjust;
+    m_thunks.push_back(t);
+}
+
 void X86Module::emitVtables()
 {
+    // the adjustor thunks the tables name (decorated names are known by now): this moves from the vfptr the
+    // slot was reached through to where the overrider expects it, then a tail jump; a leaf without a frame
+    for (size_t i = 0; i < m_thunks.size(); ++i) {
+        const std::string sym = symbol(m_thunks[i].name), target = symbol(m_thunks[i].target);
+        if (m_defined.count(sym)) continue;
+        m_defined.insert(sym);
+        if (!m_defined.count(target)) m_externs.insert(target);
+        m_code += ";@comdat any\n" + sym + " PROC\n        ; " + m_thunks[i].name + "\n        sub rcx, " + intToString(m_thunks[i].adjust) +
+                  "\n        jmp " + target + "\n" + sym + " ENDP\n\n";
+    }
     for (size_t i = 0; i < m_vtables.size(); ++i) {
         const IrVtable& v = m_vtables[i];
         std::string tableSym = globalSymbol("vtable@" + v.className);
@@ -1546,6 +1563,7 @@ void X86Module::describeSymbols(const std::vector<IrFunction*>& functions, std::
     for (size_t i = 0; i < functions.size(); ++i) out[symbol(functions[i]->name)] = functions[i]->name;
     for (size_t i = 0; i < m_globals.size(); ++i) out[globalSymbol(m_globals[i].name)] = m_globals[i].name;
     for (size_t i = 0; i < m_vtables.size(); ++i) out[globalSymbol("vtable@" + m_vtables[i].className)] = m_vtables[i].className + "::`vftable'";
+    for (size_t i = 0; i < m_thunks.size(); ++i) out[symbol(m_thunks[i].name)] = "[thunk] " + m_thunks[i].name;
     for (std::map<std::string, double>::const_iterator fi = m_floats.begin(); fi != m_floats.end(); ++fi) {
         std::ostringstream v;
         v.precision(17);

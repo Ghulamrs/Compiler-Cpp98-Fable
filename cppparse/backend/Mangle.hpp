@@ -42,7 +42,10 @@ extern unsigned long g_mangleUnitId;
 std::string msvcMangleVariableSymbol(const sema::Symbol& v);
 // a static local: "?n@?1??counterA@@YAHXZ@4HA", the variable in block <discriminator> (2: the function's body)
 std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
-std::string msvcMangleVtableSymbol(const sema::Symbol& c);
+// a vftable; forBase names one of several (??_7D@@6BPB@@@: D's vftable for PB), 0 for a class with one
+std::string msvcMangleVtableSymbol(const sema::Symbol& c, const sema::Symbol* forBase = 0);
+// an adjustor thunk of a virtual function: ?f@D@@WBA@EAAHXZ, D::f`adjustor{16}'
+std::string msvcMangleThunkSymbol(const sema::Symbol& fn, long adjust);
 
 } // namespace cppparse
 

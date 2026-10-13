@@ -50,8 +50,10 @@ void zeroData(std::vector<IrDataItem>& out, int n)
 
 } // namespace
 
+static Symbol* namedLocal(cxx::Expr* e);
+
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
-    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_tryCount(0),
+    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_nrvoEnabled(false), m_nrvo(0), m_tryCount(0),
       m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_deletingDone(0), m_ctorFlag(1), m_vbFlagSlot(-1),m_staticCount(0), m_guardCount(0), m_unwindId(-1), m_bodyBlock(-1) {}
 
 IrGen::~IrGen()
@@ -2076,6 +2078,20 @@ void IrGen::localDecl(cxx::Decl* d)
             }
             continue;
         }
+        if (var == m_nrvo) {
+            // NRVO: built in the caller's result object; the returns copy nothing, and only an exception that
+            // leaves the function destroys it
+            const int line = id.decl->loc.line;
+            const sema::Type* vt = var->type;
+            LValue sl; sl.kind = LValue::Local; sl.local = m_sretSlot; sl.type = m_semaTypes.pointer(vt);
+            LValue rl; rl.kind = LValue::Mem; rl.addr = load(sl, sl.type, line); rl.type = vt;
+            initObject(rl, vt, var, id, line);
+            m_slots[var] = m_sretSlot;
+            var->type = m_semaTypes.reference(vt);   // reads go through the hidden pointer
+            if (needsDtor(vt)) registerCleanup(m_sretSlot, vt, true, 2, line);
+            endFullExpr(line);
+            continue;
+        }
         int slot = newLocal(var->name, var->type, false);
         m_slots[var] = slot;
         LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = m_semaTypes.unref(var->type);
@@ -2297,6 +2313,8 @@ void IrGen::stmt(cxx::Stmt* s)
                 int addr = lv.kind == LValue::None ? value(s->expr) : addressOf(lv, line);
                 addr = convert(addr, m_semaTypes.pointer(lv.kind == LValue::None ? m_semaTypes.unref(exprType(s->expr)) : lv.type), m_semaTypes.pointer(m_semaTypes.unref(rt)), line);
                 in.args.push_back(IrOperand::temp(addr, oldType(m_semaTypes.pointer(rt->inner))));
+            } else if (isClassType(rt) && m_nrvo && namedLocal(s->expr) == m_nrvo) {
+                // NRVO: the object already is the result
             } else if (isClassType(rt)) {
                 // build the result in the hidden result object
                 IrInst ld = make(IrInst::LoadLocal, m_semaTypes.pointer(rt), line); ld.args.push_back(IrOperand::local(m_sretSlot, oldType(m_semaTypes.pointer(rt))));
@@ -2531,6 +2549,7 @@ void IrGen::genVbaseDestructor(Symbol* fn)
 
 void IrGen::prologue(Symbol* fn)
 {
+    m_nrvo = 0;
     m_out->name = irName(fn);
     m_out->fn = 0;
     m_out->variadic = fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic;
@@ -2908,6 +2927,49 @@ void IrGen::numberStaticBlocks(cxx::Stmt* s, long& next, long current)
     }
 }
 
+// the variable a name expression (in parentheses or not) refers to, or 0
+static Symbol* namedLocal(cxx::Expr* e)
+{
+    while (e && e->kind == cxx::Expr::Paren && !e->kids.empty()) e = e->kids[0];
+    return e && e->kind == cxx::Expr::Name && e->semaSym && e->semaSym->kind == Symbol::Variable ? e->semaSym : 0;
+}
+
+static void collectReturns(cxx::Stmt* s, std::vector<cxx::Stmt*>& rets, bool& hasGoto)
+{
+    if (!s) return;
+    if (s->kind == cxx::Stmt::Return) rets.push_back(s);
+    if (s->kind == cxx::Stmt::Goto || s->kind == cxx::Stmt::Asm) hasGoto = true;
+    collectReturns(s->init, rets, hasGoto);
+    for (size_t i = 0; i < s->kids.size(); ++i) collectReturns(s->kids[i], rets, hasGoto);
+}
+
+// cl /O2's named return value optimisation, for a result returned through the hidden pointer: a local of the
+// result's class declared directly in the body and named by every return statement is built in the result
+// object. Not with goto (a jump back over the declaration would build it twice)
+Symbol* IrGen::namedResult(Symbol* fn, cxx::Stmt* body)
+{
+    if (!body || body->kind != cxx::Stmt::Compound || !fn->type || !fn->type->inner) return 0;
+    const sema::Type* rt = m_semaTypes.unqualified(fn->type->inner);
+    std::vector<cxx::Stmt*> rets;
+    bool hasGoto = false;
+    collectReturns(body, rets, hasGoto);
+    if (rets.empty() || hasGoto) return 0;
+    Symbol* var = 0;
+    for (size_t i = 0; i < rets.size(); ++i) {
+        Symbol* v = namedLocal(rets[i]->expr);
+        if (!v || (var && v != var)) return 0;
+        var = v;
+    }
+    if (var->isStatic || !var->type || isReference(var->type) || m_semaTypes.unqualified(var->type) != rt) return 0;
+    for (size_t i = 0; i < body->kids.size(); ++i) {
+        cxx::Stmt* k = body->kids[i];
+        if (k->kind != cxx::Stmt::DeclStmt || !k->decl || k->decl->kind != cxx::Decl::Simple) continue;
+        for (size_t d = 0; d < k->decl->declarators.size(); ++d)
+            if (k->decl->declarators[d].decl && k->decl->declarators[d].decl->semaSym == var) return var;
+    }
+    return 0;
+}
+
 void IrGen::genFunction(Symbol* fn)
 {
     cxx::Decl* def = fn->definition;
@@ -2916,6 +2978,7 @@ void IrGen::genFunction(Symbol* fn)
     m_fn = fn;
     m_slots.clear(); m_loops.clear(); m_tryStack.clear(); m_tryCount = 0;
     prologue(fn);
+    m_nrvo = (m_nrvoEnabled && m_sretSlot >= 0 && !m_retReg) ? namedResult(fn, def->body) : 0;
     if (fn->isConstructor) constructorInit(fn, def);
     // as cl: a destructor stores its own class's vptrs first, so a virtual call made while it (or a base's
     // destructor after it) runs reaches this class's functions, not those of the derived object being destroyed

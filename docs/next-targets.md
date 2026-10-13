@@ -93,3 +93,31 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   (Sema.cpp:1169-1174); the destructor slot holding a scalar deleting destructor.
 - design-table-exceptions.md section 7: an exception edge from every call to its landing pad, then GVN and
   register values across handlers; the main lever on code size (1.57 times cl's on the matrix sample).
+
+## Other known limits (found by the reviews of 2026-10-13)
+
+- A destructor that throws (allowed in C++98): in cppparse's own code a throw out of a destructor reached by
+  `delete` through a base pointer skips the base destructors, and one from a stack object's destructor is not
+  caught at all ("unhandled exception of type int"). Repro: review-v w.cpp.
+- Calls through pointers to members (`(obj.*pmf)(x)`, `(p->*pmf)(x)`) are rejected by sema (an error, not wrong code).
+
+## Code size against cl /O2 (analysis of the matrix sample, 2026-10-13)
+
+mapcompare part C: the ten largest-ratio Matrix members are 1788 bytes against cl's 611 (2.93); the whole
+class 1.85, all 95 functions both compilers emit 1.64. The causes, by extra bytes across the sample:
+
+| | Cause | Bytes | Where | Size / risk |
+|---|---|---|---|---|
+| A | exception code in the body: constructed flags, destructors expanded in every landing pad, pads where nothing after construction can throw | ~1700 | IrGen registerCleanup (table states instead of flags, design-table-exceptions.md section 7); Optimizer inlineCalls (call `??1` in pads instead of inlining) | large / medium |
+| B | register allocator: float pool only callee-saved xmm6-13, rax/rcx/rdx not in the pool, intervals ending at a call treated as crossing it, spills not weighted by loop depth, no memory operands, copies not coalesced | ~1100 | X86.cpp allocate, Lower.cpp | medium / medium |
+| C | `throw std::invalid_argument("...")` builds a heap std::string temporary; cl uses the `const char*` constructor and `_CxxThrowException` (35 bytes) | ~600 | include/stdexcept, runtime helper | small / low |
+| D | instruction selection: base+index*8 addressing, `add r,8` pointer steps, `xorps` for 0.0, setcc and jump threading for bools, redundant movsxd (widen int counters), FP-to-integer copies only for variadic callees, hot slots within rbp-128 | ~400 | X86.cpp, Ssa/Optimizer | small each / low |
+| E | no NRVO and no elision of a copy from a returned temporary (transpose, operator*, `Matrix p = a*b`) | ~320 | IrGen (return slot, destination address) | medium / medium |
+| F | inlining thresholds counted on unoptimised IR (sameSize 26 instructions for 20 bytes) | ~150 | Optimizer.cpp:1039 | small / low |
+| G | rbp frame in leaf functions, no tail calls (`~Matrix`: cl `add rcx,8; jmp _Tidy`) | ~100 | X86.cpp | small / low |
+| H | `fabs` called instead of `andpd`, `std::max(const&)` kept through memory after inlining | ~70 | Optimizer | small / low |
+
+Order: C and F (small, low risk), then B, then A, then D, E, G, H. Expected Matrix members ratio: about 1.65
+after A+B+C, about 1.15-1.3 after A-F; `~Matrix` needs G and `index`/`sameSize` need D to reach 1.25; the
+free functions depend mostly on A. Note: cl moves cleanup and catch code into `dtor$`/`catch$` symbols, which
+mapcompare does not add to the function (mtxSingularThrows is 465 bytes with them, not 207).

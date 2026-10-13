@@ -300,7 +300,13 @@ int Optimizer::constantFold(IrFunction& f)
             } else if (in.op == IrInst::Conv && in.args.size() == 1 && in.args[0].isConst() && in.type) {
                 IrInst n; n.dst = in.dst; n.line = in.line; n.type = in.type;
                 const IrOperand& o = in.args[0];
-                if (in.type->isFloating()) { n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(o.kind == IrOperand::FImm ? o.fval : static_cast<double>(o.ival), in.type)); }
+                if (in.type->isFloating()) {
+                    // a float source or result is single precision (constants are kept as doubles): rounded here
+                    double v = o.kind == IrOperand::FImm ? o.fval : static_cast<double>(o.ival);
+                    if (o.kind == IrOperand::FImm && o.type && o.type->kind == Type::Float) v = static_cast<double>(static_cast<float>(v));
+                    if (in.type->kind == Type::Float) v = static_cast<double>(static_cast<float>(v));
+                    n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(v, in.type));
+                }
                 else if (in.type->isIntegral() || in.type->isPointer()) {
                     long v = o.kind == IrOperand::FImm ? static_cast<long>(o.fval) : o.ival;
                     // a negative 32-bit pattern zero-extended needs a 64-bit constant, which the IR does not have

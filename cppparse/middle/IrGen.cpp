@@ -515,7 +515,12 @@ int IrGen::convert(int temp, const sema::Type* from, const sema::Type* to, int l
         sub = ts <= fs ? "trunc" : (from->isUnsigned() ? "zext" : "sext");
     } else if (from->isIntegral() && to->isFloating()) sub = from->isUnsigned() && from->kind != sema::Type::Bool ? "uitofp" : "sitofp";
     else if (from->isFloating() && to->isIntegral()) sub = "fptosi";
-    else if (from->isFloating() && to->isFloating()) sub = sizeOf(to) > sizeOf(from) ? "fpext" : "fptrunc";
+    else if (from->isFloating() && to->isFloating()) {
+        // long double is double (both are lowered to the 8-byte double, as MSVC): only float <-> the others converts
+        const bool fromSingle = from->kind == sema::Type::Float, toSingle = to->kind == sema::Type::Float;
+        if (fromSingle == toSingle) return temp;
+        sub = toSingle ? "fptrunc" : "fpext";
+    }
     else if (from->isPointer() && to->isIntegral()) sub = "ptrtoint";
     else if (from->isIntegral() && to->isPointer()) sub = "inttoptr";
     else return temp;

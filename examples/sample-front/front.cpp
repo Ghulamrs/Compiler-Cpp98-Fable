@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 // sizeof(T&) is sizeof(T) (C++98 5.3.3/2), not the size of a pointer
@@ -214,6 +215,26 @@ void foldedGlobals()
     showBytes("d17", &folded::d17, 8); showBytes("f3", &folded::f3, 4); showBytes("d18", &folded::d18, 8);
 }
 
+// floating point as cl computes it, results printed as their bits
+namespace fp {
+unsigned long long bitsD(double d) { unsigned long long u; std::memcpy(&u, &d, 8); return u; }
+unsigned int bitsF(float f) { unsigned int u; std::memcpy(&u, &f, 4); return u; }
+volatile double vzero = 0.0;
+
+// long double is MSVC's 8-byte double: double <-> long double converts nothing, float <-> long double as double
+long double d2ld(double x) { return x; }
+double ld2d(long double x) { return x; }
+long double f2ld(float x) { return x; }
+float ld2f(long double x) { return x; }
+long double ldAdd(long double a, double b) { return a + b; }
+void longDouble()
+{
+    std::printf("long double: %016llx %016llx %016llx %08x %016llx %d\n", bitsD(d2ld(1.1)), bitsD(ld2d(2.2L)), bitsD(f2ld(0.1f)), bitsF(ld2f(0.1L)),
+                bitsD(ldAdd(1.5L, 0.1)), (int)sizeof(long double));
+    std::printf("long double through varargs: %Lf %Lf\n", d2ld(3.25), (long double)1.5);
+}
+}
+
 int main()
 {
     predefined();
@@ -226,6 +247,7 @@ int main()
     functorMembers();
     conditionDeclarations();
     foldedGlobals();
+    fp::longDouble();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

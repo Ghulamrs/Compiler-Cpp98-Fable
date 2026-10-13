@@ -605,7 +605,7 @@ try {
         if ($p.Count -eq 0) { Write-Host "  ok   align${lvl}6.map: functions 16-aligned, sizes consistent, addresses match dumpbin, g_align64 64-aligned" }
         else { Write-Host "  FAIL align${lvl}6.map:"; $p | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" }; $failed++ }
     }
-    # MSVC's class layout (empty bases): every size and offset cppparse computes for layout.hpp against a
+    # MSVC's class layout (empty bases, bit-fields, anonymous unions): every size and offset cppparse computes for layout.hpp against a
     # cl-compiled driver that evaluates the same expressions, and objects shared between the two compilers
     foreach ($lvl in @(0, 1, 2, 3)) {
         $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"

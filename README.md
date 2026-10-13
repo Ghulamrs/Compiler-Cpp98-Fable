@@ -738,7 +738,14 @@ MSVC without `__declspec(empty_bases)`: an empty base takes no space
 (`struct EB : E { int w; }` is 4 bytes, w at 0), a byte of padding
 separates a base ending with a zero-sized subobject from a following base
 that leads with one (`EM : E, E2 { int w; }` is 8, w at 4), and an empty
-base left at the end of a class sits on its last byte. Test 13 links
+base left at the end of a class sits on its last byte. Bit-fields are laid
+out as cl does: a bit-field takes a unit of its declared type's size, the
+next one shares it (from the low bit up) when its type has the same size
+and its bits fit, and a zero-width bit-field closes the unit when it
+follows a bit-field; loads mask and shift the unit (sign-extending a
+signed field) and stores merge into it. The members of an anonymous
+union or struct in a class are members of the class, placed at the
+unnamed member that holds them. Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment;
 `examples/sample-layout/` does the same for MSVC's class layout rules at

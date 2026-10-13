@@ -4,6 +4,14 @@
 
 EM g_em;
 NE g_ne;
+BF    g_bf;
+BF6   g_bf6;
+BF7   g_bf7;
+BF8   g_bf8;
+BFP   g_bfp;
+BFAgg g_agg;
+AU    g_au;
+AN    g_an;
 
 namespace {
 
@@ -15,7 +23,19 @@ const int s_values[] = {
 };
 
 struct Init {
-    Init() { g_em.w = 41; g_ne.n = 7; g_ne.w = 9; }
+    Init()
+    {
+        g_em.w = 41; g_ne.n = 7; g_ne.w = 9;
+        g_bf.a = 5; g_bf.b = 17; g_bf.c = 0xABCDEF; g_bf.d = 'd';
+        g_bf6.a = -3; g_bf6.b = 300; g_bf6.c = -1; g_bf6.s = -16;
+        g_bf7.a = -2; g_bf7.b = 3; g_bf7.c = 0x2345678;
+        g_bf8.f = true; g_bf8.g = false; g_bf8.h = 'h'; g_bf8.k = Red;
+        g_bfp.c = 'p'; g_bfp.a = 7; g_bfp.b = -100000;
+        BFAgg agg = { 11, 9, -7 };
+        g_agg = agg;
+        g_au.k = 1; g_au.dd = 2.5; g_au.z = 'z';
+        g_an.t = 't'; g_an.lo = 0x1234; g_an.hi = 0x5678; g_an.f = 9; g_an.g = 5;
+    }
 };
 Init s_init;
 
@@ -42,3 +62,50 @@ int evalGet(EVal& v, int set)
     return back->get();
 }
 
+void fillBits(BF2* p, int a, int b, int c)
+{
+    p->a = (char)a;
+    p->b = b;
+    p->c = (char)c;
+}
+
+long readBits(const BF2* p, int which)
+{
+    switch (which) {
+    case 0: return p->a;
+    case 1: return p->b;
+    case 2: return p->c;
+    }
+    return -99;
+}
+
+long bitOps(BF6* p)
+{
+    long r = 0;
+    p->a += 2;                             // -3 + 2 = -1
+    r = r * 10 + (p->a == -1);
+    p->b++;                                // 301
+    r = r * 10 + (p->b == 301);
+    ++p->s;                                // -15
+    r = r * 10 + (p->s == -15);
+    int v = (p->a = 5);                    // 5 does not fit in 3 signed bits: -3
+    r = r * 10 + (v == -3);
+    p->b -= 302;                           // 9 unsigned bits wrap: 511
+    r = r * 10 + (p->b == 511);
+    p->c = 0;
+    r = r * 10 + (p->c == 0 && p->s == -15 && p->a == -3);
+    AUC u;
+    u.fv = 1.0f;                           // 0x3F800000 seen through the int member
+    r = r * 10 + (u.twice() == 0x7F000000 && u.tag == 1);
+    return r;
+}
+
+long readBf7(const BF7* p, int which)
+{
+    switch (which) {
+    case 0: return p->a == -2 ? 1 : 0;
+    case 1: return p->b;
+    case 2: return (long)p->c;
+    }
+    return -99;
+}

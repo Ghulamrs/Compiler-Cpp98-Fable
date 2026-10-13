@@ -1,5 +1,5 @@
 // layout.hpp - class layouts shared by the unit cppparse compiles (layout.cpp) and the driver cl compiles
-// (sample-layout-driver): MSVC's placement of empty bases. Both sides evaluate the same
+// (sample-layout-driver): MSVC's placement of empty bases, bit-fields and anonymous unions and structs. Both sides evaluate the same
 // expressions (LAYOUT_VALUES); the driver compares cppparse's results with its own.
 // Strict C++98.
 #ifndef SAMPLE_LAYOUT_HPP_INCLUDED
@@ -40,6 +40,41 @@ struct CLE : C1, LE { char c; };           // LE at 4, c at 8, size 12
 struct EF  : E { E2 x; char d; };          // x at 0, d at 1, size 2
 struct EVal : E { int v; EVal() : v(0) {} int get() const { return v; } };
 
+// ---- bit-fields ---------------------------------------------------------------------------------------
+// A bit-field takes an allocation unit of its declared type's size; the next bit-field shares it when its
+// type has the same size and its bits still fit, from the low bit up. A zero-width bit-field closes the
+// unit (ignored unless it follows a bit-field). In a union, bit-fields do not raise the alignment.
+enum Colour { Red = -1, Green = 1, Blue = 2 };
+struct BF  { unsigned a : 3; unsigned b : 5; unsigned c : 24; char d; };    // size 8, d at 4
+struct BF2 { char a : 3; int b : 4; char c : 2; };                         // units at 0, 4, 8: size 12
+struct BF3 { int a : 3; int : 0; int b : 2; };                             // b in a new unit: size 8
+struct BF4 { char x; int : 0; char y; };                                   // the :0 is ignored: y at 1, size 2
+struct BF5 { int a : 30; int b : 4; };                                     // b does not fit: size 8
+struct BF6 { short a : 3; unsigned short b : 9; int c : 1; int s : 5; };   // a, b share a short; c, s an int
+union  BU  { int a : 3; char c; };                                         // size 4, alignment 1
+struct BUa { char c; BU u; };                                              // u at 1
+struct BF7 { long long a : 40; int b : 3; long long c : 30; };             // size 24
+struct BF8 { bool f : 1; bool g : 1; char h; Colour k : 3; };              // f, g share a byte; k at 4
+struct BF9 { int a : 4; int : 0; int : 0; char c; };                       // the second :0 is ignored: c at 4
+struct BF10 { int a : 1; long b : 2; };                                    // int and long share: size 4
+#pragma pack(push, 1)
+struct BFP { char c; int a : 4; int b : 30; };                             // units at 1 and 5: size 9
+#pragma pack(pop)
+struct BFAgg { int x; unsigned y : 4; int : 3; int z : 5; };               // the unnamed bit-field takes no initialiser
+
+// ---- anonymous unions and structs ----------------------------------------------------------------------
+// The members of an anonymous union or struct are members of the enclosing class, at the anonymous
+// object's offset; union members share it.
+struct AU  { int k; union { int i; double dd; }; char z; };                // dd at 8, z at 16, size 24
+union  US  { struct { int a, b; }; long long q; };                         // b at 4, size 8
+struct AN  { char t; union { struct { short lo, hi; }; int all; }; unsigned f : 4; union { unsigned g : 3; char gc; }; };
+struct AUC {
+    int tag;
+    union { int iv; float fv; };
+    AUC() : tag(1), iv(0) {}
+    int twice() const { return iv * 2; }                                    // an anonymous member named in a member function
+};
+
 #define LAYOUT_VALUES(X) \
     X(sizeof(EB)) X(LAYOUT_FIELD(EB, w)) X(LAYOUT_BASE(EB, E)) \
     X(sizeof(EM)) X(LAYOUT_FIELD(EM, w)) X(LAYOUT_BASE(EM, E2)) \
@@ -55,7 +90,13 @@ struct EVal : E { int v; EVal() : v(0) {} int get() const { return v; } };
     X(sizeof(ELE)) X(LAYOUT_BASE(ELE, LE)) X(LAYOUT_FIELD(ELE, c)) \
     X(sizeof(CLE)) X(LAYOUT_BASE(CLE, LE)) X(LAYOUT_FIELD(CLE, c)) \
     X(sizeof(EF)) X(LAYOUT_FIELD(EF, x)) X(LAYOUT_FIELD(EF, d)) \
-    X(sizeof(EVal)) X(LAYOUT_FIELD(EVal, v))
+    X(sizeof(EVal)) X(LAYOUT_FIELD(EVal, v)) \
+    X(sizeof(BF)) X(offsetof(BF, d)) X(sizeof(BF2)) X(sizeof(BF3)) X(sizeof(BF4)) X(offsetof(BF4, y)) X(sizeof(BF5)) \
+    X(sizeof(BF6)) X(sizeof(BU)) X(offsetof(BUa, u)) X(sizeof(BF7)) X(sizeof(BF8)) X(offsetof(BF8, h)) X(sizeof(BF9)) \
+    X(offsetof(BF9, c)) X(sizeof(BF10)) X(sizeof(BFP)) X(sizeof(BFAgg)) \
+    X(sizeof(AU)) X(offsetof(AU, i)) X(offsetof(AU, dd)) X(offsetof(AU, z)) X(sizeof(US)) X(offsetof(US, b)) \
+    X(offsetof(US, q)) X(sizeof(AN)) X(offsetof(AN, lo)) X(offsetof(AN, hi)) X(offsetof(AN, all)) X(offsetof(AN, gc)) \
+    X(sizeof(AUC)) X(LAYOUT_FIELD(AUC, iv)) X(LAYOUT_FIELD(AUC, fv))
 
 // the value of the k-th expression of LAYOUT_VALUES as cppparse computes it; -1 past the end
 int layoutValue(int k);
@@ -65,5 +106,20 @@ extern EM g_em;
 extern NE g_ne;
 int  emSum(const EM* p);                   // w read through cppparse's view of EM
 int  evalGet(EVal& v, int set);            // stores set, assigns to the E subobject, reads v back through EVal*
+
+// bit-fields and anonymous members written and read by cppparse's code, checked by the driver through cl's
+// view of the classes
+extern BF    g_bf;
+extern BF6   g_bf6;
+extern BF7   g_bf7;
+extern BF8   g_bf8;
+extern BFP   g_bfp;
+extern BFAgg g_agg;
+extern AU    g_au;
+extern AN    g_an;
+void fillBits(BF2* p, int a, int b, int c);    // stores through the bit-fields (sign bits and all)
+long readBits(const BF2* p, int which);        // reads them back: 0 a, 1 b, 2 c
+long bitOps(BF6* p);                           // compound assignment, ++, -- and the value of an assignment
+long readBf7(const BF7* p, int which);         // 0 a, 1 b, 2 c
 
 #endif

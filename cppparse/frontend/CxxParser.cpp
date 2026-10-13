@@ -704,6 +704,17 @@ bool Parser::memInitializers(Decl* fn)
     return true;
 }
 
+// a declarator, or in a class an unnamed bit-field ": width" (": 0" closes the bit-field allocation unit)
+bool Parser::memberDeclarator(Declarator& d, bool inClass)
+{
+    if (inClass && at(":")) {
+        advance();
+        d.bitfield = conditional();
+        return d.bitfield != 0;
+    }
+    return declarator(d, false, true, false);
+}
+
 Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, bool firstParsed, Declarator* first)
 {
     Declarator* d = first;
@@ -715,7 +726,7 @@ Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, boo
             return decl;
         }
         d = m_arena.declarator();
-        if (!declarator(*d, false, true, false)) return 0;
+        if (!memberDeclarator(*d, inClass)) return 0;
     }
     // function definition?
     if (d->isFunction() && (at("{") || at(":") || at("try"))) {
@@ -752,9 +763,8 @@ Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, boo
         decl->declarators.push_back(id);
         if (!accept(",")) break;
         d = m_arena.declarator();
-        if (!declarator(*d, false, true, false)) return 0;
+        if (!memberDeclarator(*d, inClass)) return 0;
     }
-    (void)inClass;
     if (!expect(";", "after the declaration")) return 0;
     return decl;
 }

@@ -335,7 +335,12 @@ of cppparse, and compares the programs' output), `mapcompare.ps1` (builds the ma
 and with `--compile6 -O2 --obj`, links both with `/MAP`, checks cppparse's object maps against the linker's map
 of the same objects (addresses, 16-byte alignment, `f` / `f i` flags) and every function's map size against
 the code bytes `dumpbin /disasm` finds in the object, and lists the functions both compilers emit side by side
-with their exact code sizes (cl's counted from its objects the same way, since `link /MAP` has no size column); `-Lvl` picks cppparse's optimisation level, exit code 1 on any disagreement), `eh.ps1` (exceptions and
+with their exact code sizes (cl's counted from its objects the same way, since `link /MAP` has no size column;
+cl's functions are the ones `dumpbin /symbols` finds defined in its objects, so an inline method `link /OPT:REF`
+dropped, such as `Matrix::rows()`, is listed as removed by link instead of missing), then a per-class summary
+(every member function of `mx::Matrix` and `lin::System` either compiler emits, both sizes, the ratio, whether
+each linker kept it, class totals); `-Lvl` picks cppparse's optimisation level, exit code 1 on any disagreement
+of the object-map checks), `eh.ps1` (exceptions and
 unwind tables, `examples/sample-eh/` with its driver and an ml64 entry function, at `-O0`..`-O3`; see
 [Unwind tables](#unwind-tables)). The first four: the Visual Studio 2010 solution in
 `examples/sample/` with checks on the report, symbols and map, the `cpp` folder

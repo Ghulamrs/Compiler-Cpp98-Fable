@@ -767,6 +767,8 @@ const Type* Sema::exprMember(cxx::Expr* e, Scope* in)
 
 const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
 {
+    // "(f)(x)", "(e.scale)(x)": the parentheses do not change what is called
+    while (e->kids[0]->kind == cxx::Expr::Paren && e->kids[0]->kids.size() == 1) e->kids[0] = e->kids[0]->kids[0];
     cxx::Expr* callee = e->kids[0];
     std::vector<Symbol*> cands;
     cxx::Expr* thisExpr = 0;
@@ -817,6 +819,8 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
             if (ot && ot->kind == Type::Class && ot->decl) { if (callee->name.parts.size() > 1) { Scope* q = scopeForQualifier(callee->name, ot->decl->members); if (q && q->kind == Scope::Class) lookupMember(q->owner, s->name, cands); } else lookupMember(ot->decl, s->name, cands); }
             thisExpr = callee->kids[0];
         } else {
+            // a data member: a function pointer (called through its value) or a class with operator()
+            callee->semaType = mt;
             const Type* vt = m_types.unref(mt);
             if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); return vt->inner->inner; }
             if (vt->kind == Type::Class && vt->decl) { lookupMember(vt->decl, "operator()", cands); thisExpr = callee; }

@@ -1300,6 +1300,12 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
             callee = callee->kids[0];
         }
         const sema::Type* ct = m_semaTypes.unref(exprType(callee));
+        // "(*fp)(x)": the dereferenced pointer is the address called
+        while (ct->kind == sema::Type::Function && callee->kind == cxx::Expr::Unary && callee->text == "*" && callee->kids.size() == 1) {
+            callee = callee->kids[0];
+            ct = m_semaTypes.unref(exprType(callee));
+        }
+        if (ct->kind == sema::Type::Function && callee->semaSym && callee->semaSym->kind == Symbol::Function) ct = m_semaTypes.pointer(ct);   // "(*f)(x)", f a function
         if (ct->kind == sema::Type::Pointer && ct->inner->kind == sema::Type::Function) {
             int fp = value(callee);
             in.args.push_back(IrOperand::temp(fp, oldType(ct)));
@@ -1347,7 +1353,14 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
     // "t(c, r)" with t an object: operator() on t, also inside a member function of t's own class, where
     // a plain name would otherwise call through the implicit this
     const bool objectCall = fn->isOperator && fn->name == "operator()" && callee->kind == cxx::Expr::Name && callee->name.last() != "operator()";
-    if (callee->kind == cxx::Expr::Member && fn->ownerClass && !fn->isStatic) {
+    if (callee->kind == cxx::Expr::Member && fn->ownerClass && !fn->isStatic && fn->isOperator && fn->name == "operator()" &&
+        callee->semaSym && callee->semaSym->kind == Symbol::Variable) {
+        // "h.f(1)", "p->f(1)" with f a data member of class type: operator() on the member itself
+        thisPtr = addressOf(lvalue(callee), line);
+        const sema::Type* memT = m_semaTypes.unqualified(m_semaTypes.unref(exprType(callee)));
+        if (memT->kind == sema::Type::Class && memT->decl && memT->decl != fn->ownerClass) thisPtr = convert(thisPtr, m_semaTypes.pointer(memT), m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass)), line);
+        virtualCall = true;
+    } else if (callee->kind == cxx::Expr::Member && fn->ownerClass && !fn->isStatic) {
         cxx::Expr* obj = callee->kids[0];
         const sema::Type* objT = m_semaTypes.unref(exprType(obj));
         if (callee->arrowMember) {

@@ -16,7 +16,8 @@ the default), with the items found since. Each was reproduced with a small progr
 - 23, partly: a class used before its layout is done and array fields of class type are laid out as cl does.
 - Lazy instantiation of class template member bodies (MatrixTest.cpp's first blocker).
 - README "known limit" (untyped library results): with the headers included the version 6 front end types
-  `strtod` and `std::string::size`; the paragraph describes the legacy self-compile.
+  `strtod` and `std::string::size`; the paragraph describes the legacy self-compile. Rewritten: the README now
+  describes the version 6 behaviour (typed results, S103 and no object without a declaration); test 17 checks both.
 - 4 (plan 1): a unit with syntax or semantic errors is not compiled: no object, `.asm` or map (stale ones removed),
   exit code 1 (main.cpp); test 17, `examples/sample-front/errors.cpp`.
 - 3 (plan 3): `sizeof(T&)` is `sizeof(T)`; sizeof of a declared-only class, of a class inside its own members, of

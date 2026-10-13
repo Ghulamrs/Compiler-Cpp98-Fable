@@ -2,6 +2,8 @@
 // the two programs must print the same lines
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 // sizeof(T&) is sizeof(T) (C++98 5.3.3/2), not the size of a pointer
 struct Forty { char a[40]; };
@@ -103,5 +105,8 @@ int main()
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");
+    // library results are typed by the headers: a double from strtod, a size_t from string::size
+    std::string s("abc"); double d = std::strtod("2.5", 0); std::size_t n = s.size(); long long q = n * 3;
+    printf("library results: %f %d %lld\n", d * 2, (int)n, q);
     return 0;
 }

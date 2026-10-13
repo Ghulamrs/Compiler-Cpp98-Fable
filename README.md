@@ -983,11 +983,17 @@ while the result fits the sign-extended 32-bit immediates and otherwise
 leave the operation to run. The register, static-local and 64-bit constant
 defects are reproduced in `sample-self` and checked by test 16.
 
-Known limit: when cppparse compiles its own 51 sources, 23 of about
-290,000 generated lines mix an XMM register with an integer operand.
-They come from calls to library functions that the front end has no
-declaration for (`strtod`, `std::string::size`, ...): their results carry
-no type, so the register allocator and the instruction emitter disagree
-about the register class. ml64 rejects those lines as well; the COFF
-writer reports them by line number. Real declarations for library
-functions are part of the version 6 front end.
+Library calls and their result types: the version 6 front end compiles
+against cppparse's own headers (`include/`), so `strtod` returns `double`
+and `std::string::size` returns `size_t` like any other declared
+function, and a call to a function without a declaration is error S103,
+after which no object is written. All of cppparse's own units compile
+this way (`selfhost.ps1`), and test 17 checks such library results
+against cl's build. The old pipeline (`analyzer/`, versions 3 to 5) still
+has no declarations for library functions: their results carry no type,
+which, when it compiled cppparse's own sources, made the register
+allocator and the instruction emitter disagree about the register class
+(an XMM register with an integer operand, rejected by ml64 and reported by
+the COFF writer). It compiles only part of those sources today (templates,
+function-try-blocks and `std::` classes by value are skipped) and serves
+the reports, not the self-build.

@@ -455,6 +455,13 @@ void show()
 // review of the member-pointer and conversion commits: cl's sizes for an incomplete class (unspecified model) and
 // for a vfptr added in front of a base without one (multiple model); a class template with a member pointer
 // only named through a pointer is accepted; out-of-range literal casts folded modulo 2^N as cl folds them
+// a class named T: test 2 also reads this file with the old pipeline, whose template instantiator took "T" and "C - 1"
+// in Matrix.hpp's submatrix for concrete arguments and nested Matrix<T, C - 1 - 1, ...> until the stack overflowed
+namespace tclass {
+struct T { int t; };
+int useT() { T x; x.t = 2; return x.t; }
+}
+
 namespace review {
 struct Inc;
 struct A1 { int a; };
@@ -687,6 +694,7 @@ int main()
     mplater::show();
     strlit::show();
     cfold::show();
+    std::printf("a class named T: %d\n", tclass::useT());
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

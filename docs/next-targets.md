@@ -221,6 +221,13 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
 
 ## Other known limits (found by the reviews of 2026-10-13)
 
+- (fixed 2026-10-14) Test 2 (the old pipeline reading the whole `cpp` folder) overflowed its stack when a class named
+  `T` was anywhere in the folder: the old instantiator (analyzer/Instantiate.cpp argumentsDependent) took a template
+  argument for concrete when its names matched classes of the folder, so `Matrix<T, R - 1, C - 1>` in Matrix.hpp's
+  submatrix was instantiated with `T` the class and `C - 1` (front.cpp has a `struct C`), each instantiation asking for
+  a deeper one until the IR builder recursed over `C - 1 - 1 - ...`. A non-type argument with a name and an operator
+  that does not fold is now dependent, and argument texts over 512 characters are not instantiated; front.cpp has a
+  `tclass::T` so test 2 keeps checking it. Debug builds of cppparse print the stack on an overflow (driver/main.cpp).
 - cl builds a handler's by-value parameter before it unwinds the frames and handlers the exception leaves (MSVC's
   two-phase handling); cppparse unwinds first, so the order of copies and destructors differs when a handler is
   left by a throw that an outer by-value handler catches. Repro: `struct B { int v; B(int x) : v(x) {} B(const B&

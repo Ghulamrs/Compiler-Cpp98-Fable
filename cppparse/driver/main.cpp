@@ -195,32 +195,47 @@ void removeUnitOutputs(const std::string& base)
 } // namespace
 
 #if defined(_MSC_VER) && defined(_DEBUG)
+// the call stack, symbolised from the .pdb next to the executable
+void printStack()
+{
+    void* frames[62];
+    const unsigned short n = CaptureStackBackTrace(0, 62, frames, 0);
+    HANDLE process = GetCurrentProcess();
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
+    if (SymInitialize(process, 0, TRUE)) {
+        char buffer[sizeof(SYMBOL_INFO) + 256];
+        for (unsigned short i = 0; i < n; ++i) {
+            SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+            std::memset(buffer, 0, sizeof(buffer));
+            symbol->SizeOfStruct = sizeof(SYMBOL_INFO); symbol->MaxNameLen = 255;
+            DWORD64 displacement = 0;
+            if (!SymFromAddr(process, reinterpret_cast<DWORD64>(frames[i]), &displacement, symbol)) continue;
+            IMAGEHLP_LINE64 line; std::memset(&line, 0, sizeof(line)); line.SizeOfStruct = sizeof(line);
+            DWORD lineDisplacement = 0;
+            if (SymGetLineFromAddr64(process, reinterpret_cast<DWORD64>(frames[i]), &lineDisplacement, &line)) std::fprintf(stderr, "  %s  %s(%lu)\n", symbol->Name, line.FileName, static_cast<unsigned long>(line.LineNumber));
+            else std::fprintf(stderr, "  %s\n", symbol->Name);
+        }
+    }
+    std::fflush(stderr);
+}
+
+// a stack overflow prints the innermost frames (the recursion) too; the handler runs on the stack the thread
+// reserved with SetThreadStackGuarantee
+LONG CALLBACK stackOverflowToStderr(EXCEPTION_POINTERS* info)
+{
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
+    std::fprintf(stderr, "debug runtime: stack overflow\n");
+    printStack();
+    _exit(4);
+}
+
 // a debug-runtime assertion (an iterator check, a heap check) is written to stderr and ends the process with
 // exit code 3, so that a build script or a bisection sees it instead of a dialog waiting for a click
 int reportToStderr(int reportType, char* message, int* returnValue)
 {
     std::fprintf(stderr, "debug runtime: %s", message ? message : "");
     if (reportType == _CRT_ASSERT || reportType == _CRT_ERROR) {
-        // the call stack, symbolised from the .pdb next to the executable
-        void* frames[62];
-        const unsigned short n = CaptureStackBackTrace(0, 62, frames, 0);
-        HANDLE process = GetCurrentProcess();
-        SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
-        if (SymInitialize(process, 0, TRUE)) {
-            char buffer[sizeof(SYMBOL_INFO) + 256];
-            for (unsigned short i = 0; i < n; ++i) {
-                SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
-                std::memset(buffer, 0, sizeof(buffer));
-                symbol->SizeOfStruct = sizeof(SYMBOL_INFO); symbol->MaxNameLen = 255;
-                DWORD64 displacement = 0;
-                if (!SymFromAddr(process, reinterpret_cast<DWORD64>(frames[i]), &displacement, symbol)) continue;
-                IMAGEHLP_LINE64 line; std::memset(&line, 0, sizeof(line)); line.SizeOfStruct = sizeof(line);
-                DWORD lineDisplacement = 0;
-                if (SymGetLineFromAddr64(process, reinterpret_cast<DWORD64>(frames[i]), &lineDisplacement, &line)) std::fprintf(stderr, "  %s  %s(%lu)\n", symbol->Name, line.FileName, static_cast<unsigned long>(line.LineNumber));
-                else std::fprintf(stderr, "  %s\n", symbol->Name);
-            }
-        }
-        std::fflush(stderr);
+        printStack();
         _exit(3);
     }
     if (returnValue) *returnValue = 0;
@@ -232,6 +247,9 @@ int main(int argc, char* argv[])
 {
 #if defined(_MSC_VER) && defined(_DEBUG)
     _CrtSetReportHook(reportToStderr);
+    ULONG guarantee = 256 * 1024;
+    SetThreadStackGuarantee(&guarantee);
+    AddVectoredExceptionHandler(1, stackOverflowToStderr);
 #endif
     std::vector<std::string> inputs;
     std::string outDir, outName;

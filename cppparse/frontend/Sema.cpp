@@ -273,7 +273,7 @@ Symbol::Symbol()
       leadsWithZeroSized(false), endsWithZeroSized(false), vptrOffset(-1), vbptrOffset(-1), classAst(0),
       isVirtual(false), isPureVirtual(false), isStatic(false), isExtern(false), isInline(false), isExplicit(false), isConstructor(false),
       isDestructor(false), isConversion(false), isOperator(false), isFriendDecl(false), hasBody(false), isExternC(false),
-      definition(0), declAst(0), body(0), vtableSlot(-1), thisAdjust(0), vfptrOffset(0), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
+      definition(0), declAst(0), body(0), vtableSlot(-1), thisAdjust(0), vfptrOffset(0), vfptrVbase(0), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false),
       isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), bitWidth(-1), bitOffset(0),
       anonHost(0), anonOf(0), templateAst(0), instantiatedFrom(0),
       isDependentContext(false), isImplicitInstantiation(false), isLazyInstantiation(false), instantiationFailed(false), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
@@ -383,7 +383,26 @@ bool Sema::lookupMember(Symbol* cls, const std::string& name, std::vector<Symbol
     const std::vector<Symbol*>* v = cls->members->find(name);
     if (v) { out.insert(out.end(), v->begin(), v->end()); return true; }
     bool found = false;
+    const size_t before = out.size();
     for (size_t b = 0; b < cls->bases.size(); ++b) if (lookupMember(cls->bases[b].cls, name, out, depth + 1)) found = true;
+    if (found && !cls->vbases.empty() && out.size() > before + 1) {
+        // 10.2: a declaration found in a virtual base is hidden by one found in a class derived from it on another
+        // path (VL::f hides V::f in VD : VL, VR with V virtual); the same symbol found twice is one declaration
+        std::vector<Symbol*> kept;
+        for (size_t i = before; i < out.size(); ++i) {
+            Symbol* s = out[i];
+            Symbol* owner = s->ownerClass ? s->ownerClass : (s->scope && s->scope->kind == Scope::Class ? s->scope->owner : 0);
+            bool hidden = false;
+            if (owner && std::find(cls->vbases.begin(), cls->vbases.end(), owner) != cls->vbases.end())
+                for (size_t k = before; k < out.size() && !hidden; ++k) {
+                    Symbol* o = out[k]->ownerClass ? out[k]->ownerClass : (out[k]->scope && out[k]->scope->kind == Scope::Class ? out[k]->scope->owner : 0);
+                    if (o && o != owner && derivesFrom(o, owner, 0)) hidden = true;
+                }
+            if (!hidden && std::find(kept.begin(), kept.end(), s) == kept.end()) kept.push_back(s);
+        }
+        out.resize(before);
+        out.insert(out.end(), kept.begin(), kept.end());
+    }
     return found;
 }
 
@@ -889,6 +908,8 @@ void Sema::declareAnonymousMember(Symbol* anon, Scope* in, cxx::Access access)
 
 namespace {
 
+bool sameSignature(const Type* a, const Type* b);
+
 // the offset of base in derived along non-virtual bases only (false when there is none, or only through a
 // virtual base)
 bool nonVirtualOffset(const Symbol* derived, const Symbol* base, int& off, int depth)
@@ -900,6 +921,47 @@ bool nonVirtualOffset(const Symbol* derived, const Symbol* base, int& off, int d
         if (derived->bases[i].isVirtual || !nonVirtualOffset(derived->bases[i].cls, base, o, depth + 1)) continue;
         off = derived->bases[i].offset + o;
         return true;
+    }
+    return false;
+}
+
+// the offset of a subobject of class owner in a complete object of cls: through non-virtual bases, or in one of the
+// virtual bases (at its place in cls)
+bool completeOffset(const Symbol* cls, const Symbol* owner, int& off)
+{
+    if (nonVirtualOffset(cls, owner, off, 0)) return true;
+    for (size_t v = 0; v < cls->vbases.size() && v < cls->vbaseOffsets.size(); ++v) {
+        int o = 0;
+        if (nonVirtualOffset(cls->vbases[v], owner, o, 0)) { off = cls->vbaseOffsets[v] + o; return true; }
+    }
+    return false;
+}
+
+// whether m (declared in a class deriving from vb) overrides a virtual function other than a destructor held by one
+// of vb's own vftables (not those inside vb's virtual bases: their functions are those bases')
+bool overridesFunctionOf(const Symbol* m, const Symbol* vb)
+{
+    if (!m || m->kind != Symbol::Function || m->isStatic || m->isDestructor || m->isConstructor) return false;
+    for (size_t t = 0; t < vb->vftables.size(); ++t)
+        for (size_t s = 0; !vb->vftables[t].vbase && s < vb->vftables[t].fns.size(); ++s) {
+            const Symbol* v = vb->vftables[t].fns[s];
+            if (v && !v->isDestructor && v->name == m->name && sameSignature(v->type, m->type)) return true;
+        }
+    return false;
+}
+
+// whether a member function declared virtual overrides some virtual function of the bases (then it needs no vfptr
+// of its own: cl gives a class a vfptr only for new virtual functions)
+bool overridesAny(const Symbol* m, const Symbol* cls)
+{
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        const Symbol* bc = cls->bases[b].cls;
+        if (!bc) continue;
+        for (size_t t = 0; t < bc->vftables.size(); ++t)
+            for (size_t s = 0; s < bc->vftables[t].fns.size(); ++s) {
+                const Symbol* v = bc->vftables[t].fns[s];
+                if (v && (m->isDestructor ? v->isDestructor : (!v->isDestructor && v->name == m->name && sameSignature(v->type, m->type)))) return true;
+            }
     }
     return false;
 }
@@ -1441,7 +1503,7 @@ void Sema::layoutClass(Symbol* cls)
     // MSVC's empty bases: a base takes its size without the byte an empty class is given (nvSize), so an empty
     // base takes no space; a byte of padding separates a base that ends with a zero-sized subobject from a
     // following base that leads with one (E, E2 { int w; }: E at 0, E2 at 1, w at 4)
-    // MSVC places the polymorphic bases first, in declaration order, then the others: the first polymorphic base
+    // MSVC places the bases with a vfptr at offset 0 first, in declaration order, then the others: the first of them
     // (the primary base) is at offset 0 and the class shares its vptr (NP, PB { virtual }: PB at 0, NP after it)
     std::vector<size_t> baseOrder;
     for (size_t pass = 0; pass < 2; ++pass)
@@ -1450,14 +1512,14 @@ void Sema::layoutClass(Symbol* cls)
             if (!bc) continue;
             if (!bc->layoutDone) layoutClass(bc);
             if (cls->bases[b].isVirtual) continue;           // placed after the non-virtual part
-            if (bc->isPolymorphic == (pass == 0)) baseOrder.push_back(b);
+            if ((bc->vptrOffset == 0) == (pass == 0)) baseOrder.push_back(b);
         }
     const Symbol* prev = 0;
     bool leadsZero = false, endsZero = false;
     for (size_t k = 0; k < baseOrder.size(); ++k) {
         const size_t b = baseOrder[k];
         Symbol* bc = cls->bases[b].cls;
-        if (k == 0 && bc->isPolymorphic) vptr = true;        // share the primary base's vptr
+        if (k == 0 && bc->vptrOffset == 0) vptr = true;      // share the primary base's vptr
         int a = pack > 0 && bc->align > pack ? pack : bc->align;
         if (bc->declAlign > a) a = bc->declAlign;
         if (bc->declAlign > floor) floor = bc->declAlign;
@@ -1470,23 +1532,10 @@ void Sema::layoutClass(Symbol* cls)
         prev = bc;
         if (a > align) align = a;
     }
-    bool ownVirtuals = false;
-    for (size_t i = 0; i < cls->members->order.size(); ++i) { Symbol* m = cls->members->order[i]; if (m->kind == Symbol::Function && m->isVirtual) ownVirtuals = true; }
-    for (size_t b = 0; b < cls->bases.size() && !ownVirtuals; ++b) if (cls->bases[b].cls && cls->bases[b].cls->isPolymorphic) ownVirtuals = true;
-    cls->isPolymorphic = ownVirtuals;
-    if (ownVirtuals && !vptr) {
-        // a new vptr at offset 0: shift the bases
-        for (size_t b = 0; b < cls->bases.size(); ++b) cls->bases[b].offset += 8;
-        off += 8;
-        cls->vptrOffset = 0;
-        const int va = pack > 0 && pack < 8 ? pack : 8;
-        if (align < va) align = va;
-    } else if (vptr) cls->vptrOffset = 0;
     // MSVC's virtual bases: every one, direct or inherited, in cl's order (a base's own virtual bases before it).
     // The class shares the vbptr of its first non-virtual base that has one, or gets its own after the
     // non-virtual bases (injected once the members are placed, as cl does: VN : NB, virtual VB { short n; }:
     // NB at 0, vbptr at 8, n at 18)
-    const int baseEnd = off;
     std::vector<Symbol*> vbases;
     int sharedVb = -1;
     for (size_t b = 0; b < cls->bases.size(); ++b) {
@@ -1495,6 +1544,45 @@ void Sema::layoutClass(Symbol* cls)
         for (size_t v = 0; v < bc->vbases.size(); ++v) if (std::find(vbases.begin(), vbases.end(), bc->vbases[v]) == vbases.end()) vbases.push_back(bc->vbases[v]);
         if (cls->bases[b].isVirtual) { if (std::find(vbases.begin(), vbases.end(), bc) == vbases.end()) vbases.push_back(bc); }
         else if (sharedVb < 0 && bc->vbptrOffset >= 0) sharedVb = static_cast<int>(b);
+    }
+    // a vfptr of its own only for new virtual functions (one that overrides a function of a virtual base goes into
+    // that base's vftable, which stays in the virtual base subobject: VL : virtual V { int f(); } has no vfptr of
+    // its own, VN : virtual V { virtual int h(); } has one at 0)
+    bool ownVirtuals = false, newVirtuals = false;
+    for (size_t i = 0; i < cls->members->order.size(); ++i) {
+        Symbol* m = cls->members->order[i];
+        if (m->kind != Symbol::Function || !m->isVirtual) continue;
+        ownVirtuals = true;
+        if (!overridesAny(m, cls)) newVirtuals = true;
+    }
+    for (size_t b = 0; b < cls->bases.size() && !ownVirtuals; ++b) if (cls->bases[b].cls && cls->bases[b].cls->isPolymorphic) ownVirtuals = true;
+    cls->isPolymorphic = ownVirtuals;
+    if (newVirtuals && !vptr) {
+        // a new vptr at offset 0: shift the bases
+        for (size_t b = 0; b < cls->bases.size(); ++b) cls->bases[b].offset += 8;
+        off += 8;
+        cls->vptrOffset = 0;
+        const int va = pack > 0 && pack < 8 ? pack : 8;
+        if (align < va) align = va;
+    } else if (vptr) cls->vptrOffset = 0;
+    const int baseEnd = off;
+    // cl's vtordisp for a polymorphic virtual base: a class with a user-declared constructor or destructor that
+    // overrides one of the base's virtual functions (not only its destructor) gets the field, and so does every
+    // class derived from one that has it (VL : virtual V { VL(); int f(); } and VL2 : VL { VL2(); }, not VO3 : VO
+    // { VO3(); } with VO { int f(); } without a constructor)
+    std::vector<bool> vtordisps(vbases.size(), false);
+    for (size_t v = 0; v < vbases.size(); ++v) {
+        Symbol* vb = vbases[v];
+        if (!vb->isPolymorphic) continue;
+        bool need = false;
+        for (size_t b = 0; b < cls->bases.size() && !need; ++b) {
+            Symbol* bc = cls->bases[b].cls;
+            if (!bc) continue;
+            for (size_t k = 0; k < bc->vbases.size() && k < bc->vtordisp.size(); ++k) if (bc->vbases[k] == vb && bc->vtordisp[k]) need = true;
+        }
+        if (!need && (cls->hasUserCtor || cls->hasCopyCtor || cls->hasDtor))
+            for (size_t i = 0; i < cls->members->order.size() && !need; ++i) if (overridesFunctionOf(cls->members->order[i], vb)) need = true;
+        vtordisps[v] = need;
     }
     // the members in declaration order, unnamed bit-fields included
     std::vector<Symbol*> members;
@@ -1574,11 +1662,13 @@ void Sema::layoutClass(Symbol* cls)
             int a = pack > 0 && vb->align > pack ? pack : vb->align;
             if (vb->declAlign > a) a = vb->declAlign;
             if (a > align) align = a;
+            if (vtordisps[v]) voff += 4;                     // the vtordisp just before the base (VL: at 20, V at 24)
             voff = (voff + a - 1) / a * a;
             cls->vbaseOffsets.push_back(voff);
             voff += vb->nvSize;
         }
         cls->vbases = vbases;
+        cls->vtordisp = vtordisps;
         cls->size = (voff + align - 1) / align * align;
         for (size_t b = 0; b < cls->bases.size(); ++b)
             if (cls->bases[b].isVirtual && cls->bases[b].cls)
@@ -1634,9 +1724,10 @@ void Sema::completeClass(Symbol* cls)
     }
     if (cls->isDependentContext) return;
     layoutClass(cls);
-    // vtable: the primary base's table first (the first polymorphic base, at offset 0), then overrides and new virtuals
+    // vtable: the primary base's table first (the first non-virtual base with a vfptr at offset 0), then overrides
+    // and new virtuals; a virtual base is never primary (its vfptr stays in the virtual base subobject)
     size_t primary = cls->bases.size();
-    for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->bases[b].cls && cls->bases[b].cls->isPolymorphic) { primary = b; break; }
+    for (size_t b = 0; b < cls->bases.size(); ++b) if (cls->bases[b].cls && !cls->bases[b].isVirtual && cls->bases[b].cls->vptrOffset == 0) { primary = b; break; }
     if (primary < cls->bases.size()) cls->vtable = cls->bases[primary].cls->vtable;
     // MSVC's secondary vftables: every vfptr of the bases other than the one at offset 0 (those of the other
     // polymorphic bases, and the primary base's own secondary ones) keeps a table of its own at its offset here,
@@ -1654,12 +1745,52 @@ void Sema::completeClass(Symbol* cls)
     tables[0].returnAdjust.resize(cls->vtable.size(), 0);
     for (size_t b = 0; b < cls->bases.size(); ++b) {
         Symbol* bc = cls->bases[b].cls;
-        if (!bc || !bc->isPolymorphic) continue;
-        for (size_t t = b == primary ? 1 : 0; t < bc->vftables.size(); ++t) {
+        if (!bc || !bc->isPolymorphic || cls->bases[b].isVirtual) continue;
+        for (size_t t = 0; t < bc->vftables.size(); ++t) {
+            if (bc->vftables[t].vbase) continue;              // a table inside one of its virtual bases: this class's own copy below
+            if (b == primary && bc->vftables[t].offset == 0) continue;
             tables.push_back(bc->vftables[t]);
             tables.back().offset += cls->bases[b].offset;
             tables.back().returnOf.resize(tables.back().fns.size(), 0);
             tables.back().returnAdjust.resize(tables.back().fns.size(), 0);
+        }
+    }
+    // the vftables inside the polymorphic virtual bases, at their places in this class (cl: ??_7D@@6BV@@@): each
+    // starts as the base's own tables, takes the overriders the direct bases hold for it, then this class's; the
+    // thunks are recomputed below for this class's layout. Two direct bases overriding one function of the virtual
+    // base differently leave no final overrider unless this class overrides it (10.3/2; cl C2250)
+    std::vector<std::pair<std::pair<size_t, size_t>, std::pair<Symbol*, Symbol*> > > contested;   // (table, slot), the two overriders
+    for (size_t v = 0; v < cls->vbases.size(); ++v) {
+        Symbol* vb = cls->vbases[v];
+        if (!vb->isPolymorphic) continue;
+        for (size_t t = 0; t < vb->vftables.size(); ++t) {
+            if (vb->vftables[t].vbase) continue;              // inside one of vb's own virtual bases: that one's own copy
+            VfTable nt = vb->vftables[t];
+            const int rel = nt.offset;
+            nt.offset += cls->vbaseOffsets[v];
+            nt.vbase = vb;
+            nt.vtordisp = v < cls->vtordisp.size() && cls->vtordisp[v];
+            nt.returnOf.resize(nt.fns.size(), 0);
+            nt.returnAdjust.resize(nt.fns.size(), 0);
+            for (size_t b = 0; b < cls->bases.size(); ++b) {
+                Symbol* bc = cls->bases[b].cls;
+                if (!bc || bc == vb) continue;
+                size_t bv = 0;
+                while (bv < bc->vbases.size() && bc->vbases[bv] != vb) ++bv;
+                if (bv >= bc->vbases.size()) continue;
+                for (size_t k = 0; k < bc->vftables.size(); ++k) {
+                    const VfTable& bt = bc->vftables[k];
+                    if (bt.vbase != vb || bt.offset - bc->vbaseOffsets[bv] != rel) continue;
+                    for (size_t s = 0; s < bt.fns.size() && s < nt.fns.size(); ++s) {
+                        if (bt.fns[s] == vb->vftables[t].fns[s]) continue;
+                        if (nt.fns[s] == vb->vftables[t].fns[s]) {
+                            nt.fns[s] = bt.fns[s];
+                            if (s < bt.returnOf.size()) { nt.returnOf[s] = bt.returnOf[s]; nt.returnAdjust[s] = bt.returnAdjust[s]; }
+                        } else if (bt.fns[s] != nt.fns[s]) contested.push_back(std::make_pair(std::make_pair(tables.size(), s), std::make_pair(nt.fns[s], bt.fns[s])));
+                    }
+                }
+            }
+            tables.push_back(nt);
         }
     }
     std::map<std::string, size_t> firstOfName;   // where each member function's name is first declared
@@ -1716,6 +1847,7 @@ void Sema::completeClass(Symbol* cls)
             if (radj[h] != 0) covariant = true;
         }
         m->thisAdjust = m->vfptrOffset = 0;
+        m->vfptrVbase = 0;
         bool placed = false;
         if (!covariant) {
             for (size_t h = 0; h < hits.size(); ++h)
@@ -1723,7 +1855,10 @@ void Sema::completeClass(Symbol* cls)
             if (!placed && !hits.empty()) {
                 for (size_t h = 0; h < hits.size(); ++h) if (hits[h].first == first) m->vtableSlot = static_cast<int>(hits[h].second);
                 m->vfptrOffset = tables[first].offset;
-                m->thisAdjust = m->isDestructor ? 0 : m->vfptrOffset;   // a destructor always takes the complete object
+                m->vfptrVbase = tables[first].vbase;
+                // a destructor takes the complete object, unless its vfptr lies only in virtual bases: then, as cl,
+                // it takes the first of them (VY::{dtor} this adjustor: 24)
+                m->thisAdjust = m->isDestructor && !m->vfptrVbase ? 0 : m->vfptrOffset;
                 placed = true;
             }
             for (size_t h = 0; h < hits.size(); ++h) {
@@ -1737,6 +1872,7 @@ void Sema::completeClass(Symbol* cls)
                 VfTable& own = tables[first];
                 m->vtableSlot = static_cast<int>(own.fns.size());
                 m->vfptrOffset = m->thisAdjust = own.offset;
+                m->vfptrVbase = own.vbase;
                 own.fns.push_back(m); own.thunks.push_back(0); own.returnOf.push_back(0); own.returnAdjust.push_back(0);
                 placed = true;
             }
@@ -1765,6 +1901,31 @@ void Sema::completeClass(Symbol* cls)
     tables[0].thunks.resize(cls->vtable.size(), 0);
     tables[0].returnOf.resize(cls->vtable.size(), 0);
     tables[0].returnAdjust.resize(cls->vtable.size(), 0);
+    for (size_t k = 0; k < contested.size(); ++k) {
+        const size_t t = contested[k].first.first, s = contested[k].first.second;
+        Symbol* held = t < tables.size() && s < tables[t].fns.size() ? tables[t].fns[s] : 0;
+        if (!held || held->ownerClass == cls) continue;   // overridden here: the final overrider
+        const Symbol* a = contested[k].second.first;
+        const Symbol* b = contested[k].second.second;
+        error(cls->loc, "S145", "'" + cls->qualifiedName() + "': ambiguous inheritance of '" + (held->overrides ? held->overrides->qualifiedName() : held->qualifiedName()) + "', overridden by '" + a->qualifiedName() + "' and '" + b->qualifiedName() + "' (cl C2250)");
+    }
+    // the thunks of the tables inside the virtual bases, for this class's layout: from the base's place here to
+    // where each entry expects this (its owner's subobject plus its own adjustor); an entry of the base itself
+    // moves nothing
+    for (size_t t = 1; t < tables.size(); ++t) {
+        if (!tables[t].vbase) continue;
+        for (size_t s = 0; s < tables[t].fns.size(); ++s) {
+            Symbol* fn = tables[t].fns[s];
+            int eo = 0;
+            if (!fn || !completeOffset(cls, fn->ownerClass, eo)) continue;
+            tables[t].thunks[s] = tables[t].offset - (eo + fn->thisAdjust);
+            // an overrider that lies in another virtual base: its distance from this base is not fixed (cl's
+            // vtordispex thunk reads the vbtable)
+            int nv = 0;
+            if (!nonVirtualOffset(cls, fn->ownerClass, nv, 0) && !nonVirtualOffset(tables[t].vbase, fn->ownerClass, nv, 0)) tables[t].vtordispex = fn;
+        }
+    }
+    if (cls->vptrOffset != 0) tables.erase(tables.begin());   // no vfptr of its own: only the inherited tables
     if (cls->isPolymorphic) cls->vftables = tables;
     cls->isAbstract = false;
     for (size_t t = 0; t < cls->vftables.size(); ++t)

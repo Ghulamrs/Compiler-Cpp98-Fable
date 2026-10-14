@@ -2,7 +2,7 @@ GAP ANALYSIS OF C++98 (checked against HEAD d9309fa on 2026-10-14, every item re
 
 Left for later sessions, recorded in docs/next-targets.md with repros:
 
-Polymorphic virtual bases (14b): the largest remaining item. Refused (S130) in every form tried, not miscompiled.
+Polymorphic virtual bases (14b): done on 2026-10-14 (vfptr in the virtual base, vtordisp and $4 thunks, the virtual bases' vftables, catch of virtual bases); only an override held by another virtual base (cl's vtordispex thunk) stays refused (S130), not miscompiled.
 Cases that still behave differently from cl, silently:
 T() value-initialisation leaves plain structs unzeroed;
 a float passed to printf or any variadic function is not promoted to double;
@@ -14,7 +14,7 @@ the halfway float literal and out-of-range floating constants in static initiali
 argument evaluation order (left to right, cl right to left) and NRVO in nested blocks at -O2;
 the handler copy order when a by-value handler rethrows into another;
 d.a hidden on one path and unqualified members inside member functions are not checked for ambiguity (C2385).
-Rejected with an error, not wrong code: ->* and member-pointer values, tmake<V>(42), 64-bit literals as constant expressions, class placement new, a conversion operator against int/long overloads.
+Rejected with an error, not wrong code: tmake<V>(42), 64-bit literals as constant expressions, class placement new, a conversion operator against int/long overloads (->* and member-pointer values, covariant returns through a secondary base and polymorphic virtual bases compile since 2026-10-14; left refused: member-pointer conversions into a class with virtual bases that does not share the base's vbptr, covariant returns through a virtual base, the vtordispex case).
 Fixed: takeV(mk()), throwing destructors including delete[] elements, catch by value, the -O2 double-to-unsigned conversion, C2584/C4584 and the direct d.a ambiguity.
 Mixed cl/cppparse links only: statics in local classes; vtable names with longer base paths; exceptions crossing runtimes (both directions fail fast).
 Code size: 1.79 of cl on the Matrix members both emit (whole class 1.60, all common functions 1.55), plan to about 1.25.

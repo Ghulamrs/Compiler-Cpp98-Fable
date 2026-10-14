@@ -1555,21 +1555,28 @@ void X86Module::appendCode(const std::string& code) { Lock l(m_mutex); m_code +=
 void X86Module::addThunk(const std::string& irName, const std::string& target, int adjust)
 {
     if (!m_thunkNames.insert(irName).second) return;
-    Thunk t; t.name = irName; t.target = target; t.adjust = adjust; t.vcall = false; t.returning = false; t.returnAdjust = 0; t.reference = false; t.stackArgs = 0;
+    Thunk t; t.name = irName; t.target = target; t.adjust = adjust; t.vcall = false; t.returning = false; t.returnAdjust = 0; t.reference = false; t.stackArgs = 0; t.vtordisp = false;
     m_thunks.push_back(t);
 }
 
 void X86Module::addVcallThunk(const std::string& irName, int slotOffset)
 {
     if (!m_thunkNames.insert(irName).second) return;
-    Thunk t; t.name = irName; t.adjust = slotOffset; t.vcall = true; t.returning = false; t.returnAdjust = 0; t.reference = false; t.stackArgs = 0;
+    Thunk t; t.name = irName; t.adjust = slotOffset; t.vcall = true; t.returning = false; t.returnAdjust = 0; t.reference = false; t.stackArgs = 0; t.vtordisp = false;
     m_thunks.push_back(t);
 }
 
 void X86Module::addReturnThunk(const std::string& irName, const std::string& target, int thisAdjust, int returnAdjust, bool reference, int stackArgs)
 {
     if (!m_thunkNames.insert(irName).second) return;
-    Thunk t; t.name = irName; t.target = target; t.adjust = thisAdjust; t.vcall = false; t.returning = true; t.returnAdjust = returnAdjust; t.reference = reference; t.stackArgs = stackArgs;
+    Thunk t; t.name = irName; t.target = target; t.adjust = thisAdjust; t.vcall = false; t.returning = true; t.returnAdjust = returnAdjust; t.reference = reference; t.stackArgs = stackArgs; t.vtordisp = false;
+    m_thunks.push_back(t);
+}
+
+void X86Module::addVtordispThunk(const std::string& irName, const std::string& target, int adjust)
+{
+    if (!m_thunkNames.insert(irName).second) return;
+    Thunk t; t.name = irName; t.target = target; t.adjust = adjust; t.vcall = false; t.returning = false; t.returnAdjust = 0; t.reference = false; t.stackArgs = 0; t.vtordisp = true;
     m_thunks.push_back(t);
 }
 
@@ -1589,6 +1596,11 @@ void X86Module::emitVtables()
         }
         const std::string target = symbol(m_thunks[i].target);
         if (!m_defined.count(target)) m_externs.insert(target);
+        if (m_thunks[i].vtordisp) {
+            m_code += ";@comdat any\n" + sym + " PROC\n        ; " + m_thunks[i].name + "\n        movsxd rax, dword ptr [rcx-4]\n        sub rcx, rax\n" +
+                      (m_thunks[i].adjust ? "        sub rcx, " + intToString(m_thunks[i].adjust) + "\n" : std::string()) + "        jmp " + target + "\n" + sym + " ENDP\n\n";
+            continue;
+        }
         if (m_thunks[i].returning) {
             // the frame holds the shadow space and the stack arguments copied from the caller's (the register
             // arguments stay where they are), 16-aligned at the call; the result comes back in rax

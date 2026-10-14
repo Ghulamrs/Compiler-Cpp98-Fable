@@ -27,6 +27,7 @@
 #include "Types.hpp"
 
 #include <string>
+#include <vector>
 
 namespace cppparse {
 namespace sema { struct Symbol; }
@@ -45,6 +46,8 @@ std::string msvcMangleVariableSymbol(const sema::Symbol& v);
 std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
 // a vftable; forBase names one of several (??_7D@@6BPB@@@: D's vftable for PB), 0 for a class with one
 std::string msvcMangleVtableSymbol(const sema::Symbol& c, const sema::Symbol* forBase = 0);
+// a vbtable, named by the bases of its path (??_8D@@7B@, ??_8VX@@7BVL@@@, ??_8R@@7BB@@P@@@)
+std::string msvcMangleVbtableSymbol(const sema::Symbol& c, const std::vector<sema::Symbol*>& path);
 // an adjustor thunk of a virtual function: ?f@D@@WBA@EAAHXZ, D::f`adjustor{16}'
 std::string msvcMangleThunkSymbol(const sema::Symbol& fn, long adjust);
 // cl's vcall thunk of the virtual function at slotOffset (8 per slot) of a class's vftable: ??_9P@@$B7AA, P::`vcall'{8}'
@@ -52,6 +55,9 @@ std::string msvcMangleVcallThunk(const sema::Symbol& c, long slotOffset);
 // cl's return-adjusting thunk of the covariant override fn in the slot of root: fn as a non-virtual function with
 // root's return type, ?self@CD@@QEAAPEAUSB@@XZ
 std::string msvcMangleReturnThunk(const sema::Symbol& fn, const sema::Symbol& root);
+// cl's vtordisp thunk of an overrider in the vftable inside a virtual base: ?f@VL@@$4PPPPPPPM@7EBAHXZ (the vtordisp
+// at -4 before the base, then the adjustment 8)
+std::string msvcMangleVtordispThunk(const sema::Symbol& fn, long adjust);
 // cl's thread-safe-static guard of a function's index-th guarded static local: "?$TSS0@?1??f@@YAAEAUCnt@@XZ@4HA"
 std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index);
 

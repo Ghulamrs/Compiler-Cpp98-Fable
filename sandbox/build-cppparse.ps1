@@ -754,15 +754,15 @@ try {
     $rejects = @(
         @{ unit = "errors"; expect = @("error S103: call to undeclared function 'undeclared_fn'", "error S101: undeclared identifier 'nosuchvar'") },
         @{ unit = "sizeof-incomplete"; expect = @("error S113: sizeof of incomplete class 'Inc'", "error S113: sizeof of incomplete class 'std::", "error S113: sizeof of incomplete class 'Self'", "error S113: sizeof of void") },
-        @{ unit = "vbase"; expect = @("error S130: 'VL' has a virtual base class", "error S130: 'VR' has a virtual base class", "error S130: 'VD' has a virtual base class") },
-        @{ unit = "vbase-refused"; expect = @("error S132: line 8: cannot convert from 'V' to 'D': 'V' is a virtual base", "error S132: line 9: catching 'V', a virtual base class", "error S132: line 10: throwing a pointer to 'D', a class with virtual bases") },
+        @{ unit = "vbase"; expect = @("(10): error S130: 'WL' has a virtual base class: a virtual function overridden in another virtual base (cl's vtordispex thunk, which reads the vbtable) is not supported yet by --compile6", "(11): error S130: 'WL2' has a virtual base class: a virtual function overridden in another virtual base") },
+        @{ unit = "vbase-refused"; expect = @("error S132: line 9: cannot convert from 'V' to 'D': 'V' is a virtual base") },
         @{ unit = "goto-refused"; expect = @("error S132: line 5: goto x jumps past the initialisation of an object with a destructor (ill-formed)", "error S132: line 6: goto y jumps into a try block or a handler (ill-formed)") },
         @{ unit = "covariant-refused"; expect = @("(8): error S131: 'CD::get' overrides 'SB::get' with a covariant return type, and its return conversion goes through a virtual base", "(14): error S131: 'D::g' overrides 'B::g' with a covariant return type, and the slot needs a this adjustment as well as the return adjustment") },
         @{ unit = "goto-handler"; expect = @("error S132: line 5: a goto out of a catch handler ('out')", "error S132: line 6: a goto out of a catch handler ('out')") },
         @{ unit = "new-refused"; expect = @("error S132: line 8: a placement new-expression of 'Q'", "error S132: line 9: new of a multidimensional array of 'S'", "error S132: line 9: delete[] of a multidimensional array of 'S'") },
         @{ unit = "memptr-refused"; expect = @("error S132: line 16: conversion of a pointer to member from 'int W::*' to 'int VW::*' is not supported yet", "error S132: line 17: conversion of a pointer to member from 'int VX::*' to 'int X::*' is not supported yet", "error S132: line 18: conversion of a pointer to member from 'int I1::*' to 'int I2::*', whose inheritance model is unspecified") },
         @{ unit = "ambiguous-base"; expect = @("(8): error S141: 'F': direct base 'V' is inaccessible; already a base of 'W'", "(9): error S141: 'H2': direct base 'V' is inaccessible; already a base of 'WV'", "(10): error S141: 'H5': direct base 'V' is inaccessible; already a base of 'X'", "(11): warning S142: 'G2': base-class 'V' is already a base-class of 'W'", "(12): warning S142: 'H3': base-class 'V' is already a base-class of 'WV'", "(16): warning S142: 'T7': base-class 'V' is already a base-class of 'XV'", "(17): error S141: 'T8': direct base 'V' is inaccessible; already a base of 'XV'") },
-        @{ unit = "ambiguous"; expect = @("ambiguous.cpp(12): error S105: cannot initialise 'p1' of type A* from D*", "ambiguous.cpp(13): error S143: ambiguous conversions from 'D*' to 'A*'", "ambiguous.cpp(14): error S143:", "ambiguous.cpp(15): error S144: ambiguous access of 'a' in 'D'", "ambiguous.cpp(16): error S144: ambiguous access of 'f'", "ambiguous.cpp(17): error S105: cannot convert D to the return type A&") }
+        @{ unit = "ambiguous"; expect = @("ambiguous.cpp(12): error S105: cannot initialise 'p1' of type A* from D*", "ambiguous.cpp(13): error S143: ambiguous conversions from 'D*' to 'A*'", "ambiguous.cpp(14): error S143:", "ambiguous.cpp(15): error S144: ambiguous access of 'a' in 'D'", "ambiguous.cpp(16): error S144: ambiguous access of 'f'", "ambiguous.cpp(17): error S105: cannot convert D to the return type A&", "ambiguous.cpp(26): error S145: 'XD': ambiguous inheritance of 'XV::f', overridden by 'XL::f' and 'XR::f' (cl C2250)") }
     )
     foreach ($r in $rejects) {
         $nm = "front-$($r.unit)"
@@ -775,7 +775,8 @@ try {
         if ($rc -ne 0 -and $missing.Count -eq 0 -and $left.Count -eq 0) { Write-Host "  ok   $($r.unit).cpp: errors reported, exit code $rc, no object, listing or map" }
         else { Write-Host "  FAIL $($r.unit).cpp (exit $rc, missing diagnostics: $($missing -join ' | '), left behind: $($left -join ', ')):"; Write-Host $c6; $failed++ }
     }
-    # S130 is a refusal of code generation only: the analysis of the same unit accepts its virtual bases
+    # S130 is a refusal of code generation only: the analysis of the same unit accepts its virtual bases (the
+    # polymorphic ones that --compile6 generates are run against cl in front.cpp, pvbase::)
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
     $s6 = & $exe --sema6 -I ..\include -o out\x64 -n front-vbase-sema "..\examples\sample-front\vbase.cpp" 2>&1 | Out-String
     $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
@@ -788,7 +789,8 @@ try {
     $rep = & $cl /nologo /c "/Foout\x64\vbase-layout_cl.obj" /d1reportAllClassLayout "..\examples\sample-front\vbase-layout.cpp" 2>&1 | Out-String
     $ErrorActionPreference = $eap
     $want = @([regex]::Matches($rep, '(?m)^class (V\w+)\s+size\((\d+)\)') | ForEach-Object { "$($_.Groups[1].Value) size $($_.Groups[2].Value)" })
-    $want += @([regex]::Matches($rep, '(?m)^(V\w+)::\$vbtable@(\w*)@?:\s*\r?\n((?:\s*\d+\s*\|\s*-?\d+.*\r?\n)+)') | ForEach-Object { "$($_.Groups[1].Value) vbtable@$($_.Groups[2].Value):" + ((@([regex]::Matches($_.Groups[3].Value, '\|\s*(-?\d+)')) | ForEach-Object { $_.Groups[1].Value }) -join ',') })
+    # a table's path of bases: cl prints "VPR::$vbtable@VPB@VPP@:", the symbol dump "vbtable@VPB/VPP@0:"
+    $want += @([regex]::Matches($rep, '(?m)^(V\w+)::\$vbtable@((?:\w+@)*):\s*\r?\n((?:\s*\d+\s*\|\s*-?\d+.*\r?\n)+)') | ForEach-Object { "$($_.Groups[1].Value) vbtable@$($_.Groups[2].Value.TrimEnd('@').Replace('@', '/')):" + ((@([regex]::Matches($_.Groups[3].Value, '\|\s*(-?\d+)')) | ForEach-Object { $_.Groups[1].Value }) -join ',') })
     $got = @()
     $sym = if (Test-Path "out\x64\front-vbase-layout-sym6.txt") { Get-Content "out\x64\front-vbase-layout-sym6.txt" } else { @() }
     foreach ($ln in $sym) {

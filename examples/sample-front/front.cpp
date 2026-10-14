@@ -877,6 +877,57 @@ void show()
 }
 }
 
+// polymorphic virtual bases, as cl lays them out: the vfptr stays in the virtual base subobject and a class gets a
+// vfptr of its own only for new virtual functions (VN); the virtual base's vftable has a copy per class
+// (??_7VL@@6B@, ??_7VN@@6BV@@@) whose entries from outside the base are adjustor thunks, or cl's $4 vtordisp thunks
+// when the class has a user-declared constructor or destructor and overrides a function of the base (the vtordisp,
+// 4 bytes before the base, holds how far the base moved while a base constructor runs). Every call goes through
+// every base, during construction and destruction too, through delete, and through pointers to members
+namespace pvbase {
+struct V  { int v; V() : v(7) { std::printf("V() %d ", probe()); } virtual int f() const { return v; } virtual int g() const { return 1; } virtual ~V() { std::printf("~V %d ", probe()); } int probe() const { return f() * 100 + g(); } };
+struct VL : virtual V { int l; VL() : l(2) { std::printf("VL() %d ", probe()); } ~VL() { std::printf("~VL %d ", probe()); } int f() const { return l + 10; } };
+struct VR : virtual V { int r; VR() : r(3) { std::printf("VR() %d ", probe()); } };
+struct VD : VL, VR { int d; VD() : d(4) { std::printf("VD() %d ", probe()); } ~VD() { std::printf("~VD %d ", probe()); } int g() const { return d + 20; } };
+struct VN : virtual V { int n; VN() : n(5) {} virtual int h() const { return 3; } };
+struct VN2 : VN { int n2; VN2() : n2(8) {} int h() const { return n2; } int g() const { return n2 + 1; } };
+struct VO : virtual V { int o; int f() const { return o + 30; } };
+struct VO2 : VO { int o2; };
+struct VL2 : VL { int l2; VL2() : l2(5) { std::printf("VL2() %d ", probe()); } };
+struct NB { int nb; NB() : nb(4) {} virtual int nf() const { return nb; } };
+struct MX : NB, virtual V { int mx; MX() : mx(6) { std::printf("MX() %d ", probe()); } int f() const { return mx + 40; } int nf() const { return mx + 1; } };
+struct MY : NB, virtual V { int my; MY() : my(2) {} virtual int h() const { return 9; } int f() const { return my; } };
+struct VV { int vv; VV() : vv(5) {} virtual ~VV() { std::printf("~VV "); } virtual int k() const { return vv; } };
+struct VY : virtual VV { int y; VY() : y(6) {} ~VY() { std::printf("~VY "); } int k() const { return y + 50; } };
+struct VY2 : VY { int y2; VY2() : y2(9) {} ~VY2() { std::printf("~VY2 "); } };
+struct VP : NB, virtual V { int p; VP() : p(8) {} int f() const { return p; } };
+int callF(const V* p) { return p->f() * 100 + p->g(); }
+int callVL(const VL* p) { return p->f() * 100 + p->g(); }
+int callVD(const VD* p) { return p->f() * 100 + p->g(); }
+int callVN(const VN* p) { return p->f() * 100 + p->g() + p->h() * 10000; }
+int callMX(const MX* p) { return p->f() * 100 + p->nf(); }
+int callMY(const MY* p) { return p->f() * 100 + p->nf() + p->h() * 10000; }
+int callK(const VV* p) { return p->k(); }
+void destroyV(V* p) { delete p; }
+void destroyVV(VV* p) { delete p; }
+void show()
+{
+    std::printf("pvbase build: "); VD d; std::printf("\n");
+    VL a; VR b; VN n; VN2 n2; VO o; o.o = 1; VO2 o2; o2.o = 2; VL2 l2; MX mx; MY my; VY y; VY2 y2; VP vp;
+    std::printf("\npvbase calls %d %d %d %d %d %d %d %d %d %d %d\n", callF(&a), callF(&b), callF(&d), callF(&n), callF(&n2), callF(&o), callF(&o2), callF(&l2), callF(&mx), callF(&my), callK(&y));
+    std::printf("pvbase calls2 %d %d %d %d %d %d %d %d %d\n", callVL(&a), callVL(&d), callVD(&d), callVN(&n), callVN(&n2), callMX(&mx), callMY(&my), callK(&y2), callF(&vp));
+    std::printf("pvbase direct %d %d %d %d %d %d %d\n", d.f(), d.g(), d.VL::f(), d.V::f(), n2.h(), y2.k(), vp.f());
+    std::printf("pvbase sizes %d %d %d %d %d %d %d %d %d\n", (int)sizeof(VL), (int)sizeof(VD), (int)sizeof(VN), (int)sizeof(VN2), (int)sizeof(VO2), (int)sizeof(MX), (int)sizeof(MY), (int)sizeof(VY2), (int)sizeof(VP));
+    VD* hd = new VD; std::printf("\npvbase heap %d ", callF(hd)); destroyV(hd); std::printf("\n");
+    VL2* hl = new VL2; std::printf("\npvbase heap2 %d ", callF(hl)); destroyV(hl); std::printf("\n");
+    VY2* hy = new VY2; std::printf("pvbase heap3 %d ", callK(hy)); destroyVV(hy); std::printf("\n");
+    VD c(d); std::printf("pvbase copy %d %d\n", callF(&c), c.d);
+    VD* arr = new VD[2]; std::printf("\npvbase array %d %d ", callF(&arr[0]), callF(&arr[1])); delete[] arr; std::printf("\n");
+    int VP::* pm = &VP::p; int (VP::*pf)() const = &VP::f; int (VP::*pg)() const = &V::g; int VD::* pv = &V::v; int (VD::*pdg)() const = &V::g;
+    std::printf("pvbase memptr %d %d %d %d %d %d %d\n", vp.*pm, (vp.*pf)(), (vp.*pg)(), (my.*static_cast<int (MY::*)() const>(&V::f))(), d.*pv, (d.*pdg)(), (hd = &d)->*pv);
+    std::printf("pvbase end: ");
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -906,7 +957,8 @@ int main()
     cfold::show();
     memptr::show();
     covariant::show();
-    std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
+    pvbase::show();
+    std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");
     // library results are typed by the headers: a double from strtod, a size_t from string::size

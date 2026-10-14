@@ -12,11 +12,12 @@ namespace {
 
 class SemaMangler {
 public:
-    std::string function(const sema::Symbol& f, long thunk = 0, const sema::Type* resultOverride = 0);
+    std::string function(const sema::Symbol& f, long thunk = 0, const sema::Type* resultOverride = 0, bool vtordisp = false);
     std::string variable(const sema::Symbol& v);
     std::string staticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
     std::string staticGuard(const sema::Symbol& fn, long discriminator, int index);
     std::string vtable(const sema::Symbol& c, const sema::Symbol* forBase);
+    std::string vbtable(const sema::Symbol& c, const std::vector<sema::Symbol*>& path);
     std::string vcallThunk(const sema::Symbol& c, long slotOffset);
 private:
     std::string storageType(const sema::Type* t);
@@ -255,8 +256,9 @@ std::string SemaMangler::operatorCode(const std::string& fname, bool& ok)
 }
 
 // resultOverride: a return-adjusting thunk is spelled as the function, non-virtual, returning the overridden
-// function's type
-std::string SemaMangler::function(const sema::Symbol& f, long thunk, const sema::Type* resultOverride)
+// function's type; vtordisp: cl's $4 thunk, the vtordisp's place (-4, as an unsigned hex number) and the adjustment
+// in place of the access code
+std::string SemaMangler::function(const sema::Symbol& f, long thunk, const sema::Type* resultOverride, bool vtordisp)
 {
     const sema::Symbol* owner = f.ownerClass;
     if (f.isExternC) return f.name;
@@ -286,8 +288,8 @@ std::string SemaMangler::function(const sema::Symbol& f, long thunk, const sema:
         char acc = access == cxx::AccessPrivate ? 'A' : access == cxx::AccessProtected ? 'I' : 'Q';
         if (f.isVirtual && !resultOverride) acc = static_cast<char>(acc + 4);
         if (thunk) acc = static_cast<char>(acc + 2);   // an adjustor thunk (G, O, W) and its adjustment
-        out += acc;
-        if (thunk) out += number(thunk);
+        if (vtordisp) { out += "$4PPPPPPPM@"; out += number(thunk); }
+        else { out += acc; if (thunk) out += number(thunk); }
         out += "E";
         out += ft && ft->constMethod ? "B" : "A";
         out += "A";
@@ -405,6 +407,21 @@ std::string SemaMangler::vtable(const sema::Symbol& c, const sema::Symbol* forBa
     return out + "@@";
 }
 
+// a vbtable, named by the bases that tell it from the class's others: ??_8D@@7B@, ??_8VX@@7BVL@@@, ??_8R@@7BB@@P@@@
+std::string SemaMangler::vbtable(const sema::Symbol& c, const std::vector<sema::Symbol*>& path)
+{
+    std::string out = "??_8";
+    out += symbolName(&c);
+    out += scopesOf(c.scope);
+    out += "@7B";
+    for (size_t p = 0; p < path.size(); ++p) {
+        out += symbolName(path[p]);
+        out += scopesOf(path[p]->scope);
+        out += "@";
+    }
+    return out + "@";
+}
+
 std::string SemaMangler::vcallThunk(const sema::Symbol& c, long slotOffset)
 {
     std::string out = "??_9";
@@ -424,9 +441,11 @@ void setMangleUnitId(unsigned long id) { g_mangleUnitId = id; }
 std::string msvcMangleVariableSymbol(const sema::Symbol& v) { SemaMangler m; return m.variable(v); }
 std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator) { SemaMangler m; return m.staticLocal(v, fn, discriminator); }
 std::string msvcMangleVtableSymbol(const sema::Symbol& c, const sema::Symbol* forBase) { SemaMangler m; return m.vtable(c, forBase); }
+std::string msvcMangleVbtableSymbol(const sema::Symbol& c, const std::vector<sema::Symbol*>& path) { SemaMangler m; return m.vbtable(c, path); }
 std::string msvcMangleThunkSymbol(const sema::Symbol& fn, long adjust) { SemaMangler m; return m.function(fn, adjust); }
 std::string msvcMangleVcallThunk(const sema::Symbol& c, long slotOffset) { SemaMangler m; return m.vcallThunk(c, slotOffset); }
 std::string msvcMangleReturnThunk(const sema::Symbol& fn, const sema::Symbol& root) { SemaMangler m; return m.function(fn, 0, root.type && root.type->kind == sema::Type::Function ? root.type->inner : 0); }
+std::string msvcMangleVtordispThunk(const sema::Symbol& fn, long adjust) { SemaMangler m; return m.function(fn, adjust, 0, true); }
 std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index) { SemaMangler m; return m.staticGuard(fn, discriminator, index); }
 
 } // namespace cppparse

@@ -215,17 +215,6 @@ void IrGen::collectLabels(const cxx::Stmt* s, std::set<std::string>& out)
     for (size_t i = 0; i < s->kids.size(); ++i) collectLabels(s->kids[i], out);
 }
 
-// a class some class in the program has as a virtual base
-bool IrGen::isVirtualBaseAnywhere(Symbol* cls) const
-{
-    for (size_t i = 0; i < m_prog.symbols.size(); ++i) {
-        const Symbol* s = m_prog.symbols[i];
-        if (s->kind != Symbol::Class) continue;
-        for (size_t v = 0; v < s->vbases.size(); ++v) if (s->vbases[v] == cls) return true;
-    }
-    return false;
-}
-
 // MSVC's conversion to a virtual base: the vbptr's table holds the base's distance from the vbptr
 int IrGen::toBase(int addr, Symbol* derived, Symbol* base, int line)
 {
@@ -911,8 +900,11 @@ void IrGen::catchableBases(Symbol* top, std::vector<Symbol*>& bases, std::vector
 // the runtime's type descriptor of a thrown object: its type, then what else a handler may catch it as, separated by
 // ';'. A class lists its catchable bases with their offsets ("Base@16": the handler gets the base subobject); a
 // pointer to a class lists pointers to them ("const Base*+16": the pointer is adjusted unless null), and a pointer to
-// an object type ends with void*. A handler of pointer type also takes the thrown pointer with more cv-qualifiers on
-// the pointee, which the runtime checks
+// an object type ends with void*. A thrown object is a complete object of its class, so its virtual bases lie at the
+// class's offsets; a thrown pointer may point to an object of a derived class, so a virtual base of the pointee is
+// found through the object's vbtable ("Base*+v8:4+16": the vbptr at 8, the base's entry at 4 in its table, 16
+// further for a non-virtual base of that virtual base). A handler of pointer type also takes the thrown pointer with
+// more cv-qualifiers on the pointee, which the runtime checks
 std::string IrGen::throwDescriptorFor(const sema::Type* t) const
 {
     t = m_semaTypes.unref(t);
@@ -928,7 +920,11 @@ std::string IrGen::throwDescriptorFor(const sema::Type* t) const
         catchableBases(top, bases, offsets);
         for (size_t k = 0; k < bases.size(); ++k) {
             d += ";" + cv + bases[k]->qualifiedName() + (pointee ? "*" : "");
-            if (offsets[k]) d += (pointee ? "+" : "@") + numText(static_cast<long>(offsets[k]));
+            int off = 0, index = 0, rest = 0;
+            if (pointee && !baseOffset(top, bases[k], off) && virtualBasePath(top, bases[k], index, rest)) {
+                d += "+v" + numText(static_cast<long>(top->vbptrOffset)) + ":" + numText(4L * index);
+                if (rest) d += "+" + numText(static_cast<long>(rest));
+            } else if (offsets[k]) d += (pointee ? "+" : "@") + numText(static_cast<long>(offsets[k]));
         }
     }
     if (pointee && pointee->kind != sema::Type::Function && pointee->kind != sema::Type::Void) d += ";" + cv + "void*";
@@ -1649,10 +1645,11 @@ int IrGen::callFunction(Symbol* fn, int thisPtr, int sretAddr, const std::vector
     const bool vcall = virtualCall && fn->isVirtual && fn->vtableSlot >= 0 && thisPtr >= 0;
     if (thisPtr >= 0) {
         // MSVC's this adjustor: a virtual function first held by a secondary vftable is called with the address of
-        // that vfptr (a virtual call loads the vptr there); a destructor takes the complete object
-        const int adjust = vcall ? fn->vfptrOffset : fn->thisAdjust;
+        // that vfptr (a virtual call loads the vptr there; inside a virtual base it is found through the vbtable); a
+        // destructor takes the complete object unless its vfptr lies only in virtual bases
         const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));
-        if (adjust != 0) thisPtr = offsetAddress(thisPtr, cp, cp, adjust, line);
+        if (vcall) thisPtr = vfptrThis(fn, thisPtr, line);
+        else if (fn->thisAdjust != 0) thisPtr = offsetAddress(thisPtr, cp, cp, fn->thisAdjust, line);
         in.args.push_back(IrOperand::temp(thisPtr, oldType(cp)));
         // the destructor's slot holds the deleting destructor: flags 0 destroys without freeing
         if (vcall && fn->isDestructor) in.args.push_back(IrOperand::imm(0, oldType(m_semaTypes.basic(sema::Type::UInt))));
@@ -2789,7 +2786,7 @@ int IrGen::value(cxx::Expr* e)
             IrInst in = make(IrInst::VCall, m_semaTypes.basic(sema::Type::Void), line);
             in.sub = irName(vdtor);
             in.extra = vdtor->vtableSlot;
-            in.args.push_back(IrOperand::temp(vdtor->vfptrOffset ? offsetAddress(p, cp, cp, vdtor->vfptrOffset, line) : p, oldType(cp)));
+            in.args.push_back(IrOperand::temp(vfptrThis(vdtor, p, line), oldType(cp)));
             in.args.push_back(IrOperand::imm(1, oldType(m_semaTypes.basic(sema::Type::UInt))));
             emit(in);
             br(xb, line);
@@ -2816,7 +2813,7 @@ int IrGen::value(cxx::Expr* e)
             IrInst in = make(IrInst::VCall, m_semaTypes.basic(sema::Type::Void), line);
             in.sub = irName(adtor);
             in.extra = adtor->vtableSlot;
-            in.args.push_back(IrOperand::temp(adtor->vfptrOffset ? offsetAddress(p, cp, cp, adtor->vfptrOffset, line) : p, oldType(cp)));
+            in.args.push_back(IrOperand::temp(vfptrThis(adtor, p, line), oldType(cp)));
             in.args.push_back(IrOperand::imm(3, oldType(m_semaTypes.basic(sema::Type::UInt))));
             emit(in);
             br(xb, line);
@@ -2866,8 +2863,6 @@ int IrGen::value(cxx::Expr* e)
                 in.args.push_back(IrOperand::temp(v, oldType(tt)));
             }
             const sema::Type* desc = tt;
-            if (tt->kind == sema::Type::Pointer && isClassType(tt->inner) && hasVbases(tt->inner->decl))
-                unsupported(line, "throwing a pointer to '" + tt->inner->decl->qualifiedName() + "', a class with virtual bases, is not supported yet by --compile6");
             cxx::Expr* operand = e->kids[0];
             while (operand && operand->kind == cxx::Expr::Paren && !operand->kids.empty()) operand = operand->kids[0];
             // cl throws a string literal as a pointer to non-const characters: catch (char*) takes it
@@ -3455,13 +3450,6 @@ void IrGen::stmt(cxx::Stmt* s)
             Symbol* var = 0;
             if (h->decl && !h->decl->declarators.empty() && h->decl->declarators[0].decl) var = h->decl->declarators[0].decl->semaSym;
             const sema::Type* ct = var ? m_semaTypes.unqualified(m_semaTypes.unref(var->type)) : 0;
-            {
-                // a handler for a class used as a virtual base would need the thrown object's vbptr to find its
-                // subobject: refused (S132)
-                const sema::Type* hc = ct && ct->kind == sema::Type::Pointer ? m_semaTypes.unqualified(ct->inner) : ct;
-                if (hc && hc->kind == sema::Type::Class && hc->decl && isVirtualBaseAnywhere(hc->decl))
-                    unsupported(h->loc.line, "catching '" + hc->decl->qualifiedName() + "', a virtual base class, is not supported yet by --compile6");
-            }
             if (h->catchAll) cp.sub = "...";
             else if (ct && ct->kind == sema::Type::Class && ct->decl) cp.sub = ct->decl->qualifiedName();
             else if (ct) cp.sub = ct->text();
@@ -3577,34 +3565,65 @@ std::string IrGen::vtableName(const Symbol* cls, size_t t)
     return n + "{for " + (v.introducedBy ? v.introducedBy->qualifiedName() : std::string("?")) + "@" + numText(v.offset) + "}";
 }
 
-// every vfptr of the object: the one at offset 0, then those of the secondary vftables at their offsets
+// every vfptr of the object: the one at offset 0, those of the secondary vftables at their offsets, and those
+// inside the virtual bases, found through the vbtable (a constructor may be building a base subobject of a bigger
+// object, where the virtual base lies elsewhere); with it cl's vtordisp before such a base: how far the base lies
+// from where this class's layout has it
 void IrGen::storeVptr(Symbol* cls, int objAddr, int line)
 {
     if (!cls->isPolymorphic) return;
     const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
     const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(cls));
+    const sema::Type* chp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Char));
+    const sema::Type* it = m_semaTypes.basic(sema::Type::Int);
     const size_t n = cls->vftables.empty() ? 1 : cls->vftables.size();
     for (size_t t = 0; t < n; ++t) {
         IrInst vt = make(IrInst::AddrGlobal, vp, line);
         vt.args.push_back(IrOperand::global(vtableName(cls, t), oldType(m_semaTypes.basic(sema::Type::Void))));
         int vtp = emit(vt);
         int at = objAddr;
-        if (t > 0) { IrInst fa = make(IrInst::AddrField, m_semaTypes.pointer(vp), line); fa.sub = "vptr"; fa.extra = cls->vftables[t].offset; fa.args.push_back(IrOperand::temp(objAddr, oldType(cp))); at = emit(fa); }
+        const sema::VfTable* v = cls->vftables.empty() ? 0 : &cls->vftables[t];
+        if (v && v->vbase) {
+            size_t vi = 0;
+            while (vi < cls->vbases.size() && cls->vbases[vi] != v->vbase) ++vi;
+            const int vbOff = vi < cls->vbaseOffsets.size() ? cls->vbaseOffsets[vi] : 0;
+            const int base = toBase(objAddr, cls, v->vbase, line);
+            const int rel = v->offset - vbOff;
+            at = rel ? offsetAddress(base, chp, chp, rel, line) : base;
+            if (v->vtordisp) {
+                const int expected = offsetAddress(objAddr, cp, chp, vbOff, line);
+                const int disp = convert(binary("-", base, chp, expected, chp, m_semaTypes.basic(sema::Type::LongLong), line), m_semaTypes.basic(sema::Type::LongLong), it, line);
+                LValue dl; dl.kind = LValue::Mem; dl.addr = offsetAddress(base, chp, m_semaTypes.pointer(it), -4, line); dl.type = it;
+                store(dl, disp, it, line);
+            }
+        } else if (v && v->offset) { IrInst fa = make(IrInst::AddrField, m_semaTypes.pointer(vp), line); fa.sub = "vptr"; fa.extra = v->offset; fa.args.push_back(IrOperand::temp(objAddr, oldType(cp))); at = emit(fa); }
         IrInst st = make(IrInst::StoreMem, vp, line);
         st.sub = "vptr";
-        st.args.push_back(IrOperand::temp(at, oldType(t > 0 ? m_semaTypes.pointer(vp) : cp)));
+        st.args.push_back(IrOperand::temp(at, oldType(at == objAddr ? cp : m_semaTypes.pointer(vp))));
         st.args.push_back(IrOperand::temp(vtp, oldType(vp)));
         emit(st);
     }
 }
 
-// the IR name of a class's vbtable t ("vbtable@D", "vbtable@D{for VL@16}")
+// the this a virtual call of fn loads the vfptr from: through the vbtable when fn's table lies in a virtual base of
+// its class, else at its fixed offset
+int IrGen::vfptrThis(Symbol* fn, int thisPtr, int line)
+{
+    if (fn->vfptrVbase) return toBase(thisPtr, fn->ownerClass, fn->vfptrVbase, line);
+    if (!fn->vfptrOffset) return thisPtr;
+    const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));
+    return offsetAddress(thisPtr, cp, cp, fn->vfptrOffset, line);
+}
+
+// the IR name of a class's vbtable t ("vbtable@D", "vbtable@D{for VL@16}", "vbtable@R{for B/P@0}")
 std::string IrGen::vbtableName(const Symbol* cls, size_t t)
 {
     std::string n = "vbtable@" + cls->qualifiedName();
     if (t >= cls->vbtables.size() || cls->vbtables[t].path.empty()) return n;
     const sema::VbTable& v = cls->vbtables[t];
-    return n + "{for " + v.path.back()->qualifiedName() + "@" + numText(v.offset) + "}";
+    n += "{for ";
+    for (size_t p = 0; p < v.path.size(); ++p) n += (p ? "/" : "") + v.path[p]->qualifiedName();
+    return n + "@" + numText(v.offset) + "}";
 }
 
 // every vbptr of a complete object (MSVC: stored by the constructor that has the "most derived" flag)
@@ -4321,7 +4340,10 @@ void IrGen::genDeletingDestructors()
         condbr(toBool(arrayBit, u, line), ab, sb, line);
 
         m_block = ab;
-        const int first = thisTemp(line);
+        // this arrives at the destructor's vfptr: inside a virtual base when the class's only vfptrs lie there (cl's
+        // ??_GVL2: this - 32), else the complete object
+        const int first0 = thisTemp(line);
+        const int first = dtor->thisAdjust ? offsetAddress(first0, cp, cp, -dtor->thisAdjust, line) : first0;
         IrInst hd = make(IrInst::AddrIndex, cp, line); hd.extra = 1;
         hd.args.push_back(IrOperand::temp(first, oldType(cp))); hd.args.push_back(IrOperand::imm(-8, oldType(lng)));
         const int cookie = emit(hd);
@@ -4339,16 +4361,24 @@ void IrGen::genDeletingDestructors()
         br(xb, line);
 
         m_block = sb;
-        callSpecial(dtor, thisTemp(line), -1, line);
+        {
+            // the complete object: with virtual bases through cl's vbase destructor (??_D)
+            const int t0 = thisTemp(line);
+            const int c0 = dtor->thisAdjust ? offsetAddress(t0, cp, cp, -dtor->thisAdjust, line) : t0;
+            if (hasVbases(dtor->ownerClass)) callSpecial(vbaseDestructor(dtor->ownerClass), c0, -1, line);
+            else callSpecial(dtor, c0, -1, line);
+        }
         const int self0 = thisTemp(line);
-        store(rl, self0, cp, line);
+        const int complete0 = dtor->thisAdjust ? offsetAddress(self0, cp, cp, -dtor->thisAdjust, line) : self0;
+        store(rl, complete0, cp, line);
         const int flags2 = load(fl, u, line);
         const int one2 = constant(1, u, line);
         const int freeOne = binary("&", flags2, u, one2, u, u, line);
         int db = m_out->newBlock("delete");
         condbr(toBool(freeOne, u, line), db, xb, line);
         m_block = db;
-        const int self = thisTemp(line);
+        const int self1 = thisTemp(line);
+        const int self = dtor->thisAdjust ? offsetAddress(self1, cp, cp, -dtor->thisAdjust, line) : self1;
         if (!freeObject(dtor->ownerClass, self, line)) freeGlobal(self, sizeOf(ct), line);
         br(xb, line);
 
@@ -4427,6 +4457,19 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
                     }
                     // the destructor's slot: the vector deleting destructor (??_ED@@UEAAPEAXI@Z), as with cl
                     const std::string target = m->isDestructor ? deletingDestructor(m, x86, msvc) : irName(m);
+                    if (!s->vftables.empty() && s->vftables[t].vbase && s->vftables[t].vtordisp) {
+                        // a table inside a virtual base of a class with a vtordisp for it: an entry from outside the base
+                        // (an overrider) is cl's $4 thunk, which first moves this by the vtordisp field before the base
+                        int dummy = 0;
+                        const bool original = m->ownerClass == s->vftables[t].vbase || baseOffset(s->vftables[t].vbase, m->ownerClass, dummy);
+                        if (!original) {
+                            const std::string thunk = target + " vtordisp{" + numText(adjust) + "}";
+                            v.entries.push_back(thunk);
+                            x86.addVtordispThunk(thunk, target, adjust);
+                            if (msvc) x86.registerSymbolName(thunk, m->isDestructor ? deletingName(msvcMangleVtordispThunk(*m, adjust)) : msvcMangleVtordispThunk(*m, adjust));
+                            continue;
+                        }
+                    }
                     if (adjust == 0) { v.entries.push_back(target); continue; }
                     const std::string thunk = target + " adjustor{" + numText(adjust) + "}";
                     v.entries.push_back(thunk);
@@ -4446,14 +4489,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
                 g.readOnly = true; g.linkOnce = true; g.align = 4;
                 for (size_t e = 0; e < s->vbtables[t].entries.size(); ++e) { IrDataItem d; d.kind = IrDataItem::Int; d.size = 4; d.value = s->vbtables[t].entries[e]; g.data.push_back(d); }
                 x86.addGlobal(g);
-                if (msvc) {
-                    // the vftable's name with ??_8 and 7B: ??_7VX@@6BVL@@@ -> ??_8VX@@7BVL@@@
-                    const sema::VbTable& v = s->vbtables[t];
-                    std::string n = msvcMangleVtableSymbol(*s, v.path.empty() ? 0 : v.path.back());
-                    const std::string plain = msvcMangleVtableSymbol(*s, 0);
-                    if (n.compare(0, 4, "??_7") == 0 && plain.size() >= 7) n = "??_8" + n.substr(4, plain.size() - 7) + "7B" + n.substr(plain.size() - 1);
-                    x86.registerGlobalName(g.name, n);
-                }
+                if (msvc) x86.registerGlobalName(g.name, msvcMangleVbtableSymbol(*s, s->vbtables[t].path));
             }
         }
         if (s->kind == Symbol::Variable && !s->isLocal && !s->isParam && (!s->isMember || s->isStatic) && s->scope && !s->isDependentContext) {

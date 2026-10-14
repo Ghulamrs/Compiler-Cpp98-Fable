@@ -50,6 +50,10 @@ static int clOwCall(const OW* p, int which)
 // copies of the tables, reached by cppparse's calls through RB* and RC*
 struct RD : RC { RD* self() { return this; } RD* six(int p, int q, int r, int s, double t, int u) { return p + q + r + s + (int)t + u == 21 ? this : 0; } };
 
+// a class cl derives from cppparse's PVD, overriding PV::f: cl's vtordisp thunk in cl's copy of PV's table, reached
+// by cppparse's calls through PV*; cppparse's constructors and destructors run inside cl's
+struct PVE : PVD { int e; PVE() : e(9) { g_pvLog = g_pvLog * 10 + (probe() == 1024 ? 7 : 0); } ~PVE() { g_pvLog = g_pvLog * 10 + (probe() == 1024 ? 8 : 0); } int f() const { return e + 1; } };
+
 // a class cl derives from cppparse's OW: cppparse's calls reach its overriders through cl's table
 struct CW : OW {
     int f(int) const { return 201; }
@@ -473,6 +477,58 @@ int main()
         g_dnForm = 0;
         deleteDNArray(new DN[2]);
         expect("DN array of cl deleted by cppparse: operator delete[](void*)", g_dnForm, 1);
+    }
+    printf("polymorphic virtual bases: the vfptr in the virtual base, vtordisp and cl's thunks, by both compilers\n");
+    {
+        g_pvLog = 0;
+        PVD d;
+        expect("PVD built by cl, cppparse's constructors: log", g_pvLog, 1234);
+        expect("cl's calls through PV*", static_cast<PV*>(&d)->f() * 100 + static_cast<PV*>(&d)->g(), 1224);
+        expect("cl's calls through PVR*", static_cast<PVR*>(&d)->f() * 100 + static_cast<PVR*>(&d)->g(), 1224);
+        expect("cl's direct calls", d.f() * 100 + d.g() * 10 + d.PV::f() / 7, 1441);
+        expect("cppparse's calls through PV*", pvCall(&d), 1224);
+        expect("cppparse's calls through PVL*", pvCallL(&d), 1224);
+        expect("cppparse's calls through every base", pvCallD(&d), 1224);
+        expect("PVD copied by cppparse", pvCopy(d), 1224);
+        expect("pointers to members on PVD (cppparse)", pvMemptr(d, &PVL::l, &PV::f), 20012);
+        expect("pointers to members on PVD (cl)", d.*(&PVL::l) * 10000 + (d.*(&PV::f))(), 20012);
+        PVX x;
+        expect("PVX: cl's calls", static_cast<PV*>(&x)->f() * 100 + x.nf(), 4607);
+        expect("PVX: cppparse's calls", pvCallX(&x) * 10000 + pvCall(&x), 46074601);
+        PVN2 n2;
+        expect("PVN2: cl's calls through PV* and PVN*", static_cast<PV*>(&n2)->g() * 100 + static_cast<PVN*>(&n2)->h() * 10 + static_cast<PV*>(&n2)->f() / 7, 981);
+        expect("PVN2: cppparse's calls", pvCallN(&n2), 80709);
+        g_pvLog = 0;
+        PV* p = pvMakeD();
+        expect("PVD built by cppparse: log", g_pvLog, 1234);
+        expect("cl's calls into cppparse's object", p->f() * 100 + p->g(), 1224);
+        g_pvLog = 0;
+        delete p;
+        expect("cppparse's PVD deleted by cl: log", g_pvLog, 569);
+        p = new PVD;
+        g_pvLog = 0;
+        pvDelete(p);
+        expect("cl's PVD deleted by cppparse: log", g_pvLog, 569);
+        PVN* pn = pvMakeN2();
+        expect("cl's calls into cppparse's PVN2", pn->h() * 1000 + pn->g() * 10 + pn->f() / 7, 8091);
+        pvDelete(pn);
+        expect("a PVD on cppparse's stack: log", pvLife(), 1234569);
+        // cl's class derived from PVD: cppparse's constructors run inside cl's, with cl's vtordisp
+        g_pvLog = 0;
+        {
+            PVE e;
+            expect("PVE built by cl: log", g_pvLog, 12347);
+            expect("cppparse's calls of cl's override through PV*", pvCall(&e), 1024);
+            expect("cppparse's calls of cl's override through every base", pvCallD(&e), 1024);
+            expect("cl's call through PVL*", static_cast<PVL*>(&e)->f(), 10);
+            g_pvLog = 0;
+        }
+        expect("PVE destroyed by cl: log", g_pvLog, 8569);
+        PV* pe = new PVE;
+        g_pvLog = 0;
+        pvDelete(pe);
+        expect("cl's PVE deleted by cppparse: log", g_pvLog, 8569);
+        g_pvLog = 0;
     }
     printf("covariant returns through a secondary base: cl's return-adjusting thunks, by both compilers\n");
     {

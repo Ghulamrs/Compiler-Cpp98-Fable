@@ -18,8 +18,8 @@
 //     call cppparse_catch_end
 //
 // "throw x" copies the object (its size and a type descriptor "Class;Base1;Base2@16" or the
-// scalar type name, "D*;B1*;B2*+16;void*" for a pointer to a class, come from the generated
-// code) and longjmps to the innermost frame. The
+// scalar type name, "D*;B1*;B2*+16;V*+v0:4;void*" for a pointer to a class (V a virtual base: found
+// through the object's vbtable), come from the generated code) and longjmps to the innermost frame. The
 // frame stack, the exception in flight and the caught ones are per thread.
 //
 // With --eh=table the generated code has no frames: a try region is a list of code ranges in the
@@ -222,9 +222,34 @@ static int splitPointer(const char* t, char* out, size_t cap, int* cv)
 
 /* the last successful match: the offset of the base subobject it found ("Base@16" in the descriptor), which
    cppparse_catch_begin adds to the object address it returns, or the offset to add to a thrown pointer that is not
-   null ("Base*+16") */
+   null ("Base*+16"); a virtual base of the pointee ("Base*+v8:4+16": the vbptr at 8, its vbtable's entry at 4, then
+   16 further) lies where the pointed-to object's vbtable says, as the object may be of a class derived from the
+   pointee's */
 static __declspec(thread) unsigned long g_matchOffset = 0;
 static __declspec(thread) int           g_matchPointer = 0;
+static __declspec(thread) int           g_matchVirtual = 0;
+static __declspec(thread) unsigned long g_matchVbptr = 0;
+static __declspec(thread) unsigned long g_matchVbentry = 0;
+
+static void parseOffset(const char* s)
+{
+    if (*s == 'v') {
+        g_matchVirtual = 1;
+        g_matchVbptr = strtoul(s + 1, (char**)&s, 10);
+        g_matchVbentry = *s == ':' ? strtoul(s + 1, (char**)&s, 10) : 0;
+        g_matchOffset = *s == '+' ? strtoul(s + 1, 0, 10) : 0;
+    } else g_matchOffset = strtoul(s, 0, 10);
+}
+
+static char* adjustPointer(char* v)
+{
+    if (!v) return 0;
+    if (g_matchVirtual) {
+        char* vbptr = v + g_matchVbptr;
+        v = vbptr + *(const int*)(*(const char**)vbptr + g_matchVbentry);
+    }
+    return v + g_matchOffset;
+}
 
 int cppparse_match(const char* catchType)
 {
@@ -234,6 +259,7 @@ int cppparse_match(const char* catchType)
     if (!g_inflight.type) return 0;
     g_matchOffset = 0;
     g_matchPointer = 0;
+    g_matchVirtual = 0;
     if (strcmp(catchType, "...") == 0) return 1;
     wantPointer = splitPointer(catchType, want, sizeof want, &wantCv);
     p = g_inflight.type;
@@ -249,13 +275,12 @@ int cppparse_match(const char* catchType)
             char* plus = strchr(entry, '+');
             char have[256];
             int haveCv = 0;
-            unsigned long off = 0;
-            if (at) { *at = 0; off = strtoul(at + 1, 0, 10); }
-            if (plus) { *plus = 0; off = strtoul(plus + 1, 0, 10); }
+            if (at) *at = 0;
+            if (plus) *plus = 0;
             if (wantPointer && splitPointer(entry, have, sizeof have, &haveCv)) {
                 /* a pointer handler: a qualification conversion may add cv-qualifiers to the pointee, not drop them */
-                if ((haveCv & ~wantCv) == 0 && sameType(have, want)) { g_matchOffset = off; g_matchPointer = 1; return 1; }
-            } else if (sameType(entry, catchType)) { g_matchOffset = off; return 1; }
+                if ((haveCv & ~wantCv) == 0 && sameType(have, want)) { if (plus) parseOffset(plus + 1); g_matchPointer = 1; return 1; }
+            } else if (sameType(entry, catchType)) { if (at) parseOffset(at + 1); return 1; }
         }
         p = e ? e + 1 : p + n;
     }
@@ -269,12 +294,12 @@ void* cppparse_catch_begin(void)
     else { dropException(&g_inflight); obj = 0; }  /* too deeply nested: the object is dropped */
     if (obj && g_matchPointer && g_inflight.slot) {
         /* the thrown pointer converted to the handler's: the thrown one stays as it was for a "throw;" */
-        char* v = *(char**)obj;
-        *g_inflight.slot = v ? v + g_matchOffset : 0;
+        *g_inflight.slot = adjustPointer(*(char**)obj);
         obj = g_inflight.slot;
     } else if (obj) obj = (char*)obj + g_matchOffset;
     g_matchOffset = 0;
     g_matchPointer = 0;
+    g_matchVirtual = 0;
     g_inflight.object = 0;
     g_inflight.type = 0;
     g_inflight.size = 0;

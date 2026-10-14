@@ -141,20 +141,12 @@ bool hasVirtualBase(const sema::Symbol* cls, int depth)
     return false;
 }
 
-// what --compile6 cannot generate yet for a class with virtual bases (0: it can): it lays out and builds
-// non-polymorphic classes with virtual bases, as cl does (vbptrs, vbtables, the
-// "most derived" flag, ??_D); polymorphic ones need the vfptr inside the virtual base and vtordisp (S130)
+// what --compile6 cannot generate yet for a class with virtual bases (0: it can): an overrider that lies in another
+// virtual base (S130)
 const char* virtualBaseRefusal(const sema::Symbol* cls)
 {
-    if (cls->isPolymorphic) return "a polymorphic class with virtual bases (vfptrs in virtual bases, vtordisp)";
-    if (cls->classAst && cls->classAst->pack > 0) return "#pragma pack with virtual bases";
-    if (cls->declAlign > 0 || cls->endsWithZeroSized) return "virtual bases after an over-aligned or zero-sized part";
-    for (size_t v = 0; v < cls->vbases.size(); ++v) {
-        const sema::Symbol* vb = cls->vbases[v];
-        if (vb->nvSize == 0 || vb->leadsWithZeroSized || vb->endsWithZeroSized || vb->declAlign > 0) return "an empty or over-aligned virtual base";
-        if (vb->isPolymorphic) return "a polymorphic virtual base (vtordisp)";
-    }
-    for (size_t t = 0; t < cls->vbtables.size(); ++t) if (cls->vbtables[t].path.size() > 1) return "a vbtable named by a path of several bases";
+    for (size_t t = 0; t < cls->vftables.size(); ++t)
+        if (cls->vftables[t].vtordispex) return "a virtual function overridden in another virtual base (cl's vtordispex thunk, which reads the vbtable)";
     return 0;
 }
 
@@ -166,6 +158,7 @@ const char* returnThunkRefusal(const sema::VfTable& t, size_t s)
 {
     if (s >= t.returnOf.size() || !t.returnOf[s]) return 0;
     if (t.returnAdjust[s] < 0) return "its return conversion goes through a virtual base";
+    if (t.vbase) return "the overridden function's vftable lies in a virtual base";
     if (t.thunks[s] != 0) return "the slot needs a this adjustment as well as the return adjustment";
     const sema::Symbol* fn = t.fns[s];
     if (fn && fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic) return "it is variadic";

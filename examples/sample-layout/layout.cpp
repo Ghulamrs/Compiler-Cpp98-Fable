@@ -252,6 +252,47 @@ int  vbNestedG(VNG* g) { VNE* e = g; VNC* c = g; VNB* b = c; return g->a * 10000
 VNA* vbToVNA(VNG* g) { VNC* c = g; return c; }
 long vbNestedLife() { g_vbLog = 0; long ok = 0; { VNF f; VNG g; ok = f.a + g.a == 2 && g_vbLog == 12351235; g_vbLog = 0; } return ok * 10000 + g_vbLog; }
 
+long g_pvLog = 0;
+PV::PV() : v(7) { g_pvLog = g_pvLog * 10 + (probe() == 701 ? 1 : 0); }
+PV::~PV() { g_pvLog = g_pvLog * 10 + (probe() == 701 ? 9 : 0); }
+int PV::f() const { return v; }
+int PV::g() const { return 1; }
+int PV::probe() const { return f() * 100 + g(); }
+PVL::PVL() : l(2) { g_pvLog = g_pvLog * 10 + (probe() == 1201 ? 2 : 0); }
+PVL::~PVL() { g_pvLog = g_pvLog * 10 + (probe() == 1201 ? 6 : 0); }
+int PVL::f() const { return l + 10; }
+PVR::PVR() : r(3) { g_pvLog = g_pvLog * 10 + (probe() == 701 ? 3 : 0); }
+PVD::PVD() : d(4) { g_pvLog = g_pvLog * 10 + (probe() == 1224 ? 4 : 0); }
+PVD::~PVD() { g_pvLog = g_pvLog * 10 + (probe() == 1224 ? 5 : 0); }
+int PVD::g() const { return d + 20; }
+PNB::PNB() : nb(4) {}
+int PNB::nf() const { return nb; }
+PVX::PVX() : x(6) { g_pvLog = g_pvLog * 10 + (probe() == 4601 ? 4 : 0); }
+int PVX::f() const { return x + 40; }
+int PVX::nf() const { return x + 1; }
+PVN::PVN() : n(5) {}
+int PVN::h() const { return 3; }
+PVN2::PVN2() : n2(8) {}
+int PVN2::h() const { return n2; }
+int PVN2::g() const { return n2 + 1; }
+int  pvCall(const PV* p) { return p->f() * 100 + p->g(); }
+int  pvCallL(const PVL* p) { return p->f() * 100 + p->g(); }
+int  pvCallD(const PVD* p)
+{
+    const PVL* l = p; const PVR* r = p; const PV* v = p;
+    int a = p->f() * 100 + p->g();
+    return a == l->f() * 100 + l->g() && a == r->f() * 100 + r->g() && a == v->f() * 100 + v->g() ? a : 0;
+}
+int  pvCallX(const PVX* p) { return p->f() * 100 + p->nf(); }
+int  pvCallN(const PVN* p) { return p->f() * 100 + p->g() + p->h() * 10000; }
+PV*  pvMakeD() { return new PVD; }
+PV*  pvMakeX() { return new PVX; }
+PVN* pvMakeN2() { return new PVN2; }
+void pvDelete(PV* p) { delete p; }
+long pvLife() { g_pvLog = 0; long built; { PVD d; built = g_pvLog; g_pvLog = 0; } return built * 1000 + g_pvLog; }
+int  pvCopy(const PVD& d) { PVD c(d); return c.probe(); }
+int  pvMemptr(const PVD& d, int PVL::* pm, int (PV::*pf)() const) { return d.*pm * 10000 + (d.*pf)(); }
+
 int g_ovLog = 0;
 OV::OV() : o(0) {}
 int OV::a() const { return 1 + o; }

@@ -123,7 +123,15 @@ struct VfTable {
     // slot's original function, whose return type the thunk returns (0: a plain slot)
     std::vector<Symbol*> returnOf;
     std::vector<int>     returnAdjust;
-    VfTable() : offset(0), introducedBy(0) {}
+    // a vfptr inside a virtual base of the class (vbase; offset is where that base lies in a complete object of the
+    // class, its vfptr is found through the vbtable): overriders from outside the base are reached through thunks
+    // that move this by thunks[s], first subtracting the vtordisp field before the base when the class has one
+    // (vtordisp: cl's $4 thunks; the field holds how far the base moved from where this class's layout has it)
+    Symbol*              vbase;
+    bool                 vtordisp;
+    Symbol*              vtordispex;      // an overrider from inside another virtual base (its distance varies: cl's
+                                          // vtordispex thunk reads the vbtable); 0 when the table has none
+    VfTable() : offset(0), introducedBy(0), vbase(0), vtordisp(false), vtordispex(0) {}
 };
 
 // one vbptr of a class with virtual bases and its vbtable (MSVC: ??_8D@@7B@): entries[0] is the offset of the
@@ -170,6 +178,10 @@ struct Symbol {
     std::vector<int>         vbaseOffsets;
     std::vector<VbTable>     vbtables;
     int           vbptrOffset;
+    // per vbases[i]: cl's vtordisp, an int just before the base (at vbaseOffsets[i] - 4) that a class with a
+    // user-declared constructor or destructor and an override of one of the base's virtual functions gets (and
+    // every class derived from one that has it)
+    std::vector<bool>        vtordisp;
     cxx::ClassDecl* classAst;
     // functions
     std::vector<Symbol*>     params;
@@ -182,6 +194,9 @@ struct Symbol {
                                           // whose table first holds it; callers pass this + thisAdjust (0 for destructors)
     int           vfptrOffset;            // virtual function: the vfptr (in its class) whose table holds it at vtableSlot;
                                           // equal to thisAdjust except for a destructor reached through a secondary table
+    Symbol*       vfptrVbase;             // virtual function: the virtual base of its class whose vftable first holds it (its
+                                          // vfptr is found through the vbtable; vfptrOffset is the base's place in the class's
+                                          // layout, which this takes on entry); 0 when the vfptr is at a fixed offset
     Symbol*       overrides;
     Symbol*       ownerClass;             // member functions / static members / fields
     // variables, enumerators, fields

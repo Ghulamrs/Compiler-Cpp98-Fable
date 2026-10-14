@@ -855,15 +855,42 @@ virtual bases after it. A virtual base with virtual bases of its own keeps
 its vbptr in the virtual part, stored by the most derived constructor, its
 table named after the base it comes through as cl names it (test 13,
 sample-layout: a diamond, shared and injected vbptrs, nested virtual bases,
-copies, arrays and logs, built and destroyed across both compilers). Still
-refused with S130 (test 17, `examples/sample-front/vbase.cpp`): polymorphic
-classes with virtual bases (the vfptr inside the virtual base, vtordisp),
-empty or over-aligned virtual bases, `#pragma pack`,
-and vbtables whose names need a path of several bases; `--sema6` and the
-reports accept them. S132 (found while generating code, no object
-written; `examples/sample-front/vbase-refused.cpp`) refuses a `catch` of
-a class used as a virtual base, `.*`/`->*` on a class with virtual bases
-and a cast from a virtual base down to a derived class (ill-formed, cl's
+copies, arrays and logs, built and destroyed across both compilers).
+Polymorphic classes with virtual bases are laid out and generated as cl
+does (Sema::layoutClass, completeClass; IrGen storeVptr, registerMetadata;
+X86 addVtordispThunk): the vfptr stays inside the virtual base subobject
+and a class gets a vfptr of its own only for new virtual functions; each
+class holds a copy of every virtual base's vftable at the base's place
+(`??_7VL@@6B@`, `??_7VN@@6BV@@@`), whose overriders from outside the base
+are reached through adjustor thunks computed from the base's offset; a
+class with a user-declared constructor or destructor that overrides a
+function of the virtual base gets cl's vtordisp (4 bytes before the base,
+inherited by the classes derived from it) and those slots hold cl's `$4`
+thunks (`?f@VL@@$4PPPPPPPM@A@EBAHXZ`: `movsxd rax, [rcx-4]; sub rcx, rax;
+sub rcx, delta`); a constructor stores the base's vftable through the
+vbtable and the vtordisp as the base's distance from its place in the
+complete object, a destructor restores them, and the deleting destructors
+`??_G`/`??_E` reached from a virtual base's table subtract the base's
+static offset; a name declared in a virtual base and again in a class
+deriving from it is found in the derived class (dominance). Empty and
+over-aligned virtual bases, `#pragma pack` and vbtables named by a path of
+several bases (`??_8VPR@@7BVPB@@VPP@@@`) follow cl as well. Test 17
+compares the sizes, vtordisps and vbtables of 50 classes with cl's
+`/d1reportAllClassLayout` (`vbase-layout.cpp`) and runs front.cpp
+`pvbase::` (calls through every base during construction and destruction,
+delete, copies, arrays, `.*`/`->*`) against cl at -O0 and -O2; test 13
+(sample-layout PV..PVN2) builds, calls and deletes such objects across the
+compilers, cl's derived class PVE with cl's vtordisp thunks included;
+eh.ps1 ehCatchVbase catches a thrown class with virtual bases as a virtual
+base, by value and by reference, and a thrown pointer to one as a pointer
+to a virtual base, found through the pointed-to object's vbtable (the
+runtime descriptor `EV*+v0:4`). Still refused with S130 (test 17,
+`examples/sample-front/vbase.cpp`): a virtual base that overrides a
+virtual function of another virtual base of the class (`WL : virtual VL`
+with `VL : virtual V`: cl's vtordispex thunk reads the vbtable); `--sema6`
+and the reports accept it. S132 (found while generating code, no object
+written; `examples/sample-front/vbase-refused.cpp`) refuses a cast from a
+virtual base down to a derived class (ill-formed, cl's
 C2635). Pointers to members are generated in cl's representations
 (IrGen.cpp mpLayout and the mp* functions): a data member pointer is an
 int offset with null -1, under virtual inheritance an int offset and the
@@ -909,7 +936,9 @@ base of another direct base is diagnosed as cl does (Sema::declareClass;
 gives C4584 (`struct G : V, W {}`); ambiguous conversions to a base (cl C2594: S143 for
 casts, S105 for implicit conversions) and unqualified access to a member of
 a base held more than once (cl C2385: S144) are errors (Sema::baseSubobjects,
-`ambiguous.cpp`); `d.B::a` and `d.C::f()` go through the named base
+`ambiguous.cpp`), as is a virtual function of a virtual base overridden in
+two direct bases and not in the class itself (cl C2250: S145,
+Sema::completeClass); `d.B::a` and `d.C::f()` go through the named base
 (IrGen namingBase: they used the first path; front.cpp `ambig::`).
 An override with a covariant return type whose
 conversion moves the pointer (`CD* self()` over `SB* self()` with SB at 16

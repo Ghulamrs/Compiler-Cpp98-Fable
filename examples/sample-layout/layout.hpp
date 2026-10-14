@@ -217,7 +217,9 @@ void deleteDNArray(DN* p);
     X(LAYOUT_FIELD(VY, y)) X(sizeof(VZ)) X(LAYOUT_BASE(VZ, VX)) X(LAYOUT_FIELD(VZ, z)) \
     X(sizeof(VNB)) X(sizeof(VNC)) X(sizeof(VNE)) X(sizeof(VNF)) X(LAYOUT_BASE(VNF, VNE)) X(LAYOUT_FIELD(VNF, f)) X(sizeof(VNG)) \
     X(sizeof(int MP::*)) X(sizeof(int (MP::*)() const)) X(sizeof(int MQ::*)) X(sizeof(int (MQ::*)() const)) X(sizeof(int VL::*)) \
-    X(sizeof(int (VL::*)() const)) X(sizeof(MH)) X(LAYOUT_FIELD(MH, x)) X(sizeof(RC)) X(LAYOUT_BASE(RC, RB)) X(LAYOUT_FIELD(RC, c))
+    X(sizeof(int (VL::*)() const)) X(sizeof(MH)) X(LAYOUT_FIELD(MH, x)) X(sizeof(RC)) X(LAYOUT_BASE(RC, RB)) X(LAYOUT_FIELD(RC, c)) \
+    X(sizeof(PV)) X(sizeof(PVL)) X(LAYOUT_FIELD(PVL, l)) X(sizeof(PVD)) X(LAYOUT_BASE(PVD, PVR)) X(LAYOUT_FIELD(PVD, d)) \
+    X(sizeof(PVX)) X(LAYOUT_FIELD(PVX, x)) X(sizeof(PVN)) X(LAYOUT_FIELD(PVN, n)) X(sizeof(PVN2)) X(LAYOUT_FIELD(PVN2, n2))
 
 // ---- virtual bases (MSVC: vbptr, vbtables, the "most derived" flag, the vbase destructor ??_D) -----------
 // A class with virtual bases shares the vbptr of its first non-virtual base that has one or gets its own after
@@ -259,6 +261,35 @@ int  vbNestedF(const VNF& f);              // a b c e f, through the bases
 int  vbNestedG(VNG* g);                    // a b c e g, through VNE* and VNC*
 VNA* vbToVNA(VNG* g);                      // through VNC's VNB
 long vbNestedLife();                       // a VNF and a VNG on cppparse's stack: built right, then the destructors' log
+
+// ---- polymorphic virtual bases (cl: the vfptr stays in the virtual base, vtordisp and $4 thunks) ------------
+// PV's vfptr lies in the PV subobject of every class below, and a class gets a vfptr of its own only for new
+// virtual functions (PVN). An override from a class with a user-declared constructor or destructor (PVL, PVD, PVX)
+// is reached from PV's table through cl's vtordisp thunk, which reads the vtordisp before PV; the constructors and
+// destructors (all in layout.cpp) store the tables and the vtordisp and call probe() while the object is built and
+// destroyed, logging a digit when probe() returns what the stage must see. Both compilers build the objects, call
+// through every base and delete them; cl derives PVE from PVD with cl's thunks in its tables.
+extern long g_pvLog;
+struct PV { int v; PV(); virtual ~PV(); virtual int f() const; virtual int g() const; int probe() const; };   // f() * 100 + g(): 701 in PV
+struct PVL : virtual PV { int l; PVL(); ~PVL(); int f() const; };                                             // f 12: 1201
+struct PVR : virtual PV { int r; PVR(); };
+struct PVD : PVL, PVR { int d; PVD(); ~PVD(); int g() const; };                                               // g 24: 1224
+struct PNB { int nb; PNB(); virtual int nf() const; };
+struct PVX : PNB, virtual PV { int x; PVX(); int f() const; int nf() const; };                                // f 46, nf 7
+struct PVN : virtual PV { int n; PVN(); virtual int h() const; };                                             // h 3
+struct PVN2 : PVN { int n2; PVN2(); int h() const; int g() const; };                                          // h 8, g 9
+int  pvCall(const PV* p);                  // p->f() * 100 + p->g()
+int  pvCallL(const PVL* p);
+int  pvCallD(const PVD* p);                // the same through PVD*, PVL*, PVR* and PV*, 0 when they differ
+int  pvCallX(const PVX* p);                // p->f() * 100 + p->nf()
+int  pvCallN(const PVN* p);                // p->f() * 100 + p->g() + p->h() * 10000
+PV*  pvMakeD();                            // new PVD
+PV*  pvMakeX();
+PVN* pvMakeN2();
+void pvDelete(PV* p);                      // delete p: PV's virtual destructor, the vbase destructor ??_D
+long pvLife();                             // a PVD on cppparse's stack: the log of its construction * 1000 + the log of its destruction
+int  pvCopy(const PVD& d);                 // a copy's probe()
+int  pvMemptr(const PVD& d, int PVL::* pm, int (PV::*pf)() const);   // d.*pm * 10000 + (d.*pf)()
 
 // ---- covariant returns through a secondary base (cl's return-adjusting thunks) ------------------------------
 // RC::self overrides RB::self with a covariant return type and RB is at 16 in RC: cl gives RC::self a slot of its

@@ -107,7 +107,6 @@ private:
     bool isBaseOf(sema::Symbol* derived, sema::Symbol* base) const { int o = 0, i = 0, r = 0; return baseOffset(derived, base, o) || virtualBasePath(derived, base, i, r); }
     static bool hasVbases(const sema::Symbol* cls) { return cls && !cls->vbases.empty(); }
     int  toBase(int addr, sema::Symbol* derived, sema::Symbol* base, int line);
-    bool isVirtualBaseAnywhere(sema::Symbol* cls) const;
     static std::string vbtableName(const sema::Symbol* cls, size_t t);
 
     // pointers to members as cl represents them (the sizes are TypeTable::sizeOf's): a data member is an int
@@ -224,6 +223,7 @@ private:
     void destructorCleanup(sema::Symbol* fn);
     void destructorParts(sema::Symbol* fn);
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
+    int  vfptrThis(sema::Symbol* fn, int thisPtr, int line);
     static std::string vtableName(const sema::Symbol* cls, size_t t);
     // MSVC's vector deleting destructor of a virtual destructor (what its vtable slot holds): with bit 1 of its
     // flags clear it destroys the complete object, with bit 1 set the array whose count is in the cookie before

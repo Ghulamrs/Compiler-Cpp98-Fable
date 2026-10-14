@@ -165,8 +165,10 @@ private:
     bool staticData(const sema::Type* t, const cxx::Initializer& init, std::vector<IrDataItem>& out);
     bool constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataItem>& out, int depth);
     bool foldArith(cxx::Expr* x, double& v, int depth);
+    bool foldToFloating(cxx::Expr* x, double& v, int depth);
+    bool foldInteger(cxx::Expr* x, const sema::Type* to, unsigned long long& bits, int depth);
     bool convertFolded(const sema::Type* t, double& v) const;
-    static bool floatRoundsOnce(double d);
+    bool foldableFloating(cxx::Expr* e) const;
     bool aggregateData(const sema::Type* t, const std::vector<cxx::Expr*>* elems, std::vector<IrDataItem>& out, int depth);
     bool readOnlyObject(const sema::Type* t) const;
     void registerAtExit(const std::string& global, const sema::Type* t, int line);
@@ -252,6 +254,13 @@ private:
     bool                       m_msvcNames;        // --msvc-mangling: static locals get cl's decorated names
     std::map<sema::Symbol*, std::string> m_staticNames;   // static local -> its global's IR name
     std::map<sema::Symbol*, long> m_staticBlocks;         // static local of the current function -> cl's block number
+    // the constant convert() last folded from a floating one, while nothing has been emitted after it: converted
+    // straight on to a floating type it is its untruncated value (raw), as cl ((double)(unsigned char)300.0 is 300)
+    int                        m_rawTemp;
+    const IrFunction*          m_rawFunction;
+    int                        m_rawBlock;
+    size_t                     m_rawEnd;
+    double                     m_raw;
     void numberStaticBlocks(cxx::Stmt* s, long& next, long current);
     std::map<sema::Symbol*, sema::Symbol*> m_deleting;     // virtual destructor -> its deleting destructor
     std::vector<sema::Symbol*> m_deletingOrder;            // the virtual destructors, in the order their deleting ones were made

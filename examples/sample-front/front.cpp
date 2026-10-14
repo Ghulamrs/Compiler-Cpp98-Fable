@@ -507,6 +507,40 @@ void show()
 }
 }
 
+// floating constants converted to integers as cl folds them: modulo 2^N for any constant operand (a negation,
+// arithmetic, a cast through float, a const double, ?:; only a bare literal was folded, the rest gave 80000000h),
+// in code, globals and array bounds ((int)(unsigned char)300.0 + 1 was S114); converted straight on to a floating
+// type the folded value is the untruncated one ((unsigned char)300.0 + 0.5 is 300.5, it was 44.5); a float
+// literal rounded once from its decimal (1.00000005960464477550f is 3F800001h, through a double 3F800000h)
+namespace cfold {
+const double cd = 3e9;
+const float hf = 1.00000005960464477550f;
+double g1 = (unsigned char)300.0 + 0.5;
+int g2 = (int)-2147483649.0;
+long long g3 = (long long)-9.3e18;
+unsigned long long g4 = (unsigned long long)-1.0;
+int g5 = (int)cd;
+double g6 = (int)3e9;
+float g7 = 1.00000005960464477550f;
+float g8[2] = { 1.00000005960464477530f, 16777217.000000001f };
+int bound[(int)(unsigned char)300.0 + 1];
+int bound2[(int)cd / 1000000000 + (int)(2.0 * 1.5)];
+int take(int x) { return x; }
+double takeD(double x) { return x; }
+void show()
+{
+    const double lcd = 3e9;
+    std::printf("cfold a %x %x %x %x %x\n", (int)-2147483649.0, (int)+3e9, (int)(2.0 * 1.5e9), (int)(3e9 + 1.0), (int)(float)1e10);
+    std::printf("cfold b %llx %x %x %llx %x\n", (long long)-9.3e18, (int)cd, (int)lcd, (unsigned long long)-1e19, (int)1e20);
+    std::printf("cfold c %.17g %.17g %.17g %.17g %.17g\n", (unsigned char)300.0 + 0.5, (double)(int)3e9, -(int)3e9 * 1.0, (double)(unsigned)-1.0, (short)1e5 * 2.0);
+    int i = 3e9; double d = (int)3e9;
+    std::printf("cfold d %x %.17g %x %.17g %x %llx\n", i, d, take(3e9), takeD((unsigned char)300.0), (int)(3e9 > 1 ? 3e9 : 1.0), (unsigned long long)(unsigned)-1.0);
+    std::printf("cfold e %.17g %d %llx %llx %x %.17g %.17g\n", g1, g2, g3, g4, g5, g6, (double)(long long)(int)3e9);
+    std::printf("cfold f %08x %08x %08x %08x %08x\n", fp::bitsF(g7), fp::bitsF(hf), fp::bitsF(1.00000005960464477550f), fp::bitsF(g8[0]), fp::bitsF(g8[1]));
+    std::printf("cfold g %d %d\n", (int)(sizeof(bound) / sizeof(bound[0])), (int)(sizeof(bound2) / sizeof(bound2[0])));
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -530,6 +564,7 @@ int main()
     ambig::show();
     review::show();
     strlit::show();
+    cfold::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

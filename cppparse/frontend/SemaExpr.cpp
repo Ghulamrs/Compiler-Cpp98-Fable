@@ -50,6 +50,15 @@ long fitTo(long v, const Type* t)
     }
 }
 
+// an unsigned 32-bit constant beyond 2^31 cast to a 64-bit type: its value leaves semaValue's sign-extended 32
+// bits ((unsigned long long)(unsigned)-1.0 is FFFFFFFFh, not 2^64-1), so the cast is left to IrGen
+bool widensUnsigned(const Type* from, const Type* to, long v)
+{
+    while (from && from->kind == Type::Reference) from = from->inner;
+    if (!from || v >= 0 || (to->kind != Type::LongLong && to->kind != Type::ULongLong)) return false;
+    return from->kind == Type::UInt || from->kind == Type::ULong;
+}
+
 // the IR sign-extends the 32 bits of semaValue, so an operation of a 64-bit type is folded only while its
 // result stays in that range; otherwise it is left to run (1ULL << 40 was folded to 1 << 8)
 void foldWide(cxx::Expr* e, const std::string& op, long a, long b, bool isUnsigned)
@@ -892,10 +901,114 @@ const Type* Sema::exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked
         if (c.rank == Conversion::None && tu->isScalar() && !valueType(e->kids[0])->isScalar() && valueType(e->kids[0])->kind != Type::Class)
             error(e->loc, "S105", "cannot convert " + valueType(e->kids[0])->text() + " to " + tu->text());
         if (c.userFunction) e->semaSym = c.userFunction;
-        if (e->kids[0]->semaConst && tu->isIntegral()) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, tu); }
+        if (e->kids[0]->semaConst && tu->isIntegral() && !widensUnsigned(e->kids[0]->semaType, tu, e->kids[0]->semaValue)) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, tu); }
     }
-    if (e->kids.size() == 1 && e->kids[0]->semaConst && tu->isIntegral() && !checked) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, tu); }
+    if (e->kids.size() == 1 && e->kids[0]->semaConst && tu->isIntegral() && !checked && !widensUnsigned(e->kids[0]->semaType, tu, e->kids[0]->semaValue)) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, tu); }
+    // a floating constant cast to an integral type is an integral constant expression (5.19), folded as cl folds
+    // it: modulo 2^N ((int)3e9 is B2D05E00h); a 64-bit value beyond semaValue's 32 bits is left to IrGen
+    const Type* iu = m_types.unqualified(tu);
+    if (e->kids.size() == 1 && !e->semaConst && !e->semaSym && iu->isIntegral() && e->kids[0]->semaType && m_types.unref(e->kids[0]->semaType)->isFloating()) {
+        double d = 0, raw = 0;
+        unsigned long long bits = 0;
+        if (floatingConstant(e->kids[0], d, false, 0)) {
+            if (iu->kind == Type::Bool) { e->semaConst = true; e->semaValue = d != 0; }
+            else if (foldFloatToInteger(d, m_types.sizeOf(iu) * 8, iu->isUnsigned(), bits, raw)) {
+                const long low = static_cast<long>(static_cast<int>(static_cast<unsigned int>(bits & 0xFFFFFFFFULL)));
+                if (m_types.sizeOf(iu) < 8 || static_cast<long long>(bits) == static_cast<long long>(low)) { e->semaConst = true; e->semaValue = low; }
+            }
+        }
+    }
     return to;
+}
+
+// the value of an arithmetic constant expression of a floating type, or of an integer constant on its way to one,
+// as cl folds it (IrGen::foldArith gives the same values): C++98 takes a floating literal cast to an integral type
+// as an integral constant expression; cl also "(int)(2.0 * 1.5)", "(int)-2.5" and a const double initialised by
+// a constant. toFloating: e is converted to a floating type next, where a folded cast of a floating constant to an
+// integer has its untruncated value ((unsigned char)300.0 + 0.5 is 300.5, as cl)
+bool Sema::floatingConstant(cxx::Expr* e, double& v, bool toFloating, int depth)
+{
+    if (!e || depth > 64 || !e->semaType) return false;
+    const Type* t = m_types.unqualified(m_types.unref(e->semaType));
+    if (!t->isArithmetic()) return false;
+    cxx::Expr* x = e;
+    while (x->kids.size() == 1 && !x->semaSym && (x->kind == cxx::Expr::Paren || (toFloating && x->kind == cxx::Expr::Unary && x->text == "+" && x->kids[0]->semaType
+                                                   && m_types.unqualified(m_types.unref(x->semaType)) == m_types.unqualified(m_types.unref(x->kids[0]->semaType)))))
+        x = x->kids[0];
+    const bool cast = (x->kind == cxx::Expr::Cast || (x->kind == cxx::Expr::NamedCast && x->text == "static_cast") || x->kind == cxx::Expr::FunctionalCast) && x->kids.size() == 1 && !x->semaSym;
+    const Type* xt = x->semaType ? m_types.unqualified(m_types.unref(x->semaType)) : t;
+    if (cast && xt->isIntegral() && xt->kind != Type::Bool && x->kids[0]->semaType && m_types.unref(x->kids[0]->semaType)->isFloating()) {
+        double d = 0, raw = 0;
+        unsigned long long bits = 0;
+        if (!floatingConstant(x->kids[0], d, false, depth + 1) || !foldFloatToInteger(d, m_types.sizeOf(xt) * 8, xt->isUnsigned(), bits, raw)) return false;
+        v = toFloating ? raw : xt->isUnsigned() ? static_cast<double>(bits) : static_cast<double>(static_cast<long long>(bits));
+        return true;
+    }
+    if (t->isIntegral() && e->semaConst) {
+        v = static_cast<double>(e->semaValue);
+        if (t->isUnsigned() && m_types.sizeOf(t) <= 4 && v < 0) v += 4294967296.0;
+        return true;
+    }
+    switch (e->kind) {
+    case cxx::Expr::FloatLit: v = floatingLiteralValue(e->text, t->kind == Type::Float); break;
+    case cxx::Expr::Paren:
+        if (e->kids.size() != 1 || !floatingConstant(e->kids[0], v, false, depth + 1)) return false;
+        break;
+    case cxx::Expr::Unary:
+        if (e->kids.size() != 1 || e->semaSym || (e->text != "-" && e->text != "+") || !floatingConstant(e->kids[0], v, false, depth + 1)) return false;
+        if (e->text == "-") v = -v;
+        break;
+    case cxx::Expr::Binary: {
+        double a = 0, b = 0;
+        if (!t->isFloating() || e->kids.size() != 2 || e->semaSym || !floatingConstant(e->kids[0], a, true, depth + 1) || !floatingConstant(e->kids[1], b, true, depth + 1)) return false;
+        // the usual arithmetic conversions: double if either operand is, else float
+        const Type* ta = m_types.unref(e->kids[0]->semaType);
+        const Type* tb = m_types.unref(e->kids[1]->semaType);
+        const bool single = ta->kind != Type::Double && ta->kind != Type::LongDouble && tb->kind != Type::Double && tb->kind != Type::LongDouble;
+        if (single) { a = static_cast<float>(a); b = static_cast<float>(b); }
+        if (e->text == "+") v = a + b;
+        else if (e->text == "-") v = a - b;
+        else if (e->text == "*") v = a * b;
+        else if (e->text == "/" && b != 0) v = a / b;
+        else return false;
+        if (single) v = static_cast<float>(v);
+        break;
+    }
+    case cxx::Expr::Cast: case cxx::Expr::NamedCast: case cxx::Expr::FunctionalCast:
+        if (e->kids.size() != 1 || e->semaSym || (e->kind == cxx::Expr::NamedCast && e->text != "static_cast")) return false;
+        if (!floatingConstant(e->kids[0], v, t->isFloating(), depth + 1)) return false;
+        break;
+    case cxx::Expr::Name: {
+        Symbol* s = e->semaSym;
+        if (!t->isFloating() || !s || s->kind != Symbol::Variable || s->isParam || !s->init || !s->type || !s->type->isConst || s->type->isVolatile) return false;
+        cxx::Expr* init = s->init;
+        if (!init->semaType) {
+            // a namespace-scope initializer is analysed after the declarations: a literal is read as it stands
+            bool negative = false;
+            while (init->kids.size() == 1 && (init->kind == cxx::Expr::Paren || (init->kind == cxx::Expr::Unary && (init->text == "-" || init->text == "+")))) {
+                if (init->kind == cxx::Expr::Unary && init->text == "-") negative = !negative;
+                init = init->kids[0];
+            }
+            if (init->kind != cxx::Expr::FloatLit || init->text.empty()) return false;
+            const char last = init->text[init->text.size() - 1];
+            v = floatingLiteralValue(init->text, last == 'f' || last == 'F');
+            if (negative) v = -v;
+        } else if (!floatingConstant(init, v, true, depth + 1)) return false;
+        break;
+    }
+    default:
+        return false;
+    }
+    if (v != v) return false;
+    if (t->kind == Type::Float) { v = static_cast<float>(v); return true; }
+    if (t->isFloating()) return true;
+    if (t->kind == Type::Bool) { v = v != 0 ? 1 : 0; return true; }
+    if (t->kind == Type::Enum) return false;
+    double raw = 0;
+    unsigned long long bits = 0;
+    if (!foldFloatToInteger(v, m_types.sizeOf(t) * 8, t->isUnsigned(), bits, raw)) return false;
+    v = t->isUnsigned() ? static_cast<double>(bits) : static_cast<double>(static_cast<long long>(bits));
+    return true;
 }
 
 const Type* Sema::exprNew(cxx::Expr* e, Scope* in)
@@ -1302,7 +1415,7 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         const Type* to = typeOf(e->type->spec, in);
         if (e->type->decl) to = applyDeclarator(to, *e->type->decl, in, 0);
         t = exprCast(e, in, to, e->kind == cxx::Expr::FunctionalCast);
-        if (e->kind != cxx::Expr::FunctionalCast && e->kids.size() == 1 && e->kids[0]->semaConst && to->isIntegral()) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, m_types.unref(to)); }
+        if (e->kind != cxx::Expr::FunctionalCast && e->kids.size() == 1 && e->kids[0]->semaConst && to->isIntegral() && !widensUnsigned(e->kids[0]->semaType, m_types.unref(to), e->kids[0]->semaValue)) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, m_types.unref(to)); }
         if (to->kind == Type::Reference) e->semaLvalue = true;
         break;
     }

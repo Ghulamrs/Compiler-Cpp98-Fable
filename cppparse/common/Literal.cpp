@@ -1,9 +1,76 @@
 // Literal.cpp - escape sequences, string literal pieces and character constants decoded as cl does.
 #include "Literal.hpp"
 
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+
 namespace cppparse {
 
 namespace {
+
+// a non-negative integer in 32-bit words, least significant first: exact comparisons of decimal literals
+typedef std::vector<unsigned int> BigNum;
+
+void bigMulAdd(BigNum& a, unsigned int m, unsigned int add)
+{
+    unsigned long long carry = add;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const unsigned long long p = static_cast<unsigned long long>(a[i]) * m + carry;
+        a[i] = static_cast<unsigned int>(p & 0xFFFFFFFFULL);
+        carry = p >> 32;
+    }
+    if (carry) a.push_back(static_cast<unsigned int>(carry));
+}
+
+void bigPow(BigNum& a, unsigned int base, long n)
+{
+    for (; n > 0; --n) bigMulAdd(a, base, 0);
+}
+
+int bigCompare(BigNum a, BigNum b)
+{
+    while (!a.empty() && a.back() == 0) a.pop_back();
+    while (!b.empty() && b.back() == 0) b.pop_back();
+    if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
+    for (size_t i = a.size(); i-- > 0; ) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+// the decimal literal s (no sign, no suffix) compared exactly with the positive finite double m
+int compareDecimal(const std::string& s, double m)
+{
+    BigNum left, right;
+    long exp10 = 0;
+    bool point = false;
+    size_t i = 0;
+    for (; i < s.size(); ++i) {
+        const char c = s[i];
+        if (c >= '0' && c <= '9') { bigMulAdd(left, 10, static_cast<unsigned int>(c - '0')); if (point) --exp10; }
+        else if (c == '.' && !point) point = true;
+        else break;
+    }
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        ++i;
+        const bool negative = i < s.size() && s[i] == '-';
+        if (i < s.size() && (s[i] == '-' || s[i] == '+')) ++i;
+        long e = 0;
+        for (; i < s.size() && s[i] >= '0' && s[i] <= '9'; ++i) if (e < 100000) e = e * 10 + (s[i] - '0');
+        exp10 += negative ? -e : e;
+    }
+    int e2 = 0;
+    const double mant = std::frexp(m, &e2);
+    const unsigned long long whole = static_cast<unsigned long long>(std::ldexp(mant, 53));
+    right.push_back(static_cast<unsigned int>(whole & 0xFFFFFFFFULL));
+    right.push_back(static_cast<unsigned int>(whole >> 32));
+    const long k = static_cast<long>(e2) - 53;
+    if (exp10 > 0) bigPow(left, 10, exp10); else bigPow(right, 10, -exp10);
+    if (k > 0) bigPow(right, 2, k); else bigPow(left, 2, -k);
+    return bigCompare(left, right);
+}
+
+// a positive float as a double, its infinity as 2^128 (the float above the largest one when rounding)
+double floatAsDouble(float v) { return v > 3.4028235e38f ? std::ldexp(1.0, 128) : static_cast<double>(v); }
 
 int hexDigit(char c)
 {
@@ -126,6 +193,44 @@ long charLiteralValue(const std::string& text, int& count)
     if (wide) return static_cast<long>(first);
     if (count <= 1) return static_cast<signed char>(static_cast<unsigned char>(first));
     return static_cast<long>(static_cast<int>(static_cast<unsigned int>(v & 0xFFFFFFFFUL)));
+}
+
+double floatingLiteralValue(const std::string& text, bool asFloat)
+{
+    std::string s = text;
+    while (!s.empty() && std::strchr("fFlL", s[s.size() - 1])) s.erase(s.size() - 1);
+    const double x = std::strtod(s.c_str(), 0);
+    if (!asFloat) return x;
+    const float f = static_cast<float>(x);
+    if (static_cast<double>(f) == x || x != x) return f;
+    // the double rounding goes wrong only when x lies exactly halfway between f and the float on its other side;
+    // then the decimal itself, compared exactly with that midpoint, decides (a tie stays f, the even one)
+    unsigned int bits = 0;
+    std::memcpy(&bits, &f, 4);
+    const double fd = floatAsDouble(f);
+    const unsigned int nb = fd < x ? bits + 1 : bits - 1;
+    float g = 0;
+    std::memcpy(&g, &nb, 4);
+    const double gd = floatAsDouble(g);
+    if ((fd + gd) / 2 != x) return f;
+    const int c = compareDecimal(s, x);
+    if (c == 0) return f;
+    return (c > 0) == (fd < gd) ? g : f;
+}
+
+bool foldFloatToInteger(double d, int bits, bool isUnsigned, unsigned long long& out, double& raw)
+{
+    if (d != d || d > 1.7976931348623157e308 || d < -1.7976931348623157e308) return false;
+    const double n = std::fmod(d < 0 ? std::ceil(d) : std::floor(d), 18446744073709551616.0);   // exact
+    unsigned long long u = n < 0 ? 0ULL - static_cast<unsigned long long>(-n) : static_cast<unsigned long long>(n);
+    raw = isUnsigned ? static_cast<double>(u) : static_cast<double>(static_cast<long long>(u));
+    if (bits < 64) {
+        const unsigned long long mask = (1ULL << bits) - 1;
+        u &= mask;
+        if (!isUnsigned && (u >> (bits - 1)) != 0) u |= ~mask;   // sign-extended
+    }
+    out = u;
+    return true;
 }
 
 } // namespace cppparse

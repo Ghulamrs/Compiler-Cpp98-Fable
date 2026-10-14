@@ -1103,7 +1103,9 @@ range they give 80000000h truncated, `unsigned int` through a 64-bit one,
 value with its top bit set by halves as cl does, the optimiser folds both
 the same way (Optimizer.cpp floatToInt), and value numbering compares
 floating constants by their bits (it took `1e19` and `1e19f` for one value;
-sample-front `conv::`); loop unrolling (`-O3`) renamed the values a
+sample-front `conv::`; floating constants converted to integers are folded
+modulo 2^N as cl folds them, and float literals are rounded once from their
+decimal, front.cpp `cfold`); loop unrolling (`-O3`) renamed the values a
 loop uses from before it, such as hoisted invariants. The old type checker
 recursed without end on a copy constructor when it looked for a converting
 constructor (`c ? T(1) : t`). For linking with MSVC-compiled code,

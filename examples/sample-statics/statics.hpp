@@ -62,8 +62,10 @@ STATICS_INLINE void nestedN(int k, NestedSeen& n)
 
 // constants folded with the usual arithmetic conversions (float op int is float, rounded after each float
 // operation, overflow to infinity), conversions to unsigned, sizeof and long long: data with cl's bytes, so
-// the counted object after them is $TSS0 on both sides
-struct KonstFold { float f3; double d17; double d16; float f6; unsigned u; float fm; double ds; double dl; int t; };
+// the counted object after them is $TSS0 on both sides. Also as cl: a float literal rounded once from its
+// decimal (fh, halfway as a double), out-of-range casts of floating constants modulo 2^N with the untruncated
+// value kept for a floating type (dv 300.5, ni 7FFFFFFFh, nl, dc 3e9) and a char array from concatenated pieces
+struct KonstFold { float f3; double d17; double d16; float f6; unsigned u; float fm; double ds; double dl; float fh; double dv; int ni; long long nl; double dc; char cs[4]; int t; };
 STATICS_INLINE void konstF(KonstFold& s)
 {
     static float f3 = 16777217 + 1.0f;
@@ -74,8 +76,16 @@ STATICS_INLINE void konstF(KonstFold& s)
     static float fm = 3.4028235e38f;
     static double ds = sizeof(int);
     static double dl = 5LL;
+    static float fh = 1.00000005960464477550f;
+    static double dv = (unsigned char)300.0 + 0.5;
+    static int ni = (int)-2147483649.0;
+    static long long nl = (long long)-9.3e18;
+    static double dc = (int)3e9;
+    static char cs[] = "\x41" "b" "\0" "c";
     static Counted t;
     s.f3 = f3; s.d17 = d17; s.d16 = d16; s.f6 = f6; s.u = u; s.fm = fm; s.ds = ds; s.dl = dl; s.t = t.id;
+    s.fh = fh; s.dv = dv; s.ni = ni; s.nl = nl; s.dc = dc;
+    for (int i = 0; i < 4; ++i) s.cs[i] = cs[i];
 }
 
 // a function-try-block: its try block is block 3, as cl numbers it

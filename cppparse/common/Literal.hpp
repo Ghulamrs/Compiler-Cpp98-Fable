@@ -19,6 +19,17 @@ long stringLiteralLength(const std::string& text);
 // constant of type int; L'ab' is L'a' as with cl). A single narrow character is a signed char
 long charLiteralValue(const std::string& text, int& count);
 
+// the value of a floating literal (digits, '.', an exponent, an f/F/l/L suffix ignored): as a double, or with
+// asFloat as a float rounded once from the decimal, as cl rounds it (decimal -> double -> float differs when the
+// double lies exactly halfway between two floats: 1.00000005960464477550f is 3F800001h)
+double floatingLiteralValue(const std::string& text, bool asFloat);
+
+// a floating constant converted to an integer of `bits` bits as cl folds it: truncated toward zero, taken modulo
+// 2^64 (not saturated) and narrowed, so (int)3e9 is B2D05E00h and (int)-2147483649.0 7FFFFFFFh. raw is the
+// 64-bit value before narrowing, read as signed or unsigned: cl converts the folded constant to a floating type
+// from there ((unsigned char)300.0 + 0.5 is 300.5). False for NaN and the infinities
+bool foldFloatToInteger(double d, int bits, bool isUnsigned, unsigned long long& out, double& raw);
+
 } // namespace cppparse
 
 #endif

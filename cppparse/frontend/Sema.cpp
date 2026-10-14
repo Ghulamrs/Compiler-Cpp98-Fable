@@ -169,6 +169,17 @@ void TypeTable::memberPointerModel(const Symbol* cls, bool& multiple, bool& virt
     }
 }
 
+bool TypeTable::holdsMemberPointer(const Type* t, int depth)
+{
+    while (t && (t->kind == Type::Array || t->kind == Type::Reference)) { if (t->kind == Type::Reference) return false; t = t->inner; }
+    if (!t || depth > 32) return false;
+    if (t->kind == Type::MemberPointer) return true;
+    if (t->kind != Type::Class || !t->decl) return false;
+    for (size_t b = 0; b < t->decl->bases.size(); ++b) if (t->decl->bases[b].cls && holdsMemberPointer(t->decl->bases[b].cls->type, depth + 1)) return true;
+    for (size_t f = 0; f < t->decl->fields.size(); ++f) if (holdsMemberPointer(t->decl->fields[f]->type, depth + 1)) return true;
+    return false;
+}
+
 int TypeTable::sizeOf(const Type* t) const
 {
     if (!t) return 8;
@@ -187,9 +198,13 @@ int TypeTable::sizeOf(const Type* t) const
         // with virtual bases); functions, a code pointer (plus a this adjustment with multiple inheritance, plus
         // a vbtable index with virtual bases), rounded to the pointer's alignment
         bool multiple = false, virt = false;
-        const Symbol* mc = t->memberClass ? t->memberClass->decl : 0;
-        // an incomplete class: cl's unspecified model (data 12, functions a pointer plus three ints)
-        if (!mc || !mc->isDefinition) return !t->inner || t->inner->kind != Type::Function ? 12 : (m_pointerSize + 12 + m_pointerSize - 1) / m_pointerSize * m_pointerSize;
+        Symbol* mc = t->memberClass ? t->memberClass->decl : 0;
+        // cl fixes the model of a class the first time it needs the size of one of its member pointers (sizeof, a
+        // member's layout): while the class is incomplete that is the unspecified model (data 12, functions a
+        // pointer plus three ints), which it keeps after the class is defined; naming the type alone (a typedef, a
+        // parameter) decides nothing
+        if (mc && !mc->isDefinition) mc->memberPointerUnspecified = true;
+        if (!mc || mc->memberPointerUnspecified) return !t->inner || t->inner->kind != Type::Function ? 12 : (m_pointerSize + 12 + m_pointerSize - 1) / m_pointerSize * m_pointerSize;
         memberPointerModel(mc, multiple, virt, 0);
         if (!t->inner || t->inner->kind != Type::Function) return virt ? 8 : 4;
         const int n = m_pointerSize + (multiple || virt ? 4 : 0) + (virt ? 4 : 0);
@@ -262,7 +277,7 @@ Symbol::Symbol()
       isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), bitWidth(-1), bitOffset(0),
       anonHost(0), anonOf(0), templateAst(0), instantiatedFrom(0),
       isDependentContext(false), isImplicitInstantiation(false), isLazyInstantiation(false), instantiationFailed(false), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
-      hasCopyAssign(false), hasDefaultCtor(false) {}
+      hasCopyAssign(false), hasDefaultCtor(false), memberPointerUnspecified(false), defOrder(0) {}
 
 std::string Symbol::qualifiedName() const
 {
@@ -308,7 +323,26 @@ Scope* Program::newScope(Scope::Kind k, Scope* parent, Symbol* owner)
 
 
 Sema::Sema(TypeTable& types, Program& program)
-    : m_types(types), m_prog(program), m_currentFunction(0), m_currentClass(0), m_loopDepth(0), m_switchDepth(0), m_depth(0), m_externalArena(0) {}
+    : m_types(types), m_prog(program), m_currentFunction(0), m_currentClass(0), m_loopDepth(0), m_switchDepth(0), m_depth(0),
+      m_classOrder(0), m_bodyOrder(-1), m_definingDepth(0), m_externalArena(0) {}
+
+void Sema::queueBody(PendingBody pb)
+{
+    // a body queued while bodies are analysed (an instantiation's member) is compiled after the whole unit, as cl
+    // instantiates them; a member function defined in its class gets the order where the outermost class ends
+    pb.order = m_bodyOrder >= 0 ? 0x7FFFFFFF : m_classOrder;
+    m_pending.push_back(pb);
+}
+
+// sizeof of a pointer to member of a class defined after the body (or initializer) being analysed: cl met the
+// class incomplete there and keeps its unspecified model (TypeTable::sizeOf)
+void Sema::memberPointerSizeUse(const Type* t)
+{
+    while (t && t->kind == Type::Array) t = t->inner;
+    if (!t || t->kind != Type::MemberPointer || !t->memberClass || !t->memberClass->decl) return;
+    Symbol* cls = t->memberClass->decl;
+    if (m_bodyOrder >= 0 && cls->defOrder > m_bodyOrder) cls->memberPointerUnspecified = true;
+}
 
 Sema::~Sema()
 {
@@ -696,7 +730,7 @@ void Sema::declare(cxx::Decl* d, Scope* in, cxx::Access access)
         d->semaSym = fn;
         if (fn->hasBody && fn->definition != d) { error(d->loc, "S110", "redefinition of '" + fn->qualifiedName() + "'"); break; }
         fn->hasBody = true; fn->definition = d; fn->isInline = fn->isInline || d->spec.isInline;
-        if (!fn->isDependentContext) { PendingBody pb; pb.fn = fn; pb.def = d; pb.scope = fn->ownerClass ? fn->ownerClass->members : (dscope != in ? dscope : in); m_pending.push_back(pb); }
+        if (!fn->isDependentContext) { PendingBody pb; pb.fn = fn; pb.def = d; pb.scope = fn->ownerClass ? fn->ownerClass->members : (dscope != in ? dscope : in); queueBody(pb); }
         break;
     }
     case cxx::Decl::Template: declareTemplate(d, in, access); break;
@@ -786,6 +820,9 @@ Symbol* Sema::declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Sym
     if (!c->isDefinition) return cls;
     if (cls->isDefinition) { error(c->loc, "S110", "redefinition of class '" + cls->qualifiedName() + "'"); return cls; }
     cls->isDefinition = true;
+    cls->defOrder = m_bodyOrder >= 0 ? 0 : ++m_classOrder;
+    const size_t firstPending = m_pending.size();
+    const bool outermost = m_definingDepth++ == 0;
     cls->members = m_prog.newScope(Scope::Class, target, cls);
     ++m_stats.classes;
     // bases
@@ -823,6 +860,8 @@ Symbol* Sema::declareClass(cxx::ClassDecl* c, Scope* in, cxx::Access access, Sym
     declareAll(c->members, cls->members, cls->isStruct ? cxx::AccessPublic : cxx::AccessPrivate);
     m_currentClass = savedClass;
     completeClass(cls);
+    --m_definingDepth;
+    if (outermost && m_bodyOrder < 0) for (size_t k = firstPending; k < m_pending.size(); ++k) m_pending[k].order = m_classOrder;
     return cls;
 }
 
@@ -985,7 +1024,7 @@ Symbol* Sema::declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::Dec
     fn->requiredParams = static_cast<int>(params.size());
     for (size_t k = 0; k < params.size(); ++k) if (params[k]->init) { fn->requiredParams = static_cast<int>(k); break; }
     // default arguments are analysed with the bodies, in the class or declaring scope (a member may be declared later)
-    if (!fn->isDependentContext) for (size_t k = 0; k < params.size(); ++k) if (params[k]->init) { PendingBody pb; pb.fn = params[k]; pb.def = d; pb.scope = owner && owner->members ? owner->members : target; m_pending.push_back(pb); }
+    if (!fn->isDependentContext) for (size_t k = 0; k < params.size(); ++k) if (params[k]->init) { PendingBody pb; pb.fn = params[k]; pb.def = d; pb.scope = owner && owner->members ? owner->members : target; queueBody(pb); }
     for (size_t k = 0; k < params.size(); ++k) params[k]->scope = 0;
     if (owner) {
         if (ctor) { owner->hasUserCtor = true; if (params.empty() || fn->requiredParams == 0) owner->hasDefaultCtor = true;
@@ -1099,8 +1138,8 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
         if (!var->declAst || id.init.kind != cxx::Initializer::None) var->declAst = d;   // the declaration carrying the initializer
         if (id.init.kind != cxx::Initializer::None) {
             var->init = id.init.args.empty() ? 0 : id.init.args[0];
-            if (!var->isDependentContext && !var->isMember) { PendingBody pb; pb.fn = var; pb.def = d; pb.scope = in; m_pending.push_back(pb); }
-            else if (var->isMember && var->isStatic && var->init && !var->isDependentContext) { PendingBody pb; pb.fn = var; pb.def = d; pb.scope = in; m_pending.push_back(pb); }
+            if (!var->isDependentContext && !var->isMember) { PendingBody pb; pb.fn = var; pb.def = d; pb.scope = in; queueBody(pb); }
+            else if (var->isMember && var->isStatic && var->init && !var->isDependentContext) { PendingBody pb; pb.fn = var; pb.def = d; pb.scope = in; queueBody(pb); }
         }
     }
 }

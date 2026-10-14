@@ -392,6 +392,12 @@ int main(int argc, char* argv[])
                                 std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
                                           << "): error S132: '" << s->qualifiedName() << "' is a pointer to member: not supported yet by --compile6\n";
                                 ++unsupported;
+                            } else if (sema::TypeTable::holdsMemberPointer(vt)) {
+                                // an object holding one (a class template instantiation, a member, a base): static
+                                // storage is zero-initialised, where cl writes -1 for a null data member pointer
+                                std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
+                                          << "): error S132: '" << s->qualifiedName() << "' of type '" << s->type->text() << "' holds a pointer to member: its static initialisation is not supported yet by --compile6\n";
+                                ++unsupported;
                             }
                         }
                         // (an implicit instantiation is left alone: cl accepts naming one, as in sizeof(Holder<P>*);

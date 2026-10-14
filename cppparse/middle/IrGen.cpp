@@ -1203,6 +1203,40 @@ void IrGen::constructDefault(const sema::Type* t, int addr, int line)
     construct(ctor, addr, none, 0, line);
 }
 
+void IrGen::zeroBytes(int addr, int bytes, int line)
+{
+    if (bytes <= 0) return;
+    IrInst z = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+    z.sub = "__zero";
+    z.args.push_back(IrOperand::temp(addr, oldType(m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)))));
+    z.args.push_back(IrOperand::imm(0, m_types.intType()));
+    z.args.push_back(IrOperand::imm(bytes, m_types.builtin(Type::LongLong)));
+    emit(z);
+}
+
+// value-initialisation: a class without a user-declared constructor is zero-initialised and then built by its
+// implicit constructor when it has one to run (members or bases with constructors, a vptr); a class with one is
+// only built by it; anything else (scalars, arrays of either) is zeroed. cl implements C++03's rule, not C++98's
+// default-initialisation
+void IrGen::valueInit(Symbol* ctor, const sema::Type* t, int addr, bool complete, int line)
+{
+    const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    const sema::Type* e = u;
+    while (e->kind == sema::Type::Array) e = m_semaTypes.unqualified(e->inner);
+    // cl's null data member pointer is -1, which zeroing does not give (value-initialisation in cl gives 0 all the
+    // same): refused like the other member-pointer values
+    if (sema::TypeTable::holdsMemberPointer(u)) unsupported(line, "value-initialisation of '" + u->text() + "', which holds a pointer to member, is not supported yet by --compile6");
+    const bool userCtor = e->kind == sema::Type::Class && e->decl && e->decl->hasUserCtor;
+    if (!userCtor) {
+        // a base subobject: its own bytes (an empty base has none); its vbptrs are the complete object's
+        if (!complete && u->kind == sema::Type::Class && u->decl && hasVbases(u->decl))
+            unsupported(line, "value-initialisation of '" + u->decl->qualifiedName() + "', a base with virtual bases, is not supported yet by --compile6");
+        else zeroBytes(addr, complete || u->kind != sema::Type::Class || !u->decl || !u->decl->layoutDone ? sizeOf(u) : u->decl->nvSize, line);
+    }
+    if (ctor && u->kind == sema::Type::Class && (userCtor || needsDefaultCtor(u))) { std::vector<cxx::Expr*> none; construct(ctor, addr, none, 0, line); }
+    else constructDefault(u, addr, line);
+}
+
 // constructs (default) or destroys count elements of an array through a loop; count is a long long temp
 void IrGen::forEachElement(const sema::Type* elem, int base, int count, bool construct, int line)
 {
@@ -1257,6 +1291,7 @@ int IrGen::materialize(cxx::Expr* e, const sema::Type* t, int dst, int line)
     Symbol* s = x->semaSym;
     const sema::Type* xt = m_semaTypes.unqualified(m_semaTypes.unref(exprType(x)));
     bool sameClass = xt == u;
+    if (sameClass && x->kind == cxx::Expr::FunctionalCast && x->kids.empty()) { valueInit(s && s->kind == Symbol::Function && s->isConstructor ? s : 0, u, dst, true, line); return dst; }
     if (sameClass && s && s->kind == Symbol::Function && s->isConstructor && !x->semaLvalue) {
         if (x->kind == cxx::Expr::Call) return construct(s, dst, x->kids, 1, line);
         if (x->kind == cxx::Expr::FunctionalCast || x->kind == cxx::Expr::Cast || x->kind == cxx::Expr::NamedCast) return construct(s, dst, x->kids, 0, line);
@@ -1768,11 +1803,13 @@ int IrGen::value(cxx::Expr* e)
     case cxx::Expr::Call: return rvalue(call(e), e, line);
     case cxx::Expr::FunctionalCast: {
         const sema::Type* to = exprType(e);
-        if (isClassType(to) && e->semaSym && e->semaSym->isConstructor) {
-            Symbol* ctor = e->semaSym;
-            int slot = newLocal("tmp." + ctor->ownerClass->name, m_semaTypes.unqualified(to), true);
+        if (isClassType(to) && ((e->semaSym && e->semaSym->isConstructor) || e->kids.empty())) {
+            Symbol* ctor = e->semaSym && e->semaSym->isConstructor ? e->semaSym : 0;
+            int slot = newLocal("tmp." + m_semaTypes.unqualified(m_semaTypes.unref(to))->decl->name, m_semaTypes.unqualified(to), true);
             LValue tl; tl.kind = LValue::Local; tl.local = slot; tl.type = m_semaTypes.unqualified(to);
-            int r = construct(ctor, addressOf(tl, line), e->kids, 0, line);
+            int r = addressOf(tl, line);
+            if (e->kids.empty()) valueInit(ctor, tl.type, r, true, line);
+            else r = construct(ctor, r, e->kids, 0, line);
             if (needsDtor(tl.type)) registerCleanup(slot, tl.type, false, 1, line);
             return r;
         }
@@ -1966,6 +2003,21 @@ int IrGen::value(cxx::Expr* e)
                 IrInst adv = make(IrInst::AddrField, pt, line); adv.sub = "elements"; adv.extra = 8; adv.args.push_back(IrOperand::temp(p, oldType(pt)));
                 p = emit(adv);
             }
+            if (e->hasInit) {
+                // new T[n](): every element value-initialised (valueInit): zeroed unless a user-declared constructor
+                // builds it, then constructed below
+                const sema::Type* ec = m_semaTypes.unqualified(elem);
+                while (ec->kind == sema::Type::Array) ec = m_semaTypes.unqualified(ec->inner);
+                if (sema::TypeTable::holdsMemberPointer(ec)) unsupported(line, "value-initialisation of '" + ec->text() + "', which holds a pointer to member, is not supported yet by --compile6");
+                if (!(ec->kind == sema::Type::Class && ec->decl && ec->decl->hasUserCtor)) {
+                    IrInst z = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+                    z.sub = "__zero";
+                    z.args.push_back(IrOperand::temp(p, oldType(m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)))));
+                    z.args.push_back(IrOperand::imm(0, m_types.intType()));
+                    z.args.push_back(IrOperand::temp(binary("*", count, lng, constant(sizeOf(elem), lng, line), lng, lng, line), oldType(lng)));
+                    emit(z);
+                }
+            }
             if (needsDefaultCtor(elem)) {
                 // an element's constructor that throws: the elements built are destroyed (forEachElement), then
                 // the memory is freed through the matching operator delete[] (C++98 5.3.4/17), as cl does
@@ -1995,7 +2047,8 @@ int IrGen::value(cxx::Expr* e)
         int freeK = -1;
         if (e->placement.empty() && ((e->semaSym && e->semaSym->isConstructor) || !e->kids.empty() || (isClassType(elem) && needsDefaultCtor(elem))))
             freeK = registerFree(p, !e->globalScope && isClassType(elem) && elem->decl ? elem->decl : 0, false, -1, line);
-        if (e->semaSym && e->semaSym->isConstructor) construct(e->semaSym, p, e->kids, 0, line);
+        if (e->hasInit && e->kids.empty() && isClassType(elem)) valueInit(e->semaSym && e->semaSym->isConstructor ? e->semaSym : 0, elem, p, true, line);   // new T(); new T stays uninitialised
+        else if (e->semaSym && e->semaSym->isConstructor) construct(e->semaSym, p, e->kids, 0, line);
         else if (!e->kids.empty()) { LValue lv; lv.kind = LValue::Mem; lv.addr = p; lv.type = elem; store(lv, convert(value(e->kids[0]), exprType(e->kids[0]), elem, line), elem, line); }
         else if (e->hasInit && !isClassType(elem)) { LValue lv; lv.kind = LValue::Mem; lv.addr = p; lv.type = elem; store(lv, constant(0, elem, line), elem, line); }   // new T(): value-initialised
         else if (isClassType(elem)) constructDefault(elem, p, line);
@@ -2182,6 +2235,10 @@ void IrGen::initAggregate(const sema::Type* t, int addr, const std::vector<cxx::
 void IrGen::initObject(const LValue& lv, const sema::Type* t, Symbol* var, cxx::InitDeclarator& id, int line)
 {
     const sema::Type* u = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    // the members a brace list leaves out are value-initialised: zero, where cl writes -1 for a null data member
+    // pointer (but 0 when the pointer is nested deeper, H<P> h = {} against Outer o = {})
+    if (id.init.kind == cxx::Initializer::Brace && sema::TypeTable::holdsMemberPointer(u))
+        unsupported(line, "brace initialisation of '" + u->text() + "', which holds a pointer to member, is not supported yet by --compile6");
     if (isReference(t)) {
         if (id.init.args.empty()) return;
         cxx::Expr* initE = id.init.args[0];
@@ -3044,7 +3101,8 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
         if (mi && mi->semaSym && mi->semaSym->isConstructor && mi->semaSym->ownerClass == base) chosen = mi->semaSym;
         if (ctors) for (size_t i = 0; i < ctors->size() && !chosen; ++i) { Symbol* c = (*ctors)[i]; if (c->kind == Symbol::Function && c->isConstructor && nargs >= static_cast<size_t>(c->requiredParams) && nargs <= c->params.size()) chosen = c; }
         m_ctorFlag = 0;   // a base, virtual or not, never builds its own virtual bases here
-        if (chosen) { std::vector<cxx::Expr*> none; construct(chosen, baddr, mi ? mi->args : none, 0, mi ? mi->loc.line : line); }
+        if (mi && mi->args.empty()) valueInit(chosen, base->type, baddr, false, mi->loc.line);   // "D() : B()"
+        else if (chosen) { std::vector<cxx::Expr*> none; construct(chosen, baddr, mi ? mi->args : none, 0, mi ? mi->loc.line : line); }
         else constructDefault(base->type, baddr, line);
         m_ctorFlag = 1;
         if (mi) endFullExpr(mi->loc.line);
@@ -3077,7 +3135,8 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
         if ((fu->kind == sema::Type::Class && fu->decl) || (fu->kind == sema::Type::Array && isClassType(fu->inner))) {
             int faddr = emit(fa);
             size_t nargs = mi ? mi->args.size() : 0;
-            if (fu->kind == sema::Type::Array || !mi) constructDefault(fu, faddr, line);
+            if (mi && nargs == 0) valueInit(fu->kind == sema::Type::Class && mi->semaSym && mi->semaSym->isConstructor && mi->semaSym->ownerClass == fu->decl ? mi->semaSym : 0, fu, faddr, true, mi->loc.line);
+            else if (fu->kind == sema::Type::Array || !mi) constructDefault(fu, faddr, line);
             else if (nargs == 1 && isClassType(exprType(mi->args[0])) && m_semaTypes.unqualified(m_semaTypes.unref(exprType(mi->args[0]))) == fu) materialize(mi->args[0], fu, faddr, mi->loc.line);
             else {
                 const std::vector<Symbol*>* ctors = fu->decl->members ? fu->decl->members->find(fu->decl->ctorName()) : 0;
@@ -3100,7 +3159,12 @@ void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
         int faddr = emit(fa);
         LValue fl; fl.kind = LValue::Mem; fl.addr = faddr; fl.type = fu;
         bitField(fl, fld);
-        if (mi->args.empty()) { store(fl, constant(0, fu, mi->loc.line), fu, mi->loc.line); continue; }   // member(): value-initialised
+        if (mi->args.empty()) {
+            // member(): value-initialised (an array of scalars, a member pointer: valueInit)
+            if (fu->kind == sema::Type::Array || sema::TypeTable::holdsMemberPointer(fu)) valueInit(0, fu, faddr, true, mi->loc.line);
+            else store(fl, constant(0, fu, mi->loc.line), fu, mi->loc.line);
+            continue;
+        }
         store(fl, convert(value(mi->args[0]), exprType(mi->args[0]), fu, mi->loc.line), fu, mi->loc.line);
         endFullExpr(mi->loc.line);
     }

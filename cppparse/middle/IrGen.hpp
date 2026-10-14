@@ -136,6 +136,10 @@ private:
     void copyConstruct(const sema::Type* t, int dst, int src, int line);
     void copyAssign(const sema::Type* t, int dst, int src, int line);
     void constructDefault(const sema::Type* t, int addr, int line);
+    // T() (C++03 8.5/5, as cl): zeroed unless a user-declared constructor builds it; complete false for a base
+    // subobject (only its own bytes); ctor: the constructor sema chose, or 0
+    void valueInit(sema::Symbol* ctor, const sema::Type* t, int addr, bool complete, int line);
+    void zeroBytes(int addr, int bytes, int line);
     void forEachElement(const sema::Type* elem, int base, int count, bool construct, int line);
     int  materialize(cxx::Expr* e, const sema::Type* t, int dst, int line);
     void destroy(const sema::Type* t, int objAddr, int line, bool viaVtable, bool complete = true);   // complete: with its virtual bases

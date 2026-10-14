@@ -16,8 +16,9 @@
 // const methods, constructors/destructors/operators, the fundamental types,
 // pointers/references with cv-qualifiers, class/struct/union/enum types,
 // template instances with type and integer arguments, name and type
-// back-references. Not covered: function pointer parameters beyond the
-// simple case, member pointers, varargs.
+// back-references; the version 6 mangler (MangleSema.cpp) also covers
+// pointers to members and vcall thunks. Not covered: function pointer
+// parameters beyond the simple case, varargs.
 //
 // Strict C++98.
 #ifndef CPPPARSE_MANGLE_HPP
@@ -46,6 +47,8 @@ std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn,
 std::string msvcMangleVtableSymbol(const sema::Symbol& c, const sema::Symbol* forBase = 0);
 // an adjustor thunk of a virtual function: ?f@D@@WBA@EAAHXZ, D::f`adjustor{16}'
 std::string msvcMangleThunkSymbol(const sema::Symbol& fn, long adjust);
+// cl's vcall thunk of the virtual function at slotOffset (8 per slot) of a class's vftable: ??_9P@@$B7AA, P::`vcall'{8}'
+std::string msvcMangleVcallThunk(const sema::Symbol& c, long slotOffset);
 // cl's thread-safe-static guard of a function's index-th guarded static local: "?$TSS0@?1??f@@YAAEAUCnt@@XZ@4HA"
 std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index);
 

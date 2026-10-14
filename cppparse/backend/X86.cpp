@@ -1555,7 +1555,14 @@ void X86Module::appendCode(const std::string& code) { Lock l(m_mutex); m_code +=
 void X86Module::addThunk(const std::string& irName, const std::string& target, int adjust)
 {
     if (!m_thunkNames.insert(irName).second) return;
-    Thunk t; t.name = irName; t.target = target; t.adjust = adjust;
+    Thunk t; t.name = irName; t.target = target; t.adjust = adjust; t.vcall = false;
+    m_thunks.push_back(t);
+}
+
+void X86Module::addVcallThunk(const std::string& irName, int slotOffset)
+{
+    if (!m_thunkNames.insert(irName).second) return;
+    Thunk t; t.name = irName; t.adjust = slotOffset; t.vcall = true;
     m_thunks.push_back(t);
 }
 
@@ -1564,9 +1571,16 @@ void X86Module::emitVtables()
     // the adjustor thunks the tables name (decorated names are known by now): this moves from the vfptr the
     // slot was reached through to where the overrider expects it, then a tail jump; a leaf without a frame
     for (size_t i = 0; i < m_thunks.size(); ++i) {
-        const std::string sym = symbol(m_thunks[i].name), target = symbol(m_thunks[i].target);
+        const std::string sym = symbol(m_thunks[i].name);
         if (m_defined.count(sym)) continue;
         m_defined.insert(sym);
+        if (m_thunks[i].vcall) {
+            // a pointer to a virtual member function: the call goes through the vfptr this points at
+            m_code += ";@comdat any\n" + sym + " PROC\n        ; " + m_thunks[i].name + "\n        mov rax, qword ptr [rcx]\n        jmp qword ptr [rax+" +
+                      intToString(m_thunks[i].adjust) + "]\n" + sym + " ENDP\n\n";
+            continue;
+        }
+        const std::string target = symbol(m_thunks[i].target);
         if (!m_defined.count(target)) m_externs.insert(target);
         m_code += ";@comdat any\n" + sym + " PROC\n        ; " + m_thunks[i].name + "\n        sub rcx, " + intToString(m_thunks[i].adjust) +
                   "\n        jmp " + target + "\n" + sym + " ENDP\n\n";

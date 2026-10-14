@@ -385,3 +385,34 @@ void DN::operator delete[](void* p) { g_dnForm = 1; free(p); }
 void DN::operator delete[](void* p, size_t) { g_dnForm = 2; free(p); }
 DN* makeDNArray(int n) { return new DN[n]; }
 void deleteDNArray(DN* p) { delete[] p; }
+
+MP::MP() : a(1), b(2) {}
+int MP::f() const { return a * 10; }
+int MP::h() const { return b * 10; }
+MM::MM() : m(3) {}
+int MM::mf() const { return m * 100; }
+MQ::MQ() : q(4) {}
+int MQ::f() const { return q * 10; }
+int MP::* g_mpB = &MP::b;
+int MP::* g_mpNull = 0;
+int (MP::*g_mpF)() const = &MP::f;
+int MQ::* g_mqM = &MM::m;
+int (MQ::*g_mqF)() const = &MP::f;
+int (MQ::*g_mqMf)() const = &MM::mf;
+int VL::* g_vlV = &VB::v;
+int (VL::*g_vlGet)() const = &VB::get;
+int MP::* g_mpArr[3] = { &MP::a, 0 };
+MH g_mh;
+int mpRead(const MP* p, int MP::* m) { return p->*m; }
+int mpCall(const MP* p, int (MP::*f)() const) { return (p->*f)(); }
+int mpReadQ(const MQ& q, int MQ::* m) { return q.*m; }
+int mpCallQ(const MQ& q, int (MQ::*f)() const) { return (q.*f)(); }
+int mpReadVL(const VL* p, int VL::* m) { return p->*m; }
+int mpCallVL(const VL* p, int (VL::*f)() const) { return (p->*f)(); }
+int MP::* mpOfB() { return &MP::b; }
+int (MQ::*mqOfMf())() const { return &MM::mf; }
+int VL::* vlOfV() { return &VB::v; }
+int (VL::*vlOfGet())() const { return &VB::get; }
+int mpIsNull(int MP::* m, int (MQ::*f)() const, int VL::* v, int (VL::*g)() const) { return (m == 0 ? 1 : 0) + (f == 0 ? 2 : 0) + (!v ? 4 : 0) + (g ? 0 : 8); }
+int mpEqual(int (MQ::*f)() const, int (MQ::*g)() const, int VL::* v, int VL::* w) { return (f == g ? 1 : 0) + (v == w ? 2 : 0); }
+int mpViaCl(const MP* p, const MQ& q) { return clMpRead(p, &MP::b) + clMpCallQ(q, &MM::mf); }

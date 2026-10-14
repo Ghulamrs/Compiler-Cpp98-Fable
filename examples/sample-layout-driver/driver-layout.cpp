@@ -470,7 +470,62 @@ int main()
         deleteDNArray(new DN[2]);
         expect("DN array of cl deleted by cppparse: operator delete[](void*)", g_dnForm, 1);
     }
+    printf("pointers to members: made, passed, applied, compared and stored by both compilers\n");
+    {
+        MP p; MQ q; VL vl;
+        // cppparse's values read through cl's view of the representations
+        expect("g_mpB (offset of b)", g_mpB == &MP::b, 1);
+        expect("g_mpNull (-1)", *(const int*)&g_mpNull, -1);
+        expect("g_mpF (the vcall thunk)", g_mpF == &MP::f, 1);
+        expect("g_mqM (16 + m)", *(const int*)&g_mqM, 16 + (int)LAYOUT_FIELD(MM, m));
+        expect("g_mqF == &MP::f as MQ's", g_mqF == &MP::f, 1);
+        expect("g_mqMf adjustment", ((const int*)&g_mqMf)[2], 16);
+        expect("g_vlV (offset, vbtable entry)", ((const int*)&g_vlV)[0] * 100 + ((const int*)&g_vlV)[1], 4);
+        expect("g_vlGet == &VB::get as VL's", g_vlGet == &VB::get, 1);
+        expect("g_mpArr: &MP::a, -1, -1", ((const int*)g_mpArr)[0] * 100 + ((const int*)g_mpArr)[1] + ((const int*)g_mpArr)[2], 8 * 100 - 2);
+        expect("g_mh.field (-1 in static storage)", *(const int*)&g_mh.field, -1);
+        expect("g_mh.field == 0", g_mh.field == 0, 1);
+        // cl's values applied by cppparse
+        expect("mpRead(&p, &MP::a)", mpRead(&p, &MP::a), 1);
+        expect("mpRead(&p, &MP::b)", mpRead(&p, &MP::b), 2);
+        expect("mpCall(&p, &MP::f) (virtual)", mpCall(&p, &MP::f), 10);
+        expect("mpCall(&q, &MP::f) (MQ::f through the thunk)", mpCall(&q, &MP::f), 40);
+        expect("mpCall(&p, &MP::h)", mpCall(&p, &MP::h), 20);
+        expect("mpReadQ(q, &MM::m)", mpReadQ(q, &MM::m), 3);
+        expect("mpReadQ(q, &MP::b)", mpReadQ(q, &MP::b), 2);
+        expect("mpCallQ(q, &MM::mf)", mpCallQ(q, &MM::mf), 300);
+        expect("mpCallQ(q, &MP::f)", mpCallQ(q, &MP::f), 40);
+        expect("mpCallQ(q, &MP::h)", mpCallQ(q, &MP::h), 20);
+        expect("mpReadVL(&vl, &VB::v)", mpReadVL(&vl, &VB::v), 7);
+        expect("mpReadVL(&vl, &VL::l)", mpReadVL(&vl, &VL::l), 2);
+        expect("mpCallVL(&vl, &VB::get)", mpCallVL(&vl, &VB::get), 1007);
+        // cppparse's results applied by cl
+        expect("p.*mpOfB()", p.*mpOfB(), 2);
+        expect("(q.*mqOfMf())()", (q.*mqOfMf())(), 300);
+        expect("vl.*vlOfV()", vl.*vlOfV(), 7);
+        expect("(vl.*vlOfGet())()", (vl.*vlOfGet())(), 1007);
+        expect("mpOfB() == &MP::b", mpOfB() == &MP::b, 1);
+        expect("mqOfMf() == &MM::mf", mqOfMf() == &MM::mf, 1);
+        expect("vlOfV() == &VB::v", vlOfV() == &VB::v, 1);
+        // null and equality, cl's values compared by cppparse
+        int (MQ::*nullMq)() const = 0;
+        expect("mpIsNull(0, 0, 0, 0)", mpIsNull(0, 0, 0, 0), 15);
+        expect("mpIsNull(&MP::a, nullMq, &VB::v, 0)", mpIsNull(&MP::a, nullMq, &VB::v, 0), 10);
+        expect("mpIsNull(g_mpNull, &MP::f, 0, &VB::get)", mpIsNull(g_mpNull, &MP::f, 0, &VB::get), 5);
+        expect("mpEqual(&MP::f, &MP::f, &VB::v, &VB::v)", mpEqual(&MP::f, &MP::f, &VB::v, &VB::v), 3);
+        expect("mpEqual(&MP::f, &MM::mf, &VB::v, &VL::l)", mpEqual(&MP::f, &MM::mf, &VB::v, &VL::l), 0);
+        expect("mpEqual(&MP::f, &MP::h, 0, 0)", mpEqual(&MP::f, &MP::h, 0, 0), 2);
+        // cl's functions called by cppparse with cppparse's values
+        expect("mpViaCl(&p, q)", mpViaCl(&p, q), 302);
+        // cl's derived class: cppparse's thunk reaches its override
+        struct MR : MP { int f() const { return 77; } } mr;
+        expect("mpCall(&mr, &MP::f) (cl's override)", mpCall(&mr, &MP::f), 77);
+        expect("mpCall(&mr, g_mpF)", mpCall(&mr, g_mpF), 77);
+    }
     if (failures) { printf("%d FAILED\n", failures); return 1; }
     printf("ALL OK\n");
     return 0;
 }
+
+int clMpRead(const MP* p, int MP::* m) { return p->*m; }
+int clMpCallQ(const MQ& q, int (MQ::*f)() const) { return (q.*f)(); }

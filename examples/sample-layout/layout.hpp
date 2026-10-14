@@ -215,7 +215,9 @@ void deleteDNArray(DN* p);
     X(sizeof(VB)) X(sizeof(VD)) X(LAYOUT_FIELD(VD, d)) X(sizeof(VL)) X(sizeof(VX)) X(LAYOUT_BASE(VX, VR)) \
     X(LAYOUT_FIELD(VX, x)) X(sizeof(VN)) X(LAYOUT_FIELD(VN, n)) X(sizeof(VM)) X(LAYOUT_FIELD(VM, m)) X(sizeof(VY)) \
     X(LAYOUT_FIELD(VY, y)) X(sizeof(VZ)) X(LAYOUT_BASE(VZ, VX)) X(LAYOUT_FIELD(VZ, z)) \
-    X(sizeof(VNB)) X(sizeof(VNC)) X(sizeof(VNE)) X(sizeof(VNF)) X(LAYOUT_BASE(VNF, VNE)) X(LAYOUT_FIELD(VNF, f)) X(sizeof(VNG))
+    X(sizeof(VNB)) X(sizeof(VNC)) X(sizeof(VNE)) X(sizeof(VNF)) X(LAYOUT_BASE(VNF, VNE)) X(LAYOUT_FIELD(VNF, f)) X(sizeof(VNG)) \
+    X(sizeof(int MP::*)) X(sizeof(int (MP::*)() const)) X(sizeof(int MQ::*)) X(sizeof(int (MQ::*)() const)) X(sizeof(int VL::*)) \
+    X(sizeof(int (VL::*)() const)) X(sizeof(MH)) X(LAYOUT_FIELD(MH, x))
 
 // ---- virtual bases (MSVC: vbptr, vbtables, the "most derived" flag, the vbase destructor ??_D) -----------
 // A class with virtual bases shares the vbptr of its first non-virtual base that has one or gets its own after
@@ -224,7 +226,7 @@ void deleteDNArray(DN* p);
 // stores the vbptrs and builds the virtual bases; ??_D destroys them after ~D. Both compilers build, convert,
 // copy and destroy these objects; the constructors and destructors log their digits in g_vbLog.
 extern long g_vbLog;
-struct VB { int v; VB() : v(7) { g_vbLog = g_vbLog * 10 + 1; } VB(const VB& o) : v(o.v + 100) { g_vbLog = g_vbLog * 10 + 8; } ~VB() { g_vbLog = g_vbLog * 10 + 9; } };
+struct VB { int v; VB() : v(7) { g_vbLog = g_vbLog * 10 + 1; } VB(const VB& o) : v(o.v + 100) { g_vbLog = g_vbLog * 10 + 8; } ~VB() { g_vbLog = g_vbLog * 10 + 9; } int get() const { return v + 1000; } };
 struct VD : virtual VB { int d; VD(); ~VD(); };
 struct VL : virtual VB { int l; VL() : l(2) { g_vbLog = g_vbLog * 10 + 2; } };
 struct VR : virtual VB { int r; VR() : r(3) { g_vbLog = g_vbLog * 10 + 3; } ~VR() { g_vbLog = g_vbLog * 10 + 6; } };
@@ -257,6 +259,43 @@ int  vbNestedF(const VNF& f);              // a b c e f, through the bases
 int  vbNestedG(VNG* g);                    // a b c e g, through VNE* and VNC*
 VNA* vbToVNA(VNG* g);                      // through VNC's VNB
 long vbNestedLife();                       // a VNF and a VNG on cppparse's stack: built right, then the destructors' log
+
+// ---- pointers to members (cl's representations) ----------------------------------------------------------
+// A pointer to data member is an int offset, null -1; under virtual inheritance an int offset and the vbtable
+// offset of the base's entry (null {0, -1}). A pointer to member function is a code pointer (cl's vcall thunk
+// ??_9MP@@$BA@AA for a virtual one), under multiple inheritance with an int this adjustment, under virtual
+// inheritance with the vbtable offset as well. Both compilers make them, pass them (an 8-byte one in a register,
+// a larger one by the address of a copy and through the hidden result pointer, before this), apply them, compare
+// them and store them; cppparse's static storage holds cl's null values.
+struct MP { MP(); virtual int f() const; int h() const; int a; int b; };
+struct MM { MM(); int mf() const; int m; };
+struct MQ : MM, MP { MQ(); int f() const; int q; };     // MP at 0 (the polymorphic base first), MM at 16
+struct MH { int MP::* field; int x; };                   // zero-initialised static storage: field is -1
+extern int MP::* g_mpB;                        // &MP::b
+extern int MP::* g_mpNull;                     // 0: -1
+extern int (MP::*g_mpF)() const;               // &MP::f: the vcall thunk
+extern int MQ::* g_mqM;                        // &MM::m converted: 16 + offset of m
+extern int (MQ::*g_mqF)() const;               // &MP::f: {thunk, 0}
+extern int (MQ::*g_mqMf)() const;              // &MM::mf: {MM::mf, 16}
+extern int VL::* g_vlV;                        // &VB::v: {offset of v, 4}
+extern int (VL::*g_vlGet)() const;             // &VB::get: {VB::get, 0, 4}
+extern int MP::* g_mpArr[3];                   // { &MP::a, 0 }: offset, -1, -1
+extern MH g_mh;
+int  mpRead(const MP* p, int MP::* m);         // p->*m
+int  mpCall(const MP* p, int (MP::*f)() const);
+int  mpReadQ(const MQ& q, int MQ::* m);
+int  mpCallQ(const MQ& q, int (MQ::*f)() const);
+int  mpReadVL(const VL* p, int VL::* m);
+int  mpCallVL(const VL* p, int (VL::*f)() const);
+int  MP::* mpOfB();                            // &MP::b
+int (MQ::*mqOfMf())() const;                   // &MM::mf as MQ's (a 16-byte result through the hidden pointer)
+int  VL::* vlOfV();                            // &VB::v as VL's (8 bytes, in rax)
+int (VL::*vlOfGet())() const;
+int  mpIsNull(int MP::* m, int (MQ::*f)() const, int VL::* v, int (VL::*g)() const);   // bits: 1 m, 2 f, 4 v, 8 g
+int  mpEqual(int (MQ::*f)() const, int (MQ::*g)() const, int VL::* v, int VL::* w);  // bits: 1 f == g, 2 v == w
+int  mpViaCl(const MP* p, const MQ& q);        // clMpRead(p, &MP::b) + clMpCallQ(q, &MM::mf), the driver's functions
+int  clMpRead(const MP* p, int MP::* m);       // defined by the driver (cl)
+int  clMpCallQ(const MQ& q, int (MQ::*f)() const);
 
 // the value of the k-th expression of LAYOUT_VALUES as cppparse computes it; -1 past the end
 int layoutValue(int k);

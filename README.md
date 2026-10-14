@@ -688,7 +688,7 @@ Version 6 is finished only when every compilation gap left by versions
   copied with their copy constructors (both done in the version 6 IR
   generator), a per-thread frame stack (done in the runtime);
 - COFF: `.pdata`/`.xdata` unwind tables and line information;
-- mangling: function-pointer parameter lists, member pointers, varargs;
+- mangling: function-pointer parameter lists, member pointers (done), varargs;
 - the type checker replaced by real semantic analysis (scopes, lookup,
   overload resolution, conversions, templates).
 
@@ -864,22 +864,45 @@ reports accept them. S132 (found while generating code, no object
 written; `examples/sample-front/vbase-refused.cpp`) refuses a `catch` of
 a class used as a virtual base, `.*`/`->*` on a class with virtual bases
 and a cast from a virtual base down to a derived class (ill-formed, cl's
-C2635). Pointers to members are not generated yet: S132 also refuses
-`.*`/`->*` and every value of a member pointer type on any class (they
-compiled as `void*`: `->*` read garbage, a null data member pointer was 0
-where cl's is -1) and a class with a member of such a type
-(`memptr-refused.cpp`, `memptr-field.cpp`); calls through them stay a sema
-error (S109). Their sizes are cl's (TypeTable::sizeOf by the inheritance
-model: data 4, 8 with virtual bases; functions 8, 16 with multiple or
-virtual inheritance or a vfptr added in front of a base; an incomplete
-class 12 and 24, also after it is defined when its size was needed while
-it was incomplete, as cl keeps the model it chose there; front.cpp
-`mpsize::`, `review::`, `mplater::`). Namespace-scope and static member
-pointers are refused too (`memptr-global.cpp`), and so are objects that
-hold one (a class template instantiation, a member, an array element)
-when they have static storage, are value-initialised or are brace
-initialised (`memptr-static.cpp`, `memptr-valueinit.cpp`: zero is not cl's
-null data member pointer). A direct base that is also a
+C2635). Pointers to members are generated in cl's representations
+(IrGen.cpp mpLayout and the mp* functions): a data member pointer is an
+int offset with null -1, under virtual inheritance an int offset and the
+vbtable offset of the base's entry (null {0, -1}; cl reads `object + vbptr
+offset + vbtable[entry] + offset`, entry 0 leading back to the vbptr's
+subobject), and in the unspecified model (the class incomplete when the
+size was first needed) the offset, the vbptr's offset and the entry (null
+{0, 0, -1}); a member function pointer is a code pointer (cl's vcall thunk
+`??_9P@@$BA@AA` for a virtual function, `mov rax, [rcx]; jmp [rax+slot]`),
+under multiple inheritance with an int this adjustment (`&AB::fb`, first
+held by a secondary vftable, is AB's thunk with the adjustment 16), under
+virtual inheritance with the vbtable offset as well, and in the
+unspecified model with the vbptr's offset before it. Their sizes are cl's
+(TypeTable::sizeOf by the inheritance model: data 4, 8 with virtual
+bases; functions 8, 16 with multiple or virtual inheritance or a vfptr
+added in front of a base; an incomplete class 12 and 24, also after it is
+defined when its size was needed while it was incomplete, as cl keeps the
+model it chose there; front.cpp `mpsize::`, `review::`, `mplater::`).
+Conversions to a derived class add the base's offset (not to a null data
+member pointer; through a virtual base the entry and the offset in the
+base), `static_cast` back subtracts it or drops the adjustment, `.*` and
+`->*` apply them, `(obj.*pmf)(x)` calls through the adjusted this, `==`
+compares every field (a function's beyond the code pointer only when it is
+not null), and they travel as cl passes them: 4 and 8 bytes in a register
+(also the {offset, entry} pair), larger ones by the address of a copy and
+through a hidden result pointer that a member function takes before
+`this`. `&C::m` and null initialise static storage as data; a
+zero-initialised object gets cl's null values where cl writes them (a
+pointer to member, an array of them, the pointer-to-member members of a
+class without bases; nested classes, arrays of them inside a class and
+arrays of classes stay zero), value-initialisation zeroes as cl does, and
+a brace list's omitted pointers to members are null. The mangling is cl's
+(`PEQP@@H`, `P8P@@EAAHXZ`, `?pm@@3PEQP@@HEQ1@`). Test 17 compares every
+word of the representations with cl's (front.cpp `memptr::`) and test 13
+passes them between the compilers (sample-layout MP, MQ, MH, VL). Still
+refused with S132 (`memptr-refused.cpp`): a conversion into a class with
+virtual bases that does not share the base's vbptr, down from a class with
+virtual bases, and between two classes whose models are both unspecified;
+a pointer to member as a template argument stays a sema error. A direct base that is also a
 base of another direct base is diagnosed as cl does (Sema::declareClass;
 `ambiguous-base.cpp`): S141, an error, where cl gives C2584
 (`struct F : virtual V, W {}` with `W : V`), S142, a warning, where cl

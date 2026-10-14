@@ -46,6 +46,14 @@ static int clOwCall(const OW* p, int which)
     return clOvCall(p, which);
 }
 
+// a class cl derives from cppparse's RC with covariant overrides of its own: cl's return-adjusting thunks in cl's
+// copies of the tables, reached by cppparse's calls through RB* and RC*
+struct RD : RC { RD* self() { return this; } RD* six(int p, int q, int r, int s, double t, int u) { return p + q + r + s + (int)t + u == 21 ? this : 0; } };
+
+// a class cl derives from cppparse's PVD, overriding PV::f: cl's vtordisp thunk in cl's copy of PV's table, reached
+// by cppparse's calls through PV*; cppparse's constructors and destructors run inside cl's
+struct PVE : PVD { int e; PVE() : e(9) { g_pvLog = g_pvLog * 10 + (probe() == 1024 ? 7 : 0); } ~PVE() { g_pvLog = g_pvLog * 10 + (probe() == 1024 ? 8 : 0); } int f() const { return e + 1; } };
+
 // a class cl derives from cppparse's OW: cppparse's calls reach its overriders through cl's table
 struct CW : OW {
     int f(int) const { return 201; }
@@ -470,7 +478,137 @@ int main()
         deleteDNArray(new DN[2]);
         expect("DN array of cl deleted by cppparse: operator delete[](void*)", g_dnForm, 1);
     }
+    printf("polymorphic virtual bases: the vfptr in the virtual base, vtordisp and cl's thunks, by both compilers\n");
+    {
+        g_pvLog = 0;
+        PVD d;
+        expect("PVD built by cl, cppparse's constructors: log", g_pvLog, 1234);
+        expect("cl's calls through PV*", static_cast<PV*>(&d)->f() * 100 + static_cast<PV*>(&d)->g(), 1224);
+        expect("cl's calls through PVR*", static_cast<PVR*>(&d)->f() * 100 + static_cast<PVR*>(&d)->g(), 1224);
+        expect("cl's direct calls", d.f() * 100 + d.g() * 10 + d.PV::f() / 7, 1441);
+        expect("cppparse's calls through PV*", pvCall(&d), 1224);
+        expect("cppparse's calls through PVL*", pvCallL(&d), 1224);
+        expect("cppparse's calls through every base", pvCallD(&d), 1224);
+        expect("PVD copied by cppparse", pvCopy(d), 1224);
+        expect("pointers to members on PVD (cppparse)", pvMemptr(d, &PVL::l, &PV::f), 20012);
+        expect("pointers to members on PVD (cl)", d.*(&PVL::l) * 10000 + (d.*(&PV::f))(), 20012);
+        PVX x;
+        expect("PVX: cl's calls", static_cast<PV*>(&x)->f() * 100 + x.nf(), 4607);
+        expect("PVX: cppparse's calls", pvCallX(&x) * 10000 + pvCall(&x), 46074601);
+        PVN2 n2;
+        expect("PVN2: cl's calls through PV* and PVN*", static_cast<PV*>(&n2)->g() * 100 + static_cast<PVN*>(&n2)->h() * 10 + static_cast<PV*>(&n2)->f() / 7, 981);
+        expect("PVN2: cppparse's calls", pvCallN(&n2), 80709);
+        g_pvLog = 0;
+        PV* p = pvMakeD();
+        expect("PVD built by cppparse: log", g_pvLog, 1234);
+        expect("cl's calls into cppparse's object", p->f() * 100 + p->g(), 1224);
+        g_pvLog = 0;
+        delete p;
+        expect("cppparse's PVD deleted by cl: log", g_pvLog, 569);
+        p = new PVD;
+        g_pvLog = 0;
+        pvDelete(p);
+        expect("cl's PVD deleted by cppparse: log", g_pvLog, 569);
+        PVN* pn = pvMakeN2();
+        expect("cl's calls into cppparse's PVN2", pn->h() * 1000 + pn->g() * 10 + pn->f() / 7, 8091);
+        pvDelete(pn);
+        expect("a PVD on cppparse's stack: log", pvLife(), 1234569);
+        // cl's class derived from PVD: cppparse's constructors run inside cl's, with cl's vtordisp
+        g_pvLog = 0;
+        {
+            PVE e;
+            expect("PVE built by cl: log", g_pvLog, 12347);
+            expect("cppparse's calls of cl's override through PV*", pvCall(&e), 1024);
+            expect("cppparse's calls of cl's override through every base", pvCallD(&e), 1024);
+            expect("cl's call through PVL*", static_cast<PVL*>(&e)->f(), 10);
+            g_pvLog = 0;
+        }
+        expect("PVE destroyed by cl: log", g_pvLog, 8569);
+        PV* pe = new PVE;
+        g_pvLog = 0;
+        pvDelete(pe);
+        expect("cl's PVE deleted by cppparse: log", g_pvLog, 8569);
+        g_pvLog = 0;
+    }
+    printf("covariant returns through a secondary base: cl's return-adjusting thunks, by both compilers\n");
+    {
+        RC c;
+        RB* asB = &c;
+        expect("cppparse's call through RB* (the thunk)", rbSelf(&c) == &c, 1);
+        expect("cppparse's call through RC* (the new slot)", rcSelf(&c) == &c, 1);
+        expect("cppparse's reference result through RB&", &rbSelfRef(c) == &c, 1);
+        expect("cppparse's six through RB*, found", rbSix(&c, 6) == &c, 1);
+        expect("cppparse's six through RB*, null", rbSix(&c, 7) == 0, 1);
+        expect("cppparse's six through RC*", rcSix(&c, 6) == &c, 1);
+        expect("cl's call through RB* into cppparse's table", asB->self() == &c, 1);
+        expect("cl's call through RC*", c.self() == &c, 1);
+        expect("cl's reference result through RB&", &asB->selfRef() == &c, 1);
+        expect("cl's six through RB*", asB->six(1, 2, 3, 4, 5.0, 6) == &c, 1);
+        expect("cl's six through RB*, null", asB->six(1, 2, 3, 4, 5.0, 7) == 0, 1);
+        // cl's class derived from cppparse's RC: cppparse's calls reach cl's thunks and real slots
+        RD d;
+        expect("cppparse's RB* call of cl's override", rbSelf(&d) == &d, 1);
+        expect("cppparse's RC* call of cl's override", rcSelf(&d) == &d, 1);
+        expect("cppparse's RB* six of cl's override", rbSix(&d, 6) == &d, 1);
+        expect("cppparse's RC* six of cl's override, null", rcSix(&d, 7) == 0, 1);
+        expect("RC::rc through cl", static_cast<const RC&>(d).rc(), 3);
+    }
+    printf("pointers to members: made, passed, applied, compared and stored by both compilers\n");
+    {
+        MP p; MQ q; VL vl;
+        // cppparse's values read through cl's view of the representations
+        expect("g_mpB (offset of b)", g_mpB == &MP::b, 1);
+        expect("g_mpNull (-1)", *(const int*)&g_mpNull, -1);
+        expect("g_mpF (the vcall thunk)", g_mpF == &MP::f, 1);
+        expect("g_mqM (16 + m)", *(const int*)&g_mqM, 16 + (int)LAYOUT_FIELD(MM, m));
+        expect("g_mqF == &MP::f as MQ's", g_mqF == &MP::f, 1);
+        expect("g_mqMf adjustment", ((const int*)&g_mqMf)[2], 16);
+        expect("g_vlV (offset, vbtable entry)", ((const int*)&g_vlV)[0] * 100 + ((const int*)&g_vlV)[1], 4);
+        expect("g_vlGet == &VB::get as VL's", g_vlGet == &VB::get, 1);
+        expect("g_mpArr: &MP::a, -1, -1", ((const int*)g_mpArr)[0] * 100 + ((const int*)g_mpArr)[1] + ((const int*)g_mpArr)[2], 8 * 100 - 2);
+        expect("g_mh.field (-1 in static storage)", *(const int*)&g_mh.field, -1);
+        expect("g_mh.field == 0", g_mh.field == 0, 1);
+        // cl's values applied by cppparse
+        expect("mpRead(&p, &MP::a)", mpRead(&p, &MP::a), 1);
+        expect("mpRead(&p, &MP::b)", mpRead(&p, &MP::b), 2);
+        expect("mpCall(&p, &MP::f) (virtual)", mpCall(&p, &MP::f), 10);
+        expect("mpCall(&q, &MP::f) (MQ::f through the thunk)", mpCall(&q, &MP::f), 40);
+        expect("mpCall(&p, &MP::h)", mpCall(&p, &MP::h), 20);
+        expect("mpReadQ(q, &MM::m)", mpReadQ(q, &MM::m), 3);
+        expect("mpReadQ(q, &MP::b)", mpReadQ(q, &MP::b), 2);
+        expect("mpCallQ(q, &MM::mf)", mpCallQ(q, &MM::mf), 300);
+        expect("mpCallQ(q, &MP::f)", mpCallQ(q, &MP::f), 40);
+        expect("mpCallQ(q, &MP::h)", mpCallQ(q, &MP::h), 20);
+        expect("mpReadVL(&vl, &VB::v)", mpReadVL(&vl, &VB::v), 7);
+        expect("mpReadVL(&vl, &VL::l)", mpReadVL(&vl, &VL::l), 2);
+        expect("mpCallVL(&vl, &VB::get)", mpCallVL(&vl, &VB::get), 1007);
+        // cppparse's results applied by cl
+        expect("p.*mpOfB()", p.*mpOfB(), 2);
+        expect("(q.*mqOfMf())()", (q.*mqOfMf())(), 300);
+        expect("vl.*vlOfV()", vl.*vlOfV(), 7);
+        expect("(vl.*vlOfGet())()", (vl.*vlOfGet())(), 1007);
+        expect("mpOfB() == &MP::b", mpOfB() == &MP::b, 1);
+        expect("mqOfMf() == &MM::mf", mqOfMf() == &MM::mf, 1);
+        expect("vlOfV() == &VB::v", vlOfV() == &VB::v, 1);
+        // null and equality, cl's values compared by cppparse
+        int (MQ::*nullMq)() const = 0;
+        expect("mpIsNull(0, 0, 0, 0)", mpIsNull(0, 0, 0, 0), 15);
+        expect("mpIsNull(&MP::a, nullMq, &VB::v, 0)", mpIsNull(&MP::a, nullMq, &VB::v, 0), 10);
+        expect("mpIsNull(g_mpNull, &MP::f, 0, &VB::get)", mpIsNull(g_mpNull, &MP::f, 0, &VB::get), 5);
+        expect("mpEqual(&MP::f, &MP::f, &VB::v, &VB::v)", mpEqual(&MP::f, &MP::f, &VB::v, &VB::v), 3);
+        expect("mpEqual(&MP::f, &MM::mf, &VB::v, &VL::l)", mpEqual(&MP::f, &MM::mf, &VB::v, &VL::l), 0);
+        expect("mpEqual(&MP::f, &MP::h, 0, 0)", mpEqual(&MP::f, &MP::h, 0, 0), 2);
+        // cl's functions called by cppparse with cppparse's values
+        expect("mpViaCl(&p, q)", mpViaCl(&p, q), 302);
+        // cl's derived class: cppparse's thunk reaches its override
+        struct MR : MP { int f() const { return 77; } } mr;
+        expect("mpCall(&mr, &MP::f) (cl's override)", mpCall(&mr, &MP::f), 77);
+        expect("mpCall(&mr, g_mpF)", mpCall(&mr, g_mpF), 77);
+    }
     if (failures) { printf("%d FAILED\n", failures); return 1; }
     printf("ALL OK\n");
     return 0;
 }
+
+int clMpRead(const MP* p, int MP::* m) { return p->*m; }
+int clMpCallQ(const MQ& q, int (MQ::*f)() const) { return (q.*f)(); }

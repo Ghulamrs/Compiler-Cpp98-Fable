@@ -107,9 +107,46 @@ private:
     bool isBaseOf(sema::Symbol* derived, sema::Symbol* base) const { int o = 0, i = 0, r = 0; return baseOffset(derived, base, o) || virtualBasePath(derived, base, i, r); }
     static bool hasVbases(const sema::Symbol* cls) { return cls && !cls->vbases.empty(); }
     int  toBase(int addr, sema::Symbol* derived, sema::Symbol* base, int line);
-    bool isVirtualBaseAnywhere(sema::Symbol* cls) const;
-    void memberPointerCheck(cxx::Expr* e);
     static std::string vbtableName(const sema::Symbol* cls, size_t t);
+
+    // pointers to members as cl represents them (the sizes are TypeTable::sizeOf's): a data member is an int
+    // offset, null -1 (kind 1); with virtual bases an int offset and the vbtable offset of the base's entry, null
+    // {0, -1}; in the unspecified model (the class incomplete when a size was first needed) the offset, the vbptr's
+    // offset and the vbtable offset, null {0, 0, -1}. A member function is a code pointer (a vcall thunk for a
+    // virtual one), null 0 (kind 2); under multiple inheritance a code pointer and an int this adjustment; with
+    // virtual bases the vbtable offset follows; in the unspecified model the vbptr's offset comes before it (null:
+    // all zero, the vbtable offset -1 in the unspecified model). Every representation but the first two (kind 3)
+    // lives in memory like a class object: values are addresses, copies move the bytes, and an 8-byte one travels
+    // in a register as an integer, a larger one by the address of a copy and through the hidden result pointer
+    struct MpLayout {
+        bool function, multiple, virt, unspecified;
+        int  size;
+        int  adjAt, vbptrAt, vbindexAt;   // byte offsets of the fields after the pointer / offset at 0, -1 when absent
+        MpLayout() : function(false), multiple(false), virt(false), unspecified(false), size(0), adjAt(-1), vbptrAt(-1), vbindexAt(-1) {}
+    };
+    MpLayout mpLayout(const sema::Type* t) const;
+    int  mpKind(const sema::Type* t) const;
+    bool byAddress(const sema::Type* u) const { return u && (u->kind == sema::Type::Class || u->kind == sema::Type::Array || mpKind(u) == 3); }
+    const Type* mpClassType(int size);
+    int  mpLoad(int addr, int at, const sema::Type* ft, int line);
+    void mpStore(int addr, int at, int v, const sema::Type* ft, int line);
+    int  mpTemp(const sema::Type* t, int line);
+    int  mpNull(const sema::Type* t, int line);
+    int  mpAddressOf(sema::Symbol* m, const sema::Type* t, int line);
+    int  mpConvert(int v, const sema::Type* from, const sema::Type* to, int line);
+    int  mpCompare(int a, const sema::Type* ta, int b, const sema::Type* tb, bool ne, int line);
+    int  mpToBool(int v, const sema::Type* t, int line);
+    int  mpApply(cxx::Expr* e, int* code);
+    int  mpVbaseAddress(int obj, sema::Symbol* cls, int vbindex, int line);
+    int  memberPointerCall(cxx::Expr* e, cxx::Expr* callee, int sretAddr);
+    bool memberPointerData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataItem>& out);
+    bool nullMemberPointerData(const sema::Type* t, std::vector<IrDataItem>& out, bool direct);
+    void nullMemberPointers(const sema::Type* t, int addr, int line);
+    std::string vcallThunk(sema::Symbol* fn);
+    static int vbptrOrigin(const sema::Symbol* cls);
+    bool mpPath(sema::Symbol* derived, sema::Symbol* base, int& off, int& index, int& rest) const;
+    std::map<int, const Type*> m_mpTypes;
+    int                        m_thisSlot;      // the local holding this (0, or 1 behind a hidden result pointer cl puts first)
     void storeVbptrs(sema::Symbol* cls, int objAddr, int line);
     sema::Symbol* namedResult(sema::Symbol* fn, cxx::Stmt* body);   // the local every return names (NRVO), or 0
     sema::Symbol* vbaseDestructor(sema::Symbol* cls);   // cl's ??_D: the destructor of a complete object
@@ -127,6 +164,7 @@ private:
     // register; a POD-like one of those sizes is returned in rax by a non-member or static function
     const sema::Type* regParamType(const sema::Type* t) const;
     const sema::Type* regReturnType(sema::Symbol* fn, const sema::Type* rt) const;
+    const sema::Type* argOperandType(const sema::Type* pt, cxx::Expr* a) const;   // the IR type an argument of a parameter of type pt travels as
     bool podForReturn(const sema::Type* t, int depth) const;
     bool copyAssignDeleted(const sema::Type* t, int depth) const;
     void callSpecial(sema::Symbol* fn, int thisPtr, int argPtr, int line);
@@ -185,6 +223,7 @@ private:
     void destructorCleanup(sema::Symbol* fn);
     void destructorParts(sema::Symbol* fn);
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
+    int  vfptrThis(sema::Symbol* fn, int thisPtr, int line);
     static std::string vtableName(const sema::Symbol* cls, size_t t);
     // MSVC's vector deleting destructor of a virtual destructor (what its vtable slot holds): with bit 1 of its
     // flags clear it destroys the complete object, with bit 1 set the array whose count is in the cookie before

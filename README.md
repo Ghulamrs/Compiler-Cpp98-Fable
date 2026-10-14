@@ -688,7 +688,7 @@ Version 6 is finished only when every compilation gap left by versions
   copied with their copy constructors (both done in the version 6 IR
   generator), a per-thread frame stack (done in the runtime);
 - COFF: `.pdata`/`.xdata` unwind tables and line information;
-- mangling: function-pointer parameter lists, member pointers, varargs;
+- mangling: function-pointer parameter lists, member pointers (done), varargs;
 - the type checker replaced by real semantic analysis (scopes, lookup,
   overload resolution, conversions, templates).
 
@@ -855,43 +855,107 @@ virtual bases after it. A virtual base with virtual bases of its own keeps
 its vbptr in the virtual part, stored by the most derived constructor, its
 table named after the base it comes through as cl names it (test 13,
 sample-layout: a diamond, shared and injected vbptrs, nested virtual bases,
-copies, arrays and logs, built and destroyed across both compilers). Still
-refused with S130 (test 17, `examples/sample-front/vbase.cpp`): polymorphic
-classes with virtual bases (the vfptr inside the virtual base, vtordisp),
-empty or over-aligned virtual bases, `#pragma pack`,
-and vbtables whose names need a path of several bases; `--sema6` and the
-reports accept them. S132 (found while generating code, no object
-written; `examples/sample-front/vbase-refused.cpp`) refuses a `catch` of
-a class used as a virtual base, `.*`/`->*` on a class with virtual bases
-and a cast from a virtual base down to a derived class (ill-formed, cl's
-C2635). Pointers to members are not generated yet: S132 also refuses
-`.*`/`->*` and every value of a member pointer type on any class (they
-compiled as `void*`: `->*` read garbage, a null data member pointer was 0
-where cl's is -1) and a class with a member of such a type
-(`memptr-refused.cpp`, `memptr-field.cpp`); calls through them stay a sema
-error (S109). Their sizes are cl's (TypeTable::sizeOf by the inheritance
-model: data 4, 8 with virtual bases; functions 8, 16 with multiple or
-virtual inheritance or a vfptr added in front of a base; an incomplete
-class 12 and 24, also after it is defined when its size was needed while
-it was incomplete, as cl keeps the model it chose there; front.cpp
-`mpsize::`, `review::`, `mplater::`). Namespace-scope and static member
-pointers are refused too (`memptr-global.cpp`), and so are objects that
-hold one (a class template instantiation, a member, an array element)
-when they have static storage, are value-initialised or are brace
-initialised (`memptr-static.cpp`, `memptr-valueinit.cpp`: zero is not cl's
-null data member pointer). A direct base that is also a
+copies, arrays and logs, built and destroyed across both compilers).
+Polymorphic classes with virtual bases are laid out and generated as cl
+does (Sema::layoutClass, completeClass; IrGen storeVptr, registerMetadata;
+X86 addVtordispThunk): the vfptr stays inside the virtual base subobject
+and a class gets a vfptr of its own only for new virtual functions; each
+class holds a copy of every virtual base's vftable at the base's place
+(`??_7VL@@6B@`, `??_7VN@@6BV@@@`), whose overriders from outside the base
+are reached through adjustor thunks computed from the base's offset; a
+class with a user-declared constructor or destructor that overrides a
+function of the virtual base gets cl's vtordisp (4 bytes before the base,
+inherited by the classes derived from it) and those slots hold cl's `$4`
+thunks (`?f@VL@@$4PPPPPPPM@A@EBAHXZ`: `movsxd rax, [rcx-4]; sub rcx, rax;
+sub rcx, delta`); a constructor stores the base's vftable through the
+vbtable and the vtordisp as the base's distance from its place in the
+complete object, a destructor restores them, and the deleting destructors
+`??_G`/`??_E` reached from a virtual base's table subtract the base's
+static offset; a name declared in a virtual base and again in a class
+deriving from it is found in the derived class (dominance). Empty and
+over-aligned virtual bases, `#pragma pack` and vbtables named by a path of
+several bases (`??_8VPR@@7BVPB@@VPP@@@`) follow cl as well. Test 17
+compares the sizes, vtordisps and vbtables of 50 classes with cl's
+`/d1reportAllClassLayout` (`vbase-layout.cpp`) and runs front.cpp
+`pvbase::` (calls through every base during construction and destruction,
+delete, copies, arrays, `.*`/`->*`) against cl at -O0 and -O2; test 13
+(sample-layout PV..PVN2) builds, calls and deletes such objects across the
+compilers, cl's derived class PVE with cl's vtordisp thunks included;
+eh.ps1 ehCatchVbase catches a thrown class with virtual bases as a virtual
+base, by value and by reference, and a thrown pointer to one as a pointer
+to a virtual base, found through the pointed-to object's vbtable (the
+runtime descriptor `EV*+v0:4`). Still refused with S130 (test 17,
+`examples/sample-front/vbase.cpp`): a virtual base that overrides a
+virtual function of another virtual base of the class (`WL : virtual VL`
+with `VL : virtual V`: cl's vtordispex thunk reads the vbtable); `--sema6`
+and the reports accept it. S132 (found while generating code, no object
+written; `examples/sample-front/vbase-refused.cpp`) refuses a cast from a
+virtual base down to a derived class (ill-formed, cl's
+C2635). Pointers to members are generated in cl's representations
+(IrGen.cpp mpLayout and the mp* functions): a data member pointer is an
+int offset with null -1, under virtual inheritance an int offset and the
+vbtable offset of the base's entry (null {0, -1}; cl reads `object + vbptr
+offset + vbtable[entry] + offset`, entry 0 leading back to the vbptr's
+subobject), and in the unspecified model (the class incomplete when the
+size was first needed) the offset, the vbptr's offset and the entry (null
+{0, 0, -1}); a member function pointer is a code pointer (cl's vcall thunk
+`??_9P@@$BA@AA` for a virtual function, `mov rax, [rcx]; jmp [rax+slot]`),
+under multiple inheritance with an int this adjustment (`&AB::fb`, first
+held by a secondary vftable, is AB's thunk with the adjustment 16), under
+virtual inheritance with the vbtable offset as well, and in the
+unspecified model with the vbptr's offset before it. Their sizes are cl's
+(TypeTable::sizeOf by the inheritance model: data 4, 8 with virtual
+bases; functions 8, 16 with multiple or virtual inheritance or a vfptr
+added in front of a base; an incomplete class 12 and 24, also after it is
+defined when its size was needed while it was incomplete, as cl keeps the
+model it chose there; front.cpp `mpsize::`, `review::`, `mplater::`).
+Conversions to a derived class add the base's offset (not to a null data
+member pointer; through a virtual base the entry and the offset in the
+base), `static_cast` back subtracts it or drops the adjustment, `.*` and
+`->*` apply them, `(obj.*pmf)(x)` calls through the adjusted this, `==`
+compares every field (a function's beyond the code pointer only when it is
+not null), and they travel as cl passes them: 4 and 8 bytes in a register
+(also the {offset, entry} pair), larger ones by the address of a copy and
+through a hidden result pointer that a member function takes before
+`this`. `&C::m` and null initialise static storage as data; a
+zero-initialised object gets cl's null values where cl writes them (a
+pointer to member, an array of them, the pointer-to-member members of a
+class without bases; nested classes, arrays of them inside a class and
+arrays of classes stay zero), value-initialisation zeroes as cl does, and
+a brace list's omitted pointers to members are null. The mangling is cl's
+(`PEQP@@H`, `P8P@@EAAHXZ`, `?pm@@3PEQP@@HEQ1@`). Test 17 compares every
+word of the representations with cl's (front.cpp `memptr::`) and test 13
+passes them between the compilers (sample-layout MP, MQ, MH, VL). Still
+refused with S132 (`memptr-refused.cpp`): a conversion into a class with
+virtual bases that does not share the base's vbptr, down from a class with
+virtual bases, and between two classes whose models are both unspecified;
+a pointer to member as a template argument stays a sema error. A direct base that is also a
 base of another direct base is diagnosed as cl does (Sema::declareClass;
 `ambiguous-base.cpp`): S141, an error, where cl gives C2584
 (`struct F : virtual V, W {}` with `W : V`), S142, a warning, where cl
 gives C4584 (`struct G : V, W {}`); ambiguous conversions to a base (cl C2594: S143 for
 casts, S105 for implicit conversions) and unqualified access to a member of
 a base held more than once (cl C2385: S144) are errors (Sema::baseSubobjects,
-`ambiguous.cpp`); `d.B::a` and `d.C::f()` go through the named base
+`ambiguous.cpp`), as is a virtual function of a virtual base overridden in
+two direct bases and not in the class itself (cl C2250: S145,
+Sema::completeClass); `d.B::a` and `d.C::f()` go through the named base
 (IrGen namingBase: they used the first path; front.cpp `ambig::`).
-Likewise an override with a covariant return
-type whose conversion moves the pointer (`CD* self()` over `SB* self()`
-with SB at 16 in CD) would need cl's return-adjusting thunk: S131
-(`covariant.cpp`).
+An override with a covariant return type whose
+conversion moves the pointer (`CD* self()` over `SB* self()` with SB at 16
+in CD) is laid out as cl lays it out: the overrider gets a slot of its own
+at the end of the vftable that holds the overridden function (in the
+primary table among the class's new virtual functions, in declaration
+order), and every slot it overrides holds cl's return-adjusting thunk,
+named as the function, non-virtual, returning the overridden type
+(`?self@CD@@QEAAPEAUSB@@XZ`): a frame with the stack arguments staged
+again, the call, and a non-null pointer (a reference always) moved by
+the base's offset; a further overrider gets thunks in every slot, also
+where the move is 0, and a new slot again; an override whose moves are
+all 0 stays in place. front.cpp `covariant::` and sample-layout RB/RC
+check it against cl, through every base and across the compilers. S131
+still refuses a return conversion through a virtual base, a slot that
+needs a this adjustment as well as the return adjustment, and a variadic
+covariant function (`covariant-refused.cpp`).
 Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment;

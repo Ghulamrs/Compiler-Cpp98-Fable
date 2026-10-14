@@ -667,6 +667,274 @@ void show()
 }
 }
 
+// pointers to members in cl's representations (row 18): a data member an int offset with null -1, under virtual
+// inheritance with the vbtable offset of the base's entry (null {0, -1}), in the unspecified model (the class
+// incomplete when the size was first needed) with the vbptr's offset as well; a member function a code pointer
+// (cl's vcall thunk for a virtual one), with an int this adjustment under multiple inheritance and the vbtable
+// offset under virtual inheritance. Conversions add the base's offset (data: unless null), .* and ->* apply them,
+// == compares every field (a function's beyond the pointer only when it is not null), static storage holds the
+// null values cl writes (a class's own members, arrays, not nested classes), value-initialisation zeroes, a brace
+// list's omitted members are null. The words of the representations are printed, except code pointers and padding
+namespace memptr {
+struct P { int a; int b; virtual int f() { return 1; } virtual int g(int x) { return x + 2; } int h() { return a; } P() : a(0), b(0) {} };
+struct M { int m; int mf() { return m + 100; } virtual int mv() { return 3; } M() : m(0) {} };
+struct Q : M, P { int q; Q() : q(0) {} };
+struct A { virtual int fa() { return 1; } int x; A() : x(0) {} };
+struct B { virtual int fb() { return 2; } virtual int fb2() { return 22; } int y; B() : y(0) {} };
+struct AB : A, B { int fb() { return 5; } int z; AB() : z(0) {} };
+struct S { int s; int t; int sf() { return s + 1000; } S() : s(0), t(0) {} };
+struct V : virtual S { int v; V() : v(0) {} };
+struct VD : V { int vd; VD() : vd(0) {} };
+struct N { int n; int nf() { return n + 200; } N() : n(0) {} };
+struct W : N, virtual S { int w; W() : w(0) {} };
+struct Holder { int P::* field; int x; };
+template <class T> struct H { int T::* f; int x; };
+struct Outer { H<P> h; int y; };
+struct Mem { H<P> h; int (Q::*qf)(); Mem() : h(), qf() {} };
+struct Two { int P::* a[2]; int (Q::*q)(); };
+struct Inc;
+int incSize = sizeof(int Inc::*) + 100 * sizeof(int (Inc::*)());
+struct Inc { int x; int y; int g() { return y; } Inc() : x(0), y(0) {} };
+struct Inc2;
+int inc2Size = sizeof(int Inc2::*) + 100 * sizeof(int (Inc2::*)());
+struct Inc2 : N, virtual S { int i2; int g2() { return i2; } Inc2() : i2(0) {} };
+int P::* pm = &P::b;
+int P::* pmnull = 0;
+int (P::*pf)() = &P::f;
+int (P::*pg)(int) = &P::g;
+int (P::*ph)() = &P::h;
+int Q::* qm = &P::b;
+int Q::* qmm = &M::m;
+int Q::* qmnull = 0;
+int (Q::*qf)() = &P::f;
+int (Q::*qh)() = &P::h;
+int (Q::*qmv)() = &M::mv;
+int (Q::*qfnull)() = 0;
+int (AB::*abfb)() = &B::fb;
+int (AB::*abfb2)() = &AB::fb;
+int (AB::*abfa)() = &A::fa;
+int S::* sm = &S::t;
+int V::* vm = &S::t;
+int V::* vmnull = 0;
+int (V::*vf)() = &S::sf;
+int W::* wm = &S::t;
+int W::* ww = &W::w;
+int W::* wmm = &N::n;
+int (W::*wf)() = &S::sf;
+int (W::*wfnull)() = 0;
+int Inc::* ix = &Inc::y;
+int (Inc::*ig)() = &Inc::g;
+int Inc::* incNull = 0;
+int (Inc::*incFNull)() = 0;
+int Inc2::* i2a = &Inc2::i2;
+int Inc2::* i2s = &S::t;
+int (Inc2::*i2g)() = &Inc2::g2;
+int (Inc2::*i2sf)() = &S::sf;
+int P::* arr[2] = { &P::a, 0 };
+int P::* arr2[3];
+Holder gh;
+Outer go[2];
+Outer go1;
+Two gtwo;
+struct SS { static int P::* smp; static Holder sho; };
+int P::* SS::smp = 0;
+Holder SS::sho;
+int readP(P* p, int P::* m) { return p->*m; }
+int readQ(Q& q, int Q::* m) { return q.*m; }
+int callP(P* p, int (P::*f)()) { return (p->*f)(); }
+int callPg(P* p, int (P::*f)(int), int x) { return (p->*f)(x); }
+int callQ(Q& q, int (Q::*f)()) { return (q.*f)(); }
+int callAB(AB* p, int (AB::*f)()) { return (p->*f)(); }
+int readV(V* v, int V::* m) { return v->*m; }
+int callV(V* v, int (V::*f)()) { return (v->*f)(); }
+int readW(W* w, int W::* m) { return w->*m; }
+int callW(W* w, int (W::*f)()) { return (w->*f)(); }
+int readInc(Inc* p, int Inc::* m) { return p->*m; }
+int callInc(Inc* p, int (Inc::*f)()) { return (p->*f)(); }
+int readInc2(Inc2* p, int Inc2::* m) { return p->*m; }
+int callInc2(Inc2* p, int (Inc2::*f)()) { return (p->*f)(); }
+bool isnullP(int P::* m) { return m == 0; }
+bool isnullQf(int (Q::*f)()) { return f == 0; }
+bool eqQf(int (Q::*f)(), int (Q::*g)()) { return f == g; }
+bool eqQm(int Q::* f, int Q::* g) { return f == g; }
+bool isnullV(int V::* m) { return 0 == m; }
+bool isnullWf(int (W::*f)()) { return !f; }
+bool neWm(int W::* f, int W::* g) { return f != g; }
+bool isNullInc(int Inc::* m) { return m == 0; }
+bool isNullIncF(int (Inc::*f)()) { return f == 0; }
+int Q::* convPQ(int P::* m) { return m; }
+int Q::* convMQ(int M::* m) { return m; }
+int (Q::*convPQf(int (P::*f)()))() { return f; }
+int (Q::*convMQf(int (M::*f)()))() { return f; }
+int V::* convSV(int S::* m) { return m; }
+int VD::* convVVD(int V::* m) { return m; }
+int (V::*convSVf(int (S::*f)()))() { return f; }
+int W::* convSW(int S::* m) { return m; }
+int (W::*convSWf(int (S::*f)()))() { return f; }
+int Inc::* convInc(int Inc::* m) { return m; }
+int P::* castQP(int Q::* m) { return static_cast<int P::*>(m); }
+int M::* castQM(int Q::* m) { return static_cast<int M::*>(m); }
+int (M::*castQMf(int (Q::*f)()))() { return static_cast<int (M::*)()>(f); }
+bool toBoolP(int P::* m) { return m; }
+bool toBoolW(int W::* m) { return m; }
+int (P::*gf())() { return &P::g == pg ? &P::f : 0; }
+bool cmpPQ(int P::* p, int Q::* q) { return p == q; }
+bool cmpPQf(int (P::*p)(), int (Q::*q)()) { return p == q; }
+struct Ret { int V::* rv(int S::* m) { return m; } int (Q::*rq(int (P::*f)()))() { return f; } int P::* rp() { return &P::a; } };
+void dump(const char* name, const void* p, int n)
+{
+    std::printf("memptr %s:", name);
+    for (int i = 0; i < n; i += 4) std::printf(" %x", *(const unsigned*)((const char*)p + i));
+    std::printf("\n");
+}
+#define MP_DUMP(x) dump(#x, &x, (int)sizeof(x))
+void show()
+{
+    Q q; q.a = 1; q.b = 2; q.m = 3; q.q = 4;
+    P p; p.a = 5; p.b = 6;
+    AB ab; ab.x = 7; ab.y = 8;
+    V v; v.s = 9; v.t = 10; v.v = 11;
+    VD vd; vd.s = 12; vd.t = 13; vd.v = 14; vd.vd = 15;
+    W w; w.n = 16; w.s = 17; w.t = 18; w.w = 19;
+    Inc i; i.x = 20; i.y = 21;
+    Inc2 j; j.n = 22; j.s = 23; j.t = 24; j.i2 = 25;
+    std::printf("memptr sizes %d %d %d %d %d %d %d %d %d %d\n", (int)sizeof(pm), (int)sizeof(pf), (int)sizeof(qm), (int)sizeof(qf), (int)sizeof(vm), (int)sizeof(vf), (int)sizeof(wm), (int)sizeof(wf), incSize, inc2Size);
+    MP_DUMP(pm); MP_DUMP(pmnull); MP_DUMP(qm); MP_DUMP(qmm); MP_DUMP(qmnull); dump("qfnull", &qfnull, 12); MP_DUMP(sm); MP_DUMP(vm); MP_DUMP(vmnull);
+    MP_DUMP(wm); MP_DUMP(ww); MP_DUMP(wmm); MP_DUMP(wfnull); MP_DUMP(arr); MP_DUMP(arr2); MP_DUMP(gh); MP_DUMP(go); MP_DUMP(go1); MP_DUMP(gtwo); MP_DUMP(SS::smp); MP_DUMP(SS::sho);
+    MP_DUMP(ix); MP_DUMP(incNull); dump("ig+8", (char*)&ig + 8, 12); dump("incFNull", &incFNull, 24); MP_DUMP(i2a); MP_DUMP(i2s); dump("i2g+8", (char*)&i2g + 8, 12); dump("i2sf+8", (char*)&i2sf + 8, 12);
+    std::printf("memptr adj %d %d %d %d %d %d %d %d %d %d\n", ((int*)&qf)[2], ((int*)&qh)[2], ((int*)&qmv)[2], ((int*)&abfb)[2], ((int*)&abfb2)[2], ((int*)&abfa)[2], ((int*)&vf)[2], ((int*)&vf)[3], ((int*)&wf)[2], ((int*)&wf)[3]);
+    std::printf("memptr same %d %d %d %d\n", pf == &P::f, pg == &P::g, ph == &P::h, *(void**)&qf == *(void**)&pf);
+    std::printf("memptr reads %d %d %d %d %d %d %d %d %d %d %d %d\n", readP(&p, pm), readQ(q, qm), readQ(q, qmm), readQ(q, &P::a), readV(&v, vm), readV(&vd, vm), readW(&w, wm), readW(&w, ww), readW(&w, wmm), p.*pm, q.*qm, (&q)->*qmm);
+    std::printf("memptr reads2 %d %d %d %d %d %d\n", w.*ww, readInc(&i, ix), readInc(&i, &Inc::x), readInc2(&j, i2a), readInc2(&j, i2s), j.*i2s);
+    std::printf("memptr calls %d %d %d %d %d %d %d %d\n", callP(&p, pf), callPg(&p, pg, 40), callP(&p, ph), callQ(q, qf), callQ(q, qh), callQ(q, qmv), callAB(&ab, abfb), callAB(&ab, abfb2));
+    std::printf("memptr calls2 %d %d %d %d %d %d %d\n", callAB(&ab, abfa), callV(&v, vf), callV(&vd, vf), callW(&w, wf), (p.*pf)(), (q.*pf)(), (ab.*abfb2)());
+    std::printf("memptr calls3 %d %d %d %d\n", callInc(&i, ig), callInc2(&j, i2g), callInc2(&j, i2sf), (j.*i2sf)());
+    std::printf("memptr nulls %d %d %d %d %d %d %d %d %d %d\n", isnullP(pm), isnullP(pmnull), isnullQf(qf), isnullQf(qfnull), isnullV(vm), isnullV(vmnull), isnullWf(wf), isnullWf(wfnull), toBoolP(pm), toBoolP(pmnull));
+    std::printf("memptr nulls2 %d %d %d %d %d %d %d %d %d %d\n", toBoolW(wm), toBoolW(ww), toBoolW(0), neWm(wm, ww), neWm(wm, convSW(sm)), isNullInc(ix), isNullInc(incNull), isNullIncF(ig), isNullIncF(incFNull), isNullIncF(0));
+    std::printf("memptr eq %d %d %d %d %d %d %d %d %d %d %d %d\n", eqQf(qf, qf), eqQf(qf, qh), eqQf(qfnull, 0), eqQm(qm, qm), eqQm(qm, qmm), eqQm(qmnull, 0), cmpPQ(pm, qm), cmpPQf(pf, qf), cmpPQf(ph, qh), cmpPQf(0, qfnull), eqQf(convMQf(&M::mf), convMQf(&M::mf)), eqQf(convMQf(0), convMQf(0)));
+    int Q::* c1 = convPQ(pm); int Q::* c2 = convMQ(&M::m); int Q::* c3 = convMQ(0); int Q::* c4 = convPQ(0);
+    int (Q::*c5)() = convPQf(ph); int (Q::*c6)() = convMQf(&M::mf); int (Q::*c7)() = convMQf(0);
+    int V::* c8 = convSV(sm); int V::* c9 = convSV(0); int VD::* c10 = convVVD(vm); int (V::*c11)() = convSVf(&S::sf);
+    int W::* c12 = convSW(sm); int W::* c13 = convSW(0); int (W::*c14)() = convSWf(&S::sf); int Inc::* c15 = convInc(ix);
+    MP_DUMP(c1); MP_DUMP(c2); MP_DUMP(c3); MP_DUMP(c4); dump("c7", &c7, 12); MP_DUMP(c8); MP_DUMP(c9); MP_DUMP(c10); MP_DUMP(c12); MP_DUMP(c13); MP_DUMP(c15);
+    std::printf("memptr conv %d %d %d %d %d %d %d %d\n", ((int*)&c5)[2], ((int*)&c6)[2], ((int*)&c11)[2], ((int*)&c11)[3], ((int*)&c14)[2], ((int*)&c14)[3], c5 == qh, c15 == ix);
+    std::printf("memptr convcalls %d %d %d %d %d %d\n", callQ(q, c5), callQ(q, c6), callV(&v, c11), callW(&w, c14), readQ(q, c1), readQ(q, c2));
+    int P::* d1 = castQP(qm); int M::* d2 = castQM(qmm); int M::* d3 = castQM(0); int (M::*d4)() = castQMf(c6);
+    std::printf("memptr down %d %d %d %d %d %d %d\n", d1 == pm, d2 == &M::m, d3 == 0, d4 == &M::mf, (q.*d4)(), gf() == pf, gf() != 0);
+    H<P> h1 = H<P>(); Holder h2 = Holder(); Outer o1 = { }; H<P> h3 = { }; Mem mm; Holder h4 = { &P::a }; Two t1 = { }; Outer o2 = { { } };
+    int P::* a1[2] = { &P::a }; int P::* a2[2] = { };
+    MP_DUMP(h1); MP_DUMP(h2); MP_DUMP(o1); MP_DUMP(h3); dump("mm", &mm, 20); MP_DUMP(h4); dump("t1", &t1, 20); MP_DUMP(o2); MP_DUMP(a1); MP_DUMP(a2);
+    Outer* no = new Outer(); dump("new Outer()", no, 12); delete no;
+    Outer* na = new Outer[2](); dump("new Outer[2]()", &na[1], 12); delete[] na;
+    { static Holder sh; static int P::* sp; static int (Q::*sq)(); MP_DUMP(sh); MP_DUMP(sp); dump("sq", &sq, 12); }
+    Ret r;
+    int V::* r1 = r.rv(&S::t); int (Q::*r2)() = r.rq(&P::f); int P::* r3 = r.rp();
+    MP_DUMP(r1); std::printf("memptr ret %d %d %d %d\n", ((int*)&r2)[2], r2 == qf, r3 == &P::a, callQ(q, r2));
+    int P::* local = 0; int (Q::*localq)() = 0; int W::* localw = 0; int (W::*localwf)() = 0; int Inc::* ln = 0; int (Inc::*lfn)() = 0;
+    MP_DUMP(local); dump("localq", &localq, 12); MP_DUMP(localw); MP_DUMP(localwf); MP_DUMP(ln); dump("lfn+8", (char*)&lfn + 8, 12);
+    local = pm; localq = qf; localw = ww; localwf = wf;
+    std::printf("memptr assign %d %d %d %d %d %d\n", local == pm, localq == qf, localw == ww, localwf == wf, ix ? 1 : 0, lfn ? 1 : 0);
+    int P::* ternary = p.a > 3 ? pm : 0; int (Q::*ternq)() = p.a > 3 ? qf : 0;
+    const P* cp = &p; const int P::* cpm = &P::b;
+    std::printf("memptr ternary %d %d %d %d %d %d\n", ternary == pm, ternq == qf, ternary ? 1 : 0, ternq ? 1 : 0, cp->*cpm, cp->*pm);
+}
+}
+
+// covariant returns through a secondary base (row 19), as cl lays them out: the overrider gets a slot of its own at
+// the end of the vftable that holds the overridden function (in the primary table in declaration order among the
+// class's new virtual functions), and every slot it overrides holds a return-adjusting thunk that calls it and
+// moves a non-null pointer (a reference always) by the base's offset; an override whose conversions move nothing
+// (PD : SB) stays in place. The driver of test 13 calls them across the compilers; here every call goes through
+// every base at -O0 and -O2, with stack arguments staged again by the thunk (six)
+namespace covariant {
+struct SA { virtual ~SA() {} int a; SA() : a(1) {} };
+struct SB { virtual ~SB() {} virtual SB* self() { return this; } virtual SB& selfRef() { return *this; } virtual SB* six(int p, int q, int r, int s, double t, int u) { return p + q + r + s + (int)t + u == 21 ? this : 0; } int b; SB() : b(2) {} };
+struct CD : SA, SB { CD* self() { return this; } CD& selfRef() { return *this; } CD* six(int p, int q, int r, int s, double t, int u) { return p + q + r + s + (int)t + u == 21 ? this : 0; } virtual int cd() { return 5; } int c; CD() : c(3) {} };
+struct CD2 : SA, SB { virtual int cd2() { return 6; } CD2* self() { return this; } virtual int cd3() { return 7; } };
+struct E : CD { E* self() { return this; } int e; E() : e(4) {} };
+struct PD : SB { PD* self() { return this; } };
+struct PE : PD { virtual int more() { return 1; } PE* self() { return this; } };
+struct X { virtual X* make() { return this; } int x; };
+struct Y { virtual int yf() { return 1; } int y; };
+struct Z : Y, X { Z* make() { return this; } int z; };
+struct K { virtual SB* k() { return 0; } virtual int kk() { return 2; } int q; };
+struct L : K { virtual int ln() { return 3; } CD* k() { return &held; } virtual int lm() { return 4; } CD held; };
+struct NullCD : SA, SB { CD* self2() { return 0; } };
+struct NB { virtual ~NB() {} virtual CD* get() { return 0; } };
+struct ND : SA, NB { E* get() { return 0; } };
+SB* viaSB(SB* p) { return p->self(); }
+CD* viaCD(CD* p) { return p->self(); }
+SB& viaSBref(SB& p) { return p.selfRef(); }
+CD& viaCDref(CD& p) { return p.selfRef(); }
+SB* viaSix(SB* p, int u) { return p->six(1, 2, 3, 4, 5.0, u); }
+CD* viaSixCD(CD* p, int u) { return p->six(1, 2, 3, 4, 5.0, u); }
+X* viaX(X* p) { return p->make(); }
+SB* viaK(K* k) { return k->k(); }
+CD* viaL(L* l) { return l->k(); }
+void show()
+{
+    CD c; E e; Z z; L l; PD pd; PE pe; CD2 c2; ND nd;
+    std::printf("covariant self %d %d %d %d %d %d %d\n", viaSB(&c) == &c, viaCD(&c) == &c, viaSB(&e) == &e, viaCD(&e) == &e, static_cast<SB*>(&e)->self() == &e, e.self() == &e, viaSB(&c2) == &c2);
+    std::printf("covariant ref %d %d %d %d\n", &viaSBref(c) == &c, &viaCDref(c) == &c, &viaSBref(e) == &e, &c.selfRef() == &c);
+    std::printf("covariant six %d %d %d %d %d\n", viaSix(&c, 6) == &c, viaSix(&c, 7) == 0, viaSixCD(&c, 6) == &c, viaSixCD(&c, 7) == 0, viaSix(&e, 6) == &e);
+    std::printf("covariant primary %d %d %d %d %d %d %d\n", viaX(&z) == &z, z.make() == &z, viaK(&l) == &l.held, viaL(&l) == &l.held, l.ln() + l.lm() + l.kk(), viaSB(&pd) == &pd, viaSB(&pe) == &pe && pe.more() == 1);
+    std::printf("covariant sizes %d %d %d\n", (int)sizeof(CD), (int)sizeof(E), (int)sizeof(L));
+    SB* nullSb = 0;
+    std::printf("covariant null %d %d %d\n", static_cast<NB*>(&nd)->get() == 0, nd.get() == 0, nullSb == 0);
+}
+}
+
+// polymorphic virtual bases, as cl lays them out: the vfptr stays in the virtual base subobject and a class gets a
+// vfptr of its own only for new virtual functions (VN); the virtual base's vftable has a copy per class
+// (??_7VL@@6B@, ??_7VN@@6BV@@@) whose entries from outside the base are adjustor thunks, or cl's $4 vtordisp thunks
+// when the class has a user-declared constructor or destructor and overrides a function of the base (the vtordisp,
+// 4 bytes before the base, holds how far the base moved while a base constructor runs). Every call goes through
+// every base, during construction and destruction too, through delete, and through pointers to members
+namespace pvbase {
+struct V  { int v; V() : v(7) { std::printf("V() %d ", probe()); } virtual int f() const { return v; } virtual int g() const { return 1; } virtual ~V() { std::printf("~V %d ", probe()); } int probe() const { return f() * 100 + g(); } };
+struct VL : virtual V { int l; VL() : l(2) { std::printf("VL() %d ", probe()); } ~VL() { std::printf("~VL %d ", probe()); } int f() const { return l + 10; } };
+struct VR : virtual V { int r; VR() : r(3) { std::printf("VR() %d ", probe()); } };
+struct VD : VL, VR { int d; VD() : d(4) { std::printf("VD() %d ", probe()); } ~VD() { std::printf("~VD %d ", probe()); } int g() const { return d + 20; } };
+struct VN : virtual V { int n; VN() : n(5) {} virtual int h() const { return 3; } };
+struct VN2 : VN { int n2; VN2() : n2(8) {} int h() const { return n2; } int g() const { return n2 + 1; } };
+struct VO : virtual V { int o; int f() const { return o + 30; } };
+struct VO2 : VO { int o2; };
+struct VL2 : VL { int l2; VL2() : l2(5) { std::printf("VL2() %d ", probe()); } };
+struct NB { int nb; NB() : nb(4) {} virtual int nf() const { return nb; } };
+struct MX : NB, virtual V { int mx; MX() : mx(6) { std::printf("MX() %d ", probe()); } int f() const { return mx + 40; } int nf() const { return mx + 1; } };
+struct MY : NB, virtual V { int my; MY() : my(2) {} virtual int h() const { return 9; } int f() const { return my; } };
+struct VV { int vv; VV() : vv(5) {} virtual ~VV() { std::printf("~VV "); } virtual int k() const { return vv; } };
+struct VY : virtual VV { int y; VY() : y(6) {} ~VY() { std::printf("~VY "); } int k() const { return y + 50; } };
+struct VY2 : VY { int y2; VY2() : y2(9) {} ~VY2() { std::printf("~VY2 "); } };
+struct VP : NB, virtual V { int p; VP() : p(8) {} int f() const { return p; } };
+int callF(const V* p) { return p->f() * 100 + p->g(); }
+int callVL(const VL* p) { return p->f() * 100 + p->g(); }
+int callVD(const VD* p) { return p->f() * 100 + p->g(); }
+int callVN(const VN* p) { return p->f() * 100 + p->g() + p->h() * 10000; }
+int callMX(const MX* p) { return p->f() * 100 + p->nf(); }
+int callMY(const MY* p) { return p->f() * 100 + p->nf() + p->h() * 10000; }
+int callK(const VV* p) { return p->k(); }
+void destroyV(V* p) { delete p; }
+void destroyVV(VV* p) { delete p; }
+void show()
+{
+    std::printf("pvbase build: "); VD d; std::printf("\n");
+    VL a; VR b; VN n; VN2 n2; VO o; o.o = 1; VO2 o2; o2.o = 2; VL2 l2; MX mx; MY my; VY y; VY2 y2; VP vp;
+    std::printf("\npvbase calls %d %d %d %d %d %d %d %d %d %d %d\n", callF(&a), callF(&b), callF(&d), callF(&n), callF(&n2), callF(&o), callF(&o2), callF(&l2), callF(&mx), callF(&my), callK(&y));
+    std::printf("pvbase calls2 %d %d %d %d %d %d %d %d %d\n", callVL(&a), callVL(&d), callVD(&d), callVN(&n), callVN(&n2), callMX(&mx), callMY(&my), callK(&y2), callF(&vp));
+    std::printf("pvbase direct %d %d %d %d %d %d %d\n", d.f(), d.g(), d.VL::f(), d.V::f(), n2.h(), y2.k(), vp.f());
+    std::printf("pvbase sizes %d %d %d %d %d %d %d %d %d\n", (int)sizeof(VL), (int)sizeof(VD), (int)sizeof(VN), (int)sizeof(VN2), (int)sizeof(VO2), (int)sizeof(MX), (int)sizeof(MY), (int)sizeof(VY2), (int)sizeof(VP));
+    VD* hd = new VD; std::printf("\npvbase heap %d ", callF(hd)); destroyV(hd); std::printf("\n");
+    VL2* hl = new VL2; std::printf("\npvbase heap2 %d ", callF(hl)); destroyV(hl); std::printf("\n");
+    VY2* hy = new VY2; std::printf("pvbase heap3 %d ", callK(hy)); destroyVV(hy); std::printf("\n");
+    VD c(d); std::printf("pvbase copy %d %d\n", callF(&c), c.d);
+    VD* arr = new VD[2]; std::printf("\npvbase array %d %d ", callF(&arr[0]), callF(&arr[1])); delete[] arr; std::printf("\n");
+    int VP::* pm = &VP::p; int (VP::*pf)() const = &VP::f; int (VP::*pg)() const = &V::g; int VD::* pv = &V::v; int (VD::*pdg)() const = &V::g;
+    std::printf("pvbase memptr %d %d %d %d %d %d %d\n", vp.*pm, (vp.*pf)(), (vp.*pg)(), (my.*static_cast<int (MY::*)() const>(&V::f))(), d.*pv, (d.*pdg)(), (hd = &d)->*pv);
+    std::printf("pvbase end: ");
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -695,7 +963,10 @@ int main()
     strlit::show();
     cfold::show();
     std::printf("a class named T: %d\n", tclass::useT());
-    std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
+    memptr::show();
+    covariant::show();
+    pvbase::show();
+    std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");
     // library results are typed by the headers: a double from strtod, a size_t from string::size

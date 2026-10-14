@@ -9,10 +9,15 @@ correctly rounded; member-pointer sizes of a class completed later; the old pipe
 a folder that holds a class named T.
 
 Left for later sessions, recorded in docs/next-targets.md with repros:
-Refused with an error, not miscompiled (being implemented): polymorphic virtual bases (14b, the largest item), pointers
-to members in code, covariant returns through a secondary base; also objects holding a member pointer (static storage,
-value- or brace-initialised), tmake<V>(42), 64-bit literals as constant expressions, class placement new, a conversion
-operator against int/long overloads.
+Done on 2026-10-14 as well: pointers to members in cl's representations (data, functions, virtual functions through
+vcall thunks, multiple and virtual inheritance), covariant returns through a secondary base (cl's return thunks), and
+polymorphic virtual bases (vfptr in the virtual base, vtordisp and $4 thunks, the virtual bases' vftables, catch of
+virtual bases); layouts and symbols checked against cl's, objects shared with cl-compiled code.
+Refused with an error, not miscompiled: an override held by another virtual base (cl's vtordispex thunk, S130),
+covariant returns through a virtual base or needing a this adjustment too (S131), member-pointer conversions into a
+class with virtual bases that does not share the base's vbptr, a member pointer as a template argument; also
+tmake<V>(42), 64-bit literals as constant expressions, class placement new, a conversion operator against int/long
+overloads.
 Cases that still behave differently from cl, silently:
 argument evaluation order (left to right, cl right to left) and NRVO in nested blocks at -O2;
 the handler copy order when a by-value handler rethrows into another;
@@ -21,5 +26,5 @@ d.a hidden on one path and unqualified members inside member functions are not c
 Small: &std::printf does not link; a char array member initialised from a string in braces is rejected; a failed
 allocation ends the program (cl's operator new throws bad_alloc through cl's exception handling).
 Mixed cl/cppparse links only: statics in local classes; vtable names with longer base paths; exceptions crossing
-runtimes (both directions fail fast).
+runtimes (both directions fail fast); ??_G where cl names some deleting destructors ??_E.
 Code size: 1.79 of cl on the Matrix members both emit (whole class 1.60, all common functions 1.55), plan to about 1.25.

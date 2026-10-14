@@ -367,7 +367,18 @@ Conversion Sema::convertType(const Type* from, bool lvalue, bool nullConstant, c
     }
     if (dst->kind == Type::MemberPointer) {
         if (src->kind == Type::NullPtr || nullConstant) { c.rank = Conversion::Standard; return c; }
-        if (src->kind == Type::MemberPointer && src->inner == dst->inner) { c.rank = Conversion::Standard; return c; }
+        if (src->kind != Type::MemberPointer || !src->inner || !dst->inner) return c;
+        // the same member type (a data member's with qualifiers added) of the same class, or of a class derived
+        // from it (4.11)
+        const Type* si = src->inner;
+        const Type* di = dst->inner;
+        const bool sameMember = si == di || (si->kind != Type::Function && di->kind != Type::Function && m_types.unqualified(si) == m_types.unqualified(di)
+                                             && (!si->isConst || di->isConst) && (!si->isVolatile || di->isVolatile));
+        if (!sameMember) return c;
+        Symbol* sc = src->memberClass && src->memberClass->kind == Type::Class ? src->memberClass->decl : 0;
+        Symbol* dc = dst->memberClass && dst->memberClass->kind == Type::Class ? dst->memberClass->decl : 0;
+        if (sc == dc) { c.rank = Conversion::Exact; c.qualification = si != di; return c; }
+        if (sc && dc && derivesFrom(dc, sc, 0)) { c.rank = Conversion::Standard; return c; }
         return c;
     }
     return c;
@@ -1169,6 +1180,19 @@ const Type* Sema::exprBinary(cxx::Expr* e, Scope* in)
         l = valueType(e->kids[0]);
         r = valueType(e->kids[1]);
     }
+    if ((op == ".*" || op == "->*") && r->kind == Type::MemberPointer) {
+        // the object's class is the member's class or derived from it; a data member yields an lvalue with the
+        // object's qualifiers, a function the function type (only callable)
+        const Type* objQ = op == "->*" ? (l->kind == Type::Pointer ? l->inner : 0) : m_types.unref(e->kids[0]->semaType);
+        const Type* obj = objQ ? m_types.unqualified(objQ) : 0;
+        if (!obj || obj->kind != Type::Class || !obj->decl) { error(e->loc, "S109", "left operand of " + op + " is not " + std::string(op == "->*" ? "a pointer to " : "") + "an object of class type"); return m_types.error(); }
+        Symbol* mc = r->memberClass && r->memberClass->kind == Type::Class ? r->memberClass->decl : 0;
+        if (mc && obj->decl != mc && !derivesFrom(obj->decl, mc, 0)) { error(e->loc, "S105", "cannot apply a pointer to member of '" + mc->qualifiedName() + "' to an object of '" + obj->decl->qualifiedName() + "'"); return m_types.error(); }
+        if (!r->inner) return m_types.error();
+        if (r->inner->kind == Type::Function) return r->inner;
+        e->semaLvalue = true;
+        return m_types.qualified(r->inner, objQ->isConst, objQ->isVolatile);
+    }
     if (l->kind == Type::Class || r->kind == Type::Class) {
         const Type* res = 0;
         std::vector<cxx::Expr*> ops; ops.push_back(e->kids[0]); ops.push_back(e->kids[1]);
@@ -1196,7 +1220,9 @@ const Type* Sema::exprBinary(cxx::Expr* e, Scope* in)
     }
     if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
         bool ok = (l->isArithmetic() && r->isArithmetic()) || (l->isPointer() && r->isPointer()) || (l->isPointer() && isNullConstant(e->kids[1])) || (isNullConstant(e->kids[0]) && r->isPointer())
-                  || (l->kind == Type::MemberPointer && (r->kind == Type::MemberPointer || isNullConstant(e->kids[1])));
+                  || (l->kind == Type::MemberPointer && (r->kind == Type::MemberPointer || isNullConstant(e->kids[1])))
+                  || (isNullConstant(e->kids[0]) && r->kind == Type::MemberPointer);
+        if (ok && l->kind == Type::MemberPointer && r->kind == Type::MemberPointer && (op != "==" && op != "!=")) ok = false;
         if (!ok) { error(e->loc, "S109", "cannot compare " + l->text() + " with " + r->text()); return m_types.error(); }
         if (l->isIntegral() && r->isIntegral() && l->isUnsigned() != r->isUnsigned() && !lc && !rc && op != "==" && op != "!=") warning(e->loc, "S120", "comparison of signed and unsigned values");
         if (lc && rc) {

@@ -18,3 +18,10 @@ A& r1(D& d) { return d; }
 int ok1(D& d) { return d.B::a + d.C::a; }
 A* ok2(D* d) { return (B*)d; }
 int ok3(G& g) { V2* v = &g; return g.v + v->v; }
+// a virtual function of a virtual base overridden in two direct bases has no final overrider (cl C2250: S145),
+// unless the class overrides it itself (XE)
+struct XV { virtual int f() const { return 0; } };
+struct XL : virtual XV { int f() const { return 1; } };
+struct XR : virtual XV { int f() const { return 2; } };
+struct XD : XL, XR {};
+struct XE : XL, XR { int f() const { return 3; } };

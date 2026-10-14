@@ -141,47 +141,28 @@ bool hasVirtualBase(const sema::Symbol* cls, int depth)
     return false;
 }
 
-// what --compile6 cannot generate yet for a class with virtual bases (0: it can): it lays out and builds
-// non-polymorphic classes with virtual bases, as cl does (vbptrs, vbtables, the
-// "most derived" flag, ??_D); polymorphic ones need the vfptr inside the virtual base and vtordisp (S130)
+// what --compile6 cannot generate yet for a class with virtual bases (0: it can): an overrider that lies in another
+// virtual base (S130)
 const char* virtualBaseRefusal(const sema::Symbol* cls)
 {
-    if (cls->isPolymorphic) return "a polymorphic class with virtual bases (vfptrs in virtual bases, vtordisp)";
-    if (cls->classAst && cls->classAst->pack > 0) return "#pragma pack with virtual bases";
-    if (cls->declAlign > 0 || cls->endsWithZeroSized) return "virtual bases after an over-aligned or zero-sized part";
-    for (size_t v = 0; v < cls->vbases.size(); ++v) {
-        const sema::Symbol* vb = cls->vbases[v];
-        if (vb->nvSize == 0 || vb->leadsWithZeroSized || vb->endsWithZeroSized || vb->declAlign > 0) return "an empty or over-aligned virtual base";
-        if (vb->isPolymorphic) return "a polymorphic virtual base (vtordisp)";
-    }
-    for (size_t t = 0; t < cls->vbtables.size(); ++t) if (cls->vbtables[t].path.size() > 1) return "a vbtable named by a path of several bases";
+    for (size_t t = 0; t < cls->vftables.size(); ++t)
+        if (cls->vftables[t].vtordispex) return "a virtual function overridden in another virtual base (cl's vtordispex thunk, which reads the vbtable)";
     return 0;
 }
 
-// the offset of base in derived (-1: not a base)
-int baseOffsetIn(const sema::Symbol* derived, const sema::Symbol* base, int depth)
+// a covariant override's slot (Sema::completeClass, VfTable::returnOf) that --compile6 cannot give cl's
+// return-adjusting thunk (S131): one whose return conversion goes through a virtual base (cl's thunk reads the
+// vbtable), one that also moves this (cl's $R thunks: a this and a return adjustment in one), or a variadic function
+// (the thunk cannot stage the unnamed arguments again); 0 when the slot is fine
+const char* returnThunkRefusal(const sema::VfTable& t, size_t s)
 {
-    if (!derived || !base || depth > 32) return -1;
-    if (derived == base) return 0;
-    for (size_t b = 0; b < derived->bases.size(); ++b) {
-        const int o = baseOffsetIn(derived->bases[b].cls, base, depth + 1);
-        if (o >= 0) return derived->bases[b].offset + o;
-    }
-    return -1;
-}
-
-// an override with a covariant return type whose conversion to the overridden function's return type moves the
-// pointer (CD* to SB* with SB at 16): it needs a return-adjusting thunk, which --compile6 does not make yet (S131)
-bool needsReturnAdjustment(const sema::Symbol* fn)
-{
-    if (!fn->overrides || !fn->type || !fn->overrides->type || fn->type->kind != sema::Type::Function || fn->overrides->type->kind != sema::Type::Function) return false;
-    const sema::Type* r = fn->type->inner;
-    const sema::Type* o = fn->overrides->type->inner;
-    if (!r || !o || (r->kind != sema::Type::Pointer && r->kind != sema::Type::Reference) || r->kind != o->kind) return false;
-    const sema::Type* rc = r->inner;
-    const sema::Type* oc = o->inner;
-    if (!rc || !oc || rc->kind != sema::Type::Class || oc->kind != sema::Type::Class || rc->decl == oc->decl) return false;
-    return baseOffsetIn(rc->decl, oc->decl, 0) != 0;
+    if (s >= t.returnOf.size() || !t.returnOf[s]) return 0;
+    if (t.returnAdjust[s] < 0) return "its return conversion goes through a virtual base";
+    if (t.vbase) return "the overridden function's vftable lies in a virtual base";
+    if (t.thunks[s] != 0) return "the slot needs a this adjustment as well as the return adjustment";
+    const sema::Symbol* fn = t.fns[s];
+    if (fn && fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic) return "it is variadic";
+    return 0;
 }
 
 // a unit that is not compiled leaves no object, listing or map: one of an earlier run would be taken for its own
@@ -394,46 +375,18 @@ int main(int argc, char* argv[])
                 if (compile6)
                     for (size_t k = 0; k < program.symbols.size(); ++k) {
                         const sema::Symbol* s = program.symbols[k];
-                        if (s->kind == sema::Symbol::Function && s->isVirtual && s->ownerClass && !s->ownerClass->isDependentContext && !s->isDependentContext && needsReturnAdjustment(s)) {
-                            std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
-                                      << "): error S131: '" << s->qualifiedName() << "' overrides '" << s->overrides->qualifiedName()
-                                      << "' with a covariant return type whose conversion moves the pointer: return-adjusting thunks are not supported yet by --compile6\n";
-                            ++unsupported;
-                            continue;
-                        }
-                        if (s->kind == sema::Symbol::Variable && !s->isDependentContext && !s->isParam && !(s->isLocal && !s->isStatic) && !(s->isMember && !s->isStatic)) {
-                            // a namespace-scope, static member or static local of pointer-to-member type: its
-                            // zero initialisation would be cl's null (-1 for data) only by luck
-                            const sema::Type* vt = s->type;
-                            while (vt && vt->kind == sema::Type::Array) vt = vt->inner;
-                            if (vt && vt->kind == sema::Type::MemberPointer) {
-                                std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
-                                          << "): error S132: '" << s->qualifiedName() << "' is a pointer to member: not supported yet by --compile6\n";
-                                ++unsupported;
-                            } else if (sema::TypeTable::holdsMemberPointer(vt)) {
-                                // an object holding one (a class template instantiation, a member, a base): static
-                                // storage is zero-initialised, where cl writes -1 for a null data member pointer
-                                std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
-                                          << "): error S132: '" << s->qualifiedName() << "' of type '" << s->type->text() << "' holds a pointer to member: its static initialisation is not supported yet by --compile6\n";
-                                ++unsupported;
-                            }
-                        }
-                        // (an implicit instantiation is left alone: cl accepts naming one, as in sizeof(Holder<P>*);
-                        // using its member is refused in IrGen)
-                        if (s->kind == sema::Symbol::Class && s->isDefinition && !s->isDependentContext && !s->instantiatedFrom) {
-                            // a member of pointer-to-member type: copies and value-initialisation (cl's null data
-                            // member pointer is -1) are not generated for it yet
-                            const sema::Symbol* mp = 0;
-                            for (size_t f = 0; f < s->fields.size() && !mp; ++f) {
-                                const sema::Type* ft = s->fields[f]->type;
-                                while (ft && ft->kind == sema::Type::Array) ft = ft->inner;
-                                if (ft && ft->kind == sema::Type::MemberPointer) mp = s->fields[f];
-                            }
-                            if (mp) {
-                                std::cout << "  " << (mp->loc.file >= 0 && mp->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(mp->loc.file)] : "?") << "(" << mp->loc.line
-                                          << "): error S132: '" << mp->qualifiedName() << "' is a pointer to member: not supported yet by --compile6\n";
-                                ++unsupported;
-                            }
+                        if (s->kind == sema::Symbol::Class && s->isDefinition && !s->isDependentContext) {
+                            for (size_t t = 0; t < s->vftables.size(); ++t)
+                                for (size_t slot = 0; slot < s->vftables[t].fns.size(); ++slot) {
+                                    const char* why = returnThunkRefusal(s->vftables[t], slot);
+                                    if (!why) continue;
+                                    const sema::Symbol* fn = s->vftables[t].fns[slot];
+                                    const sema::Symbol* root = s->vftables[t].returnOf[slot];
+                                    std::cout << "  " << (fn->loc.file >= 0 && fn->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(fn->loc.file)] : "?") << "(" << fn->loc.line
+                                              << "): error S131: '" << fn->qualifiedName() << "' overrides '" << root->qualifiedName()
+                                              << "' with a covariant return type, and " << why << ": not supported yet by --compile6\n";
+                                    ++unsupported;
+                                }
                         }
                         if (s->kind != sema::Symbol::Class || !s->isDefinition || s->isDependentContext || !hasVirtualBase(s, 0)) continue;
                         const char* why = s->layoutDone ? virtualBaseRefusal(s) : "a class not laid out";

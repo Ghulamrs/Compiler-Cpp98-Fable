@@ -487,3 +487,78 @@ int ehGlobalFree(int k)
     } catch (int e) { r = e; }
     return static_cast<int>(g_gNew) * 1000 + g_gDel * 10 + r;
 }
+
+// a thrown class with virtual bases: a handler for a virtual base gets that subobject (by value, by reference), a
+// handler for a class with virtual bases copies it from the thrown object (an EE's ED part, with the EE's vbtable); a
+// thrown pointer to such a class is caught as a pointer to a virtual base (and to a base of it, EW inside EV), found
+// through the pointed-to object's vbtable, as the object may be of a derived class (an EE behind an ED*)
+struct EU { int u; EU() : u(1) {} };
+struct EW { int w; EW() : w(2) {} };
+struct EV : EU, EW { int v; EV() : v(3) { ++g_destroyed; } EV(const EV& o) : v(o.v + 10) {} ~EV() { --g_destroyed; } };
+struct EA : virtual EV { int a; EA() : a(5) {} };
+struct EB : virtual EV { int b; EB() : b(6) {} };
+struct ED : EA, EB { int d; ED() : d(7) {} };
+struct EE : ED { int pad[4]; int e; EE() : e(8) { for (int i = 0; i < 4; ++i) pad[i] = 0; } };
+
+static int vbaseByValue(int k, ED& d, EE& e)
+{
+    try { if (k == 0) throw d; else throw e; }
+    catch (EV x) { return 100 + x.v; }
+}
+
+static int vbaseByRef(int k, ED& d, EE& e)
+{
+    try { if (k == 0) throw d; else throw e; }
+    catch (EV& x) { return 150 + x.v; }
+}
+
+static int vbaseDerived(EE& e)
+{
+    try { throw e; }
+    catch (ED x) { return 200 + x.v + x.d; }
+}
+
+static int vbasePointer(int k, ED* p)
+{
+    try {
+        switch (k) {
+        case 0: throw p;
+        case 1: throw static_cast<EA*>(p);
+        case 2: throw static_cast<ED*>(0);
+        default: throw static_cast<const ED*>(p);   // not caught as EV*: as const EW*, EW inside the virtual base
+        }
+    }
+    catch (EV* v) { return v ? 300 + v->v : 301; }
+    catch (const EW* w) { return 600 + w->w; }
+    catch (...) { return 900; }
+}
+
+static int vbasePointer2(int k, ED* p)
+{
+    try {
+        switch (k) {
+        case 0: throw p;                        // EB at 16 in ED, a non-virtual base
+        case 1: throw static_cast<EA*>(p);      // no EB: EW through EA's vbtable
+        default: throw static_cast<EE*>(p);
+        }
+    }
+    catch (EB* b) { return 400 + b->b; }
+    catch (EW* w) { return 500 + w->w; }
+    catch (...) { return 900; }
+}
+
+int ehCatchVbase(int k)
+{
+    ED d;
+    EE e;
+    g_destroyed = 2;
+    int r;
+    if (k < 2) r = vbaseByValue(k, d, e);
+    else if (k < 4) r = vbaseByRef(k - 2, d, e);
+    else if (k == 4) r = vbaseDerived(e);
+    else if (k < 9) r = vbasePointer(k - 5, &d);
+    else if (k < 13) r = vbasePointer(k - 9, &e);
+    else if (k < 16) r = vbasePointer2(k - 13, &e);
+    else r = vbasePointer2(0, &d);
+    return r * 10 + g_destroyed;
+}

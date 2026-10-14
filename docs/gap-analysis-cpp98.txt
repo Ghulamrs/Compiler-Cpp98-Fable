@@ -1,16 +1,21 @@
-GAP ANALYSIS OF C++98
+GAP ANALYSIS OF C++98 (checked against HEAD d9309fa on 2026-10-14, every item reproduced against cl)
 
-Left for later sessions, all recorded in docs/next-targets.md with repros:
+Left for later sessions, recorded in docs/next-targets.md with repros:
 
-Polymorphic virtual bases (14b): the largest remaining item. They are refused today, not miscompiled.
-Cases that still behave differently from cl:
-takeV(mk()) copies twice and destroys in a different order;
-->* reads garbage;
-the -O2 double-to-unsigned conversion;
-ill-formed hierarchies cl rejects are accepted.
-Mixed cl/cppparse links only: a halfway float literal; statics in local classes; vtable names with longer base paths; exceptions crossing runtimes.
-Code size: the plan to bring it from about 1.85 down to about 1.25 of cl.
-The behaviour gaps are the ones to tackle first next time, as they are the remaining silent-difference cases.
-
-
-
+Polymorphic virtual bases (14b): the largest remaining item. Refused (S130) in every form tried, not miscompiled.
+Cases that still behave differently from cl, silently:
+T() value-initialisation leaves plain structs unzeroed;
+a float passed to printf or any variadic function is not promoted to double;
+catch (Base*) never matches a thrown Derived*;
+replaced global operator new/delete are never called;
+delete[] of a cookie-less class ignores its own operator delete[], one- and two-parameter forms;
+multicharacter constants ('ab') and a hex escape running into a concatenated literal ("\x41" "b");
+the halfway float literal and out-of-range floating constants in static initialisers;
+argument evaluation order (left to right, cl right to left) and NRVO in nested blocks at -O2;
+the handler copy order when a by-value handler rethrows into another;
+d.a hidden on one path and unqualified members inside member functions are not checked for ambiguity (C2385).
+Rejected with an error, not wrong code: ->* and member-pointer values, tmake<V>(42), 64-bit literals as constant expressions, class placement new, a conversion operator against int/long overloads.
+Fixed: takeV(mk()), throwing destructors including delete[] elements, catch by value, the -O2 double-to-unsigned conversion, C2584/C4584 and the direct d.a ambiguity.
+Mixed cl/cppparse links only: statics in local classes; vtable names with longer base paths; exceptions crossing runtimes (both directions fail fast).
+Code size: 1.79 of cl on the Matrix members both emit (whole class 1.60, all common functions 1.55), plan to about 1.25.
+The silent cases are the ones to tackle first.

@@ -3,6 +3,7 @@
 #define _CRT_SECURE_NO_WARNINGS 1     // localtime for __DATE__ / __TIME__
 #endif
 #include "Pp.hpp"
+#include "Literal.hpp"
 #include "PathUtil.hpp"
 
 #include <cctype>
@@ -382,15 +383,8 @@ struct CondParser {
     bool at(const char* s) const { return i < t.size() && t[i].text == s; }
     long charValue(const std::string& lit)
     {
-        size_t p = lit[0] == 'L' ? 2 : 1;
-        if (p >= lit.size()) return 0;
-        if (lit[p] != '\\') return static_cast<unsigned char>(lit[p]);
-        char e = p + 1 < lit.size() ? lit[p + 1] : 0;
-        switch (e) {
-        case 'n': return 10; case 't': return 9; case 'r': return 13; case '0': return lit.size() > p + 2 && isdigit(static_cast<unsigned char>(lit[p + 2])) ? strtol(lit.c_str() + p + 1, 0, 8) : 0;
-        case 'a': return 7; case 'b': return 8; case 'f': return 12; case 'v': return 11; case 'x': return strtol(lit.c_str() + p + 2, 0, 16);
-        default: return static_cast<unsigned char>(e);
-        }
+        int count = 0;
+        return charLiteralValue(lit, count);
     }
     long number(const std::string& s)
     {

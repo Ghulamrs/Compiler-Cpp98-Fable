@@ -1592,8 +1592,9 @@ Expr* Parser::primary()
     case PpToken::Char: { Expr* e = m_arena.expr(Expr::CharLit, here); e->text = t.text; advance(); return e; }
     case PpToken::String: {
         Expr* e = m_arena.expr(Expr::StringLit, here); e->text = t.text; advance();
-        // adjacent literals concatenate: the closing quote of one and the opening quote of the next go
-        while (cur().kind == PpToken::String && e->text.size() >= 2 && cur().text.size() >= 2) { e->text = e->text.substr(0, e->text.size() - 1) + cur().text.substr(1); advance(); }
+        // adjacent literals concatenate: kept as written, one space apart, since each piece's escapes are decoded
+        // on their own ("\x41" "b" is "Ab"; stringLiteralUnits)
+        while (cur().kind == PpToken::String) { e->text += " " + cur().text; advance(); }
         return e;
     }
     case PpToken::Punct:

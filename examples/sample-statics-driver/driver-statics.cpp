@@ -84,6 +84,12 @@ int main(int argc, char**)
         expect("konstF 3000000000.0", s.u == 3000000000u, 1);
         expect("konstF 3.4028235e38f", s.fm == 3.4028235e38f, 1);
         expect("konstF sizeof, 5LL", s.ds == 4 && s.dl == 5, 1);
+        expect("konstF 1.00000005960464477550f", s.fh == 1.00000005960464477550f && s.fh != 1.0f, 1);
+        expect("konstF (unsigned char)300.0 + 0.5", s.dv == 300.5, 1);
+        expect("konstF (int)-2147483649.0", s.ni == 2147483647, 1);
+        expect("konstF (long long)-9.3e18", s.nl == 0x7EEFC34604DE0000LL, 1);
+        expect("konstF (int)3e9 as a double", s.dc == 3000000000.0, 1);
+        expect("konstF \"\\x41\" \"b\" \"\\0\" \"c\"", s.cs[0] == 'A' && s.cs[1] == 'b' && s.cs[2] == 0 && s.cs[3] == 'c', 1);
         expect("konstF t", s.t, 11);
     }
     expect("constructions after konstF", g_ctorCalls, 11);

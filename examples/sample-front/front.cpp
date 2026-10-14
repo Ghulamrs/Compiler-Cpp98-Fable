@@ -587,6 +587,79 @@ void show()
 }
 }
 
+// literals: each piece of a concatenation has its escapes decoded on its own ("\x41" "b" was one character 0x1B
+// "\0" "1" one \01), wide literals are 16-bit units (L"ab" was emitted as the bytes of its text), and a
+// multicharacter constant is an int with cl's value ('ab' was 97; cl shifts each character in from the right
+// until the second escape sequence, then puts each above the ones before)
+namespace strlit {
+const char* gp = "\x41" "b";
+char ga[] = "\x41\x42" "c";
+const wchar_t* gw = L"\x41" L"b";
+wchar_t gwa[4] = L"\x41" L"b";
+void units(const char* name, const void* p, int n, int size)
+{
+    std::printf("%s", name);
+    for (int i = 0; i < n; ++i) std::printf(" %x", size == 1 ? ((const unsigned char*)p)[i] : (unsigned)((const wchar_t*)p)[i]);
+    std::printf("\n");
+}
+const char* local() { static char s[] = "\101" "7" "\0" "1"; return s; }
+#if 'ab' == 24930 && '\x12\x34' == 0x3412 && '\xff' < 0
+const int ppOk = 1;
+#else
+const int ppOk = 0;
+#endif
+void show()
+{
+    const char* p = "\x41" "b";
+    char a[] = "\x41\x42" "c";
+    char b[8] = "\101" "7" "\0" "1";
+    const wchar_t* w = L"\x41" L"b" L"\x263A";
+    wchar_t wa[] = L"\x41" L"b";
+    std::printf("strlit sizes %d %d %d %d %d %d %d\n", (int)std::strlen(p), (int)sizeof("\x41" "b"), (int)sizeof(a), (int)sizeof("\1" "2"),
+        (int)sizeof(L"\x41" L"b"), (int)sizeof(wa), (int)sizeof(ga));
+    units("strlit p", p, 3, 1); units("strlit a", a, 4, 1); units("strlit b", b, 8, 1); units("strlit gp", gp, 3, 1);
+    units("strlit ga", ga, 4, 1); units("strlit local", local(), 5, 1); units("strlit cat", "\x4" "1" "\08" "\x2" "f", 6, 1);
+    units("strlit w", w, 4, 2); units("strlit wa", wa, 3, 2); units("strlit gw", gw, 3, 2); units("strlit gwa", gwa, 4, 2);
+    std::printf("strlit chars %d %d %d %d %d %d %d\n", 'ab', 'abcd', (int)sizeof('ab'), 'a\x62', '\0a', (int)sizeof('a'), ppOk);
+    std::printf("strlit escapes %x %x %x %x %x %x %x %x\n", '\xff\xfe', '\x12\x34', 'a\x80', '\200a', 'a\n\tb', '\x11\x22\x33\x44', 'a\0b\0', '\"a\?');
+    std::printf("strlit wide %x %x %d\n", (unsigned)L'\xffff', (unsigned)L'\x41', (int)sizeof(L'a'));
+}
+}
+
+// floating constants converted to integers as cl folds them: modulo 2^N for any constant operand (a negation,
+// arithmetic, a cast through float, a const double, ?:; only a bare literal was folded, the rest gave 80000000h),
+// in code, globals and array bounds ((int)(unsigned char)300.0 + 1 was S114); converted straight on to a floating
+// type the folded value is the untruncated one ((unsigned char)300.0 + 0.5 is 300.5, it was 44.5); a float
+// literal rounded once from its decimal (1.00000005960464477550f is 3F800001h, through a double 3F800000h)
+namespace cfold {
+const double cd = 3e9;
+const float hf = 1.00000005960464477550f;
+double g1 = (unsigned char)300.0 + 0.5;
+int g2 = (int)-2147483649.0;
+long long g3 = (long long)-9.3e18;
+unsigned long long g4 = (unsigned long long)-1.0;
+int g5 = (int)cd;
+double g6 = (int)3e9;
+float g7 = 1.00000005960464477550f;
+float g8[2] = { 1.00000005960464477530f, 16777217.000000001f };
+int bound[(int)(unsigned char)300.0 + 1];
+int bound2[(int)cd / 1000000000 + (int)(2.0 * 1.5)];
+int take(int x) { return x; }
+double takeD(double x) { return x; }
+void show()
+{
+    const double lcd = 3e9;
+    std::printf("cfold a %x %x %x %x %x\n", (int)-2147483649.0, (int)+3e9, (int)(2.0 * 1.5e9), (int)(3e9 + 1.0), (int)(float)1e10);
+    std::printf("cfold b %llx %x %x %llx %x\n", (long long)-9.3e18, (int)cd, (int)lcd, (unsigned long long)-1e19, (int)1e20);
+    std::printf("cfold c %.17g %.17g %.17g %.17g %.17g\n", (unsigned char)300.0 + 0.5, (double)(int)3e9, -(int)3e9 * 1.0, (double)(unsigned)-1.0, (short)1e5 * 2.0);
+    int i = 3e9; double d = (int)3e9;
+    std::printf("cfold d %x %.17g %x %.17g %x %llx\n", i, d, take(3e9), takeD((unsigned char)300.0), (int)(3e9 > 1 ? 3e9 : 1.0), (unsigned long long)(unsigned)-1.0);
+    std::printf("cfold e %.17g %d %llx %llx %x %.17g %.17g\n", g1, g2, g3, g4, g5, g6, (double)(long long)(int)3e9);
+    std::printf("cfold f %08x %08x %08x %08x %08x\n", fp::bitsF(g7), fp::bitsF(hf), fp::bitsF(1.00000005960464477550f), fp::bitsF(g8[0]), fp::bitsF(g8[1]));
+    std::printf("cfold g %d %d\n", (int)(sizeof(bound) / sizeof(bound[0])), (int)(sizeof(bound2) / sizeof(bound2[0])));
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -612,6 +685,8 @@ int main()
     valinit::show();
     varargs::show();
     mplater::show();
+    strlit::show();
+    cfold::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

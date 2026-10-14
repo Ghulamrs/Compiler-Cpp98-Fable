@@ -164,16 +164,19 @@ virtual-base fixes, C2584/C4584). These are wrong results with no diagnostic, no
 | S3 | `catch (B*)` of a thrown `D*` | `struct XP { int a; }; struct HB { int b; }; struct MB : XP, HB {}; MB m; try { throw &m; } catch (HB* p) {}` | handler taken, `p` adjusted to the HB subobject | was `catch (...)`, or terminate; fixed (lane A): the same | fixed: IrGen throwDescriptorFor/catchableBases list a pointer's public unambiguous bases (`HB*+4`) and `void*`, runtime cppparse_match/catch_begin check the pointee's cv-qualifiers and adjust a non-null pointer in a slot behind the copy; sample-eh ehCatchPointer |
 | S4 | replaced global `operator new` / `delete` / `new[]` / `delete[]` | `void* operator new(size_t n) { ++g; return malloc(n); }`, then `new int(5)` | called | was ignored (`__new`/`__delete` went to malloc/free); fixed (lane A): called | fixed: X86 runtimeName gives cl's names (`??2@YAPEAX_K@Z`, `??_U@YAPEAX_K@Z`, sized `??3@YAXPEAX_K@Z` always, `??_V@YAXPEAX_K@Z` with a cookie and on throwing-constructor paths, `??_V@YAXPEAX@Z` without), a definition of one gets that name in either mangling (replacedAllocationName); IrGen freeGlobal/freeArray pass cl's sizes; exception objects stay malloc (`__malloc`); sample-layout (replacements in the cl driver and in layout.cpp), sample-eh ehGlobalFree |
 | S5 | `delete[]` of a class without cookie and with its own `operator delete[]` | `struct R { static void operator delete[](void* p) { log(); free(p); } }; delete[] new R[1];` (also the sized form) | R's operator (the sized form gets one element's size: the count is unknown) | was the global one; fixed (lane A): R's | fixed: IrGen Delete calls freeArray without a cookie (count unknown); sample-layout TR/TQ/TS, deleted by each compiler |
-| S6 | multicharacter constants | `'ab'`, `'abcd'` | 24930, 1633837924 | 97, 97 | SemaExpr CharLit |
-| S7 | a hex escape before a concatenated literal | `"\x41" "b"` | "Ab", strlen 2 | one char 0x1B, strlen 1 | CxxParser joins the texts before the escapes are decoded |
-| S8 | out-of-range floating constants in static initialisers (undefined, cl keeps a value) | `static double v = (unsigned char)300.0 + 0.5;`, `static int n = (int)-2147483649.0;` | 300.5, 2147483647 | 44.5, -2147483648 | IrGen foldArith / Cast: only a bare literal folds, the rest runs cvttsd2si |
-| S9 | literal casts with a non-literal constant operand | `(int)-2147483649.0`, `(int)+3e9`, `(int)(2.0 * 1.5e9)`, `(int)(float)1e10`, `const double cd = 3e9; (int)cd` | folded modulo 2^N (7fffffff, b2d05e00, ...) | 80000000h | IrGen value, Cast (`lit->kind == FloatLit` only) |
+| S6 | multicharacter constants | `'ab'`, `'abcd'` | 24930, 1633837924 | 97, 97 | fixed: common/Literal.cpp charLiteralValue (SemaExpr CharLit, Pp `#if`): an int, each character shifted in from the right until the second escape sequence, from there on each put above the ones before, as cl (`'\x12\x34'` 3412h, `'a\n\tb'` 6209610Ah); front.cpp `strlit` |
+| S7 | a hex escape before a concatenated literal | `"\x41" "b"` | "Ab", strlen 2 | one char 0x1B, strlen 1 | fixed: CxxParser keeps the pieces as written, common/Literal.cpp stringLiteralUnits decodes each piece on its own for sema (sizes), the X86 string table and char-array initialisers (`"\0" "1"` was `\01`); wide literals were emitted as the bytes of their text (`L"ab"`) and are now 16-bit units (X86 `DW`, `wchar_t w[] = L".."` locals and static data); `char s[] = ".."` statics are static data with no guard, as cl; front.cpp `strlit` |
+| S8 | out-of-range floating constants in static initialisers (undefined, cl keeps a value) | `static double v = (unsigned char)300.0 + 0.5;`, `static int n = (int)-2147483649.0;` | 300.5, 2147483647 | 44.5, -2147483648 | fixed: cl's rule (checked against cl /Od and /O2, code and data): a floating constant converted to an integer is truncated, taken modulo 2^64 and narrowed (common/Literal.cpp foldFloatToInteger); converted straight on to a floating type (a cast, an initialiser, an argument, the usual arithmetic conversions; through parentheses and a unary + that promotes nothing) it keeps that untruncated 64-bit value: `(unsigned char)300.0 + 0.5` is 300.5, `(double)(int)3e9` 3e9, while `-`, `?:`, integral conversions and arithmetic work on the narrowed value. IrGen::foldArith/foldToFloating/foldInteger/convertFolded; 64-bit values beyond 32 bits go out as two DD items; sample-statics konstF (guards as cl), front.cpp `cfold` |
+| S9 | literal casts with a non-literal constant operand | `(int)-2147483649.0`, `(int)+3e9`, `(int)(2.0 * 1.5e9)`, `(int)(float)1e10`, `const double cd = 3e9; (int)cd` | folded modulo 2^N (7fffffff, b2d05e00, ...) | 80000000h | fixed: value() folds a floating constant expression (literals, + - * /, casts, ?: with a constant or compared condition, const variables with a constant initializer) to one FConst, and IrGen::convert folds the conversion of an FConst to an integer and keeps the raw value for a floating conversion that follows at once; sema folds the same casts into integral constants (Sema::floatingConstant, exprCast; `(unsigned long long)(unsigned)-1.0` is no longer taken as 2^64-1); front.cpp `cfold` |
 | S10 | member-pointer size of a class completed later in the unit | `struct Inc; int a = sizeof(int Inc::*); struct Inc { int x; };` | 12 (24 for a function) | fixed (was 4 (8)): cl fixes the model where it first needs the size (sizeof, a member's layout) and keeps the unspecified one once the class is defined; naming the type (a typedef, a parameter) decides nothing (`typedef void (M::*MF)();` before `struct M : A, B` is 16 in cl). Sema marks the class (Symbol::memberPointerUnspecified) when TypeTable::sizeOf meets it incomplete, and for the bodies and initializers analysed after the declarations when sizeof names a class defined after them (Symbol::defOrder; a member function defined in its class counts where the outermost class ends). Test 17 front.cpp `mplater::` | Sema.cpp TypeTable::sizeOf, Sema::memberPointerSizeUse, queueBody, declareClass |
 | S11 | a namespace-scope object of a template with a member-pointer field | `template <class T> struct H { int T::* f; }; H<P> gh;` | f = -1 | refused now (was 0): S132 for every object of static storage whose type holds a member pointer (a template instantiation, a member, a base, an array element), for value-initialisation (`H<P>()`, `new Outer()`, `new Outer[2]()`, `M() : h()`) and for brace initialisation (`Outer o = {}`: cl -1 for `H<P> h = {}` but 0 for `Outer o = {}`) of one. Test 17 `sample-front/memptr-static.cpp`, `memptr-valueinit.cpp` | driver/main.cpp (static storage), IrGen::valueInit, initObject, New; TypeTable::holdsMemberPointer |
-| S12 | the halfway float literal (was filed as mixed links only) | `1.00000005960464477550f` as a global, local or static | 0x3F800001 | 0x3F800000 | decimal -> double -> float; see "Other known limits" |
+| S12 | the halfway float literal (was filed as mixed links only) | `1.00000005960464477550f` as a global, local or static | 0x3F800001 | 0x3F800000 | fixed: common/Literal.cpp floatingLiteralValue rounds once (when the double is exactly halfway between two floats, the decimal is compared exactly with that midpoint), used by sema, IrGen value and foldArith; such a static is static data with no guard, as cl; front.cpp `cfold`, sample-statics konstF |
 
-Also found, errors on valid code (not wrong code): `int a[(int)(unsigned char)300.0 + 1];` is S114 (a floating
-literal cast to an integral type is an integral constant expression); an explicit template argument on a call
+Also found, errors on valid code (not wrong code): `int a[(int)(unsigned char)300.0 + 1];` was S114 (a floating
+literal cast to an integral type is an integral constant expression; fixed with S9, also `(int)(2.0 * 1.5)` and
+`(int)cd` of a const double as cl takes them); a string literal initialising a char array member in braces,
+`struct N { char n[6]; int v; } g = { "ab", 3 };`, is S105 "cannot initialise an element of type char from const char*"
+(Sema::braceElement; IrGen::initAggregate would need the literal's units too); an explicit template argument on a call
 `run<PS>(3)` is S107; `n(sv)` with `S::operator int()` and overloads `n(int)`, `n(long)` is S106 ambiguous (cl
 picks `n(int)`). Code size at d9309fa (mapcompare's counting on the matrix sample, -O2): the 17 Matrix members
 both emit 1.79 of cl's bytes, the whole class 1.60, all 95 common functions 1.55, the ten largest 3.02.
@@ -226,17 +229,16 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   cppparse `cB20 cB30 ~B20 ~B10 cB40 got40 ~B40 ~B30` (the same objects, cB40 later).
 - Calls through pointers to members (`(obj.*pmf)(x)`, `(p->*pmf)(x)`) are rejected by sema (an error, not wrong code);
   every other use of pointers to members is refused by --compile6 (S132, row 18).
-- A float literal with an `f` suffix is converted decimal -> double -> float, which differs from cl's direct
-  decimal -> float rounding when the double is exactly halfway between two floats. The folder
-  (IrGen::foldArith, floatRoundsOnce) no longer folds such a literal, but it then takes the guarded dynamic
-  path (one more `$TSS<n>` than cl, so later guards of the function shift) and the run-time value, like the
-  code's own float constants and the assembler's REAL4, is still double-rounded. Repro (checked):
-  `float* hf() { static float h = 1.00000005960464477550f; return &h; }`: cl 0x3F800001, cppparse a guard
-  and 0x3F800000. Fix: a correctly rounded decimal -> float conversion (exact big-decimal comparison with the
-  midpoint).
-- Out-of-range float -> integer conversions in constants (undefined; cl keeps the value, e.g.
-  `static double v = (unsigned char)300.0 + 0.5;` is 300.5 in cl's data) are not folded: guarded dynamic path,
-  so the guards after them shift against cl's.
+- (fixed, S12) A float literal with an `f` suffix was converted decimal -> double -> float, which differs from cl's
+  direct decimal -> float rounding when the double is exactly halfway between two floats; such a static took the
+  guarded dynamic path. common/Literal.cpp floatingLiteralValue now rounds once (exact comparison of the decimal
+  with the midpoint); `static float h = 1.00000005960464477550f;` is static data 0x3F800001 with no guard.
+- (fixed, S8/S9) Out-of-range float -> integer conversions of constants are folded as cl folds them (modulo 2^N,
+  the untruncated value kept for a floating conversion that follows), in code and in static data. Left: cl applies
+  `~` to the untruncated 64-bit value (`(double)~(int)3e9` is -3000000001 in cl, cppparse -(B2D05E00h)-1 =
+  1294967295), and a folded constant converted to a floating type after another operand was evaluated
+  (`(int)3e9 * x` with a double variable x: cl 3e9 * x, cppparse -1294967296 * x); a const integer variable
+  initialised by a floating constant (`const int ci = 3e9;`) is not an integral constant expression in sema.
 - (fixed) At -O2 a run-time double -> unsigned conversion of 3000000000.0 gave 2147483648: the optimiser folded
   it through a 32-bit `long`. Floating <-> integer conversions now follow cl's code at every level and in the
   folder (X86.cpp Conv, Optimizer.cpp floatToInt; sample-front `conv::`).
@@ -258,12 +260,12 @@ the full suite plus matrix, lib, life, selfhost, mix, cprog and mapcompare befor
   of a non-polymorphic base (multiple model, 16); namespace-scope and static member pointers to members are
   refused (S132, memptr-global.cpp); a cast of a floating literal to an integer type is folded modulo 2^N as cl
   folds it (`(int)3e9` b2d05e00h, `(unsigned short)1e10` e400h; IrGen value, Cast). Left (checked 2026-10-14, rows S8-S11): a negated literal
-  (`(int)-2147483649.0`) is converted at run time (80000000h; cl /Od and /O2 give 7fffffff, as a printf argument
-  and as a global initialiser), likewise unary plus, constant arithmetic, cast chains and const variables; a
-  template instantiation with a member-pointer field was not refused when value-initialised (`H<P> h = H<P>();`:
-  cl 0, cppparse garbage at -O0) or as a namespace-scope object (`H<P> gh;`: cl -1, cppparse 0): both are S132
-  now (rows S1, S11; copies of one are still accepted, they move its bytes); the incomplete-class sizes held only
-  for a class never completed in the unit (row S10, fixed).
+  (`(int)-2147483649.0`) was converted at run time (80000000h; cl /Od and /O2 give 7fffffff, as a printf argument
+  and as a global initialiser), likewise unary plus, constant arithmetic, cast chains and const variables (fixed,
+  rows S8/S9); a template instantiation with a member-pointer field was not refused when value-initialised
+  (`H<P> h = H<P>();`: cl 0, cppparse garbage at -O0) or as a namespace-scope object (`H<P> gh;`: cl -1, cppparse
+  0): both are S132 now (rows S1, S11; copies of one are still accepted, they move its bytes); the incomplete-class
+  sizes held only for a class never completed in the unit (row S10, fixed).
 - Statics in a member function of a local class: the mangled name lacks the enclosing function (cl nests
   it), so such a static is not shared with cl's copy; found by the review of 92a19bb (`int t4(int a) { struct L { static int f(int b) { static int s1 = b; return s1; } }; return L::f(a); }`).
 

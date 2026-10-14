@@ -395,3 +395,95 @@ int ehTempDtor(int k)
     try { r = TT(1).get() + TT(2).get(); } catch (int e) { r = 100 + e; }
     return static_cast<int>(g_dlog) * 1000 + r;
 }
+
+// catching a thrown pointer as a pointer to a public unambiguous base (adjusted unless null, also a base of a base
+// and a base that is not first), with more cv-qualifiers on the pointee, as void*, by reference; a private or
+// ambiguous base is not caught, as a pointer or as a class; a string literal is caught as char*
+struct QA { int a; QA() : a(11) {} };
+struct QB { int b; QB() : b(22) {} };
+struct QC : QA, QB { int c; QC() : c(33) {} };
+struct QD : QC { int d; QD() : d(44) {} };
+struct QP : private QA, public QB { int p; };
+struct QL : QB { int l; };
+struct QM : QL, QB { int m; };   // two QB subobjects: ambiguous
+
+static int pointerCase(int k, QD& d, QC& c)
+{
+    const QC* cc = &c;
+    volatile QC* vc = &c;
+    QC* nul = 0;
+    QD* arr[1];
+    arr[0] = &d;
+    QP pv;
+    QM am;
+    try {
+        switch (k) {
+        case 0: throw &c;
+        case 1: throw &d;
+        case 2: throw nul;
+        case 3: throw cc;
+        case 4: throw vc;
+        case 5: throw arr;
+        case 6: throw &pv;
+        case 7: throw &am;
+        case 8: throw pv;
+        case 9: throw am;
+        case 10: throw "lit";
+        case 11: throw &g_probeSink;
+        default: throw &pointerCase;
+        }
+    }
+    catch (QB* p) { return p ? 100 + p->b : 1; }
+    catch (const QA* p) { return 200 + p->a; }
+    catch (const volatile QB* p) { return 300 + static_cast<int>((const volatile char*)p - (const volatile char*)vc); }
+    catch (QD** p) { return *p == &d ? 400 : 401; }
+    catch (QA& a) { return 500 + a.a; }
+    catch (QB& b) { return 600 + b.b; }
+    catch (char* s) { return 700 + s[0]; }
+    catch (const void* v) { return v == &g_probeSink ? 800 : 801; }
+    catch (...) { return 900; }
+}
+
+QD g_qd;
+
+int ehCatchPointer(int k)
+{
+    QD d;
+    QC c;
+    if (k < 13) return pointerCase(k, d, c);
+    // the rethrown pointer is the thrown one, not the handler's. cl 19.52 (preview) crashes on this rethrow when the
+    // thrown pointer is the address of a local (at /Od too), and here on `catch (QB*& p)` (cppparse and cl /Od take
+    // that handler with the adjusted pointer)
+    int r = 0;
+    try {
+        try { throw &g_qd; } catch (QB* p) { r = p->b; throw; }
+    } catch (QA* q) { r = r * 1000 + (q == static_cast<QA*>(&g_qd) ? q->a : 99); }
+    return r;
+}
+
+// replaced global allocation functions (they replace the library's in the whole program): a new-expression whose
+// constructor throws frees through them; the library's sized forms, which cl calls there, call these
+long g_gNew = 0;
+int g_gDel = 0;
+void* operator new(size_t n) { g_gNew += static_cast<long>(n); return malloc(n); }
+void operator delete(void* p) { if (p) ++g_gDel; free(p); }
+void* operator new[](size_t n) { g_gNew += static_cast<long>(n) * 1000; return malloc(n); }
+void operator delete[](void* p) { if (p) g_gDel += 10; free(p); }
+
+struct GT { int v; GT(int x) : v(x) { if (x == 9) throw 9; } };
+struct GA { int v; GA(); ~GA() { ++g_destroyed; } };
+GA::GA() : v(++g_ids) { if (v == 3) throw 3; }
+struct GB { int v; GB() : v(++g_ids) { if (v == 2) throw 2; } };
+
+int ehGlobalFree(int k)
+{
+    g_gNew = 0; g_gDel = 0; g_ids = 0;
+    int r = 0;
+    try {
+        if (k == 0) new GT(9);
+        else if (k == 1) new GA[4];
+        else if (k == 2) new GB[5];
+        else { int* p = new int(4); delete p; int* q = new int[3]; delete[] q; r = 1; }
+    } catch (int e) { r = e; }
+    return static_cast<int>(g_gNew) * 1000 + g_gDel * 10 + r;
+}

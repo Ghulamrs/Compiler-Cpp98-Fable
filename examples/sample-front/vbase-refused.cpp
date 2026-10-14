@@ -8,5 +8,6 @@ struct D : A, B { int d; };
 int down(V* p) { D* d = static_cast<D*>(p); return d->d; }
 int memberPointer(D* d) { int D::* p = &D::d; return d->*p; }
 int handler() { try { throw D(); } catch (V& x) { return x.v; } return 0; }
+int pointer(D* d) { try { throw d; } catch (B* b) { return b->b; } return 0; }
 
-int main() { D d; return down(&d) + memberPointer(&d) + handler(); }
+int main() { D d; return down(&d) + memberPointer(&d) + handler() + pointer(&d); }

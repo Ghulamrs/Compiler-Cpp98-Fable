@@ -294,7 +294,10 @@ must find every cppparse frame, and the registers it restores in the ml64 frame 
 - destructors that throw (C++98 allows it): through `delete` of a base pointer, of a stack object, of a member,
   of an element in `delete[]` and of an array at scope exit, and a constructor that throws in `new T` and `new T[n]`
   (ehDtorThrow, ehArrays);
-- `catch (T x)` by value: the handler's copy is copy-constructed and destroyed (ehCatchValue).
+- `catch (T x)` by value: the handler's copy is copy-constructed and destroyed (ehCatchValue);
+- a thrown pointer caught as a pointer to a base (adjusted, also a null one and a rethrown one), with more
+  cv-qualifiers, as `void*`, and not as a private or ambiguous base (ehCatchPointer);
+- a constructor that throws in a new-expression frees through the replaced global operators (ehGlobalFree).
 
 These run in four models (setjmp, table, and each mixed with the other in `probe-mix.cpp`) at `-O0` to `-O3`.
 Each output must equal the cl build's. That reference is built with `/EHa`, because cl 19.52 (preview)
@@ -477,7 +480,8 @@ Member templates and partial specialisations are not instantiated.
 **x86-64** (`X86.cpp`): `<name>.asm` holds MASM for the Windows x64 ABI:
 callee-saved registers allocated by linear scan, frame with shadow space,
 arguments in RCX/RDX/R8/R9 and XMM0-XMM3, SSE2 floating point, vtables in
-`.data`, strings and float constants in `.const`, `malloc`/`free`/`memcpy`
+`.data`, strings and float constants in `.const`, the global `operator
+new`/`operator delete` (by MSVC's names, since version 6) and `memcpy`
 for the runtime helpers, `cppparse_throw` for `throw` (exceptions are not
 implemented on this target). `--assemble` runs `ml64 /c` to produce
 `<name>.obj`. Symbols use cppparse's own mangling (`square(int x)` is
@@ -813,8 +817,19 @@ complete class finds one (with the complete object's size for the
 two-parameter form), as a non-virtual `delete` does. A new-expression
 calls the class's own (or inherited) `operator new` / `operator new[]`
 with cl's size (count * size + 8 when the array has a cookie), and
-`delete[]` frees an array with a cookie through the class's `operator
-delete[]`; `::new` and `::delete` use the global ones. A
+`delete[]` frees through the class's `operator delete[]` (count * size + 8
+with a cookie; without one the count is unknown and the two-parameter form
+gets one element's size, as from cl); `::new` and `::delete` use the
+global ones. The global ones are called by cl's names: `??2@YAPEAX_K@Z`
+and `??_U@YAPEAX_K@Z`, the sized `??3@YAXPEAX_K@Z` for every `delete`
+(also in the deleting destructors), the sized `??_V@YAXPEAX_K@Z` for
+`delete[]` with a cookie and where a constructor throws, and
+`??_V@YAXPEAX@Z` without a cookie. The C++ library defines them (its sized
+forms call the unsized ones), so a replacement defined in any unit, by
+either compiler, is the one called. The library's `operator new` reports
+failure by throwing `std::bad_alloc` through cl's exception handling,
+which does not pass through cppparse's frames: a failed allocation ends
+the program. A
 destructor stores its own class's vptrs on entry, as a constructor does
 after its bases, so a virtual call made while a base part is built or
 destroyed reaches that base's function. Virtual base classes are laid out
@@ -976,7 +991,11 @@ ends (a copy constructor that throws there calls terminate); an
 exception leaving the handler destroys its objects before the handled
 exception is released. A handler for a base class that is not the first
 gets that base subobject (the throw descriptor gives each base's
-offset). A goto out of a handler is refused (S132). `throw obj`
+offset); as with cl, only a public base the class holds once is caught.
+A thrown pointer is caught (C++98 15.3/3) by a handler for a pointer to
+such a base, adjusted to the base subobject unless null, by one with more
+cv-qualifiers on the pointee, and by `void*` for any object pointer; a
+`throw` of a string literal is caught by `char*`, as with cl. A goto out of a handler is refused (S132). `throw obj`
 copy-constructs the exception object into heap storage that the
 runtime owns (`cppparse_throw_owned`) and destroys with the class's
 destructor when the handler ends. The driver `examples/sample-life-driver/

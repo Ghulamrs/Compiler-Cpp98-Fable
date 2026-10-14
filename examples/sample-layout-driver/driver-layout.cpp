@@ -6,8 +6,14 @@
 
 #include <new>
 #include <stdio.h>
+#include <stdlib.h>
 
 static int failures = 0;
+
+// replace the library's operator new and delete for the whole program (layout.cpp replaces new[] and delete[])
+long g_gNew = 0, g_gDel = 0;
+void* operator new(size_t n) { g_gNew += (long)n; return malloc(n); }
+void operator delete(void* p) { if (p) ++g_gDel; free(p); }
 
 static void expect(const char* what, long got, long want)
 {
@@ -386,6 +392,54 @@ int main()
         g_tnNew = g_tnDel = 0;
         deleteTNGlobal(makeTNGlobal());
         expect("::new and ::delete bypass TN's operators", g_tnNew + g_tnDel, 0);
+        g_trNew = g_trDel = 0;
+        TR* r = makeTRArray(3);
+        expect("TR::operator new[] size (no cookie), by cppparse", g_trNew, 3 * (long)sizeof(TR));
+        delete[] r;
+        expect("TR::operator delete[] (no cookie), delete[] by cl", g_trDel, 1);
+        g_trDel = 0;
+        deleteTRArray(new TR[3]);
+        expect("TR::operator delete[] (no cookie), delete[] by cppparse", g_trDel, 1);
+        g_trDel = 0;
+        TQ* q = makeTQArray(2);
+        delete[] q;
+        expect("TQ::operator delete[] size (no cookie), by cl", g_trDel, (long)sizeof(TQ));
+        g_trDel = 0;
+        deleteTQArray(new TQ[2]);
+        expect("TQ::operator delete[] size (no cookie), by cppparse", g_trDel, (long)sizeof(TQ));
+        g_trDel = 0;
+        deleteTS(new TS);
+        expect("TS::operator delete, delete by cppparse", g_trDel, 1);
+    }
+    printf("replaced global operator new and delete (cl's unit), new[] and delete[] (cppparse's unit)\n");
+    {
+        g_gNew = g_gDel = g_gNewA = g_gDelA = 0;
+        int* i = makeInt(7);
+        delete i;
+        deleteInt(new int(8));
+        expect("operator new bytes: new int by cppparse, by cl", g_gNew, 8);
+        expect("operator delete calls: delete by cl, by cppparse", g_gDel, 2);
+        int* is = makeInts(5);
+        delete[] is;
+        deleteInts(new int[5]);
+        expect("operator new[] bytes: new int[5] by both", g_gNewA, 40);
+        expect("operator delete[] calls: delete[] by both", g_gDelA, 2);
+        g_gNew = g_gDel = g_gNewA = g_gDelA = 0;
+        GQ* g = makeGQ();
+        delete g;
+        deleteGQ(new GQ);
+        expect("operator new bytes: new GQ by both", g_gNew, 2 * (long)sizeof(GQ));
+        expect("operator delete calls: GQ's deleting destructor", g_gDel, 2);
+        GC* c = makeGCArray(3);
+        delete[] c;
+        deleteGCArray(new GC[3]);
+        expect("operator new[] bytes: new GC[3] by both", g_gNewA, 2 * (3 * (long)sizeof(GC) + 8));
+        expect("operator delete[] calls: delete[] of GC by both", g_gDelA, 2);
+        g_gNewA = g_gDelA = 0;
+        TQ* tq = makeTQArray(2);
+        expect("operator new[] bytes: new TQ[2] by cppparse", g_gNewA, 2 * (long)sizeof(TQ));
+        deleteTQArray(tq);
+        expect("TQ's delete[], not the global one", g_gDelA, 0);
     }
     printf("review fixes: grouping with a non-virtual name, hidden overrides, both operator delete[] forms\n");
     {

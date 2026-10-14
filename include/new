@@ -1,5 +1,6 @@
-// new - cppparse's C++98 library: placement new and bad_alloc. Ordinary new/delete expressions
-// are lowered by the compiler to the runtime's allocation calls and never look these up.
+// new - cppparse's C++98 library: the global allocation functions, placement new and bad_alloc. New- and
+// delete-expressions call the global operators by their MSVC names without looking them up here; the C++ library
+// defines them, and a program may replace them in any of its units.
 #ifndef CPPPARSE_NEW
 #define CPPPARSE_NEW
 
@@ -17,6 +18,10 @@ public:
 
 }
 
+void* operator new(size_t);
+void* operator new[](size_t);
+void  operator delete(void*);
+void  operator delete[](void*);
 inline void* operator new(size_t, void* place) { return place; }
 inline void* operator new[](size_t, void* place) { return place; }
 inline void  operator delete(void*, void*) {}

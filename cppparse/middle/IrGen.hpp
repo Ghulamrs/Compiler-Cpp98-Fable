@@ -82,7 +82,8 @@ private:
         sema::Symbol*     freeCls;     // the class whose operator delete frees it (0: the global one)
         int               countSlot;   // freeKind 2: the local holding the element count
         bool              noCookie;    // freeKind 2: an array without a cookie (a sized operator delete[] gets count * size)
-        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false), restIndex(-1), freeKind(0), freeCls(0), countSlot(-1), noCookie(false) {}
+        int               freeSize;    // freeKind: the size of the object (of an element), for the sized global operators
+        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false), restIndex(-1), freeKind(0), freeCls(0), countSlot(-1), noCookie(false), freeSize(1) {}
     };
     struct ExitThunk {                 // destroys a global or static local at exit; registered with atexit once it is built
         sema::Symbol*     fn;
@@ -113,6 +114,7 @@ private:
     sema::Symbol* namedResult(sema::Symbol* fn, cxx::Stmt* body);   // the local every return names (NRVO), or 0
     sema::Symbol* vbaseDestructor(sema::Symbol* cls);   // cl's ??_D: the destructor of a complete object
     void genVbaseDestructor(sema::Symbol* fn);
+    void catchableBases(sema::Symbol* top, std::vector<sema::Symbol*>& bases, std::vector<int>& offsets) const;
     std::string throwDescriptorFor(const sema::Type* t) const;
 
     // special members
@@ -155,7 +157,7 @@ private:
     void handlerCleanups(size_t mark, int line);
     int  beginTerminateRegion(int& term, int line);
     void endTerminateRegion(int tid, int term, int line);
-    int  registerFree(int ptr, sema::Symbol* cls, bool array, int count, int line);
+    int  registerFree(int ptr, sema::Symbol* cls, bool array, int count, int elemSize, int line);
     void clearFlag(int index, int line);
     void returnSequence(int line);
     void finishFunction(int line);
@@ -189,7 +191,8 @@ private:
     void genDeletingDestructors();
     sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth, const char* name = "operator delete", size_t maxParams = 2) const;
     bool freeObject(sema::Symbol* cls, int p, int line);
-    void freeArray(sema::Symbol* cls, int cookie, int count, int line, bool hasCookie = true);
+    void freeArray(sema::Symbol* cls, int cookie, int count, int elemSize, int line, bool hasCookie = true);
+    void freeGlobal(int p, int size, int line);
     void need(sema::Symbol* fn);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
     int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);

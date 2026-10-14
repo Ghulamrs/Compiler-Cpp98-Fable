@@ -17,8 +17,9 @@
 //     ... handler body ...
 //     call cppparse_catch_end
 //
-// "throw x" copies the object (its size and a type descriptor "Class;Base1;Base2" or the
-// scalar type name come from the generated code) and longjmps to the innermost frame. The
+// "throw x" copies the object (its size and a type descriptor "Class;Base1;Base2@16" or the
+// scalar type name, "D*;B1*;B2*+16;void*" for a pointer to a class, come from the generated
+// code) and longjmps to the innermost frame. The
 // frame stack, the exception in flight and the caught ones are per thread.
 //
 // With --eh=table the generated code has no frames: a try region is a list of code ranges in the
@@ -52,11 +53,12 @@ struct cppparse_exception {
     const char*   type;
     unsigned long size;
     void        (*dtor)(void*);   /* destructor of a class object thrown with cppparse_throw_owned, or 0 */
+    void**        slot;           /* behind a thrown pointer: the adjusted pointer a handler of a pointer to a base gets */
 };
 
 /* per thread: the compiler runs its phases on a worker pool, and every thread has its own chain of frames */
 static __declspec(thread) struct cppparse_frame*    g_top = 0;
-static __declspec(thread) struct cppparse_exception g_inflight = { 0, 0, 0, 0 };
+static __declspec(thread) struct cppparse_exception g_inflight = { 0, 0, 0, 0, 0 };
 
 static void dropException(struct cppparse_exception* e)
 {
@@ -64,6 +66,7 @@ static void dropException(struct cppparse_exception* e)
     free(e->object);
     e->object = 0;
     e->dtor = 0;
+    e->slot = 0;
 }
 static __declspec(thread) struct cppparse_exception g_caught[32];
 static __declspec(thread) int                       g_caughtCount = 0;
@@ -130,12 +133,14 @@ static void dispatch(void)
 
 void cppparse_throw(const void* object, const char* type, unsigned long size)
 {
-    void* copy = malloc(size ? size : 1);
+    const unsigned long at = (size + 7) & ~7UL;
+    void* copy = malloc(at + sizeof(void*));
     if (object && size) memcpy(copy, object, size);
     g_inflight.object = copy;
     g_inflight.type = type;
     g_inflight.size = size;
     g_inflight.dtor = 0;
+    g_inflight.slot = (void**)((char*)copy + at);
     dispatch();
 }
 
@@ -147,6 +152,7 @@ void cppparse_throw_owned(void* object, const char* type, unsigned long size, vo
     g_inflight.type = type;
     g_inflight.size = size;
     g_inflight.dtor = dtor;
+    g_inflight.slot = 0;
     dispatch();
 }
 
@@ -179,16 +185,57 @@ static int sameType(const char* thrown, const char* caught)
     return strcmp(lastComponent(a), lastComponent(b)) == 0;   /* "geom::Error" matches "Error" */
 }
 
-/* the offset of the base subobject the last successful match found ("Base@16" in the descriptor), which
-   cppparse_catch_begin adds to the object address it returns */
+/* "const volatile X*", with the pointer's own qualifiers after the '*' ignored: X and the pointee's qualifiers (1 const,
+   2 volatile). 0 for anything but a pointer to a type that is not itself a pointer */
+static int splitPointer(const char* t, char* out, size_t cap, int* cv)
+{
+    size_t n = strlen(t), k = 0;
+    *cv = 0;
+    for (;;) {
+        while (n > 0 && t[n - 1] == ' ') --n;
+        if (n >= 6 && strncmp(t + n - 6, " const", 6) == 0) n -= 6;
+        else if (n >= 9 && strncmp(t + n - 9, " volatile", 9) == 0) n -= 9;
+        else break;
+    }
+    if (n == 0 || t[n - 1] != '*') return 0;
+    --n;
+    for (;;) {
+        while (n > 0 && *t == ' ') { ++t; --n; }
+        if (n > 6 && strncmp(t, "const ", 6) == 0) { *cv |= 1; t += 6; n -= 6; }
+        else if (n > 9 && strncmp(t, "volatile ", 9) == 0) { *cv |= 2; t += 9; n -= 9; }
+        else break;
+    }
+    while (n > 0 && t[n - 1] == ' ') --n;
+    if (n == 0 || n >= cap) return 0;
+    {
+        int depth = 0;   /* a '*' inside template arguments belongs to them */
+        for (k = 0; k < n; ++k) {
+            if (t[k] == '<') ++depth;
+            else if (t[k] == '>') --depth;
+            else if (depth == 0 && (t[k] == '*' || t[k] == '&' || t[k] == '(')) return 0;
+        }
+    }
+    for (k = 0; k < n; ++k) out[k] = t[k];
+    out[n] = 0;
+    return 1;
+}
+
+/* the last successful match: the offset of the base subobject it found ("Base@16" in the descriptor), which
+   cppparse_catch_begin adds to the object address it returns, or the offset to add to a thrown pointer that is not
+   null ("Base*+16") */
 static __declspec(thread) unsigned long g_matchOffset = 0;
+static __declspec(thread) int           g_matchPointer = 0;
 
 int cppparse_match(const char* catchType)
 {
     const char* p;
+    char want[256];
+    int wantCv = 0, wantPointer;
     if (!g_inflight.type) return 0;
     g_matchOffset = 0;
+    g_matchPointer = 0;
     if (strcmp(catchType, "...") == 0) return 1;
+    wantPointer = splitPointer(catchType, want, sizeof want, &wantCv);
     p = g_inflight.type;
     while (*p) {
         const char* e = strchr(p, ';');
@@ -199,9 +246,16 @@ int cppparse_match(const char* catchType)
         entry[n] = 0;
         {
             char* at = strchr(entry, '@');
+            char* plus = strchr(entry, '+');
+            char have[256];
+            int haveCv = 0;
             unsigned long off = 0;
             if (at) { *at = 0; off = strtoul(at + 1, 0, 10); }
-            if (sameType(entry, catchType)) { g_matchOffset = off; return 1; }
+            if (plus) { *plus = 0; off = strtoul(plus + 1, 0, 10); }
+            if (wantPointer && splitPointer(entry, have, sizeof have, &haveCv)) {
+                /* a pointer handler: a qualification conversion may add cv-qualifiers to the pointee, not drop them */
+                if ((haveCv & ~wantCv) == 0 && sameType(have, want)) { g_matchOffset = off; g_matchPointer = 1; return 1; }
+            } else if (sameType(entry, catchType)) { g_matchOffset = off; return 1; }
         }
         p = e ? e + 1 : p + n;
     }
@@ -213,12 +267,19 @@ void* cppparse_catch_begin(void)
     void* obj = g_inflight.object;
     if (g_caughtCount < 32) g_caught[g_caughtCount++] = g_inflight;
     else { dropException(&g_inflight); obj = 0; }  /* too deeply nested: the object is dropped */
-    if (obj) obj = (char*)obj + g_matchOffset;
+    if (obj && g_matchPointer && g_inflight.slot) {
+        /* the thrown pointer converted to the handler's: the thrown one stays as it was for a "throw;" */
+        char* v = *(char**)obj;
+        *g_inflight.slot = v ? v + g_matchOffset : 0;
+        obj = g_inflight.slot;
+    } else if (obj) obj = (char*)obj + g_matchOffset;
     g_matchOffset = 0;
+    g_matchPointer = 0;
     g_inflight.object = 0;
     g_inflight.type = 0;
     g_inflight.size = 0;
     g_inflight.dtor = 0;
+    g_inflight.slot = 0;
     return obj;
 }
 
@@ -230,9 +291,10 @@ void cppparse_catch_end(void)
     }
 }
 
-/* the handler got the address of the object or of one of its base subobjects */
+/* the handler got the address of the object, of one of its base subobjects, or of the converted pointer */
 static int holds(const struct cppparse_exception* e, const void* p)
 {
+    if (e->slot && p == (const void*)e->slot) return 1;
     return (const char*)p >= (const char*)e->object && (const char*)p < (const char*)e->object + (e->size ? e->size : 1);
 }
 

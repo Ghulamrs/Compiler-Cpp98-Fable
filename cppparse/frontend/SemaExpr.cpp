@@ -1,5 +1,6 @@
 // SemaExpr.cpp - version 6 stage 3: expressions, conversions, overload resolution, statements, bodies.
 #include "Sema.hpp"
+#include "Literal.hpp"
 #include "PathUtil.hpp"
 
 #include <cstdlib>
@@ -77,32 +78,6 @@ void foldWide(cxx::Expr* e, const std::string& op, long a, long b, bool isUnsign
     const long long s = static_cast<long long>(r);
     e->semaConst = ok && static_cast<long long>(static_cast<long>(s)) == s;
     e->semaValue = e->semaConst ? static_cast<long>(s) : 0;
-}
-
-// the characters of a string literal's array without the terminator: the text may hold adjacent literals
-// ("a" "b") and an L prefix, and an escape sequence (\n, \x41, \101) is one character
-long stringLiteralLength(const std::string& text)
-{
-    long n = 0;
-    bool inside = false;
-    for (size_t i = 0; i < text.size(); ++i) {
-        const char c = text[i];
-        if (!inside) { if (c == '"') inside = true; continue; }
-        if (c == '"') { inside = false; continue; }
-        ++n;
-        if (c != '\\' || i + 1 >= text.size()) continue;
-        const char x = text[++i];
-        if (x == 'x') {
-            while (i + 1 < text.size()) {
-                const char h = text[i + 1];
-                if (!((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F'))) break;
-                ++i;
-            }
-        } else if (x >= '0' && x <= '7') {
-            for (int k = 1; k < 3 && i + 1 < text.size() && text[i + 1] >= '0' && text[i + 1] <= '7'; ++k) ++i;
-        }
-    }
-    return n;
 }
 
 bool isStringInit(const Type* array, const cxx::Initializer& init)
@@ -1218,24 +1193,17 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
     }
     case cxx::Expr::FloatLit: { char last = e->text.empty() ? 0 : e->text[e->text.size() - 1]; t = m_types.basic(last == 'f' || last == 'F' ? Type::Float : last == 'l' || last == 'L' ? Type::LongDouble : Type::Double); break; }
     case cxx::Expr::CharLit: {
-        t = m_types.basic(e->text[0] == 'L' ? Type::WChar : Type::Char);
-        std::string b = e->text[0] == 'L' ? e->text.substr(2) : e->text.substr(1);
+        // char is signed, as with cl; a multicharacter constant ('ab') is an int
+        int count = 0;
         e->semaConst = true;
-        e->semaValue = 0;
-        if (b.size() >= 2 && b[0] != '\\') e->semaValue = static_cast<unsigned char>(b[0]);
-        else if (b.size() >= 3) {
-            char x = b[1];
-            if (x >= '0' && x <= '7') {
-                long o = 0;
-                for (size_t k = 1; k < b.size() && k < 4 && b[k] >= '0' && b[k] <= '7'; ++k) o = o * 8 + (b[k] - '0');
-                e->semaValue = o;
-            } else e->semaValue = x == 'n' ? 10 : x == 't' ? 9 : x == 'r' ? 13 : x == 'a' ? 7 : x == 'b' ? 8 : x == 'f' ? 12 : x == 'v' ? 11 : x == 'x' ? strtol(b.c_str() + 2, 0, 16) : static_cast<unsigned char>(x);
-        }
-        if (t->kind == Type::Char) e->semaValue = static_cast<signed char>(e->semaValue);   // char is signed, as with cl
+        e->semaValue = charLiteralValue(e->text, count);
+        t = m_types.basic(e->text[0] == 'L' ? Type::WChar : count > 1 ? Type::Int : Type::Char);
         break;
     }
     case cxx::Expr::StringLit: {
-        const long n = stringLiteralLength(e->text); const bool wide = e->text[0] == 'L';
+        std::vector<unsigned long> units;
+        const bool wide = stringLiteralUnits(e->text, units);
+        const long n = static_cast<long>(units.size());
         t = m_types.array(m_types.qualified(m_types.basic(wide ? Type::WChar : Type::Char), true, false), n + 1);
         e->semaLvalue = true;
         break;

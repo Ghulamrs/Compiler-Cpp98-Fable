@@ -1,5 +1,6 @@
 // X86.cpp - x86-64 MASM code generation.
 #include "X86.hpp"
+#include "Literal.hpp"
 #include "Mangle.hpp"
 #include "PathUtil.hpp"
 
@@ -1626,37 +1627,16 @@ std::string X86Module::finish()
     for (std::map<std::string, double>::const_iterator fi = m_floats.begin(); fi != m_floats.end(); ++fi)
         s << fi->first << " DQ 0" << fi->first.substr(7) << "h\n";
     for (std::map<std::string, std::string>::const_iterator si = m_strings.begin(); si != m_strings.end(); ++si) {
-        // the literal is stored with quotes and escapes: emit raw bytes
-        std::string lit = si->second;
-        if (lit.size() >= 2 && lit[0] == '"') lit = lit.substr(1, lit.size() - 2);
-        // MASM limits a line to 512 characters: emit at most 24 bytes per DB line
-        std::vector<int> bytes;
-        for (size_t c = 0; c < lit.size(); ++c) {
-            unsigned char ch = static_cast<unsigned char>(lit[c]);
-            if (ch == '\\' && c + 1 < lit.size()) {
-                char x = lit[++c];
-                if (x >= '0' && x <= '7') {
-                    // up to three octal digits
-                    unsigned v = 0;
-                    for (int k = 0; k < 3 && c < lit.size() && lit[c] >= '0' && lit[c] <= '7'; ++k, ++c) v = v * 8 + static_cast<unsigned>(lit[c] - '0');
-                    --c;
-                    ch = static_cast<unsigned char>(v);
-                } else if (x == 'x') {
-                    unsigned v = 0;
-                    while (c + 1 < lit.size() && isxdigit(static_cast<unsigned char>(lit[c + 1]))) {
-                        char h = lit[++c];
-                        v = v * 16 + static_cast<unsigned>(isdigit(static_cast<unsigned char>(h)) ? h - '0' : tolower(static_cast<unsigned char>(h)) - 'a' + 10);
-                    }
-                    ch = static_cast<unsigned char>(v);
-                } else ch = x == 'n' ? 10 : x == 't' ? 9 : x == 'r' ? 13 : x == 'a' ? 7 : x == 'b' ? 8 : x == 'f' ? 12 : x == 'v' ? 11 : static_cast<unsigned char>(x);
-            }
-            bytes.push_back(static_cast<int>(ch));
-        }
-        bytes.push_back(0);
-        s << si->first << " LABEL BYTE\n";
-        for (size_t c = 0; c < bytes.size(); c += 24) {
-            s << "        DB ";
-            for (size_t k = c; k < bytes.size() && k < c + 24; ++k) s << (k == c ? "" : ", ") << bytes[k];
+        // the literal is stored as written (quotes, escapes, adjacent pieces, L prefix): its code units, wide ones
+        // as 16-bit words at an even address; MASM limits a line to 512 characters: at most 24 units per line
+        std::vector<unsigned long> units;
+        const bool wide = stringLiteralUnits(si->second, units);
+        units.push_back(0);
+        if (wide) s << "ALIGN 2\n";
+        s << si->first << (wide ? " LABEL WORD\n" : " LABEL BYTE\n");
+        for (size_t c = 0; c < units.size(); c += 24) {
+            s << (wide ? "        DW " : "        DB ");
+            for (size_t k = c; k < units.size() && k < c + 24; ++k) s << (k == c ? "" : ", ") << units[k];
             s << "\n";
         }
     }

@@ -586,7 +586,8 @@ compiler they belong to; every folder is an include directory of the build (`bui
 
 - `driver/`: `main` (command line and the modes).
 - `common/`: `PathUtil` (strings, paths, files), `Parallel` (the worker pool), `Target` (the target
-  description, see below).
+  description, see below), `Literal` (the values of character and string literals as cl gives them, shared by
+  the preprocessor, sema, IrGen and the back end).
 - `frontend/`: `Pp` (preprocessor), `CxxAst`/`CxxParser` (syntax tree and parser), `Sema`/`SemaExpr`
   (semantic analysis).
 - `middle/`: `IrGen` (IR from the analysed tree), `Ir` (the intermediate representation), `Optimizer`, `Ssa`.

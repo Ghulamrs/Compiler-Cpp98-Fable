@@ -1,5 +1,6 @@
 // IrGen.cpp - version 6 stage 4: IR generation from the analysed syntax tree. See IrGen.hpp.
 #include "IrGen.hpp"
+#include "Literal.hpp"
 #include "Mangle.hpp"
 #include "PathUtil.hpp"
 
@@ -2213,19 +2214,20 @@ void IrGen::initObject(const LValue& lv, const sema::Type* t, Symbol* var, cxx::
     }
     if (u->kind == sema::Type::Array) {
         int addr = addressOf(lv, line);
-        if (id.init.kind != cxx::Initializer::Brace && id.init.args.size() == 1 && id.init.args[0]->kind == cxx::Expr::StringLit && sizeOf(u->inner) == 1) {
-            // char s[N] = "...": the literal's bytes with its terminator; the rest of a longer local array is zero
-            // (static storage is zero already)
-            const sema::Type* lt = m_semaTypes.unref(exprType(id.init.args[0]));
-            const long litBytes = lt && lt->kind == sema::Type::Array ? lt->arraySize : 0;
-            const long bytes = u->arraySize < litBytes ? u->arraySize : litBytes;
+        const sema::Type* lt = id.init.args.size() == 1 && id.init.args[0]->kind == cxx::Expr::StringLit ? m_semaTypes.unref(exprType(id.init.args[0])) : 0;
+        const int elem = sizeOf(u->inner);
+        if (id.init.kind != cxx::Initializer::Brace && lt && lt->kind == sema::Type::Array && lt->inner && sizeOf(lt->inner) == elem && (elem == 1 || elem == 2)) {
+            // char s[N] = "...", wchar_t w[N] = L"...": the literal's units with its terminator; the rest of a
+            // longer local array is zero (static storage is zero already)
+            const long units = u->arraySize < lt->arraySize ? u->arraySize : lt->arraySize;
+            const long bytes = units * elem;
             const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
-            if (lv.kind == LValue::Local && u->arraySize > bytes) {
+            if (lv.kind == LValue::Local && u->arraySize > units) {
                 IrInst z = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
                 z.sub = "__zero";
                 z.args.push_back(IrOperand::temp(addr, oldType(vp)));
                 z.args.push_back(IrOperand::imm(0, m_types.intType()));
-                z.args.push_back(IrOperand::imm(u->arraySize, m_types.builtin(Type::LongLong)));
+                z.args.push_back(IrOperand::imm(u->arraySize * elem, m_types.builtin(Type::LongLong)));
                 emit(z);
             }
             const int src = value(id.init.args[0]);
@@ -3728,8 +3730,9 @@ bool IrGen::staticData(const sema::Type* t, const cxx::Initializer& init, std::v
         return init.args.size() == 1 && constantData(t, init.args[0], out, 0);
     }
     // "const char* p = "x";", "int* p = &g;": a pointer initialised by an address; "double d = 1.0/4;",
-    // "int u = int();", "float f(1.5f*2);": an arithmetic constant, folded
-    return init.args.size() == 1 && (u->kind == sema::Type::Pointer || u->isArithmetic()) && constantData(t, init.args[0], out, 0);
+    // "int u = int();", "float f(1.5f*2);": an arithmetic constant, folded; "char s[] = "x";"
+    const bool stringArray = u->kind == sema::Type::Array && init.args.size() == 1 && init.args[0]->kind == cxx::Expr::StringLit;
+    return init.args.size() == 1 && (u->kind == sema::Type::Pointer || u->isArithmetic() || stringArray) && constantData(t, init.args[0], out, 0);
 }
 
 // the bytes of an object of type t initialised by x (0: zero-initialised); false when the initializer needs code
@@ -3741,6 +3744,23 @@ bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataIt
     if (x && x->kind == cxx::Expr::Error) return false;
     const int size = sizeOf(u);
     if (size <= 0) return false;
+    if (u->kind == sema::Type::Array && x && x->kind == cxx::Expr::StringLit) {
+        // char s[N] = "...", wchar_t w[N] = L"...": the literal's units, then zeros up to N
+        const int elem = sizeOf(u->inner);
+        std::vector<unsigned long> units;
+        if (stringLiteralUnits(x->text, units) != (elem == 2) || (elem != 1 && elem != 2) || u->arraySize < 0) return false;
+        units.push_back(0);
+        long n = 0;
+        for (; n < u->arraySize && n < static_cast<long>(units.size()); ++n) {
+            IrDataItem it;
+            it.kind = IrDataItem::Int;
+            it.size = elem;
+            it.value = static_cast<long>(units[static_cast<size_t>(n)]);
+            out.push_back(it);
+        }
+        if (n < u->arraySize) zeroData(out, static_cast<int>((u->arraySize - n) * elem));
+        return true;
+    }
     if (u->kind == sema::Type::Array || u->kind == sema::Type::Class) {
         if (x && x->kind != cxx::Expr::InitList) return false;
         return aggregateData(u, x ? &x->kids : 0, out, depth + 1);
@@ -3775,7 +3795,6 @@ bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataIt
             return true;
         }
         if (x->kind == cxx::Expr::StringLit) {
-            if (x->text.empty() || x->text[0] != '"') return false;
             it.kind = IrDataItem::String;
             it.text = x->text;
             out.push_back(it);

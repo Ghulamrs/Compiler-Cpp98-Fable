@@ -468,6 +468,45 @@ void show()
 }
 }
 
+// literals: each piece of a concatenation has its escapes decoded on its own ("\x41" "b" was one character 0x1B
+// "\0" "1" one \01), wide literals are 16-bit units (L"ab" was emitted as the bytes of its text), and a
+// multicharacter constant is an int with cl's value ('ab' was 97; cl shifts each character in from the right
+// until the second escape sequence, then puts each above the ones before)
+namespace strlit {
+const char* gp = "\x41" "b";
+char ga[] = "\x41\x42" "c";
+const wchar_t* gw = L"\x41" L"b";
+wchar_t gwa[4] = L"\x41" L"b";
+void units(const char* name, const void* p, int n, int size)
+{
+    std::printf("%s", name);
+    for (int i = 0; i < n; ++i) std::printf(" %x", size == 1 ? ((const unsigned char*)p)[i] : (unsigned)((const wchar_t*)p)[i]);
+    std::printf("\n");
+}
+const char* local() { static char s[] = "\101" "7" "\0" "1"; return s; }
+#if 'ab' == 24930 && '\x12\x34' == 0x3412 && '\xff' < 0
+const int ppOk = 1;
+#else
+const int ppOk = 0;
+#endif
+void show()
+{
+    const char* p = "\x41" "b";
+    char a[] = "\x41\x42" "c";
+    char b[8] = "\101" "7" "\0" "1";
+    const wchar_t* w = L"\x41" L"b" L"\x263A";
+    wchar_t wa[] = L"\x41" L"b";
+    std::printf("strlit sizes %d %d %d %d %d %d %d\n", (int)std::strlen(p), (int)sizeof("\x41" "b"), (int)sizeof(a), (int)sizeof("\1" "2"),
+        (int)sizeof(L"\x41" L"b"), (int)sizeof(wa), (int)sizeof(ga));
+    units("strlit p", p, 3, 1); units("strlit a", a, 4, 1); units("strlit b", b, 8, 1); units("strlit gp", gp, 3, 1);
+    units("strlit ga", ga, 4, 1); units("strlit local", local(), 5, 1); units("strlit cat", "\x4" "1" "\08" "\x2" "f", 6, 1);
+    units("strlit w", w, 4, 2); units("strlit wa", wa, 3, 2); units("strlit gw", gw, 3, 2); units("strlit gwa", gwa, 4, 2);
+    std::printf("strlit chars %d %d %d %d %d %d %d\n", 'ab', 'abcd', (int)sizeof('ab'), 'a\x62', '\0a', (int)sizeof('a'), ppOk);
+    std::printf("strlit escapes %x %x %x %x %x %x %x %x\n", '\xff\xfe', '\x12\x34', 'a\x80', '\200a', 'a\n\tb', '\x11\x22\x33\x44', 'a\0b\0', '\"a\?');
+    std::printf("strlit wide %x %x %d\n", (unsigned)L'\xffff', (unsigned)L'\x41', (int)sizeof(L'a'));
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -490,6 +529,7 @@ int main()
     lit::show();
     ambig::show();
     review::show();
+    strlit::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

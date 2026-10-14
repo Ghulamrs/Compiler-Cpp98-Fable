@@ -1,21 +1,25 @@
-GAP ANALYSIS OF C++98 (checked against HEAD d9309fa on 2026-10-14, every item reproduced against cl)
+GAP ANALYSIS OF C++98 (main 7e9bfbe, 2026-10-14; every item reproduced against cl)
+
+Fixed on 2026-10-14 (lanes V, A, L; verified: suite, selfhost generation two, suite under the self-built compiler, cprog, matrix, eh, mix):
+T() value-initialisation zeroes as cl; a float passed to printf or any variadic function is promoted to double;
+catch (Base*) matches a thrown Derived* with the pointer adjusted; replaced global operator new/delete are called;
+delete[] of a cookie-less class uses its own operator delete[]; multicharacter constants ('ab') and "\x41" "b" as cl;
+floating constants cast to integers folded as cl, in code and in static initialisers; the halfway float literal is
+correctly rounded; member-pointer sizes of a class completed later; the old pipeline no longer overflows its stack on
+a folder that holds a class named T.
 
 Left for later sessions, recorded in docs/next-targets.md with repros:
-
-Polymorphic virtual bases (14b): the largest remaining item. Refused (S130) in every form tried, not miscompiled.
+Refused with an error, not miscompiled (being implemented): polymorphic virtual bases (14b, the largest item), pointers
+to members in code, covariant returns through a secondary base; also objects holding a member pointer (static storage,
+value- or brace-initialised), tmake<V>(42), 64-bit literals as constant expressions, class placement new, a conversion
+operator against int/long overloads.
 Cases that still behave differently from cl, silently:
-T() value-initialisation leaves plain structs unzeroed;
-a float passed to printf or any variadic function is not promoted to double;
-catch (Base*) never matches a thrown Derived*;
-replaced global operator new/delete are never called;
-delete[] of a cookie-less class ignores its own operator delete[], one- and two-parameter forms;
-multicharacter constants ('ab') and a hex escape running into a concatenated literal ("\x41" "b");
-the halfway float literal and out-of-range floating constants in static initialisers;
 argument evaluation order (left to right, cl right to left) and NRVO in nested blocks at -O2;
 the handler copy order when a by-value handler rethrows into another;
-d.a hidden on one path and unqualified members inside member functions are not checked for ambiguity (C2385).
-Rejected with an error, not wrong code: ->* and member-pointer values, tmake<V>(42), 64-bit literals as constant expressions, class placement new, a conversion operator against int/long overloads.
-Fixed: takeV(mk()), throwing destructors including delete[] elements, catch by value, the -O2 double-to-unsigned conversion, C2584/C4584 and the direct d.a ambiguity.
-Mixed cl/cppparse links only: statics in local classes; vtable names with longer base paths; exceptions crossing runtimes (both directions fail fast).
+d.a hidden on one path and unqualified members inside member functions are not checked for ambiguity (C2385);
+(double)~(int)3e9 and (int)3e9 * x with a double x use the narrowed value (cl the untruncated one).
+Small: &std::printf does not link; a char array member initialised from a string in braces is rejected; a failed
+allocation ends the program (cl's operator new throws bad_alloc through cl's exception handling).
+Mixed cl/cppparse links only: statics in local classes; vtable names with longer base paths; exceptions crossing
+runtimes (both directions fail fast).
 Code size: 1.79 of cl on the Matrix members both emit (whole class 1.60, all common functions 1.55), plan to about 1.25.
-The silent cases are the ones to tackle first.

@@ -83,6 +83,8 @@ public:
     int  sizeOf(const Type* t) const;
     int  alignOf(const Type* t) const;
     static void memberPointerModel(const Symbol* cls, bool& multiple, bool& virt, int depth);
+    // t is, or holds in an element, base or member (not through a reference), a pointer to member
+    static bool holdsMemberPointer(const Type* t, int depth = 0);
     int  rank(const Type* t) const;        // integer conversion rank
     const Type* promoted(const Type* t);   // integral / floating promotion
     const Type* arithmeticResult(const Type* a, const Type* b);   // usual arithmetic conversions
@@ -207,6 +209,10 @@ struct Symbol {
     bool          isImplicit;             // compiler-generated constructor / destructor / assignment
     int           requiredParams;         // function: parameters without default arguments
     bool          hasUserCtor, hasCopyCtor, hasDtor, hasCopyAssign, hasDefaultCtor;   // class: user-declared special members
+    // class: the size of a pointer to member of it was needed while it was incomplete (TypeTable::sizeOf); cl
+    // decides the inheritance model there and keeps the unspecified one (data 12, functions 24) once it is defined
+    bool          memberPointerUnspecified;
+    int           defOrder;               // class: the order its definition began in (0: inside a function body)
     std::string   mangled;                // filled by code generation
 
     Symbol();
@@ -304,7 +310,11 @@ private:
     Symbol* injectedTemplate(Symbol* s, const cxx::NameComponent& c) const;   // the template an injected name with arguments names
 
     // bodies
-    struct PendingBody { Symbol* fn; cxx::Decl* def; Scope* scope; };
+    // order: where the body stands among the class definitions of the unit (Symbol::defOrder), for cl's
+    // member-pointer models (memberPointerSizeUse)
+    struct PendingBody { Symbol* fn; cxx::Decl* def; Scope* scope; int order; };
+    void   queueBody(PendingBody pb);
+    void   memberPointerSizeUse(const Type* t);
     void   analyzeBodies();
     // implicit instantiation (C++98 14.7.1): a non-virtual member function of a class template instantiation,
     // and a function template specialisation, is analysed tentatively; errors in its body count only when it
@@ -337,6 +347,7 @@ private:
     const Type* exprBinary(cxx::Expr* e, Scope* in);
     cxx::Expr*  boolContext(cxx::Expr* e, Scope* in);
     cxx::Expr*  converted(cxx::Expr* e, const Conversion& c);
+    void        promoteVariadic(std::vector<cxx::Expr*>& args, size_t firstArg, const Type* ft);
     const Type* exprUnary(cxx::Expr* e, Scope* in);
     const Type* exprAssign(cxx::Expr* e, Scope* in);
     const Type* exprNew(cxx::Expr* e, Scope* in);
@@ -374,6 +385,9 @@ private:
     Symbol*                    m_currentFunction;
     Symbol*                    m_currentClass;
     int                        m_loopDepth, m_switchDepth, m_depth;
+    int                        m_classOrder;      // class definitions begun so far in the declaration pass
+    int                        m_bodyOrder;       // the order of the body being analysed (-1: declaration pass)
+    int                        m_definingDepth;   // class definitions open
     std::set<std::string>      m_reportedUnknown;
     std::map<Symbol*, std::set<Symbol*> > m_uses;          // function (0: namespace scope) -> functions it refers to
     std::set<Symbol*>                     m_lazyMembers;   // members analysed tentatively

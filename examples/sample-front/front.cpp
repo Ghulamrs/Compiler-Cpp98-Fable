@@ -1,6 +1,7 @@
 // front.cpp - version 6 front-end regressions that compile (test 17): built by cppparse --compile6 and by cl,
 // the two programs must print the same lines
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -468,6 +469,124 @@ void show()
 }
 }
 
+// value-initialisation T() as cl does it (C++03 8.5/5): a class without a user-declared constructor is zeroed,
+// then its implicit constructor runs; the empty implicit constructor alone left stack and heap garbage (row S1)
+namespace valinit {
+struct Q { int* f; int x; };
+struct R { std::string s; int n; };
+struct U { U() : a(7) {} int a; int b; };
+struct PB { int p; int q; };
+struct HasPod { Q m; int k; PB arr[2]; int sc[3]; HasPod() : m(), k(3), arr(), sc() {} };
+struct Der : PB { int d; Der() : PB(), d(4) {} };
+struct Agg { Q qs[2]; int z; };
+struct PV { virtual int f() { return x + y; } int x; int y; };
+struct VB { int v; };
+struct VD : virtual VB { int d; };
+struct E { };
+struct EB : E { int w; EB() : E(), w(5) {} };
+template <class T> T makeT(T*) { return T(); }
+template <class T> struct Box { T v; Box() : v() {} };
+Q gq = Q();
+void dirty()
+{
+    volatile char buf[1024];
+    for (int i = 0; i < 1024; ++i) buf[i] = (char)0xA5;
+    void* m[4];
+    for (int i = 0; i < 4; ++i) { m[i] = std::malloc(16 + 32 * i); std::memset(m[i], 0xA5, 16 + 32 * i); }
+    for (int i = 0; i < 4; ++i) std::free(m[i]);
+}
+Q make() { return Q(); }
+int takeQ(Q q = Q()) { return q.x + (q.f != 0); }
+int v1() { Q q = Q(); return q.x + (q.f != 0); }
+int v2() { Q q((Q())); return q.x + (q.f != 0); }
+int v3() { Q q; q.x = 5; q.f = &q.x; q = Q(); return q.x + (q.f != 0); }
+int v4() { Q q = make(); return q.x + (q.f != 0) + takeQ(); }
+int v5() { Q* p = new Q(); int r = p->x + (p->f != 0); delete p; return r; }
+int v6() { int i = int(); double d = double(); double* pd = new double(); int r = i + (int)d + (int)*pd; delete pd; return r; }
+int v7() { HasPod h; return h.m.x + (h.m.f != 0) + h.k + h.arr[0].p + h.arr[1].q + h.sc[2]; }
+int v8() { Der d; EB e; return d.p + d.q + d.d + e.w; }
+int v9() { R r = R(); R* p = new R(); R* a = new R[3](); int n = r.n + (int)r.s.size() + p->n + a[2].n; delete p; delete[] a; return n; }
+int v10() { Q q = makeT((Q*)0); int i = makeT((int*)0); Box<Q> b; Box<int> c; return q.x + (q.f != 0) + i + b.v.x + (b.v.f != 0) + c.v; }
+int v11() { U u = U(); Agg a = Agg(); return u.a + a.qs[0].x + a.qs[1].x + (a.qs[1].f != 0) + a.z; }
+int v12() { Q* p = new Q[2](); int r = p[0].x + p[1].x + (p[1].f != 0); delete[] p; return r + gq.x; }
+int v13() { PV p = PV(); VD x = VD(); return p.f() + x.v + x.d; }
+int v14() { try { throw Q(); } catch (Q q) { return q.x + (q.f != 0); } return 99; }
+void show()
+{
+    int (*fs[])() = { v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14 };
+    std::printf("value-initialised:");
+    for (int i = 0; i < (int)(sizeof(fs) / sizeof(fs[0])); ++i) { dirty(); std::printf(" %d", fs[i]()); }
+    std::printf("\n");
+}
+}
+
+// arguments matching "..." get the default argument promotions (C++98 5.2.2/7): a float travelled as its own bits
+// (5.19e-315 at -O0, a double-rounded 0.333333312 at -O2), and va_arg reads the promoted types (row S2)
+namespace varargs {
+enum Col { Red = 3, Green };
+float third() { volatile float a = 1.0f; return a / 3.0f; }
+float named(float a, float b) { return a + b; }
+double sumv(int n, ...)
+{
+    va_list ap;
+    va_start(ap, n);
+    double s = 0;
+    for (int i = 0; i < n; ++i) s += va_arg(ap, double);
+    va_end(ap);
+    return s;
+}
+int digits(int n, ...)
+{
+    va_list ap;
+    va_start(ap, n);
+    int s = 0;
+    for (int i = 0; i < n; ++i) s = s * 10 + va_arg(ap, int);
+    va_end(ap);
+    return s;
+}
+void show()
+{
+    float f = third();
+    const float cf = 0.1f;
+    double (*pv)(int, ...) = sumv;
+    std::printf("varargs %.9g %.9g %.9g %.17g\n", f, 1.0f / 3.0f, f * 2.0f, cf);
+    std::printf("varargs through a pointer %.9g %.9g\n", pv(2, f, -f), (*pv)(1, f * 3.0f));
+    char c = 'A'; signed char sc = -3; unsigned char uc = 200; short s = -7; unsigned short us = 65000; bool b = true; Col col = Green;
+    std::printf("varargs %.9g %d %d %d %d %d %d %d %d %.9g\n", sumv(3, f, 2.5f, 1.0f / 3.0f), digits(4, (char)1, (short)2, true, Red), c, sc, uc, s, us, b, col, (double)named(f, f));
+}
+}
+
+// the size of a pointer to member of a class completed later in the unit: cl decides the inheritance model where
+// it first needs the size (sizeof, also in a function or an initializer before the definition, a member function
+// defined in a class before it) and keeps the unspecified one; naming the type decides nothing (row S10)
+namespace mplater {
+struct A { int a; };
+struct B { int b; };
+struct Inc;
+int ga = sizeof(int Inc::*);
+int gb = sizeof(void (Inc::*)());
+struct Inc { int x; };
+struct M;
+typedef void (M::*MF)();
+struct M : A, B { int m; };
+struct Fb;
+int fb() { return (int)sizeof(int Fb::*) + 100 * (int)sizeof(void (Fb::*)()); }
+struct Fb : A, B { int q; };
+struct Later;
+struct Host { int f() { return (int)sizeof(int Later::*); } };
+struct Later { int z; };
+struct Host2 { int f() { return (int)sizeof(int N::*); } struct N { int z; }; };
+struct Late;
+void takes(int Late::*);
+struct Late { int z; };
+void show()
+{
+    Host h; Host2 h2;
+    std::printf("member pointer sizes, completed later: %d %d %d %d %d %d %d %d %d %d\n", ga, gb, (int)sizeof(int Inc::*), (int)sizeof(MF), (int)sizeof(int M::*),
+        fb(), (int)sizeof(void (Fb::*)()), h.f(), h2.f(), (int)sizeof(int Late::*));
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -490,6 +609,9 @@ int main()
     lit::show();
     ambig::show();
     review::show();
+    valinit::show();
+    varargs::show();
+    mplater::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

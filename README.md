@@ -753,7 +753,11 @@ candidate. Calls, constructors, conversions and operators on class
 operands go through overload resolution with the C++98 implicit
 conversion sequences (exact, promotion, standard, user-defined through
 converting constructors and conversion operators, reference binding,
-derived-to-base). Classes get their layout (bases, vptr, fields,
+derived-to-base); an argument matching `...` gets the default argument
+promotions (a float is passed as a double, bool, char, short and enums as
+int), and `T()`, `new T()` and a mem-initializer `m()` value-initialise as
+cl does (zeroed first unless a user-declared constructor builds the
+object; front.cpp `varargs::`, `valinit::`). Classes get their layout (bases, vptr, fields,
 alignment) and vtable (slots, overrides, abstractness) and implicit
 special members. The layout follows MSVC's rules for `#pragma pack(n)`
 (a member's alignment is capped at n) and `__declspec(align(N))` on a
@@ -852,8 +856,14 @@ where cl's is -1) and a class with a member of such a type
 error (S109). Their sizes are cl's (TypeTable::sizeOf by the inheritance
 model: data 4, 8 with virtual bases; functions 8, 16 with multiple or
 virtual inheritance or a vfptr added in front of a base; an incomplete
-class 12 and 24; front.cpp `mpsize::`, `review::`). Namespace-scope and
-static member pointers are refused too (`memptr-global.cpp`). A direct base that is also a
+class 12 and 24, also after it is defined when its size was needed while
+it was incomplete, as cl keeps the model it chose there; front.cpp
+`mpsize::`, `review::`, `mplater::`). Namespace-scope and static member
+pointers are refused too (`memptr-global.cpp`), and so are objects that
+hold one (a class template instantiation, a member, an array element)
+when they have static storage, are value-initialised or are brace
+initialised (`memptr-static.cpp`, `memptr-valueinit.cpp`: zero is not cl's
+null data member pointer). A direct base that is also a
 base of another direct base is diagnosed as cl does (Sema::declareClass;
 `ambiguous-base.cpp`): S141, an error, where cl gives C2584
 (`struct F : virtual V, W {}` with `W : V`), S142, a warning, where cl

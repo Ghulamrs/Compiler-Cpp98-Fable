@@ -496,6 +496,7 @@ Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vect
         cxx::Expr* w = converted(args[firstArg + a], viable[best].convs[a]);
         if (w != args[firstArg + a]) const_cast<std::vector<cxx::Expr*>&>(args)[firstArg + a] = w;
     }
+    promoteVariadic(const_cast<std::vector<cxx::Expr*>&>(args), firstArg, viable[best].fn->type);
     ++m_stats.callsResolved;
     return viable[best].fn;
 }
@@ -653,7 +654,7 @@ Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::E
     ++m_stats.functionInstantiations;
     if (copy->kind == cxx::Decl::Function) {
         fn->hasBody = true; fn->definition = copy;
-        PendingBody pb; pb.fn = fn; pb.def = copy; pb.scope = iscope; m_pending.push_back(pb);
+        PendingBody pb; pb.fn = fn; pb.def = copy; pb.scope = iscope; queueBody(pb);
     }
     return fn;
 }
@@ -831,7 +832,7 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
             // a function pointer, or a class with operator()
             const Type* vt = m_types.unref(s->type);
             callee->semaSym = s; callee->semaType = s->type;
-            if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); return vt->inner->inner; }
+            if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); promoteVariadic(e->kids, 1, vt->inner); return vt->inner->inner; }
             if (vt->kind == Type::Class && vt->decl) { cands.clear(); lookupMember(vt->decl, "operator()", cands); thisExpr = callee; what = vt->decl->name + "::operator()"; }
             else { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); if (vt->kind != Type::Dependent && vt->kind != Type::Error) error(e->loc, "S118", "'" + what + "' is not a function"); return m_types.error(); }
         }
@@ -856,15 +857,15 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
             // a data member: a function pointer (called through its value) or a class with operator()
             callee->semaType = mt;
             const Type* vt = m_types.unref(mt);
-            if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); return vt->inner->inner; }
+            if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); promoteVariadic(e->kids, 1, vt->inner); return vt->inner->inner; }
             if (vt->kind == Type::Class && vt->decl) { lookupMember(vt->decl, "operator()", cands); thisExpr = callee; }
             else { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); return vt->kind == Type::Dependent ? vt : m_types.error(); }
         }
     } else {
         const Type* ct = m_types.unref(expr(callee, in));
         for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in);
-        if (ct->kind == Type::Pointer && ct->inner->kind == Type::Function) return ct->inner->inner;
-        if (ct->kind == Type::Function) return ct->inner;
+        if (ct->kind == Type::Pointer && ct->inner->kind == Type::Function) { promoteVariadic(e->kids, 1, ct->inner); return ct->inner->inner; }
+        if (ct->kind == Type::Function) { promoteVariadic(e->kids, 1, ct); return ct->inner; }
         if (ct->kind == Type::Class && ct->decl) { lookupMember(ct->decl, "operator()", cands); thisExpr = callee; what = "operator()"; }
         else { if (ct->kind != Type::Dependent && ct->kind != Type::Error) error(e->loc, "S118", "called object is not a function"); return ct->kind == Type::Dependent ? ct : m_types.error(); }
     }
@@ -1027,6 +1028,27 @@ cxx::Expr* Sema::boolContext(cxx::Expr* e, Scope* in)
     noteUse(c.userFunction);
     w->semaType = c.userFunction->type && c.userFunction->type->kind == Type::Function ? c.userFunction->type->inner : m_types.basic(Type::Bool);
     return w;
+}
+
+// the arguments that match "..." of the function type ft get the default argument promotions (5.2.2/7): float
+// becomes double and the integral promotions apply; a cast node to the promoted type makes it explicit for the
+// later stages (a float travelled as its own bits)
+void Sema::promoteVariadic(std::vector<cxx::Expr*>& args, size_t firstArg, const Type* ft)
+{
+    if (!ft || ft->kind != Type::Function || !ft->variadic) return;
+    for (size_t a = firstArg + ft->params.size(); a < args.size(); ++a) {
+        cxx::Expr* x = args[a];
+        if (!x || !x->semaType) continue;
+        const Type* v = valueType(x);
+        if (!v->isArithmetic()) continue;
+        const Type* p = m_types.promoted(v);
+        if (p == v) continue;
+        cxx::Expr* w = nodeArena().expr(cxx::Expr::Cast, x->loc);
+        w->kids.push_back(x);
+        w->semaType = p;
+        if (x->semaConst && p->isIntegral()) { w->semaConst = true; w->semaValue = x->semaValue; }
+        args[a] = w;
+    }
 }
 
 // an operand converted through a conversion operator: wrapped in a cast node that calls it (a converting
@@ -1338,12 +1360,13 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
         if (to->kind == Type::Reference) e->semaLvalue = true;
         break;
     }
-    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.sizeType(); if (ot->kind != Type::Dependent && ot->kind != Type::Error && completeForSizeof(ot, in, e->loc)) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
+    case cxx::Expr::SizeofExpr: { expr(e->kids[0], in); const Type* ot = m_types.unref(e->kids[0]->semaType); t = m_types.sizeType(); memberPointerSizeUse(ot); if (ot->kind != Type::Dependent && ot->kind != Type::Error && completeForSizeof(ot, in, e->loc)) { e->semaConst = true; e->semaValue = m_types.sizeOf(ot); } break; }
     case cxx::Expr::SizeofType: {
         const Type* st = typeOf(e->type->spec, in);
         if (e->type->decl) st = applyDeclarator(st, *e->type->decl, in, 0);
         st = m_types.unref(st);                 // sizeof(T&) is sizeof(T) (5.3.3/2)
         t = m_types.sizeType();
+        memberPointerSizeUse(st);
         if (st->kind != Type::Dependent && st->kind != Type::Error && completeForSizeof(st, in, e->loc)) { e->semaConst = true; e->semaValue = m_types.sizeOf(st); }
         break;
     }
@@ -1611,6 +1634,7 @@ void Sema::analyzeBodies()
     // instantiations may queue more bodies while others are analysed
     for (size_t i = 0; i < m_pending.size(); ++i) {
         PendingBody pb = m_pending[i];
+        m_bodyOrder = pb.order;
         if (pb.fn->kind == Symbol::Function) {
             if (pb.fn->body) continue;
             if (!isLazyMember(pb.fn)) { analyzeFunctionBody(pb.fn, pb.def, pb.scope); continue; }

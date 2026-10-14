@@ -46,6 +46,10 @@ static int clOwCall(const OW* p, int which)
     return clOvCall(p, which);
 }
 
+// a class cl derives from cppparse's RC with covariant overrides of its own: cl's return-adjusting thunks in cl's
+// copies of the tables, reached by cppparse's calls through RB* and RC*
+struct RD : RC { RD* self() { return this; } RD* six(int p, int q, int r, int s, double t, int u) { return p + q + r + s + (int)t + u == 21 ? this : 0; } };
+
 // a class cl derives from cppparse's OW: cppparse's calls reach its overriders through cl's table
 struct CW : OW {
     int f(int) const { return 201; }
@@ -469,6 +473,29 @@ int main()
         g_dnForm = 0;
         deleteDNArray(new DN[2]);
         expect("DN array of cl deleted by cppparse: operator delete[](void*)", g_dnForm, 1);
+    }
+    printf("covariant returns through a secondary base: cl's return-adjusting thunks, by both compilers\n");
+    {
+        RC c;
+        RB* asB = &c;
+        expect("cppparse's call through RB* (the thunk)", rbSelf(&c) == &c, 1);
+        expect("cppparse's call through RC* (the new slot)", rcSelf(&c) == &c, 1);
+        expect("cppparse's reference result through RB&", &rbSelfRef(c) == &c, 1);
+        expect("cppparse's six through RB*, found", rbSix(&c, 6) == &c, 1);
+        expect("cppparse's six through RB*, null", rbSix(&c, 7) == 0, 1);
+        expect("cppparse's six through RC*", rcSix(&c, 6) == &c, 1);
+        expect("cl's call through RB* into cppparse's table", asB->self() == &c, 1);
+        expect("cl's call through RC*", c.self() == &c, 1);
+        expect("cl's reference result through RB&", &asB->selfRef() == &c, 1);
+        expect("cl's six through RB*", asB->six(1, 2, 3, 4, 5.0, 6) == &c, 1);
+        expect("cl's six through RB*, null", asB->six(1, 2, 3, 4, 5.0, 7) == 0, 1);
+        // cl's class derived from cppparse's RC: cppparse's calls reach cl's thunks and real slots
+        RD d;
+        expect("cppparse's RB* call of cl's override", rbSelf(&d) == &d, 1);
+        expect("cppparse's RC* call of cl's override", rcSelf(&d) == &d, 1);
+        expect("cppparse's RB* six of cl's override", rbSix(&d, 6) == &d, 1);
+        expect("cppparse's RC* six of cl's override, null", rcSix(&d, 7) == 0, 1);
+        expect("RC::rc through cl", static_cast<const RC&>(d).rc(), 3);
     }
     printf("pointers to members: made, passed, applied, compared and stored by both compilers\n");
     {

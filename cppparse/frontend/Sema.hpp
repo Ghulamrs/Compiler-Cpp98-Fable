@@ -117,6 +117,12 @@ struct VfTable {
     Symbol*              introducedBy;    // the class whose own vfptr this is (names the table: ??_7D@@6BPB@@@)
     std::vector<Symbol*> fns;
     std::vector<int>     thunks;
+    // cl's covariant returns: an overrider whose return class holds the overridden function's return class at a
+    // non-zero offset gets a slot of its own, and every slot it overrides holds a return-adjusting thunk that calls
+    // fns[s] and moves the result by returnAdjust[s] (-1: through a virtual base, not generated); returnOf[s] is the
+    // slot's original function, whose return type the thunk returns (0: a plain slot)
+    std::vector<Symbol*> returnOf;
+    std::vector<int>     returnAdjust;
     VfTable() : offset(0), introducedBy(0) {}
 };
 

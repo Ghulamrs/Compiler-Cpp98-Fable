@@ -63,6 +63,10 @@ public:
     void        addThunk(const std::string& irName, const std::string& target, int adjust);
     // cl's vcall thunk a pointer to a virtual member function holds (??_9P@@$BA@AA): "mov rax, [rcx]; jmp [rax+offset]"
     void        addVcallThunk(const std::string& irName, int slotOffset);
+    // cl's return-adjusting thunk of a covariant override (?self@CD@@QEAAPEAUSB@@XZ): a frame, the stack arguments
+    // (stackArgs of them) staged again, this moved by thisAdjust, a call of target, the result moved by returnAdjust
+    // (a pointer only when it is not null; a reference always)
+    void        addReturnThunk(const std::string& irName, const std::string& target, int thisAdjust, int returnAdjust, bool reference, int stackArgs);
     void        addGlobal(const IrGlobal& g) { m_globals.push_back(g); }
     void        addInitializer(const std::string& irName) { m_initializers.push_back(irName); }   // run by the CRT before main
     void        registerSymbolName(const std::string& irName, const std::string& decorated);   // MSVC name of a function
@@ -97,7 +101,7 @@ private:
     std::map<std::string, std::string> m_globalNames;     // qualified variable name -> decorated name
     std::set<std::string>              m_dataSymbols;     // symbols already made PUBLIC in .data
     std::vector<IrVtable>              m_vtables;
-    struct Thunk { std::string name, target; int adjust; bool vcall; };
+    struct Thunk { std::string name, target; int adjust; bool vcall; bool returning; int returnAdjust; bool reference; int stackArgs; };
     std::vector<Thunk>                 m_thunks;
     std::set<std::string>              m_thunkNames;
     std::vector<IrGlobal>              m_globals;

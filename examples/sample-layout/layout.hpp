@@ -217,7 +217,7 @@ void deleteDNArray(DN* p);
     X(LAYOUT_FIELD(VY, y)) X(sizeof(VZ)) X(LAYOUT_BASE(VZ, VX)) X(LAYOUT_FIELD(VZ, z)) \
     X(sizeof(VNB)) X(sizeof(VNC)) X(sizeof(VNE)) X(sizeof(VNF)) X(LAYOUT_BASE(VNF, VNE)) X(LAYOUT_FIELD(VNF, f)) X(sizeof(VNG)) \
     X(sizeof(int MP::*)) X(sizeof(int (MP::*)() const)) X(sizeof(int MQ::*)) X(sizeof(int (MQ::*)() const)) X(sizeof(int VL::*)) \
-    X(sizeof(int (VL::*)() const)) X(sizeof(MH)) X(LAYOUT_FIELD(MH, x))
+    X(sizeof(int (VL::*)() const)) X(sizeof(MH)) X(LAYOUT_FIELD(MH, x)) X(sizeof(RC)) X(LAYOUT_BASE(RC, RB)) X(LAYOUT_FIELD(RC, c))
 
 // ---- virtual bases (MSVC: vbptr, vbtables, the "most derived" flag, the vbase destructor ??_D) -----------
 // A class with virtual bases shares the vbptr of its first non-virtual base that has one or gets its own after
@@ -260,6 +260,19 @@ int  vbNestedG(VNG* g);                    // a b c e g, through VNE* and VNC*
 VNA* vbToVNA(VNG* g);                      // through VNC's VNB
 long vbNestedLife();                       // a VNF and a VNG on cppparse's stack: built right, then the destructors' log
 
+// ---- covariant returns through a secondary base (cl's return-adjusting thunks) ------------------------------
+// RC::self overrides RB::self with a covariant return type and RB is at 16 in RC: cl gives RC::self a slot of its
+// own at the end of RB's vftable and fills RB::self's slot with a thunk (?self@RC@@QEAAPEAURB@@XZ) that calls it
+// and moves a non-null result by 16; a reference result is moved always; the thunk of a function with stack
+// arguments stages them again. Both compilers call through RB*, RC* and a class cl derives from RC.
+struct RA { RA(); virtual ~RA(); int ra; };
+struct RB { RB(); virtual ~RB(); virtual RB* self(); virtual RB& selfRef(); virtual RB* six(int p, int q, int r, int s, double t, int u); int rb; };
+struct RC : RA, RB { RC(); RC* self(); RC& selfRef(); RC* six(int p, int q, int r, int s, double t, int u); virtual int rc() const; int c; };
+RB*  rbSelf(RB* p);                        // p->self() by cppparse
+RC*  rcSelf(RC* p);
+RB&  rbSelfRef(RB& p);
+RB*  rbSix(RB* p, int u);                  // p->six(1, 2, 3, 4, 5.0, u): p when the sum is 21, else 0
+RC*  rcSix(RC* p, int u);
 // ---- pointers to members (cl's representations) ----------------------------------------------------------
 // A pointer to data member is an int offset, null -1; under virtual inheritance an int offset and the vbtable
 // offset of the base's entry (null {0, -1}). A pointer to member function is a code pointer (cl's vcall thunk

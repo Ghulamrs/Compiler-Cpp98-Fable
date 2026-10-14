@@ -386,6 +386,24 @@ void DN::operator delete[](void* p, size_t) { g_dnForm = 2; free(p); }
 DN* makeDNArray(int n) { return new DN[n]; }
 void deleteDNArray(DN* p) { delete[] p; }
 
+RA::RA() : ra(1) {}
+RA::~RA() {}
+RB::RB() : rb(2) {}
+RB::~RB() {}
+RB* RB::self() { return this; }
+RB& RB::selfRef() { return *this; }
+RB* RB::six(int p, int q, int r, int s, double t, int u) { return p + q + r + s + (int)t + u == 21 ? this : 0; }
+RC::RC() : c(3) {}
+RC* RC::self() { return this; }
+RC& RC::selfRef() { return *this; }
+RC* RC::six(int p, int q, int r, int s, double t, int u) { return p + q + r + s + (int)t + u == 21 ? this : 0; }
+int RC::rc() const { return c; }
+RB* rbSelf(RB* p) { return p->self(); }
+RC* rcSelf(RC* p) { return p->self(); }
+RB& rbSelfRef(RB& p) { return p.selfRef(); }
+RB* rbSix(RB* p, int u) { return p->six(1, 2, 3, 4, 5.0, u); }
+RC* rcSix(RC* p, int u) { return p->six(1, 2, 3, 4, 5.0, u); }
+
 MP::MP() : a(1), b(2) {}
 int MP::f() const { return a * 10; }
 int MP::h() const { return b * 10; }

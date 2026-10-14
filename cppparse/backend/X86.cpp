@@ -1555,14 +1555,21 @@ void X86Module::appendCode(const std::string& code) { Lock l(m_mutex); m_code +=
 void X86Module::addThunk(const std::string& irName, const std::string& target, int adjust)
 {
     if (!m_thunkNames.insert(irName).second) return;
-    Thunk t; t.name = irName; t.target = target; t.adjust = adjust; t.vcall = false;
+    Thunk t; t.name = irName; t.target = target; t.adjust = adjust; t.vcall = false; t.returning = false; t.returnAdjust = 0; t.reference = false; t.stackArgs = 0;
     m_thunks.push_back(t);
 }
 
 void X86Module::addVcallThunk(const std::string& irName, int slotOffset)
 {
     if (!m_thunkNames.insert(irName).second) return;
-    Thunk t; t.name = irName; t.adjust = slotOffset; t.vcall = true;
+    Thunk t; t.name = irName; t.adjust = slotOffset; t.vcall = true; t.returning = false; t.returnAdjust = 0; t.reference = false; t.stackArgs = 0;
+    m_thunks.push_back(t);
+}
+
+void X86Module::addReturnThunk(const std::string& irName, const std::string& target, int thisAdjust, int returnAdjust, bool reference, int stackArgs)
+{
+    if (!m_thunkNames.insert(irName).second) return;
+    Thunk t; t.name = irName; t.target = target; t.adjust = thisAdjust; t.vcall = false; t.returning = true; t.returnAdjust = returnAdjust; t.reference = reference; t.stackArgs = stackArgs;
     m_thunks.push_back(t);
 }
 
@@ -1582,6 +1589,25 @@ void X86Module::emitVtables()
         }
         const std::string target = symbol(m_thunks[i].target);
         if (!m_defined.count(target)) m_externs.insert(target);
+        if (m_thunks[i].returning) {
+            // the frame holds the shadow space and the stack arguments copied from the caller's (the register
+            // arguments stay where they are), 16-aligned at the call; the result comes back in rax
+            const Thunk& t = m_thunks[i];
+            int frame = 32 + 8 * t.stackArgs;
+            if (frame % 16 == 0) frame += 8;
+            std::string code = ";@comdat any\n" + sym + " PROC FRAME\n        ; " + t.name + "\n        sub rsp, " + intToString(frame) + "\n        .allocstack " + intToString(frame) + "\n        .endprolog\n";
+            for (int a = 0; a < t.stackArgs; ++a)
+                code += "        mov rax, qword ptr [rsp+" + intToString(frame + 40 + 8 * a) + "]\n        mov qword ptr [rsp+" + intToString(32 + 8 * a) + "], rax\n";
+            if (t.adjust) code += "        sub rcx, " + intToString(t.adjust) + "\n";
+            code += "        call " + target + "\n";
+            if (t.returnAdjust) {
+                if (!t.reference) code += "        test rax, rax\n        je " + sym + "_null\n";
+                code += "        add rax, " + intToString(t.returnAdjust) + "\n";
+                if (!t.reference) code += sym + "_null:\n";
+            }
+            m_code += code + "        add rsp, " + intToString(frame) + "\n        ret\n" + sym + " ENDP\n\n";
+            continue;
+        }
         m_code += ";@comdat any\n" + sym + " PROC\n        ; " + m_thunks[i].name + "\n        sub rcx, " + intToString(m_thunks[i].adjust) +
                   "\n        jmp " + target + "\n" + sym + " ENDP\n\n";
     }

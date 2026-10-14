@@ -889,6 +889,38 @@ void Sema::declareAnonymousMember(Symbol* anon, Scope* in, cxx::Access access)
 
 namespace {
 
+// the offset of base in derived along non-virtual bases only (false when there is none, or only through a
+// virtual base)
+bool nonVirtualOffset(const Symbol* derived, const Symbol* base, int& off, int depth)
+{
+    if (!derived || !base || depth > 32) return false;
+    if (derived == base) { off = 0; return true; }
+    for (size_t i = 0; i < derived->bases.size(); ++i) {
+        int o = 0;
+        if (derived->bases[i].isVirtual || !nonVirtualOffset(derived->bases[i].cls, base, o, depth + 1)) continue;
+        off = derived->bases[i].offset + o;
+        return true;
+    }
+    return false;
+}
+
+// the move of a covariant result from the class overrider m returns (a pointer or reference to) to the one root,
+// the overridden function, returns: 0 when they are the same class or the base is at offset 0, -1 when the base is
+// reached through a virtual base
+int returnAdjustment(const Symbol* m, const Symbol* root)
+{
+    if (!m->type || !root->type || m->type->kind != Type::Function || root->type->kind != Type::Function) return 0;
+    const Type* r = m->type->inner;
+    const Type* o = root->type->inner;
+    if (!r || !o || (r->kind != Type::Pointer && r->kind != Type::Reference) || r->kind != o->kind) return 0;
+    const Type* rc = r->inner;
+    const Type* oc = o->inner;
+    if (!rc || !oc || rc->kind != Type::Class || oc->kind != Type::Class || !rc->decl || !oc->decl || rc->decl == oc->decl) return 0;
+    int off = 0;
+    if (nonVirtualOffset(rc->decl, oc->decl, off, 0)) return off;
+    return -1;
+}
+
 bool sameSignature(const Type* a, const Type* b)
 {
     if (!a || !b || a->kind != Type::Function || b->kind != Type::Function) return false;
@@ -1614,13 +1646,20 @@ void Sema::completeClass(Symbol* cls)
     if (primary < cls->bases.size() && !cls->bases[primary].cls->vftables.empty()) {
         tables[0].introducedBy = cls->bases[primary].cls->vftables[0].introducedBy;
         tables[0].thunks = cls->bases[primary].cls->vftables[0].thunks;
+        tables[0].returnOf = cls->bases[primary].cls->vftables[0].returnOf;
+        tables[0].returnAdjust = cls->bases[primary].cls->vftables[0].returnAdjust;
     }
+    tables[0].thunks.resize(cls->vtable.size(), 0);
+    tables[0].returnOf.resize(cls->vtable.size(), 0);
+    tables[0].returnAdjust.resize(cls->vtable.size(), 0);
     for (size_t b = 0; b < cls->bases.size(); ++b) {
         Symbol* bc = cls->bases[b].cls;
         if (!bc || !bc->isPolymorphic) continue;
         for (size_t t = b == primary ? 1 : 0; t < bc->vftables.size(); ++t) {
             tables.push_back(bc->vftables[t]);
             tables.back().offset += cls->bases[b].offset;
+            tables.back().returnOf.resize(tables.back().fns.size(), 0);
+            tables.back().returnAdjust.resize(tables.back().fns.size(), 0);
         }
     }
     std::map<std::string, size_t> firstOfName;   // where each member function's name is first declared
@@ -1648,35 +1687,68 @@ void Sema::completeClass(Symbol* cls)
         }
         if (over) { m->isVirtual = true; m->overrides = over; }
         if (!m->isVirtual) continue;
-        bool placed = false;
-        for (size_t s = 0; s < cls->vtable.size() && !placed; ++s) {
-            Symbol* v = cls->vtable[s];
-            if (v == over || (over && v->overrides && v->name == m->name && sameSignature(v->type, m->type)) || (m->isDestructor && v->isDestructor)) {
-                cls->vtable[s] = m; m->vtableSlot = static_cast<int>(s); placed = true;
-                if (tables[0].thunks.size() > s) tables[0].thunks[s] = 0;
-            }
-        }
-        // the slots of the secondary tables m overrides; m is reached through the first of them (lowest offset)
-        // when the primary table does not hold it, and then expects this at that vfptr (MSVC's this adjustor)
+        // the slots m overrides, in the primary table (0) and the secondary ones; m is reached through the first of
+        // them (lowest offset) and then expects this at that vfptr (MSVC's this adjustor)
         std::vector<std::pair<size_t, size_t> > hits;
+        for (size_t s = 0; s < cls->vtable.size(); ++s) {
+            Symbol* v = cls->vtable[s];
+            if (v == over || (over && v->overrides && v->name == m->name && sameSignature(v->type, m->type)) || (m->isDestructor && v->isDestructor)) { hits.push_back(std::make_pair(static_cast<size_t>(0), s)); break; }
+        }
         for (size_t t = 1; t < tables.size(); ++t)
             for (size_t s = 0; s < tables[t].fns.size(); ++s) {
                 Symbol* v = tables[t].fns[s];
                 if (m->isDestructor ? v->isDestructor : (!v->isDestructor && v->name == m->name && sameSignature(v->type, m->type))) hits.push_back(std::make_pair(t, s));
             }
-        size_t first = 0;
-        for (size_t h = 0; h < hits.size(); ++h) if (first == 0 || tables[hits[h].first].offset < tables[first].offset) first = hits[h].first;
-        m->thisAdjust = m->vfptrOffset = 0;
-        if (!placed && first > 0) {
-            for (size_t h = 0; h < hits.size(); ++h) if (hits[h].first == first) m->vtableSlot = static_cast<int>(hits[h].second);
-            m->vfptrOffset = tables[first].offset;
-            m->thisAdjust = m->isDestructor ? 0 : m->vfptrOffset;   // a destructor always takes the complete object
-            placed = true;
-        }
+        size_t first = hits.empty() ? 0 : hits[0].first;
+        for (size_t h = 0; h < hits.size(); ++h) if (tables[hits[h].first].offset < tables[first].offset) first = hits[h].first;
+        // cl's covariant returns: when the return class of m holds the return class of a function it overrides at a
+        // non-zero offset, m gets a slot of its own at the end of the table that first holds the overridden function
+        // (in the primary table among the class's new virtual functions, in declaration order) and every slot it
+        // overrides holds a return-adjusting thunk (also where the adjustment is 0: E : CD { E* self(); } over CD's
+        // slot); PD : SB { PD* self(); } with SB at 0 overrides in place
+        std::vector<int> radj(hits.size(), 0);
+        bool covariant = false;
         for (size_t h = 0; h < hits.size(); ++h) {
-            VfTable& v = tables[hits[h].first];
-            v.fns[hits[h].second] = m;
-            v.thunks[hits[h].second] = v.offset - m->thisAdjust;
+            const VfTable& v = tables[hits[h].first];
+            const size_t s = hits[h].second;
+            Symbol* root = v.returnOf[s] ? v.returnOf[s] : hits[h].first == 0 ? cls->vtable[s] : v.fns[s];   // (the primary table's fns are filled at the end)
+            radj[h] = returnAdjustment(m, root);
+            if (radj[h] != 0) covariant = true;
+        }
+        m->thisAdjust = m->vfptrOffset = 0;
+        bool placed = false;
+        if (!covariant) {
+            for (size_t h = 0; h < hits.size(); ++h)
+                if (hits[h].first == 0) { cls->vtable[hits[h].second] = m; m->vtableSlot = static_cast<int>(hits[h].second); placed = true; tables[0].thunks[hits[h].second] = 0; }
+            if (!placed && !hits.empty()) {
+                for (size_t h = 0; h < hits.size(); ++h) if (hits[h].first == first) m->vtableSlot = static_cast<int>(hits[h].second);
+                m->vfptrOffset = tables[first].offset;
+                m->thisAdjust = m->isDestructor ? 0 : m->vfptrOffset;   // a destructor always takes the complete object
+                placed = true;
+            }
+            for (size_t h = 0; h < hits.size(); ++h) {
+                if (hits[h].first == 0) continue;
+                VfTable& v = tables[hits[h].first];
+                v.fns[hits[h].second] = m;
+                v.thunks[hits[h].second] = v.offset - m->thisAdjust;
+            }
+        } else {
+            if (first > 0) {
+                VfTable& own = tables[first];
+                m->vtableSlot = static_cast<int>(own.fns.size());
+                m->vfptrOffset = m->thisAdjust = own.offset;
+                own.fns.push_back(m); own.thunks.push_back(0); own.returnOf.push_back(0); own.returnAdjust.push_back(0);
+                placed = true;
+            }
+            for (size_t h = 0; h < hits.size(); ++h) {
+                VfTable& v = tables[hits[h].first];
+                const size_t s = hits[h].second;
+                Symbol* root = v.returnOf[s] ? v.returnOf[s] : hits[h].first == 0 ? cls->vtable[s] : v.fns[s];
+                if (hits[h].first == 0) cls->vtable[s] = m; else v.fns[s] = m;
+                v.thunks[s] = v.offset - m->thisAdjust;
+                v.returnOf[s] = root;
+                v.returnAdjust[s] = radj[h];
+            }
         }
         if (!placed) fresh.push_back(std::make_pair(std::make_pair(firstOfName[m->name], ~i), m));
     }
@@ -1691,6 +1763,8 @@ void Sema::completeClass(Symbol* cls)
     }
     tables[0].fns = cls->vtable;
     tables[0].thunks.resize(cls->vtable.size(), 0);
+    tables[0].returnOf.resize(cls->vtable.size(), 0);
+    tables[0].returnAdjust.resize(cls->vtable.size(), 0);
     if (cls->isPolymorphic) cls->vftables = tables;
     cls->isAbstract = false;
     for (size_t t = 0; t < cls->vftables.size(); ++t)

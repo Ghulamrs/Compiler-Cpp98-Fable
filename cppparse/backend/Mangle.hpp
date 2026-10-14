@@ -49,6 +49,9 @@ std::string msvcMangleVtableSymbol(const sema::Symbol& c, const sema::Symbol* fo
 std::string msvcMangleThunkSymbol(const sema::Symbol& fn, long adjust);
 // cl's vcall thunk of the virtual function at slotOffset (8 per slot) of a class's vftable: ??_9P@@$B7AA, P::`vcall'{8}'
 std::string msvcMangleVcallThunk(const sema::Symbol& c, long slotOffset);
+// cl's return-adjusting thunk of the covariant override fn in the slot of root: fn as a non-virtual function with
+// root's return type, ?self@CD@@QEAAPEAUSB@@XZ
+std::string msvcMangleReturnThunk(const sema::Symbol& fn, const sema::Symbol& root);
 // cl's thread-safe-static guard of a function's index-th guarded static local: "?$TSS0@?1??f@@YAAEAUCnt@@XZ@4HA"
 std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index);
 

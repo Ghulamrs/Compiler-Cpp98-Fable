@@ -4414,6 +4414,17 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
                     const int adjust = s->vftables.empty() ? 0 : s->vftables[t].thunks[k];
                     if (m->isPureVirtual) { v.entries.push_back(""); continue; }
                     need(m);
+                    Symbol* root = !s->vftables.empty() && k < s->vftables[t].returnOf.size() ? s->vftables[t].returnOf[k] : 0;
+                    if (root && root->type && root->type->kind == sema::Type::Function && m->type && m->type->kind == sema::Type::Function) {
+                        // a covariant override's slot: cl's return-adjusting thunk, named as the function, non-virtual,
+                        // returning the overridden function's type (?self@CD@@QEAAPEAUSB@@XZ)
+                        const std::string thunk = irName(m) + " returning " + root->type->inner->text();
+                        const int params = 1 + static_cast<int>(m->type->params.size());
+                        x86.addReturnThunk(thunk, irName(m), adjust, s->vftables[t].returnAdjust[k], root->type->inner->kind == sema::Type::Reference, params > 4 ? params - 4 : 0);
+                        if (msvc) x86.registerSymbolName(thunk, msvcMangleReturnThunk(*m, *root));
+                        v.entries.push_back(thunk);
+                        continue;
+                    }
                     // the destructor's slot: the vector deleting destructor (??_ED@@UEAAPEAXI@Z), as with cl
                     const std::string target = m->isDestructor ? deletingDestructor(m, x86, msvc) : irName(m);
                     if (adjust == 0) { v.entries.push_back(target); continue; }

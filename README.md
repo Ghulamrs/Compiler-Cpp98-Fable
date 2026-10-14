@@ -911,10 +911,22 @@ casts, S105 for implicit conversions) and unqualified access to a member of
 a base held more than once (cl C2385: S144) are errors (Sema::baseSubobjects,
 `ambiguous.cpp`); `d.B::a` and `d.C::f()` go through the named base
 (IrGen namingBase: they used the first path; front.cpp `ambig::`).
-Likewise an override with a covariant return
-type whose conversion moves the pointer (`CD* self()` over `SB* self()`
-with SB at 16 in CD) would need cl's return-adjusting thunk: S131
-(`covariant.cpp`).
+An override with a covariant return type whose
+conversion moves the pointer (`CD* self()` over `SB* self()` with SB at 16
+in CD) is laid out as cl lays it out: the overrider gets a slot of its own
+at the end of the vftable that holds the overridden function (in the
+primary table among the class's new virtual functions, in declaration
+order), and every slot it overrides holds cl's return-adjusting thunk,
+named as the function, non-virtual, returning the overridden type
+(`?self@CD@@QEAAPEAUSB@@XZ`): a frame with the stack arguments staged
+again, the call, and a non-null pointer (a reference always) moved by
+the base's offset; a further overrider gets thunks in every slot, also
+where the move is 0, and a new slot again; an override whose moves are
+all 0 stays in place. front.cpp `covariant::` and sample-layout RB/RC
+check it against cl, through every base and across the compilers. S131
+still refuses a return conversion through a virtual base, a slot that
+needs a this adjustment as well as the return adjustment, and a variadic
+covariant function (`covariant-refused.cpp`).
 Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment;

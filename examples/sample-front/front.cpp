@@ -833,6 +833,50 @@ void show()
 }
 }
 
+// covariant returns through a secondary base (row 19), as cl lays them out: the overrider gets a slot of its own at
+// the end of the vftable that holds the overridden function (in the primary table in declaration order among the
+// class's new virtual functions), and every slot it overrides holds a return-adjusting thunk that calls it and
+// moves a non-null pointer (a reference always) by the base's offset; an override whose conversions move nothing
+// (PD : SB) stays in place. The driver of test 13 calls them across the compilers; here every call goes through
+// every base at -O0 and -O2, with stack arguments staged again by the thunk (six)
+namespace covariant {
+struct SA { virtual ~SA() {} int a; SA() : a(1) {} };
+struct SB { virtual ~SB() {} virtual SB* self() { return this; } virtual SB& selfRef() { return *this; } virtual SB* six(int p, int q, int r, int s, double t, int u) { return p + q + r + s + (int)t + u == 21 ? this : 0; } int b; SB() : b(2) {} };
+struct CD : SA, SB { CD* self() { return this; } CD& selfRef() { return *this; } CD* six(int p, int q, int r, int s, double t, int u) { return p + q + r + s + (int)t + u == 21 ? this : 0; } virtual int cd() { return 5; } int c; CD() : c(3) {} };
+struct CD2 : SA, SB { virtual int cd2() { return 6; } CD2* self() { return this; } virtual int cd3() { return 7; } };
+struct E : CD { E* self() { return this; } int e; E() : e(4) {} };
+struct PD : SB { PD* self() { return this; } };
+struct PE : PD { virtual int more() { return 1; } PE* self() { return this; } };
+struct X { virtual X* make() { return this; } int x; };
+struct Y { virtual int yf() { return 1; } int y; };
+struct Z : Y, X { Z* make() { return this; } int z; };
+struct K { virtual SB* k() { return 0; } virtual int kk() { return 2; } int q; };
+struct L : K { virtual int ln() { return 3; } CD* k() { return &held; } virtual int lm() { return 4; } CD held; };
+struct NullCD : SA, SB { CD* self2() { return 0; } };
+struct NB { virtual ~NB() {} virtual CD* get() { return 0; } };
+struct ND : SA, NB { E* get() { return 0; } };
+SB* viaSB(SB* p) { return p->self(); }
+CD* viaCD(CD* p) { return p->self(); }
+SB& viaSBref(SB& p) { return p.selfRef(); }
+CD& viaCDref(CD& p) { return p.selfRef(); }
+SB* viaSix(SB* p, int u) { return p->six(1, 2, 3, 4, 5.0, u); }
+CD* viaSixCD(CD* p, int u) { return p->six(1, 2, 3, 4, 5.0, u); }
+X* viaX(X* p) { return p->make(); }
+SB* viaK(K* k) { return k->k(); }
+CD* viaL(L* l) { return l->k(); }
+void show()
+{
+    CD c; E e; Z z; L l; PD pd; PE pe; CD2 c2; ND nd;
+    std::printf("covariant self %d %d %d %d %d %d %d\n", viaSB(&c) == &c, viaCD(&c) == &c, viaSB(&e) == &e, viaCD(&e) == &e, static_cast<SB*>(&e)->self() == &e, e.self() == &e, viaSB(&c2) == &c2);
+    std::printf("covariant ref %d %d %d %d\n", &viaSBref(c) == &c, &viaCDref(c) == &c, &viaSBref(e) == &e, &c.selfRef() == &c);
+    std::printf("covariant six %d %d %d %d %d\n", viaSix(&c, 6) == &c, viaSix(&c, 7) == 0, viaSixCD(&c, 6) == &c, viaSixCD(&c, 7) == 0, viaSix(&e, 6) == &e);
+    std::printf("covariant primary %d %d %d %d %d %d %d\n", viaX(&z) == &z, z.make() == &z, viaK(&l) == &l.held, viaL(&l) == &l.held, l.ln() + l.lm() + l.kk(), viaSB(&pd) == &pd, viaSB(&pe) == &pe && pe.more() == 1);
+    std::printf("covariant sizes %d %d %d\n", (int)sizeof(CD), (int)sizeof(E), (int)sizeof(L));
+    SB* nullSb = 0;
+    std::printf("covariant null %d %d %d\n", static_cast<NB*>(&nd)->get() == 0, nd.get() == 0, nullSb == 0);
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -861,6 +905,7 @@ int main()
     strlit::show();
     cfold::show();
     memptr::show();
+    covariant::show();
     std::printf("hiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

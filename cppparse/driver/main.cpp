@@ -158,30 +158,18 @@ const char* virtualBaseRefusal(const sema::Symbol* cls)
     return 0;
 }
 
-// the offset of base in derived (-1: not a base)
-int baseOffsetIn(const sema::Symbol* derived, const sema::Symbol* base, int depth)
+// a covariant override's slot (Sema::completeClass, VfTable::returnOf) that --compile6 cannot give cl's
+// return-adjusting thunk (S131): one whose return conversion goes through a virtual base (cl's thunk reads the
+// vbtable), one that also moves this (cl's $R thunks: a this and a return adjustment in one), or a variadic function
+// (the thunk cannot stage the unnamed arguments again); 0 when the slot is fine
+const char* returnThunkRefusal(const sema::VfTable& t, size_t s)
 {
-    if (!derived || !base || depth > 32) return -1;
-    if (derived == base) return 0;
-    for (size_t b = 0; b < derived->bases.size(); ++b) {
-        const int o = baseOffsetIn(derived->bases[b].cls, base, depth + 1);
-        if (o >= 0) return derived->bases[b].offset + o;
-    }
-    return -1;
-}
-
-// an override with a covariant return type whose conversion to the overridden function's return type moves the
-// pointer (CD* to SB* with SB at 16): it needs a return-adjusting thunk, which --compile6 does not make yet (S131)
-bool needsReturnAdjustment(const sema::Symbol* fn)
-{
-    if (!fn->overrides || !fn->type || !fn->overrides->type || fn->type->kind != sema::Type::Function || fn->overrides->type->kind != sema::Type::Function) return false;
-    const sema::Type* r = fn->type->inner;
-    const sema::Type* o = fn->overrides->type->inner;
-    if (!r || !o || (r->kind != sema::Type::Pointer && r->kind != sema::Type::Reference) || r->kind != o->kind) return false;
-    const sema::Type* rc = r->inner;
-    const sema::Type* oc = o->inner;
-    if (!rc || !oc || rc->kind != sema::Type::Class || oc->kind != sema::Type::Class || rc->decl == oc->decl) return false;
-    return baseOffsetIn(rc->decl, oc->decl, 0) != 0;
+    if (s >= t.returnOf.size() || !t.returnOf[s]) return 0;
+    if (t.returnAdjust[s] < 0) return "its return conversion goes through a virtual base";
+    if (t.thunks[s] != 0) return "the slot needs a this adjustment as well as the return adjustment";
+    const sema::Symbol* fn = t.fns[s];
+    if (fn && fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic) return "it is variadic";
+    return 0;
 }
 
 // a unit that is not compiled leaves no object, listing or map: one of an earlier run would be taken for its own
@@ -376,12 +364,18 @@ int main(int argc, char* argv[])
                 if (compile6)
                     for (size_t k = 0; k < program.symbols.size(); ++k) {
                         const sema::Symbol* s = program.symbols[k];
-                        if (s->kind == sema::Symbol::Function && s->isVirtual && s->ownerClass && !s->ownerClass->isDependentContext && !s->isDependentContext && needsReturnAdjustment(s)) {
-                            std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
-                                      << "): error S131: '" << s->qualifiedName() << "' overrides '" << s->overrides->qualifiedName()
-                                      << "' with a covariant return type whose conversion moves the pointer: return-adjusting thunks are not supported yet by --compile6\n";
-                            ++unsupported;
-                            continue;
+                        if (s->kind == sema::Symbol::Class && s->isDefinition && !s->isDependentContext) {
+                            for (size_t t = 0; t < s->vftables.size(); ++t)
+                                for (size_t slot = 0; slot < s->vftables[t].fns.size(); ++slot) {
+                                    const char* why = returnThunkRefusal(s->vftables[t], slot);
+                                    if (!why) continue;
+                                    const sema::Symbol* fn = s->vftables[t].fns[slot];
+                                    const sema::Symbol* root = s->vftables[t].returnOf[slot];
+                                    std::cout << "  " << (fn->loc.file >= 0 && fn->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(fn->loc.file)] : "?") << "(" << fn->loc.line
+                                              << "): error S131: '" << fn->qualifiedName() << "' overrides '" << root->qualifiedName()
+                                              << "' with a covariant return type, and " << why << ": not supported yet by --compile6\n";
+                                    ++unsupported;
+                                }
                         }
                         if (s->kind != sema::Symbol::Class || !s->isDefinition || s->isDependentContext || !hasVirtualBase(s, 0)) continue;
                         const char* why = s->layoutDone ? virtualBaseRefusal(s) : "a class not laid out";

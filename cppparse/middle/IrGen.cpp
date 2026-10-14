@@ -243,19 +243,17 @@ int IrGen::toBase(int addr, Symbol* derived, Symbol* base, int line)
     return rest ? offsetAddress(r, bp, bp, rest, line) : r;
 }
 
-std::string IrGen::throwDescriptorFor(const sema::Type* t) const
+// the bases a handler may catch a top object as (C++98 15.3/3): each base subobject reached by public derivation
+// only, with its offset in top, unless the class has more than one subobject of that type (ambiguous)
+void IrGen::catchableBases(Symbol* top, std::vector<Symbol*>& bases, std::vector<int>& offsets) const
 {
-    t = m_semaTypes.unref(t);
-    if (!t) return "unknown";
-    if (t->kind != sema::Type::Class || !t->decl) return m_semaTypes.unqualified(t)->text();
-    // each base with its offset in the complete object ("Base@16"): a handler for it gets the base subobject's address
-    Symbol* top = t->decl;
-    std::string d = top->qualifiedName();
-    std::vector<Symbol*> todo;
-    std::vector<int> offs;
+    std::vector<Symbol*> todo, seen;
+    std::vector<int> offs, seenOffs;
+    std::vector<bool> pub, seenPub;
     todo.push_back(top);
     offs.push_back(0);
-    for (size_t i = 0; i < todo.size() && i < 64; ++i)
+    pub.push_back(true);
+    for (size_t i = 0; i < todo.size() && i < 256; ++i)
         for (size_t b = 0; b < todo[i]->bases.size(); ++b) {
             Symbol* base = todo[i]->bases[b].cls;
             if (!base) continue;
@@ -264,11 +262,49 @@ std::string IrGen::throwDescriptorFor(const sema::Type* t) const
                 off = 0;
                 for (size_t v = 0; v < top->vbases.size() && v < top->vbaseOffsets.size(); ++v) if (top->vbases[v] == base) off = static_cast<int>(top->vbaseOffsets[v]);
             }
-            d += ";" + base->qualifiedName();
-            if (off) d += "@" + numText(static_cast<long>(off));
+            const bool isPublic = pub[i] && todo[i]->bases[b].access == cxx::AccessPublic;
             todo.push_back(base);
             offs.push_back(off);
+            pub.push_back(isPublic);
+            // two paths to one subobject (a virtual base) meet at the same offset
+            size_t k = 0;
+            while (k < seen.size() && !(seen[k] == base && seenOffs[k] == off)) ++k;
+            if (k < seen.size()) { if (isPublic) seenPub[k] = true; continue; }
+            seen.push_back(base);
+            seenOffs.push_back(off);
+            seenPub.push_back(isPublic);
         }
+    for (size_t k = 0; k < seen.size(); ++k) {
+        bool unique = true;
+        for (size_t j = 0; j < seen.size(); ++j) if (j != k && seen[j] == seen[k]) unique = false;
+        if (unique && seenPub[k]) { bases.push_back(seen[k]); offsets.push_back(seenOffs[k]); }
+    }
+}
+
+// the runtime's type descriptor of a thrown object: its type, then what else a handler may catch it as, separated by
+// ';'. A class lists its catchable bases with their offsets ("Base@16": the handler gets the base subobject); a
+// pointer to a class lists pointers to them ("const Base*+16": the pointer is adjusted unless null), and a pointer to
+// an object type ends with void*. A handler of pointer type also takes the thrown pointer with more cv-qualifiers on
+// the pointee, which the runtime checks
+std::string IrGen::throwDescriptorFor(const sema::Type* t) const
+{
+    t = m_semaTypes.unref(t);
+    if (!t) return "unknown";
+    t = m_semaTypes.unqualified(t);
+    std::string d = t->kind == sema::Type::Class && t->decl ? t->decl->qualifiedName() : t->text();
+    const sema::Type* pointee = t->kind == sema::Type::Pointer ? t->inner : 0;
+    Symbol* top = t->kind == sema::Type::Class ? t->decl : pointee && pointee->kind == sema::Type::Class ? pointee->decl : 0;
+    const std::string cv = pointee ? std::string(pointee->isConst ? "const " : "") + (pointee->isVolatile ? "volatile " : "") : std::string();
+    if (top) {
+        std::vector<Symbol*> bases;
+        std::vector<int> offsets;
+        catchableBases(top, bases, offsets);
+        for (size_t k = 0; k < bases.size(); ++k) {
+            d += ";" + cv + bases[k]->qualifiedName() + (pointee ? "*" : "");
+            if (offsets[k]) d += (pointee ? "+" : "@") + numText(static_cast<long>(offsets[k]));
+        }
+    }
+    if (pointee && pointee->kind != sema::Type::Function && pointee->kind != sema::Type::Void) d += ";" + cv + "void*";
     return d;
 }
 
@@ -1363,15 +1399,12 @@ void IrGen::runCleanup(const Cleanup& c, bool guarded, int line)
         const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
         LValue pl; pl.kind = LValue::Local; pl.local = c.slot; pl.type = vp;
         const int p = load(pl, vp, line);
-        if (c.freeKind == 2 && c.freeCls) {
-            LValue nl; nl.kind = LValue::Local; nl.local = c.countSlot; nl.type = lng;
-            freeArray(c.freeCls, p, load(nl, lng, line), line, !c.noCookie);
-        } else if (c.freeKind == 2 || !c.freeCls || !freeObject(c.freeCls, p, line)) {
-            IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
-            in.sub = c.freeKind == 2 ? "__delete_array" : "__delete";
-            in.args.push_back(IrOperand::temp(p, oldType(vp)));
-            emit(in);
-        }
+        if (c.freeKind == 2) {
+            // the global operator delete[] too gets the size allocated, as cl
+            int count = -1;
+            if (c.countSlot >= 0) { LValue nl; nl.kind = LValue::Local; nl.local = c.countSlot; nl.type = lng; count = load(nl, lng, line); }
+            freeArray(c.freeCls, p, count, c.freeSize, line, !c.noCookie);
+        } else if (!c.freeCls || !freeObject(c.freeCls, p, line)) freeGlobal(p, c.freeSize, line);
         if (guarded) { br(next, line); m_block = next; }
         return;
     }
@@ -1494,7 +1527,7 @@ void IrGen::endTerminateRegion(int tid, int term, int line)
 
 // the memory a new-expression allocated, freed through the matching operator delete when the constructor (of an
 // element) throws; 'ptr' is the address the operator new returned (an array's cookie), 'count' its element count
-int IrGen::registerFree(int ptr, Symbol* cls, bool array, int count, int line)
+int IrGen::registerFree(int ptr, Symbol* cls, bool array, int count, int elemSize, int line)
 {
     const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
     const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
@@ -1512,6 +1545,7 @@ int IrGen::registerFree(int ptr, Symbol* cls, bool array, int count, int line)
     c.freeKind = array ? 2 : 1;
     c.freeCls = cls;
     c.countSlot = countSlot;
+    c.freeSize = elemSize;
     if (array && countSlot < 0) c.freeCls = 0;
     return k;
 }
@@ -1973,7 +2007,7 @@ int IrGen::value(cxx::Expr* e)
                 // without a cookie (no destructor) a sized operator delete[] is given count * size, as cl
                 IrInst raw = make(IrInst::AddrIndex, pt, line); raw.extra = 1;
                 raw.args.push_back(IrOperand::temp(p, oldType(pt))); raw.args.push_back(IrOperand::imm(header ? -8 : 0, oldType(lng)));
-                const int k = registerFree(emit(raw), fc, true, count, line);
+                const int k = registerFree(emit(raw), fc, true, count, sizeOf(elem), line);
                 m_flagged[static_cast<size_t>(k)].noCookie = !header;
                 forEachElement(elem, p, count, true, line);
                 clearFlag(k, line);
@@ -1987,14 +2021,14 @@ int IrGen::value(cxx::Expr* e)
             for (size_t k = 1; k < e->placement.size(); ++k) value(e->placement[k]);
         } else {
             n.sub = classNew ? irName(classNew) : std::string("__new");
-            n.args.push_back(IrOperand::imm(sizeOf(elem) > 0 ? sizeOf(elem) : 1, classNew ? oldType(m_semaTypes.sizeType()) : m_types.intType()));
+            n.args.push_back(IrOperand::imm(sizeOf(elem) > 0 ? sizeOf(elem) : 1, oldType(m_semaTypes.sizeType())));
             p = emit(n);
         }
         // a constructor (or initializer) that throws: the memory is freed through the matching operator delete
         // (C++98 5.3.4/17), as cl does; a placement new's matching operator delete frees nothing
         int freeK = -1;
         if (e->placement.empty() && ((e->semaSym && e->semaSym->isConstructor) || !e->kids.empty() || (isClassType(elem) && needsDefaultCtor(elem))))
-            freeK = registerFree(p, !e->globalScope && isClassType(elem) && elem->decl ? elem->decl : 0, false, -1, line);
+            freeK = registerFree(p, !e->globalScope && isClassType(elem) && elem->decl ? elem->decl : 0, false, -1, sizeOf(elem), line);
         if (e->semaSym && e->semaSym->isConstructor) construct(e->semaSym, p, e->kids, 0, line);
         else if (!e->kids.empty()) { LValue lv; lv.kind = LValue::Mem; lv.addr = p; lv.type = elem; store(lv, convert(value(e->kids[0]), exprType(e->kids[0]), elem, line), elem, line); }
         else if (e->hasInit && !isClassType(elem)) { LValue lv; lv.kind = LValue::Mem; lv.addr = p; lv.type = elem; store(lv, constant(0, elem, line), elem, line); }   // new T(): value-initialised
@@ -2050,7 +2084,7 @@ int IrGen::value(cxx::Expr* e)
             int vb = m_out->newBlock("delete.vector"), zb = m_out->newBlock("delete.empty");
             condbr(toBool(count, lng, line), vb, zb, line);
             m_block = zb;
-            freeArray(pt->inner->decl, cookie, count, line);
+            freeArray(pt->inner->decl, cookie, count, sizeOf(pt->inner), line);
             br(xb, line);
             m_block = vb;
             IrInst in = make(IrInst::VCall, m_semaTypes.basic(sema::Type::Void), line);
@@ -2071,20 +2105,16 @@ int IrGen::value(cxx::Expr* e)
             LValue hl; hl.kind = LValue::Mem; hl.addr = header; hl.type = lng;
             const int count = load(hl, lng, line);
             forEachElement(pt->inner, p, count, false, line);
-            p = header;
-            if (isClassType(pt->inner) && pt->inner->decl && !e->globalScope) {
-                // from the cookie through the class's operator delete[] (count * size + 8), as cl
-                freeArray(pt->inner->decl, header, count, line);
-                if (xb >= 0) { br(xb, line); m_block = xb; }
-                return constant(0, m_semaTypes.basic(sema::Type::Int), line);
-            }
+            // from the cookie through the class's operator delete[], or the global one, with count * size + 8, as cl
+            freeArray(isClassType(pt->inner) && !e->globalScope ? pt->inner->decl : 0, header, count, sizeOf(pt->inner), line);
+        } else if (e->arrayDelete) {
+            // no cookie: the class's operator delete[] (a two-parameter one gets one element's size, as cl), or the
+            // global one
+            const sema::Type* inner = pt->kind == sema::Type::Pointer ? m_semaTypes.unqualified(pt->inner) : 0;
+            freeArray(inner && isClassType(inner) && !e->globalScope ? inner->decl : 0, p, -1, inner ? sizeOf(inner) : 1, line, false);
         }
-        if (e->arrayDelete || pt->kind != sema::Type::Pointer || !isClassType(pt->inner) || e->globalScope || !freeObject(pt->inner->decl, p, line)) {
-            IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
-            in.sub = e->arrayDelete ? "__delete_array" : "__delete";
-            in.args.push_back(IrOperand::temp(p, oldType(pt)));
-            emit(in);
-        }
+        if (!e->arrayDelete && (pt->kind != sema::Type::Pointer || !isClassType(pt->inner) || e->globalScope || !freeObject(pt->inner->decl, p, line)))
+            freeGlobal(p, pt->kind == sema::Type::Pointer ? sizeOf(pt->inner) : 1, line);
         if (xb >= 0) { br(xb, line); m_block = xb; }
         return constant(0, m_semaTypes.basic(sema::Type::Int), line);
     }
@@ -2096,7 +2126,7 @@ int IrGen::value(cxx::Expr* e)
                 // the exception object: copy-constructed into heap storage the runtime takes over and
                 // destroys with the class's destructor when the handler ends
                 IrInst n = make(IrInst::Call, m_semaTypes.pointer(tt), line);
-                n.sub = "__new";
+                n.sub = "__malloc";   // the runtime frees it
                 n.args.push_back(IrOperand::imm(sizeOf(tt) > 0 ? sizeOf(tt) : 1, m_types.intType()));
                 int obj = emit(n);
                 materialize(e->kids[0], tt, obj, line);
@@ -2109,7 +2139,14 @@ int IrGen::value(cxx::Expr* e)
                 int v = value(e->kids[0]);
                 in.args.push_back(IrOperand::temp(v, oldType(tt)));
             }
-            in.sub = throwDescriptorFor(tt);
+            const sema::Type* desc = tt;
+            if (tt->kind == sema::Type::Pointer && isClassType(tt->inner) && hasVbases(tt->inner->decl))
+                unsupported(line, "throwing a pointer to '" + tt->inner->decl->qualifiedName() + "', a class with virtual bases, is not supported yet by --compile6");
+            cxx::Expr* operand = e->kids[0];
+            while (operand && operand->kind == cxx::Expr::Paren && !operand->kids.empty()) operand = operand->kids[0];
+            // cl throws a string literal as a pointer to non-const characters: catch (char*) takes it
+            if (operand && operand->kind == cxx::Expr::StringLit && tt->kind == sema::Type::Pointer) desc = m_semaTypes.pointer(m_semaTypes.unqualified(tt->inner));
+            in.sub = throwDescriptorFor(desc);
             in.extra = isClassType(tt) ? sizeOf(tt) : 8;
         }
         emit(in);
@@ -3424,24 +3461,29 @@ Symbol* IrGen::classOperatorDelete(Symbol* cls, int depth, const char* name, siz
     return 0;
 }
 
-// frees an array of class cls from its cookie (count elements follow it): through the class's operator delete[]
-// when lookup finds one, given count * size + 8 in the two-parameter form, as cl's vector deleting destructor
-// does; else through the global one
-void IrGen::freeArray(Symbol* cls, int cookie, int count, int line, bool hasCookie)
+// frees an array from its cookie (count elements of elemSize bytes follow it), or from its first element when it has
+// none: through the operator delete[] lookup finds in class cls, else (cls 0 too) the global one. A two-parameter one
+// gets what cl passes: count * size, + 8 with a cookie; one element's size from a delete[] without a cookie (count
+// < 0: unknown), where the global one is the unsized form
+void IrGen::freeArray(Symbol* cls, int cookie, int count, int elemSize, int line, bool hasCookie)
 {
     const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
     const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
-    Symbol* op = classOperatorDelete(cls, 0, "operator delete[]");
+    Symbol* op = cls ? classOperatorDelete(cls, 0, "operator delete[]") : 0;
+    const bool sized = op ? op->params.size() == 2 : count >= 0;
     int bytes = -1;
-    if (op && op->params.size() == 2) {
-        const int size = constant(sizeOf(cls->type), lng, line);
-        const int elems = binary("*", count, lng, size, lng, lng, line);
-        const int eight = hasCookie ? constant(8, lng, line) : -1;
-        bytes = hasCookie ? binary("+", elems, lng, eight, lng, lng, line) : elems;
+    if (sized) {
+        const int size = constant(elemSize > 0 ? elemSize : 1, lng, line);
+        if (count < 0) bytes = size;
+        else {
+            const int elems = binary("*", count, lng, size, lng, lng, line);
+            const int eight = hasCookie ? constant(8, lng, line) : -1;
+            bytes = hasCookie ? binary("+", elems, lng, eight, lng, lng, line) : elems;
+        }
     }
     if (op) need(op);
     IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
-    in.sub = op ? irName(op) : std::string("__delete_array");
+    in.sub = op ? irName(op) : std::string(sized ? "__delete_array_sized" : "__delete_array");
     in.args.push_back(IrOperand::temp(cookie, oldType(vp)));
     if (bytes >= 0) in.args.push_back(IrOperand::temp(bytes, oldType(m_semaTypes.sizeType())));
     emit(in);
@@ -3461,6 +3503,18 @@ bool IrGen::freeObject(Symbol* cls, int p, int line)
     if (op->params.size() == 2) in.args.push_back(IrOperand::imm(sizeOf(cls->type), oldType(m_semaTypes.sizeType())));
     emit(in);
     return true;
+}
+
+// frees an object of size bytes through the global operator delete; cl always calls the sized form, whose library
+// definition calls operator delete(void*), so replacing either one works
+void IrGen::freeGlobal(int p, int size, int line)
+{
+    const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+    IrInst in = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+    in.sub = "__delete_sized";
+    in.args.push_back(IrOperand::temp(p, oldType(vp)));
+    in.args.push_back(IrOperand::imm(size > 0 ? size : 1, oldType(m_semaTypes.sizeType())));
+    emit(in);
 }
 
 std::string IrGen::deletingDestructor(Symbol* dtor, X86Module& x86, bool msvc)
@@ -3525,7 +3579,7 @@ void IrGen::genDeletingDestructors()
         int fab = m_out->newBlock("delete.array");
         condbr(toBool(freeArr, u, line), fab, xb, line);
         m_block = fab;
-        freeArray(dtor->ownerClass, cookie, count, line);
+        freeArray(dtor->ownerClass, cookie, count, sizeOf(ct), line);
         br(xb, line);
 
         m_block = sb;
@@ -3539,12 +3593,7 @@ void IrGen::genDeletingDestructors()
         condbr(toBool(freeOne, u, line), db, xb, line);
         m_block = db;
         const int self = thisTemp(line);
-        if (!freeObject(dtor->ownerClass, self, line)) {
-            IrInst del = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
-            del.sub = "__delete";
-            del.args.push_back(IrOperand::temp(self, m_out->locals[0].type));
-            emit(del);
-        }
+        if (!freeObject(dtor->ownerClass, self, line)) freeGlobal(self, sizeOf(ct), line);
         br(xb, line);
 
         m_block = xb;

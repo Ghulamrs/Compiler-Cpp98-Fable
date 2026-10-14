@@ -330,6 +330,32 @@ void deleteTNArray(TN* p) { delete[] p; }
 void deleteTMArray(TM* p) { delete[] p; }
 TN* makeTNGlobal() { return ::new TN; }
 void deleteTNGlobal(TN* p) { ::delete p; }
+
+long g_trNew = 0, g_trDel = 0;
+void* TR::operator new[](size_t n) { g_trNew = (long)n; return malloc(n); }
+void TR::operator delete[](void* p) { g_trDel = 1; free(p); }
+void TQ::operator delete[](void* p, size_t n) { g_trDel = (long)n; free(p); }
+void TS::operator delete(void* p) { g_trDel = 1; free(p); }
+TR* makeTRArray(int n) { return new TR[n]; }
+TQ* makeTQArray(int n) { return new TQ[n]; }
+void deleteTRArray(TR* p) { delete[] p; }
+void deleteTQArray(TQ* p) { delete[] p; }
+void deleteTS(TS* p) { delete p; }
+
+long g_gNewA = 0, g_gDelA = 0;
+void* operator new[](size_t n) { g_gNewA += (long)n; return malloc(n); }
+void operator delete[](void* p) { if (p) ++g_gDelA; free(p); }
+GQ::~GQ() {}
+GC::GC() : c(1) {}
+GC::~GC() {}
+int* makeInt(int v) { return new int(v); }
+int* makeInts(int n) { return new int[n]; }
+void deleteInt(int* p) { delete p; }
+void deleteInts(int* p) { delete[] p; }
+GQ* makeGQ() { return new GQ; }
+void deleteGQ(GQ* p) { delete p; }
+GC* makeGCArray(int n) { return new GC[n]; }
+void deleteGCArray(GC* p) { delete[] p; }
 int ZG::f(char) const { return 4; }
 int ZG::g() const { return 1; }
 int ZG::f(int) const { return 2; }

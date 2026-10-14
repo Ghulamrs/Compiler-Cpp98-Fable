@@ -145,6 +145,30 @@ void deleteTNArray(TN* p);
 void deleteTMArray(TM* p);
 TN*  makeTNGlobal();                           // ::new TN
 void deleteTNGlobal(TN* p);                    // ::delete p
+// without a cookie (no destructor) delete[] still calls the class's operator delete[]: TR's one-parameter form,
+// TQ's sized one with one element's size (cl's value: the count is unknown); TS's operator delete for delete
+struct TR { static void* operator new[](size_t n); static void operator delete[](void* p); int r; };
+struct TQ { static void operator delete[](void* p, size_t n); int q[3]; };
+struct TS { static void operator delete(void* p); int s; };
+extern long g_trNew, g_trDel;                  // the size TR's (TQ's) operators were given, 1 for a one-parameter call
+TR*  makeTRArray(int n);
+TQ*  makeTQArray(int n);
+void deleteTRArray(TR* p);
+void deleteTQArray(TQ* p);
+void deleteTS(TS* p);
+// replaced global allocation functions, used by the new- and delete-expressions of both compilers: the driver (cl)
+// replaces operator new and operator delete, layout.cpp (cppparse) operator new[] and operator delete[]
+extern long g_gNew, g_gDel, g_gNewA, g_gDelA;  // the bytes asked of operator new (new[]); the calls of delete (delete[])
+struct GQ { virtual ~GQ(); int g; };           // freed by its scalar deleting destructor
+struct GC { GC(); ~GC(); int c; };             // arrays with a cookie
+int* makeInt(int v);
+int* makeInts(int n);
+void deleteInt(int* p);
+void deleteInts(int* p);
+GQ*  makeGQ();
+void deleteGQ(GQ* p);
+GC*  makeGCArray(int n);
+void deleteGCArray(GC* p);
 // slot grouping counts a non-virtual declaration of the name (ZG: f(double), f(int), g), and an override of a
 // function a middle class hides is found in the base's table (YC::f(int) overrides YA::f(int) past YB)
 struct ZG { int f(char) const; virtual int g() const; virtual int f(int) const; virtual int f(double) const; };

@@ -78,14 +78,33 @@ const char* ptrWord(int size)
     return "qword ptr";
 }
 
+// new- and delete-expressions call the global allocation functions by cl's names, which the C++ library defines and
+// a program may replace (in any unit): operator new, delete (also sized, as cl calls it), new[], delete[] (also sized)
 std::string runtimeName(const std::string& sub)
 {
-    if (sub == "__new" || sub == "__new_array") return "malloc";
-    if (sub == "__delete" || sub == "__delete_array") return "free";
+    if (sub == "__new") return "??2@YAPEAX_K@Z";
+    if (sub == "__new_array") return "??_U@YAPEAX_K@Z";
+    if (sub == "__delete") return "??3@YAXPEAX@Z";
+    if (sub == "__delete_sized") return "??3@YAXPEAX_K@Z";
+    if (sub == "__delete_array") return "??_V@YAXPEAX@Z";
+    if (sub == "__delete_array_sized") return "??_V@YAXPEAX_K@Z";
+    if (sub == "__malloc") return "malloc";
     if (sub == "__copy") return "memcpy";
     if (sub == "__zero") return "memset";
     if (sub == "__throw") return "cppparse_throw";
     return sub;
+}
+
+// a definition of a global allocation function replaces the library's: it gets cl's name in either mangling
+std::string replacedAllocationName(const std::string& irName)
+{
+    if (irName == "operator new(unsigned long long)") return runtimeName("__new");
+    if (irName == "operator new[](unsigned long long)") return runtimeName("__new_array");
+    if (irName == "operator delete(void*)") return runtimeName("__delete");
+    if (irName == "operator delete(void*, unsigned long long)") return runtimeName("__delete_sized");
+    if (irName == "operator delete[](void*)") return runtimeName("__delete_array");
+    if (irName == "operator delete[](void*, unsigned long long)") return runtimeName("__delete_array_sized");
+    return std::string();
 }
 
 } // namespace
@@ -95,6 +114,10 @@ std::string X86Module::symbol(const std::string& irName)
     if (startsWith(irName, "__")) return runtimeName(irName);                                  // __new, __throw, ...
     if (endsWith(irName, "?")) return lastComponent(irName.substr(0, irName.size() - 1));       // unknown library function: its C name
     if (irName.find('(') == std::string::npos) return irName;                                  // extern "C": plain name
+    if (startsWith(irName, "operator ")) {
+        const std::string replaced = replacedAllocationName(irName);
+        if (!replaced.empty()) return replaced;
+    }
     if (m_msvc) {
         std::map<std::string, std::string>::const_iterator it = m_functionNames.find(irName);
         if (it != m_functionNames.end()) return it->second;

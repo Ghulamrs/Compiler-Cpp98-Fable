@@ -26,9 +26,13 @@ circuit, #line, an unterminated comment or #if is an error the compile path repo
 members, friends), abstract classes, the implicit assignment a reference or const member forbids, and cl /W4's warnings
 (unreferenced parameter and local, missing return, uninitialised local, unreachable code, shadowing, assignment as a
 condition, narrowing) with the parser's messages and recovery of cl.
-Open from that review: debug information, char* from a literal, chained operator->, the driver; exceptions across
-cl-compiled frames (cl's own exception model, deferred); a pointer to member as a template argument stays refused; no
-basic_string/wstring, <complex> <valarray> <locale> <streambuf> <strstream>.
+Also fixed: chained operator-> (applied until a pointer comes out).
+Left for next week, owned by Fable 5.1 (each with its test, the full suite and the self-hosting check - generation
+two identical - before its commit): char* from a string literal (M11), _purecall in pure virtual slots (m4), internal
+errors naming the function and the assembly line (m6), the driver's -q, exit code, response files and output names
+(m2), the m8/m9 measurements, CodeView line tables (M10); won't fix: dynamic exception specifications (as cl), export
+(as cl), other targets. Deferred: exceptions across cl-compiled frames (cl's own exception model); a pointer to member
+as a template argument stays refused; no basic_string/wstring, <complex> <valarray> <locale> <streambuf> <strstream>.
 
 Fixed on 2026-10-14 (lanes V, A, L; verified: suite, selfhost generation two, suite under the self-built compiler, cprog, matrix, eh, mix):
 T() value-initialisation zeroes as cl; a float passed to printf or any variadic function is promoted to double;

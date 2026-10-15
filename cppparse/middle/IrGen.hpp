@@ -264,6 +264,8 @@ private:
     int    operatorCall(cxx::Expr* e);
     int    adjustThis(sema::Symbol* fn, int objAddr, const sema::Type* objType, int line);
     int    rvalue(int r, cxx::Expr* e, int line);
+    int    conversionCall(cxx::Expr* e, int line);   // a cast through the conversion function e->semaSym, converted on to the cast's type
+    int    incremented(int cur, const sema::Type* ot, bool up, int line);   // cur + 1 or cur - 1 in cur's type, as ++/-- compute it
     int    callFunction(sema::Symbol* fn, int thisPtr, int sretAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, bool virtualCall, int line);
     int    construct(sema::Symbol* ctor, int objAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, int line);
     int    argument(cxx::Expr* a, const sema::Type* paramType, int line);
@@ -321,6 +323,7 @@ private:
     int                        m_guardCount;    // guarded static locals so far in the function (cl's $TSS<n>)
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block
     std::vector<std::set<std::string> > m_handlerLabels;   // the labels inside each catch handler being generated
+    cxx::Decl*                 m_functionTryDef;   // a constructor or destructor whose body is a function-try-block (0: none)
     static void collectLabels(const cxx::Stmt* s, std::set<std::string>& out);
 
     IrFunction*                m_out;

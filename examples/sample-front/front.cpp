@@ -935,6 +935,118 @@ void show()
 }
 }
 
+// the review of 2026-10-15 (silent miscompiles B3, B4, M4, M5, M6, M8, M9): each case against cl at -O0 and -O2
+namespace convop {   // B3: casts through conversion functions
+struct Ci { int re; Ci(int r) : re(r) {} operator int() const { return re; } };
+struct Cd { double re; Cd(double r) : re(r) {} operator double() const { return re; } };
+struct Cp { const char* s; Cp(const char* p) : s(p) {} operator const char*() const { return s; } };
+struct Der : Ci { Der(int x) : Ci(x) {} };
+struct Ref { int w; Ref(int x) : w(x) {} operator const int&() const { return w; } };
+struct Str { const char* s; Str(const char* p) : s(p) {} };
+struct ToStr { operator Str() const { return Str("conv"); } };
+struct Both { operator int() const { return 3; } operator double() const { return 2.5; } };
+struct Vp { int v; Vp(int x) : v(x) {} operator void*() const { return v ? const_cast<Vp*>(this) : 0; } };
+Ci mki() { return Ci(4); }
+Cd mkd() { return Cd(2.5); }
+int uc(int) { return 1; } int uc(double) { return 2; } int uc(long) { return 3; }
+void show()
+{
+    Ci a(7); Cd b(1.5); Cp c("str"); Der d(9); Ref r(11); ToStr ts; Both bo; Vp yes(1), no(0);
+    std::printf("convop int %d %d %d %d | %d %d %d %d\n", (int)a, int(a), static_cast<int>(a), a, (int)mki(), int(mki()), static_cast<int>(mki()), mki());
+    std::printf("convop double %g %g %g | %g %g %g\n", (double)b, double(b), static_cast<double>(b), (double)mkd(), static_cast<double>(mkd()), b * 2);
+    std::printf("convop pointer %s %s %s\n", (const char*)c, static_cast<const char*>(c), c);
+    std::printf("convop wider %ld %g %hd %d | %d %ld %d\n", (long)a, (double)a, (short)a, (unsigned char)d, (int)r, (long)r, static_cast<int>(r));
+    Str s1 = (Str)ts; Str s2 = static_cast<Str>(ts); Str s3 = Str(ts); Str s4 = (Str)"lit";
+    std::printf("convop class %s %s %s %s\n", s1.s, s2.s, s3.s, s4.s);
+    std::printf("convop best %d %g | %d %d %d\n", (int)bo, (double)bo, uc(a), uc(d), uc(Ci(2)));
+    std::printf("convop bool %d %d %d %d\n", (int)(bool)yes, (int)static_cast<bool>(no), yes ? 1 : 0, (void*)no == 0);
+}
+}
+
+namespace reftemp {   // B4: references bound to temporaries; M9: the lifetime of the other temporaries of the initializer
+struct L { int v; L(int x) : v(x) { std::printf("L%d ", v); } L(const L& o) : v(o.v + 100) { std::printf("Lc%d ", v); } ~L() { std::printf("~L%d ", v); } };
+struct ToL { int k; ToL(int x) : k(x) {} operator L() const { return L(k); } };
+const int& gr = 5;
+const double& gd = 3;
+const L& gl = 7;
+static const L& gsl = 8;
+int sum(const int (&a)[3]) { return a[0] + a[1] + a[2]; }
+long twice(const long& x) { return x * 2; }
+double dbl(const double& d) { return d * 2; }
+int byRef(const int& x) { return x + 1; }
+const L& pass(const L& l) { return l; }
+L mk(int x) { return L(x); }
+int use(const L& l) { return l.v; }
+void show()
+{
+    std::printf("reftemp globals %d %g %d %d\n", gr, gd, gl.v, gsl.v);
+    { const L& r = 9; std::printf("| %d ", r.v); } std::printf("| scope\n");
+    { ToL t(4); const L& r = t; std::printf("| %d ", r.v); } std::printf("| scope\n");
+    { short s = 6; int i = 3; const long& lr = s; const int& ir = s + 1; const double& cd = i; const int& cr = 5; std::printf("reftemp scalars %ld %d %g %d %ld %g %d\n", lr, ir, cd, cr, twice(s), dbl(i), byRef(41)); }
+    { int a[3] = { 1, 2, 3 }; std::printf("reftemp array %d\n", sum(a)); }
+    { static const int& si = 11; static const L& sl = 12; std::printf("reftemp statics %d %d\n", si, sl.v); }
+    { const char* const& p = "lit"; char buf[4] = "abc"; const char* const& p2 = buf; std::printf("reftemp ptrs %s %s\n", p, p2); }
+    { const L& r = pass(L(20)); std::printf("| after full expr %d ", r.v == r.v); } std::printf("| scope\n");
+    { const L& r = L(21); std::printf("| bound "); } std::printf("| scope\n");
+    { const L& r = mk(22); std::printf("| bound "); } std::printf("| scope\n");
+    { int v = use(mk(23)) + use(L(24)); std::printf("| %d ", v); } std::printf("| scope\n");
+    { L a(25); const L& r = true ? L(26) : a; std::printf("| ?: %d ", r.v); } std::printf("| scope\n");
+}
+}
+
+namespace indirect {   // M5: argument conversions of a call through a function pointer
+struct Base { int flags; Base() : flags(0) {} };
+struct Der : Base { virtual ~Der() {} int extra; Der() : extra(0) {}
+    Der& apply(Base& (*m)(Base&)) { m(*this); return *this; }
+    Der& applyPtr(Base* (*m)(Base*)) { m(this); return *this; } };
+Base& setHex(Base& b) { b.flags |= 8; return b; }
+Base* setOct(Base* b) { b->flags |= 16; return b; }
+Base& direct(Der& d, Base& (*m)(Base&)) { return m(d); }
+double half(const double& d) { return d / 2; }
+long widen(long x, double y, const Base& b) { return x * 1000 + (long)y + b.flags; }
+void show()
+{
+    Der d, e, f, g;
+    d.apply(setHex); e.applyPtr(setOct); direct(f, setHex); setHex(g);
+    double (*ph)(const double&) = half; long (*pw)(long, double, const Base&) = widen;
+    int i = 7; short s = 2; Der h; h.flags = 3;
+    std::printf("indirect %d %d %d %d %d | %g %ld\n", d.flags, e.flags, f.flags, g.flags, d.extra, ph(i), pw(s, 1.5f, h));
+}
+}
+
+namespace narrow {   // M4: ++ and -- on narrow types
+void show()
+{
+    unsigned char ov = 255; ov++; short sh = 32767; sh++; signed char sc = 127; ++sc; unsigned short us = 65535; us++;
+    unsigned char ov2 = 0; ov2--; short sh2 = -32768; --sh2; bool b = false; b++; char c = 127; c++;
+    unsigned char arr[2] = { 255, 0 }; arr[0]++; ++arr[1]; float fl = 1.5f; fl++; --fl;
+    std::printf("narrow %d %d %d %d | %d %d %d %d | %d %d %g\n", ov, sh, sc, us, ov2, sh2, b, c, arr[0], arr[1], fl);
+    unsigned char x = 255; int y = x++; int z = ++x; std::printf("narrow values %d %d %d\n", x, y, z);
+}
+}
+
+namespace leafctor {   // M8: an implicit default constructor first needed by a global's initialiser
+struct Base { int v; Base() : v(7) {} };
+struct Leaf : Base {};
+struct Leaf2 : Base { int w; };
+Leaf g;
+Leaf2 g2[2];
+void show() { Leaf2 l; std::printf("leafctor %d %d %d %d\n", g.v, g2[0].v, g2[1].v, l.v); }
+}
+
+namespace ranking {   // M6: overload ranking of conversions to a base over void* and bool
+struct Base {}; struct Der : Base {}; struct Der2 : Der {};
+int db(Base*) { return 1; } int db(void*) { return 2; }
+int dr(const Base&) { return 1; } int dr(bool) { return 2; }
+int bl(bool) { return 1; } int bl(Base*) { return 2; }
+int cv(const Der*) { return 1; } int cv(void*) { return 2; }
+void show()
+{
+    Der d; Der2 d2; Base b;
+    std::printf("ranking %d %d %d %d %d %d %d\n", db(&d), db(&d2), db(&b), dr(d), bl(&d), cv(&d2), cv((Base*)&d));
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -966,6 +1078,12 @@ int main()
     memptr::show();
     covariant::show();
     pvbase::show();
+    convop::show();
+    reftemp::show();
+    indirect::show();
+    narrow::show();
+    leafctor::show();
+    ranking::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

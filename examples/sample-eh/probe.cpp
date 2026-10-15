@@ -562,3 +562,36 @@ int ehCatchVbase(int k)
     else r = vbasePointer2(0, &d);
     return r * 10 + g_destroyed;
 }
+
+// ---- function-try-blocks (C++98 15.3/10-16) ----
+// a constructor's handler runs after the bases and members built so far are destroyed and rethrows when it
+// reaches its end (the object is never constructed); a destructor's likewise (its handler may return); an ordinary
+// function's handler returns normally. The handlers take references: cl copies a by-value handler parameter
+// before it unwinds (MSVC's two-phase handling), cppparse after, a documented difference.
+static char g_ftLog[128];
+static int g_ftLen = 0;
+static void ftNote(char c) { if (g_ftLen < 127) { g_ftLog[g_ftLen++] = c; g_ftLog[g_ftLen] = 0; } }
+struct FtM { int id; explicit FtM(int i) : id(i) { ftNote(static_cast<char>('a' + i)); } ~FtM() { ftNote(static_cast<char>('A' + id)); } };
+struct FtB { FtB() { ftNote('b'); } ~FtB() { ftNote('B'); } };
+struct FtE { int c; explicit FtE(int x) : c(x) {} };
+static int ftThrowing(int a) { if (a == 1) throw FtE(11); return 2; }
+struct FtC : FtB {
+    FtM m1, m2; int v;
+    FtC(int a) try : FtB(), m1(1), m2(ftThrowing(a)), v(a) { ftNote('y'); if (a == 2) throw FtE(22); }
+    catch (const FtE& e) { ftNote('h'); ftNote(static_cast<char>('0' + e.c / 11)); }
+    ~FtC() try { ftNote('d'); if (v == 3 || v == 5) throw 9; } catch (int e) { ftNote('H'); ftNote(static_cast<char>('0' + e)); if (v == 5) return; }
+};
+static int ftPlain(int a) try { if (a) throw a * 2; return 1; } catch (int e) { ftNote('p'); return e; }
+const char* ehFunctionTry(int k)
+{
+    g_ftLen = 0; g_ftLog[0] = 0;
+    try {
+        if (k == 4) { ftNote(static_cast<char>('0' + ftPlain(0))); ftNote(static_cast<char>('0' + ftPlain(3))); return g_ftLog; }
+        FtC f(k);
+        ftNote('c');
+    }
+    catch (const FtE& e) { ftNote('m'); ftNote(static_cast<char>('0' + e.c / 11)); }
+    catch (int e) { ftNote('n'); ftNote(static_cast<char>('0' + e)); }
+    ftNote('.');
+    return g_ftLog;
+}

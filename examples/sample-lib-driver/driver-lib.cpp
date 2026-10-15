@@ -16,6 +16,7 @@ int treeStress(int n);
 int streamFormatting();
 int streamParsing();
 int fileRoundTrip();
+int streamManipulators();
 
 static int g_failures = 0;
 
@@ -41,6 +42,7 @@ int main()
     check("streamFormatting()", streamFormatting(), 1731);
     check("streamParsing()", streamParsing(), 1234);
     check("fileRoundTrip()", fileRoundTrip(), 77);
+    check("streamManipulators()", streamManipulators(), 2551);
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

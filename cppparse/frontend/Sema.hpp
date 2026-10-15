@@ -291,9 +291,10 @@ struct Conversion {
     Rank        rank;
     Symbol*     userFunction;    // converting constructor or conversion operator
     const Type* target;
-    bool        derivedToBase;   // a pointer/reference conversion to a base class (worse than identity among Standard)
+    bool        derivedToBase;   // a pointer/reference conversion to a base class (better than the other standard conversions, 13.3.3.2/4)
     bool        qualification;   // only cv-qualification added
-    Conversion() : rank(None), userFunction(0), target(0), derivedToBase(false), qualification(false) {}
+    Rank        second;          // UserDefined: the rank of the standard conversion after the user conversion (13.3.3.2/3)
+    Conversion() : rank(None), userFunction(0), target(0), derivedToBase(false), qualification(false), second(Exact) {}
 };
 
 class Sema {

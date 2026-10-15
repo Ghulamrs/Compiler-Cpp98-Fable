@@ -60,3 +60,22 @@ int fileRoundTrip()                        // 77: two lines written, read back w
     if (std::getline(in, line) && std::getline(in, line)) return -5;   // the rest of line two, then the end
     return value;
 }
+
+int streamManipulators()                   // 2551: hex and dec manipulators (a call through a function pointer whose
+{                                          // Base& parameter takes the stream's ios part), a stream as a condition and cast
+    std::ostringstream o;
+    o << std::hex << 255 << std::dec << " " << 255;
+    int r = o.str() == "ff 255" ? 2000 : 0;
+    std::istringstream in("1 2 3 x");
+    int v, sum = 0, count = 0;
+    while (in >> v) { sum += v; ++count; }
+    if (sum == 6 && count == 3) r += 500;
+    std::istringstream in2("7");
+    bool ok = (bool)(in2 >> v);                       // a cast through operator void*
+    const int got = v;
+    bool ok2 = static_cast<bool>(in2 >> v);           // the stream has failed now (and stored 0, as cl)
+    if (ok && !ok2 && got == 7) r += 50;
+    std::istringstream in3("9");
+    if (in3 >> v) r += 1;
+    return r;
+}

@@ -190,6 +190,37 @@ literal cast to an integral type is an integral constant expression; fixed with 
 picks `n(int)`). Code size at d9309fa (mapcompare's counting on the matrix sample, -O2): the 17 Matrix members
 both emit 1.79 of cl's bytes, the whole class 1.60, all 95 common functions 1.55, the ten largest 3.02.
 
+## Review of 2026-10-15 (sandbox\out\fable-review\REPORT.md): the 35 gaps and their state
+
+An independent review of a6a53c2 built 60 programs with cl and cppparse and ranked 35 gaps (blockers B1-B6, major
+M1-M15, minor m1-m10); its section 5 gives the order of work followed here. Every fix is compared against cl at
+-O0 and -O2 (test 17 front.cpp, sample-lib, sample-eh) and went through the full suite with the selfhost bootstrap.
+
+| # | Gap | State |
+|---|---|---|
+| B3 | casts through conversion functions: `(int)obj`, `static_cast<int>(obj)`, `(double)obj` (internal error at -O0), `(bool)(in >> v)` | fixed: Sema::exprCast runs the conversion lookup for C-style casts and static_cast as for functional casts (a class target through a constructor, a class operand through its conversion function; reinterpret_cast and const_cast keep their address semantics) and IrGen::conversionCall converts the function's result on to the cast's type (`(bool)stream` through `operator void*`, `(long)obj` through `operator int`). Also: a conversion function was looked up by the text "operator <type>", which failed for a class in a namespace (now by its result type, in the class and its bases); the first declared conversion function was taken, not the best (`operator double()` for a double target over `operator int()`, 13.3.3); two sequences through the same conversion function are ordered by the standard conversion after it (`uc(int)` over `uc(long)` for `operator int()`, 13.3.3.2/3: the listed "conversion operator against int/long overloads" refusal is fixed with it). front.cpp `convop::`, lib3 streamManipulators |
+| B4 | `const int& cr = 5;` crashed; `const std::string& s = "x"` crashed; `dblRef(i)` with `const double&` read the int's bytes | fixed: a reference bound to a prvalue or to a value of another type gets a temporary of the referenced type (8.5.3/5), as a local (its cleanup is the block's), as an argument (the full expression's) and at namespace scope or in a static (static storage of the module, `?gr@@3AEBHEB` plus its `$ref` object, destroyed with the globals); arrays and functions bind to references of their own type directly. A namespace-scope reference initialised by a constant had the constant as its address. IrGen::initObject, argument; front.cpp `reftemp::` |
+| M5 | a call through a function pointer passed `Der&` to a `Base&` parameter unadjusted (the vptr overwritten; why `std::cout << std::hex` crashed) | fixed: the arguments of an indirect call are converted to the pointer's parameter types as a direct call's are (IrGen::call: argument(), so references bind the base part, classes are copied, scalars converted; the variadic rest as before). front.cpp `indirect::`, lib3 streamManipulators (`std::hex`, `std::dec`) |
+| M4 | `ov++` on unsigned char and `sh++` on short gave 256 and 32768 at -O2 | fixed: ++ and -- compute in the promoted type and convert back (IrGen::incremented), as `+= 1` did. front.cpp `narrow::` |
+| M8 | `struct Leaf : Base {}; Leaf g;`: the implicit constructor the initialiser calls was never emitted (LNK2019) | fixed: the queue is drained after the module initialiser (IrGen::generate); also a namespace-scope array of a class with a needed default constructor was never constructed (`Leaf2 g2[2]`: 0 0, now built). front.cpp `leafctor::` |
+| M3 | function-try-blocks of constructors and destructors: the handler fell off its end and the object counted as constructed; the built members were destroyed after the handler | fixed: the bases and members are built (constructorInit) or registered (destructorParts) inside the try region, so a handler entry destroys the ones built so far (15.3/10-11), and a handler reaching its end rethrows (15.3/16; an ordinary function's returns as before); a destructor's handler may return (its parts' flags are tested). IrGen::genFunction, the Try statement. eh.ps1 ehFunctionTry (table and sjlj, -O0..-O3). The handlers of the test take references: cl copies a by-value handler parameter before it unwinds (the documented two-phase difference) |
+| M9 | `const T& r = pass(T());` kept the temporary alive as long as `r` | fixed: only the temporary the reference is bound to (or whose subobject it is bound to) lives as long as the reference: the last registered when the initializer is a class prvalue, both arms' for a conditional; the rest die at the end of the full expression (12.2/5). front.cpp `reftemp::` |
+| M6 | `db(&der)` chose `db(void*)` over `db(Base*)` | fixed: a derived-to-base conversion beats the other standard conversions of its rank (to void*, to bool; 13.3.3.2/4): Conversion::derivedToBase ranked better, not worse. front.cpp `ranking::` |
+| B2 | ADL on ordinary calls; in-class friend definitions | open (next) |
+| B5 | internal linkage of namespace-scope const objects; COMDAT static members of templates | open |
+| B1 | RTTI | open |
+| M2, M1, M13 | templates (partial ordering, explicit specialisation, explicit arguments on member templates, SFINAE, deduction from function types), template template parameters, an instantiation depth limit | open |
+| B6 | library headers | open |
+| M7 | the runtime's 32 live handlers; exceptions across cl frames | open |
+| M12, M13, m1 | diagnostics, robustness, `#if` arithmetic and `#line` | open |
+| M10 | CodeView debug information | open |
+| M11, M14, m2, m3, m4, m6 | deprecated `char*` from a literal, chained `operator->`, the driver, iostream details, pure virtual call, internal-error reporting | open |
+| m8, m9 | compile speed, optimisation quality | open |
+| m5 | dynamic exception specifications are ignored | as cl: cl ignores them too (C4290); not changed |
+| m7 | `export` | not implemented by any mainstream compiler (cl C3348); a parse error stays |
+| m10 | other targets | out of scope: x86_64 Windows only |
+| M15 | the listed refusals and silent differences | as documented |
+
 ## Plan
 
 Three lanes, worked in parallel on their own branches; each item gets a regression test, and each fix runs

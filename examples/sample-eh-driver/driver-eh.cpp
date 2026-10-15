@@ -32,6 +32,7 @@ int ehTempDtor(int k);
 int ehCatchPointer(int k);
 int ehGlobalFree(int k);
 int ehCatchVbase(int k);
+const char* ehFunctionTry(int k);
 extern int g_destroyed;
 
 static int g_walked = -2;

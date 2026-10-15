@@ -1,5 +1,19 @@
 GAP ANALYSIS OF C++98 (main 7e9bfbe, 2026-10-14; every item reproduced against cl)
 
+Review of 2026-10-15 (sandbox\out\fable-review\REPORT.md, 35 gaps; the state of each in docs/next-targets.md):
+fixed so far, each against cl at -O0 and -O2: casts through conversion functions ((int)obj, static_cast, (double)obj,
+(bool)(in >> v); the best conversion function, and two sequences through one conversion function ordered by the
+standard conversion after it); references bound to temporaries (const int& r = 5, const std::string& s = "x", a
+converted scalar argument, at namespace scope too); the arguments of calls through function pointers converted
+(Der& to Base& adjusted: std::cout << std::hex works); ++/-- on narrow types at -O2; the implicit constructor of
+`struct Leaf : Base {}` for a global (and global arrays of such classes constructed at all); function-try-blocks of
+constructors and destructors (members destroyed before the handler, rethrow at its end); the lifetime of a temporary
+passed through a function returning const T&; Base* ranked over void*.
+Open from that review: ADL on ordinary calls and in-class friend definitions, internal linkage of const globals and
+COMDAT static members of templates, RTTI, templates (partial ordering, explicit specialisation, SFINAE, template
+template parameters), 20 of the 32 library headers, the exception runtime's 32-handler limit, diagnostics and
+robustness, #if arithmetic and #line, debug information, char* from a literal, chained operator->, the driver.
+
 Fixed on 2026-10-14 (lanes V, A, L; verified: suite, selfhost generation two, suite under the self-built compiler, cprog, matrix, eh, mix):
 T() value-initialisation zeroes as cl; a float passed to printf or any variadic function is promoted to double;
 catch (Base*) matches a thrown Derived* with the pointer adjusted; replaced global operator new/delete are called;

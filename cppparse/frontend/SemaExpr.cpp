@@ -319,22 +319,35 @@ Conversion Sema::convertType(const Type* from, bool lvalue, bool nullConstant, c
             Conversion inner = convertType(from, lvalue, nullConstant, p0, in, false);
             if (inner.rank != Conversion::None) { c.rank = Conversion::UserDefined; c.userFunction = f; return c; }
         }
-        if (src->kind == Type::Class && src->decl) {
-            std::vector<Symbol*> convs;
-            lookupMember(src->decl, "operator " + dst->text(), convs);
-            if (!convs.empty()) { c.rank = Conversion::UserDefined; c.userFunction = convs[0]; return c; }
+        if (src->kind == Type::Class && src->decl && src->decl->members) {
+            // a conversion function of the source class (or of a base) to the target class, or to a class
+            // derived from it (its result is then converted to the base)
+            for (size_t i = 0; i < src->decl->members->order.size(); ++i) {
+                Symbol* f = src->decl->members->order[i];
+                if (f->kind != Symbol::Function || !f->isConversion || !f->type || !f->type->inner) continue;
+                const Type* rt = m_types.unqualified(m_types.unref(f->type->inner));
+                if (rt == dst || (rt->kind == Type::Class && rt->decl && derivesFrom(rt->decl, dst->decl, 0))) { c.rank = Conversion::UserDefined; c.userFunction = f; c.second = rt == dst ? Conversion::Exact : Conversion::Standard; return c; }
+            }
+            for (size_t b = 0; b < src->decl->bases.size(); ++b) {
+                Conversion inner = convertType(m_types.classType(src->decl->bases[b].cls), lvalue, false, to, in, true);
+                if (inner.rank == Conversion::UserDefined && inner.userFunction && inner.userFunction->isConversion) return inner;
+            }
         }
         return c;
     }
     if (src->kind == Type::Class) {
         if (!allowUser || !src->decl || !src->decl->members) return c;
-        // conversion operator to the target (or to something that converts to it)
+        // conversion operator to the target (or to something that converts to it): the one whose result converts
+        // best (13.3.3/1: operator double() over operator int() for a double target)
+        Conversion best;
         for (size_t i = 0; i < src->decl->members->order.size(); ++i) {
             Symbol* f = src->decl->members->order[i];
             if (f->kind != Symbol::Function || !f->isConversion || !f->type) continue;
             Conversion inner = convertType(f->type->inner, f->type->inner->kind == Type::Reference, false, to, in, false);
-            if (inner.rank != Conversion::None) { c.rank = Conversion::UserDefined; c.userFunction = f; return c; }
+            if (inner.rank == Conversion::None) continue;
+            if (!c.userFunction || inner.rank < best.rank || (inner.rank == best.rank && ((best.derivedToBase && !inner.derivedToBase) || (best.qualification && !inner.qualification && best.derivedToBase == inner.derivedToBase)))) { best = inner; c.rank = Conversion::UserDefined; c.userFunction = f; c.second = inner.rank; }
         }
+        if (c.userFunction) return c;
         for (size_t b = 0; b < src->decl->bases.size(); ++b) {
             Conversion inner = convertType(m_types.classType(src->decl->bases[b].cls), lvalue, false, to, in, true);
             if (inner.rank == Conversion::UserDefined) return inner;
@@ -403,9 +416,14 @@ int compareConversions(const Conversion& a, const Conversion& b)
     // negative: a better, positive: b better, 0: indistinguishable
     if (a.rank != b.rank) return a.rank < b.rank ? -1 : 1;
     if (a.rank == Conversion::Standard || a.rank == Conversion::Exact) {
-        if (a.derivedToBase != b.derivedToBase) return a.derivedToBase ? 1 : -1;
+        // 13.3.3.2/4: a conversion to a base (Derived* to Base*, Derived to Base&) beats the other standard
+        // conversions of the same rank, to void* and to bool
+        if (a.derivedToBase != b.derivedToBase) return a.derivedToBase ? -1 : 1;
         if (a.qualification != b.qualification) return a.qualification ? 1 : -1;
     }
+    // 13.3.3.2/3: two sequences through the same conversion function are ordered by the standard conversion
+    // after it (operator int() to int beats operator int() to double)
+    if (a.rank == Conversion::UserDefined && a.userFunction && a.userFunction == b.userFunction && a.second != b.second) return a.second < b.second ? -1 : 1;
     return 0;
 }
 
@@ -895,7 +913,11 @@ const Type* Sema::exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked
             }
         }
     }
-    if (tu->kind == Type::Class && tu->decl && checked) {
+    // a C-style cast and static_cast convert as an initialisation does (5.4/5, 5.2.9/2): a class operand goes
+    // through its conversion function, a class target through a constructor; reinterpret_cast and const_cast
+    // do not (the reference forms keep their address semantics below)
+    const bool explicitConv = checked || (e->kids.size() == 1 && (e->kind == cxx::Expr::Cast || (e->kind == cxx::Expr::NamedCast && e->text == "static_cast")));
+    if (tu->kind == Type::Class && tu->decl && (checked || (explicitConv && to->kind != Type::Reference))) {
         if (!tu->decl->isDefinition) { error(e->loc, "S113", "incomplete class '" + tu->decl->qualifiedName() + "' in a cast"); return to; }
         std::vector<Symbol*> ctors;
         lookupMember(tu->decl, tu->decl->ctorName(), ctors);
@@ -908,12 +930,12 @@ const Type* Sema::exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked
         if (f) e->semaSym = f;
         return to;
     }
-    if (e->kids.size() == 1 && checked) {
+    if (e->kids.size() == 1 && explicitConv) {
         Conversion c = convert(e->kids[0], tu, in);
-        if (c.rank == Conversion::None && tu->isScalar() && !valueType(e->kids[0])->isScalar() && valueType(e->kids[0])->kind != Type::Class)
+        if (checked && c.rank == Conversion::None && tu->isScalar() && !valueType(e->kids[0])->isScalar() && valueType(e->kids[0])->kind != Type::Class)
             error(e->loc, "S105", "cannot convert " + valueType(e->kids[0])->text() + " to " + tu->text());
-        if (c.userFunction) e->semaSym = c.userFunction;
-        if (e->kids[0]->semaConst && tu->isIntegral() && !widensUnsigned(e->kids[0]->semaType, tu, e->kids[0]->semaValue)) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, tu); }
+        if (c.userFunction && c.userFunction->isConversion) e->semaSym = c.userFunction;
+        if (checked && e->kids[0]->semaConst && tu->isIntegral() && !widensUnsigned(e->kids[0]->semaType, tu, e->kids[0]->semaValue)) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, tu); }
     }
     if (e->kids.size() == 1 && e->kids[0]->semaConst && tu->isIntegral() && !checked && !widensUnsigned(e->kids[0]->semaType, tu, e->kids[0]->semaValue)) { e->semaConst = true; e->semaValue = fitTo(e->kids[0]->semaValue, tu); }
     // a floating constant cast to an integral type is an integral constant expression (5.19), folded as cl folds

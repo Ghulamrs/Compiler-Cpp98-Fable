@@ -234,6 +234,15 @@ struct Symbol {
     // decides the inheritance model there and keeps the unspecified one (data 12, functions 24) once it is defined
     bool          memberPointerUnspecified;
     int           defOrder;               // class: the order its definition began in (0: inside a function body)
+    // access control (clause 11): the friends of a class (functions and classes; the friend declarations of a
+    // template's definition are repeated in each instantiation); friendsUnknown when a friend declaration could
+    // not be resolved (a template, a function of another scope): then nothing of the class is checked
+    std::vector<Symbol*>     friends;
+    std::vector<std::string> friendNames;   // "friend class List;" before List is declared: matched by name
+    bool          friendsUnknown;
+    bool          isUsed;                 // variable, parameter: referred to by an expression (C4100, C4101, C4189)
+    bool          isNoreturn;             // function: __declspec(noreturn)
+    std::string   deletedWhy;             // implicit copy assignment that cannot be generated (12.8/12): why
     std::string   mangled;                // filled by code generation
 
     Symbol();
@@ -343,6 +352,24 @@ private:
     // is reachable from code that is not itself tentative
     bool   isLazyMember(const Symbol* fn) const;
     void   noteUse(Symbol* used);           // m_currentFunction (0 at namespace scope) refers to used
+    // access control (clause 11) and the other checks of the 2026-10-15 review's M12
+    bool   accessible(Symbol* member, Scope* from);
+    void   accessCheck(Symbol* member, const cxx::Loc& loc, Scope* from);
+    bool   isFriendOf(Symbol* x, Symbol* cls);
+    void   abstractCheck(const Type* t, const cxx::Loc& loc);
+    bool   assignmentDeleted(Symbol* cls);
+    void   narrowingWarning(cxx::Expr* from, const Type* to, const char* what);
+    // the warnings cl gives at /W4 that need the whole body (functionWarnings runs after analyzeFunctionBody)
+    void   functionWarnings(Symbol* fn, cxx::Decl* def, size_t diagMark);
+    bool   mayFallThrough(cxx::Stmt* s);
+    bool   hasJump(cxx::Stmt* s, bool wantContinue);
+    bool   hasDefault(cxx::Stmt* s);
+    bool   generatesCode(cxx::Stmt* s);
+    bool   isNoreturnCall(cxx::Expr* e);
+    void   unreachableCheck(cxx::Stmt* s);
+    void   uninitStmt(cxx::Stmt* s, std::set<Symbol*>& assigned);
+    void   uninitDecl(cxx::Decl* d, std::set<Symbol*>& assigned);
+    void   uninitExpr(cxx::Expr* e, std::set<Symbol*>& assigned, bool write);
     void   reportUsedFailedMembers();       // releases the held diagnostics of every member reachable from real code
     void   analyzeFunctionBody(Symbol* fn, cxx::Decl* def, Scope* enclosing);
     void   stmt(cxx::Stmt* s, Scope* in, Symbol* fn);
@@ -418,6 +445,9 @@ private:
     Symbol*                    m_currentFunction;
     Symbol*                    m_currentClass;
     int                        m_loopDepth, m_switchDepth, m_depth;
+    std::vector<Symbol*>       m_locals;          // the scalar locals of the body being analysed (functionWarnings)
+    std::set<Symbol*>          m_uninitCandidates;
+    bool                       m_hasGoto;         // the body has a goto: no flow warnings
     int                        m_classOrder;      // class definitions begun so far in the declaration pass
     int                        m_bodyOrder;       // the order of the body being analysed (-1: declaration pass)
     int                        m_definingDepth;   // class definitions open

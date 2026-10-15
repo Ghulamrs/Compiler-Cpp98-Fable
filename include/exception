@@ -8,8 +8,8 @@ extern "C" {
     typedef void (*__cppparse_handler)();
     __cppparse_handler cppparse_set_terminate(__cppparse_handler f);
     __cppparse_handler cppparse_set_unexpected(__cppparse_handler f);
-    void cppparse_terminate(void);
-    void cppparse_unexpected(void);
+    __declspec(noreturn) void cppparse_terminate(void);
+    __declspec(noreturn) void cppparse_unexpected(void);
     int  cppparse_uncaught_exception(void);
 }
 
@@ -29,8 +29,8 @@ typedef void (*unexpected_handler)();
 
 inline terminate_handler set_terminate(terminate_handler f) { return cppparse_set_terminate(f); }
 inline unexpected_handler set_unexpected(unexpected_handler f) { return cppparse_set_unexpected(f); }
-inline void terminate() { cppparse_terminate(); }
-inline void unexpected() { cppparse_unexpected(); }
+__declspec(noreturn) inline void terminate() { cppparse_terminate(); }
+__declspec(noreturn) inline void unexpected() { cppparse_unexpected(); }
 inline bool uncaught_exception() { return cppparse_uncaught_exception() != 0; }
 
 }

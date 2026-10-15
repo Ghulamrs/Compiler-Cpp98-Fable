@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <set>
+#include <bitset>
 
 // sizeof(T&) is sizeof(T) (C++98 5.3.3/2), not the size of a pointer
 struct Forty { char a[40]; };
@@ -1219,6 +1221,23 @@ void show()
 }
 }
 
+namespace membername {   // M12 (found on the way): a member function named like a type of an enclosing scope
+// bitset::set with <set> included: "set(i)" in a member body is a call of the member, declared later in the class
+// (3.3.6), not a declaration of i of type std::set; the parser pre-scans the member names of a class body
+struct Counter {
+    int n;
+    Counter() : n(0) { for (int i = 1; i <= 3; ++i) set(i); }
+    void set(int v) { n += v; }
+    std::set<int> keep;
+};
+void show()
+{
+    std::bitset<8> b(std::string("101"));
+    Counter c; c.keep.insert(2);
+    std::printf("membername %d %d %d\n", (int)b.count(), c.n, (int)c.keep.size());
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -1260,6 +1279,7 @@ int main()
     rtti::show();
     templ::show();
     placement::show();
+    membername::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

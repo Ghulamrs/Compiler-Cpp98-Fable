@@ -277,7 +277,7 @@ Symbol::Symbol()
       isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), bitWidth(-1), bitOffset(0),
       anonHost(0), anonOf(0), templateAst(0), instantiatedFrom(0),
       isDependentContext(false), isImplicitInstantiation(false), isLazyInstantiation(false), instantiationFailed(false), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
-      hasCopyAssign(false), hasDefaultCtor(false), memberPointerUnspecified(false), defOrder(0) {}
+      hasCopyAssign(false), hasDefaultCtor(false), memberPointerUnspecified(false), defOrder(0), friendsUnknown(false), isUsed(false), isNoreturn(false) {}
 
 std::string Symbol::qualifiedName() const
 {
@@ -324,7 +324,7 @@ Scope* Program::newScope(Scope::Kind k, Scope* parent, Symbol* owner)
 
 Sema::Sema(TypeTable& types, Program& program)
     : m_types(types), m_prog(program), m_currentFunction(0), m_currentClass(0), m_loopDepth(0), m_switchDepth(0), m_depth(0),
-      m_classOrder(0), m_bodyOrder(-1), m_definingDepth(0), m_strictDeduce(false), m_instantiationDepth(0), m_instantiationOverflow(false), m_externalArena(0) {}
+      m_classOrder(0), m_bodyOrder(-1), m_definingDepth(0), m_hasGoto(false), m_strictDeduce(false), m_instantiationDepth(0), m_instantiationOverflow(false), m_externalArena(0) {}
 
 void Sema::queueBody(PendingBody pb)
 {
@@ -830,7 +830,17 @@ void Sema::declare(cxx::Decl* d, Scope* in, cxx::Access access)
         }
         break;
     }
-    case cxx::Decl::AccessLabel: case cxx::Decl::Friend: case cxx::Decl::Empty: case cxx::Decl::Error: break;
+    case cxx::Decl::Friend: {
+        // "friend class X;": X (declared somewhere this scope sees) may access the members; one not declared yet
+        // leaves the class unchecked (7.3.1.2/3 would declare it in the enclosing namespace, invisible to lookup)
+        Symbol* cls = in->kind == Scope::Class ? in->owner : 0;
+        if (!cls) break;
+        Symbol* f = lookupQualified(d->spec.name, in, true);
+        if (f && (f->kind == Symbol::Class || f->kind == Symbol::ClassTemplate)) cls->friends.push_back(f);
+        else cls->friendNames.push_back(d->spec.name.text());
+        break;
+    }
+    case cxx::Decl::AccessLabel: case cxx::Decl::Empty: case cxx::Decl::Error: break;
     }
 }
 
@@ -1123,6 +1133,7 @@ Symbol* Sema::declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::Dec
     if (!dcl || ft->kind != Type::Function) return 0;
     const cxx::QualifiedName& n = dcl->name;
     std::string name = n.parts.back().ident;
+    if (spec.isFriend && in->kind == Scope::Class && in->owner && n.parts.size() > 1) in->owner->friendsUnknown = true;   // "friend void N::f();", "friend void B::g();": not resolved here
     if (n.parts.back().convType) name = "operator " + n.parts.back().convType->text();
     Scope* target = in;
     Symbol* owner = in->kind == Scope::Class ? in->owner : 0;
@@ -1159,6 +1170,8 @@ Symbol* Sema::declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::Dec
         if (e->kind == Symbol::Function && sameSignature(e->type, ft)) {
             if (n.parts.size() > 1 || e->scope == target) {
                 dcl->semaSym = e;
+                if (spec.isFriend && in->kind == Scope::Class && in->owner) in->owner->friends.push_back(e);
+                if (spec.noreturn) e->isNoreturn = true;
                 if (!friendInClass && !spec.isFriend) e->isFriendDecl = false;   // the namespace declares it: visible to ordinary lookup now
                 // an out-of-line definition supplies the parameter names
                 if (!params.empty() && e->params.size() == params.size()) for (size_t k = 0; k < params.size(); ++k) if (e->params[k]->name.empty()) e->params[k]->name = params[k]->name;
@@ -1185,6 +1198,8 @@ Symbol* Sema::declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::Dec
     fn->isVirtual = spec.isVirtual; fn->isConstructor = ctor; fn->isDestructor = dtor; fn->isConversion = conv;
     fn->isOperator = name.compare(0, 8, "operator") == 0 && !conv;
     fn->isFriendDecl = friendInClass;
+    fn->isNoreturn = spec.noreturn;
+    if (spec.isFriend && in->kind == Scope::Class && in->owner) in->owner->friends.push_back(fn);
     fn->isDependentContext = in->kind == Scope::TemplateParams || (owner && owner->isDependentContext) || (friendInClass && in->owner && in->owner->isDependentContext);
     fn->requiredParams = static_cast<int>(params.size());
     for (size_t k = 0; k < params.size(); ++k) if (params[k]->init) { fn->requiredParams = static_cast<int>(k); break; }
@@ -1209,6 +1224,14 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
     if (d->spec.kind == cxx::DeclSpec::Class && d->spec.classDef) { defined = declareClass(d->spec.classDef, in, access, 0); d->semaSym = defined; }
     else if (d->spec.kind == cxx::DeclSpec::Enum && d->spec.enumDef) { defined = declareEnum(d->spec.enumDef, in, access); d->semaSym = defined; }
     else if (d->spec.kind == cxx::DeclSpec::Named && !d->spec.elaborated.empty() && d->spec.elaborated != "typename" && d->spec.elaborated != "enum" && d->declarators.empty()) {
+        if (d->spec.isFriend && in->kind == Scope::Class && in->owner) {
+            // "friend class X<T>;", "friend class N::Y;": the class named, when it can be found; else unchecked
+            Symbol* f = lookupQualified(d->spec.name, in, true);
+            if (d->spec.name.parts.back().hasTemplateArgs) in->owner->friendsUnknown = true;
+            else if (f && (f->kind == Symbol::Class || f->kind == Symbol::ClassTemplate)) in->owner->friends.push_back(f);
+            else in->owner->friendNames.push_back(d->spec.name.text());
+            return;
+        }
         // "class X;" declares X in this scope unless this scope has it already: an X of an outer scope does not count
         if (d->spec.name.parts.size() == 1 && !d->spec.name.global) {
             const std::string& nm = d->spec.name.parts[0].ident;
@@ -1313,6 +1336,7 @@ void Sema::declareTemplate(cxx::Decl* d, Scope* in, cxx::Access access)
 {
     if (d->decls.empty()) return;
     cxx::Decl* inner = d->decls[0];
+    if (inner->spec.isFriend && in->kind == Scope::Class && in->owner) { in->owner->friendsUnknown = true; return; }   // a friend template: not checked
     // the template parameter scope
     Scope* tscope = m_prog.newScope(Scope::TemplateParams, in, 0);
     std::vector<Symbol*> tparams;
@@ -1885,6 +1909,22 @@ void Sema::completeClass(Symbol* cls)
         Symbol* c = m_prog.newSymbol(Symbol::Function, "operator=", cls->members);
         c->isOperator = true; c->isImplicit = true; c->ownerClass = cls; c->type = m_types.function(m_types.reference(ct), ps, false, false); c->loc = cls->loc; c->requiredParams = 1;
         Symbol* p = m_prog.newSymbol(Symbol::Variable, "other", 0); p->type = ps[0]; p->isParam = true; c->params.push_back(p);
+        if (!cls->isDependentContext) {
+            // 12.8/12: the implicit copy assignment is ill-formed (cl C2582) for a class with a reference member, a
+            // const member, or a base or member whose own copy assignment cannot be generated; a use reports it
+            for (size_t i = 0; i < cls->fields.size() && c->deletedWhy.empty(); ++i) {
+                Symbol* f = cls->fields[i];
+                if (!f->type || f->name.empty()) continue;
+                if (f->type->kind == Type::Reference) { c->deletedWhy = "a data member '" + f->name + "' of reference type"; break; }
+                const Type* ft = f->type;
+                bool isConst = ft->isConst;
+                while (ft->kind == Type::Array) { ft = ft->inner; if (ft->isConst) isConst = true; }
+                if (isConst) { c->deletedWhy = "a const data member '" + f->name + "'"; break; }
+                if (ft->kind == Type::Class && ft->decl && assignmentDeleted(ft->decl)) c->deletedWhy = "a data member '" + f->name + "' whose class cannot be assigned";
+            }
+            for (size_t b = 0; b < cls->bases.size() && c->deletedWhy.empty(); ++b)
+                if (cls->bases[b].cls && assignmentDeleted(cls->bases[b].cls)) c->deletedWhy = "a base class '" + cls->bases[b].cls->name + "' that cannot be assigned";
+        }
     }
     if (!cls->hasDtor) {
         Symbol* c = m_prog.newSymbol(Symbol::Function, "~" + cls->ctorName(), cls->members);

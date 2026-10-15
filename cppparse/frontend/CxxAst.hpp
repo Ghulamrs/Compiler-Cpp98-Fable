@@ -70,6 +70,7 @@ struct DeclSpec {                   // decl-specifier-seq
     EnumDecl*     enumDef;          // Enum: the definition
     Loc           loc;
     int           align;            // __declspec(align(N)) among the specifiers (0: none)
+    bool          noreturn;         // __declspec(noreturn)
     DeclSpec();
     bool hasType() const { return kind != None; }
     std::string text() const;       // "const unsigned int", "std::vector<int>"

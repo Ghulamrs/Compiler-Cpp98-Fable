@@ -765,6 +765,7 @@ try {
         @{ unit = "inftempl"; expect = @("error S148: template instantiation depth exceeds 1000 instantiating 'Inf<int*") },
         @{ unit = "comment-unterminated"; expect = @("comment-unterminated.cpp(2): error: unterminated comment (cl C1071)") },
         @{ unit = "if-unterminated"; expect = @("if-unterminated.cpp(3): error: #if without #endif at end of file (cl C1070)") },
+        @{ unit = "diagnostics"; expect = @("diagnostics.cpp(17): error S150: 'Priv::secret': cannot access private member declared in class 'Priv' (cl C2248)", "diagnostics.cpp(18): error S151: 'Ab': cannot instantiate abstract class ('f' is pure virtual) (cl C2259)", "diagnostics.cpp(19): error S151: 'Ab': cannot instantiate abstract class", "diagnostics.cpp(20): error S152: 'RefMem::operator=' cannot be generated: 'RefMem' has a data member 'r' of reference type (cl C2582)", "diagnostics.cpp(21): error S152: 'Holder::operator=' cannot be generated: 'Holder' has a data member 'm' whose class cannot be assigned", "diagnostics.cpp(9): error S150: 'Base::priv': cannot access private member declared in class 'Base'", "diagnostics.cpp(22): error S150: 'Base::prot': cannot access protected member declared in class 'Base'", "diagnostics.cpp(23): error S150: 'Hidden::Hidden': cannot access private member declared in class 'Hidden'", "diagnostics.cpp(14): error: expected ')' after the parameter list near '{'", "diagnostics.cpp(24): error: expected an expression near ';'") },
         @{ unit = "ambiguous"; expect = @("ambiguous.cpp(12): error S105: cannot initialise 'p1' of type A* from D*", "ambiguous.cpp(13): error S143: ambiguous conversions from 'D*' to 'A*'", "ambiguous.cpp(14): error S143:", "ambiguous.cpp(15): error S144: ambiguous access of 'a' in 'D'", "ambiguous.cpp(16): error S144: ambiguous access of 'f'", "ambiguous.cpp(17): error S105: cannot convert D to the return type A&", "ambiguous.cpp(26): error S145: 'XD': ambiguous inheritance of 'XV::f', overridden by 'XL::f' and 'XR::f' (cl C2250)") }
     )
     foreach ($r in $rejects) {
@@ -778,6 +779,16 @@ try {
         if ($rc -ne 0 -and $missing.Count -eq 0 -and $left.Count -eq 0) { Write-Host "  ok   $($r.unit).cpp: errors reported, exit code $rc, no object, listing or map" }
         else { Write-Host "  FAIL $($r.unit).cpp (exit $rc, missing diagnostics: $($missing -join ' | '), left behind: $($left -join ', ')):"; Write-Host $c6; $failed++ }
     }
+    # warnings.cpp: the warnings cl gives at /W4 (unreferenced parameter and local, missing return, uninitialised
+    # local, unreachable code, shadowing, assignment as a condition, narrowing) on the lines cl warns, and no other
+    $wantW = @("warnings.cpp(5): warning S155: 'missingReturn': not all control paths return a value", "warnings.cpp(6): warning S153: 'y': unreferenced parameter", "warnings.cpp(7): warning S120: comparison of signed and unsigned values", "warnings.cpp(8): warning S160: 'initializing': conversion from 'double' to 'int', possible loss of data", "warnings.cpp(9): warning S159: assignment used as a condition", "warnings.cpp(10): warning S156: uninitialized local variable 'u' used", "warnings.cpp(11): warning S157: unreachable code", "warnings.cpp(12): warning S158: declaration of 'a' hides function parameter", "warnings.cpp(12): warning S153: 'a': unreferenced parameter", "warnings.cpp(13): warning S160: 'initializing': truncation of constant value", "warnings.cpp(14): warning S160: 'initializing': conversion from 'int' to 'short', possible loss of data", "warnings.cpp(15): warning S154: 'w': local variable is initialized but not referenced", "warnings.cpp(16): warning S160: 'return': conversion from 'long long' to 'int', possible loss of data", "warnings.cpp(17): warning S160: 'argument': conversion from 'int' to 'short', possible loss of data")
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n front-warnings "..\examples\sample-front\warnings.cpp" 2>&1 | Out-String
+    $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+    $missingW = @($wantW | Where-Object { -not $c6.Contains($_) })
+    $countW = ([regex]::Matches($c6, "warning S1")).Count
+    if ($rc -eq 0 -and $missingW.Count -eq 0 -and $countW -eq $wantW.Count) { Write-Host "  ok   warnings.cpp: the $countW warnings of cl /W4 and no other" }
+    else { Write-Host "  FAIL warnings.cpp (exit $rc, $countW warnings, missing: $($missingW -join ' | ')):"; Write-Host $c6; $failed++ }
     # deep-nesting.cpp: 3000 nested blocks, 5000 nested parentheses and a 2000-term expression compile and run
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
     $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n front-deep "..\examples\sample-front\deep-nesting.cpp" 2>&1 | Out-String

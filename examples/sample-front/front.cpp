@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <typeinfo>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -1087,6 +1088,54 @@ void show()
 }
 }
 
+namespace rtti {   // B1: typeid and dynamic_cast through cl's RTTI data and vcruntime
+
+struct B { virtual ~B() {} int b; };
+struct C { virtual ~C() {} int c; };
+struct D : B, C { int d; };
+struct E : virtual B { int e; };
+struct F : virtual B { int f; };
+struct G : E, F { int g; };
+struct NB { int nb; };
+struct V : NB { virtual int f() { return 1; } };
+struct W : virtual V { int w; };
+struct X : W { int x; };
+struct Plain { int p; };
+
+void show()
+{
+    D d; B* pb = &d; C* pc = &d;
+    std::printf("rtti down: %d\n", dynamic_cast<D*>(pb) == &d);
+    std::printf("rtti down from C: %d\n", dynamic_cast<D*>(pc) == &d);
+    std::printf("rtti cross: %d %d\n", dynamic_cast<C*>(pb) == pc, dynamic_cast<B*>(pc) == pb);
+    B lone; B* pl = &lone;
+    std::printf("rtti fail is null: %d\n", dynamic_cast<D*>(pl) == 0);
+    std::printf("rtti fail cross null: %d\n", dynamic_cast<C*>(pl) == 0);
+    G g; B* gb = &g; E* ge = &g; F* gf = &g;
+    std::printf("rtti vbase down: %d %d %d\n", dynamic_cast<G*>(gb) == &g, dynamic_cast<G*>(ge) == &g, dynamic_cast<G*>(gf) == &g);
+    std::printf("rtti vbase to E/F: %d %d %d\n", dynamic_cast<E*>(gb) == static_cast<E*>(&g), dynamic_cast<F*>(gb) == static_cast<F*>(&g), dynamic_cast<F*>(ge) == static_cast<F*>(&g));
+    std::printf("rtti void*: %d %d %d\n", dynamic_cast<void*>(pc) == (void*)&d, dynamic_cast<void*>(gf) == (void*)&g, dynamic_cast<void*>(pl) == (void*)&lone);
+    X xo; V* xv = &xo; W* xw = &xo;
+    std::printf("rtti vbase chain: %d %d %d\n", dynamic_cast<X*>(xv) == &xo, dynamic_cast<W*>(xv) == xw, dynamic_cast<NB*>(xw) == static_cast<NB*>(&xo));
+    std::printf("rtti null in: %d %d\n", dynamic_cast<D*>((B*)0) == 0, dynamic_cast<void*>((C*)0) == 0);
+    std::printf("rtti typeid same: %d %d %d\n", typeid(*pb) == typeid(D), typeid(*pl) == typeid(D), typeid(*pl) == typeid(B));
+    std::printf("rtti typeid static: %d %d %d %d\n", typeid(int) == typeid(int), typeid(int) == typeid(long), typeid(d) == typeid(D), typeid(Plain) != typeid(D));
+    std::printf("rtti typeid refs: %d %d\n", typeid(*gb) == typeid(G), typeid(*xv) == typeid(X));
+    const std::type_info& t = typeid(*ge);
+    std::printf("rtti typeid through vbase: %d %d\n", t == typeid(G), typeid(*xw) == typeid(X));
+    std::printf("rtti names: %s %s %s %s\n", typeid(d).name(), typeid(int).name(), typeid(const char*).name(), typeid(*pl).name());
+    std::printf("rtti raw names: %s %s\n", typeid(D).raw_name(), typeid(double).raw_name());
+    std::printf("rtti before: %d %d\n", typeid(B).before(typeid(C)) != typeid(C).before(typeid(B)), typeid(B).before(typeid(B)));
+    try { D& r = dynamic_cast<D&>(*pb); std::printf("rtti ref ok %d\n", &r == &d); } catch (std::bad_cast&) { std::printf("rtti bad_cast?\n"); }
+    try { dynamic_cast<D&>(*pl); std::printf("rtti no throw\n"); } catch (std::bad_cast& e) { std::printf("rtti bad_cast %s\n", e.what()); }
+    try { dynamic_cast<C&>(*pl); std::printf("rtti no throw\n"); } catch (std::exception& e) { std::printf("rtti as exception %s\n", e.what()); }
+    B* nullp = 0;
+    try { typeid(*nullp); std::printf("rtti no throw\n"); } catch (std::bad_typeid& e) { std::printf("rtti bad_typeid %s\n", e.what()); }
+    std::printf("rtti typeid of null expression not dereferenced: %d\n", typeid(nullp) == typeid(B*));
+    std::printf("rtti sizes %d %d\n", (int)sizeof(std::type_info) > 8, (int)sizeof(std::bad_cast) > 0);
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -1125,6 +1174,7 @@ int main()
     leafctor::show();
     ranking::show();
     adl::show();
+    rtti::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

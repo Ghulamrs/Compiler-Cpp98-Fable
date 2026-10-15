@@ -595,3 +595,21 @@ const char* ehFunctionTry(int k)
     ftNote('.');
     return g_ftLog;
 }
+
+// ---- RTTI (C++98 5.2.7, 5.2.8): a failed dynamic_cast to a reference throws std::bad_cast, typeid of a null
+// dereference std::bad_typeid, both thrown by <typeinfo>'s helpers through cppparse's runtime ----
+#include <typeinfo>
+struct RtB { virtual ~RtB() {} int b; };
+struct RtC { virtual ~RtC() {} int c; };
+struct RtD : RtB, RtC { int d; };
+int ehRtti(int k)
+{
+    RtD d; RtB lone; RtB* pb = k == 0 ? static_cast<RtB*>(&d) : &lone;
+    try {
+        if (k == 2) { RtB* n = 0; return typeid(*n) == typeid(RtD) ? 1 : 2; }
+        RtD& r = dynamic_cast<RtD&>(*pb);
+        return (&r == &d ? 10 : 11) + (dynamic_cast<RtC*>(pb) == static_cast<RtC*>(&d) ? 100 : 0);
+    }
+    catch (std::bad_cast& e) { return 20 + (e.what()[0] == 'B' ? 1 : 0) + (dynamic_cast<RtD*>(pb) == 0 ? 100 : 0); }
+    catch (std::bad_typeid& e) { return 30 + (e.what()[0] == 'A' ? 1 : 0); }
+}

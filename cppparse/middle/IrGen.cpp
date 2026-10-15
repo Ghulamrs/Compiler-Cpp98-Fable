@@ -1467,7 +1467,9 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
         if ((e->text == "++" || e->text == "--") && !e->semaSym) { value(e); return lvalue(e->kids[0]); }
         break;
     case cxx::Expr::Paren: return lvalue(e->kids[0]);
+    case cxx::Expr::Typeid: lv.kind = LValue::Mem; lv.addr = typeidAddress(e, line); return lv;
     case cxx::Expr::Cast: case cxx::Expr::NamedCast:
+        if (e->kind == cxx::Expr::NamedCast && e->text == "dynamic_cast" && isReference(exprType(e))) { int r = -1; if (dynamicCast(e, line, r)) { lv.kind = LValue::Mem; lv.addr = r; return lv; } }
         if (!e->kids.empty() && e->semaLvalue) { LValue inner = lvalue(e->kids[0]); if (inner.kind != LValue::None) { lv.kind = LValue::Mem; lv.addr = convert(addressOf(inner, line), m_semaTypes.pointer(inner.type), m_semaTypes.pointer(lv.type), line); } return lv; }
         break;
     case cxx::Expr::Call: case cxx::Expr::FunctionalCast: case cxx::Expr::Binary: case cxx::Expr::PostIncDec:
@@ -2587,6 +2589,7 @@ int IrGen::value(cxx::Expr* e)
     }
     case cxx::Expr::Cast: case cxx::Expr::NamedCast: {
         if (e->kids.empty()) return constant(0, t, line);
+        if (e->kind == cxx::Expr::NamedCast && e->text == "dynamic_cast") { int r = -1; if (dynamicCast(e, line, r)) return r; }
         if (e->semaSym && e->semaSym->kind == Symbol::Function && e->semaSym->isConversion) return conversionCall(e, line);
         if (e->semaSym && e->semaSym->kind == Symbol::Function && e->semaSym->isConstructor) {
             int slot = newLocal("tmp." + e->semaSym->ownerClass->name, m_semaTypes.unqualified(t), true);
@@ -2912,7 +2915,8 @@ int IrGen::value(cxx::Expr* e)
         emit(in);
         return constant(0, m_semaTypes.basic(sema::Type::Int), line);
     }
-    case cxx::Expr::Typeid: case cxx::Expr::InitList: case cxx::Expr::Error: return constant(0, t, line);
+    case cxx::Expr::Typeid: return typeidAddress(e, line);
+    case cxx::Expr::InitList: case cxx::Expr::Error: return constant(0, t, line);
     }
     return constant(0, t, line);
 }
@@ -3648,6 +3652,282 @@ void IrGen::need(Symbol* fn)
         return;
     }
     if (fn->isImplicit || (fn->hasBody && fn->definition)) m_queue.push_back(fn);
+}
+
+// ---- RTTI: cl's descriptors, read by vcruntime's __RTtypeid, __RTDynamicCast and __RTCastToVoid ---------------
+//
+// Every polymorphic class gets, as cl emits them (COMDATs, one per program): a type descriptor "??_R0" (vcruntime's
+// type_info vftable, the undecorated name filled in by name(), the decorated name ".?AUD@@"), a class hierarchy
+// descriptor "??_R3" whose base class array "??_R2" lists the class and every base, direct and indirect, depth
+// first in declaration order (a virtual base on each path it is reached by), each a base class descriptor "??_R1"
+// with the base's displacement, and per vftable a complete object locator "??_R4" (the vfptr's offset in the
+// complete object, the type descriptor, the hierarchy) stored in the 8 bytes before the table. typeid of a type
+// or of a non-polymorphic expression is the address of the type descriptor; typeid of a polymorphic lvalue and
+// dynamic_cast across or down the hierarchy call vcruntime with the subobject that holds the first vfptr.
+
+namespace {
+
+IrDataItem dataInt(long v, int size) { IrDataItem it; it.kind = IrDataItem::Int; it.size = size; it.value = v; return it; }
+IrDataItem dataRva(const std::string& name) { IrDataItem it; it.kind = IrDataItem::Rva; it.size = 4; it.text = name; return it; }
+IrDataItem dataAddress(const std::string& name) { IrDataItem it; it.kind = IrDataItem::Address; it.size = 8; it.text = name; return it; }
+IrDataItem dataBytes(const std::string& bytes) { IrDataItem it; it.kind = IrDataItem::Bytes; it.size = static_cast<int>(bytes.size()); it.text = bytes; return it; }
+IrDataItem dataZero(int n) { IrDataItem it; it.kind = IrDataItem::Zero; it.size = n; return it; }
+
+// an IR global name from a decorated or qualified name: letters, digits and underscores only
+std::string rttiKey(const std::string& s)
+{
+    std::string out;
+    for (size_t i = 0; i < s.size(); ++i) out += isalnum(static_cast<unsigned char>(s[i])) ? s[i] : '_';
+    return out;
+}
+
+struct RttiBase { sema::Symbol* cls; long mdisp, pdisp, vdisp, attr; size_t contained; };
+
+// the base class array of top: cls at (mdisp, pdisp, vdisp), then each of its bases depth first; a virtual base
+// is located through top's vbtable (pdisp: the vbptr, vdisp: the base's entry), a non-virtual one inside it by
+// mdisp from there; contained: the entries of the subtree after it
+void rttiBases(sema::Symbol* top, sema::Symbol* cls, long mdisp, long pdisp, long vdisp, std::vector<RttiBase>& out, int depth)
+{
+    if (!cls || depth > 32) return;
+    const size_t self = out.size();
+    RttiBase me; me.cls = cls; me.mdisp = mdisp; me.pdisp = pdisp; me.vdisp = vdisp; me.attr = 0x40; me.contained = 0;
+    out.push_back(me);
+    for (size_t b = 0; b < cls->bases.size(); ++b) {
+        const sema::BaseClass& bc = cls->bases[b];
+        if (!bc.cls) continue;
+        if (bc.isVirtual) {
+            long entry = 0;
+            for (size_t t = 0; t < top->vbtables.size(); ++t)
+                if (top->vbtables[t].offset == top->vbptrOffset)
+                    for (size_t k = 0; k < top->vbtables[t].order.size(); ++k) if (top->vbtables[t].order[k] == bc.cls) entry = 4 * static_cast<long>(k + 1);
+            const size_t at = out.size();
+            rttiBases(top, bc.cls, 0, top->vbptrOffset, entry, out, depth + 1);
+            if (at < out.size()) out[at].attr |= 0x10;   // BCD_VBOFCONTOBJ
+        } else rttiBases(top, bc.cls, mdisp + bc.offset, pdisp, vdisp, out, depth + 1);
+    }
+    out[self].contained = out.size() - self - 1;
+}
+
+} // namespace
+
+// an RTTI global, once per IR name: a COMDAT, named as cl names it under --msvc-mangling
+void IrGen::rttiGlobal(const std::string& name, const std::string& decorated, const std::vector<IrDataItem>& items, bool readOnly)
+{
+    if (!m_x86 || !m_rttiDone.insert(name).second) return;
+    if (m_msvcNames && !decorated.empty()) m_x86->registerGlobalName(name, decorated);
+    IrGlobal g;
+    g.name = name;
+    int size = 0;
+    for (size_t i = 0; i < items.size(); ++i) size += items[i].size;
+    g.size = size > 0 ? size : 8;
+    g.isFloat = false;
+    g.data = items;
+    g.readOnly = readOnly;
+    g.linkOnce = true;
+    g.internal = false;
+    g.align = readOnly ? 4 : 8;
+    m_x86->addGlobal(g);
+}
+
+// the type descriptor of t (??_R0?AUD@@@8; in .data: name() caches the undecorated name in it)
+std::string IrGen::typeDescriptor(const sema::Type* t)
+{
+    t = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    const std::string rttiName = msvcRttiTypeName(t);
+    const std::string name = "rtti_td_" + rttiKey(rttiName.substr(1));
+    if (m_rttiDone.count(name)) return name;
+    std::vector<IrDataItem> items;
+    items.push_back(dataAddress("rtti_type_info_vftable"));
+    items.push_back(dataInt(0, 8));
+    items.push_back(dataBytes(rttiName + std::string(1, '\0')));
+    rttiGlobal(name, msvcMangleTypeDescriptor(t), items, false);
+    return name;
+}
+
+// the class hierarchy descriptor of cls (??_R3D@@8) with its base class array and base class descriptors; the
+// bases' own hierarchies too (their descriptors are referenced)
+std::string IrGen::classHierarchy(sema::Symbol* cls)
+{
+    const std::string key = rttiKey(cls->qualifiedName());
+    const std::string name = "rtti_chd_" + key;
+    if (m_rttiDone.count(name)) return name;
+    m_rttiDone.insert(name);
+    std::vector<RttiBase> bases;
+    rttiBases(cls, cls, 0, -1, 0, bases, 0);
+    std::vector<IrDataItem> array;
+    long attrs = 0;   // CHD_MULTINH: a class with several direct bases; CHD_VIRTINH: a virtual base reached twice; CHD_AMBIGUOUS: a non-virtual one twice
+    for (size_t i = 0; i < bases.size(); ++i) {
+        const RttiBase& b = bases[i];
+        if (b.cls->bases.size() > 1) attrs |= 1;
+        for (size_t k = 0; k < i; ++k) if (bases[k].cls == b.cls) attrs |= (b.attr & 0x10) ? 2 : 4;
+        const std::string bchd = b.cls == cls ? name : classHierarchy(b.cls);
+        const std::string bcd = "rtti_bcd_" + rttiKey(b.cls->qualifiedName()) + "_" + numText(b.mdisp) + "_" + numText(b.pdisp) + "_" + numText(b.vdisp) + "_" + numText(b.attr);
+        std::vector<IrDataItem> items;
+        items.push_back(dataRva(typeDescriptor(b.cls->type)));
+        items.push_back(dataInt(static_cast<long>(b.contained), 4));
+        items.push_back(dataInt(b.mdisp, 4));
+        items.push_back(dataInt(b.pdisp, 4));
+        items.push_back(dataInt(b.vdisp, 4));
+        items.push_back(dataInt(b.attr, 4));
+        items.push_back(dataRva(bchd));
+        rttiGlobal(bcd, msvcMangleBaseClassDescriptor(*b.cls, b.mdisp, b.pdisp, b.vdisp, b.attr), items, true);
+        array.push_back(dataRva(bcd));
+    }
+    array.push_back(dataZero(3));   // cl pads the array so
+    const std::string bca = "rtti_bca_" + key;
+    rttiGlobal(bca, msvcMangleBaseClassArray(*cls), array, true);
+    std::vector<IrDataItem> chd;
+    chd.push_back(dataInt(0, 4));
+    chd.push_back(dataInt(attrs, 4));
+    chd.push_back(dataInt(static_cast<long>(bases.size()), 4));
+    chd.push_back(dataRva(bca));
+    m_rttiDone.erase(name);
+    rttiGlobal(name, msvcMangleClassHierarchy(*cls), chd, true);
+    return name;
+}
+
+// std::__cppparse_throw_bad_cast and the like, defined by <typeinfo> (0 without it)
+Symbol* IrGen::stdFunction(const char* name)
+{
+    const std::vector<Symbol*>* ns = m_prog.global->find("std");
+    if (!ns) return 0;
+    for (size_t i = 0; i < ns->size(); ++i) {
+        Symbol* n = (*ns)[i];
+        if (n->kind != Symbol::Namespace || !n->members) continue;
+        const std::vector<Symbol*>* v = n->members->find(name);
+        if (v) for (size_t k = 0; k < v->size(); ++k) if ((*v)[k]->kind == Symbol::Function && (*v)[k]->hasBody) return (*v)[k];
+    }
+    return 0;
+}
+
+// the subobject of a cls object at addr that holds the class's first vfptr: the object itself, or the virtual base
+// it lies in (cl moves the pointer there before __RTtypeid / __RTDynamicCast read the vftable's locator)
+int IrGen::vfptrSubobject(int addr, Symbol* cls, int line)
+{
+    if (cls->vftables.empty()) return addr;
+    const sema::VfTable& v = cls->vftables[0];
+    const sema::Type* chp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Char));
+    const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.classType(cls));
+    if (v.vbase) {
+        size_t vi = 0;
+        while (vi < cls->vbases.size() && cls->vbases[vi] != v.vbase) ++vi;
+        const int vbOff = vi < cls->vbaseOffsets.size() ? cls->vbaseOffsets[vi] : 0;
+        const int base = toBase(addr, cls, v.vbase, line);
+        const int rel = v.offset - vbOff;
+        return rel ? offsetAddress(base, chp, chp, rel, line) : base;
+    }
+    return v.offset ? offsetAddress(addr, cp, chp, v.offset, line) : addr;
+}
+
+// the same for a pointer that may be null (dynamic_cast's operand): null stays null
+int IrGen::vfptrSubobjectOrNull(int p, Symbol* cls, int line)
+{
+    if (cls->vftables.empty() || (!cls->vftables[0].vbase && cls->vftables[0].offset == 0)) return p;
+    const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+    int slot = newLocal("tmp.rtti", vp, false);
+    LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = vp;
+    store(lv, constant(0, vp, line), vp, line);
+    int nb = m_out->newBlock("rtti.nonnull"), jb = m_out->newBlock("rtti.end");
+    condbr(toBool(p, m_semaTypes.pointer(m_semaTypes.classType(cls)), line), nb, jb, line);
+    m_block = nb;
+    store(lv, vfptrSubobject(p, cls, line), vp, line);
+    br(jb, line);
+    m_block = jb;
+    return load(lv, vp, line);
+}
+
+// typeid(...): the type_info object (5.2.8): of the dynamic type for an lvalue of a polymorphic class (through the
+// vftable's locator; *p with p null throws bad_typeid), else of the static type, the operand unevaluated
+int IrGen::typeidAddress(cxx::Expr* e, int line)
+{
+    const sema::Type* ot = e->semaOperand ? e->semaOperand : m_semaTypes.basic(sema::Type::Void);
+    cxx::Expr* x = e->kids.empty() ? 0 : e->kids[0];
+    while (x && x->kind == cxx::Expr::Paren && !x->kids.empty()) x = x->kids[0];
+    const sema::Type* cu = m_semaTypes.unqualified(m_semaTypes.unref(ot));
+    const sema::Type* tip = m_semaTypes.pointer(m_semaTypes.unref(exprType(e)));
+    const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+    if (x && x->semaLvalue && cu->kind == sema::Type::Class && cu->decl && cu->decl->isPolymorphic) {
+        int addr;
+        if (x->kind == cxx::Expr::Unary && x->text == "*" && !x->semaSym && x->kids.size() == 1) {
+            addr = value(x->kids[0]);
+            Symbol* thrower = stdFunction("__cppparse_throw_bad_typeid");
+            if (thrower) {
+                int ok = m_out->newBlock("typeid.ok"), bad = m_out->newBlock("typeid.null");
+                condbr(toBool(addr, m_semaTypes.decay(exprType(x->kids[0])), line), ok, bad, line);
+                m_block = bad;
+                std::vector<cxx::Expr*> none;
+                callFunction(thrower, -1, -1, none, 0, false, line);
+                br(ok, line);
+                m_block = ok;
+            }
+        } else { LValue lv = lvalue(x); addr = lv.kind == LValue::None ? value(x) : addressOf(lv, line); }
+        IrInst in = make(IrInst::Call, tip, line);
+        in.sub = "__RTtypeid";
+        in.args.push_back(IrOperand::temp(vfptrSubobject(addr, cu->decl, line), oldType(vp)));
+        return emit(in);
+    }
+    IrInst in = make(IrInst::AddrGlobal, tip, line);
+    in.args.push_back(IrOperand::global(typeDescriptor(cu), oldType(m_semaTypes.basic(sema::Type::Void))));
+    return emit(in);
+}
+
+// dynamic_cast<T*>(p) / <T&>(l) / <void*>(p) (5.2.7) that is not a conversion to a base: vcruntime finds the complete
+// object through the locator and walks its hierarchy; a failed reference cast throws bad_cast
+bool IrGen::dynamicCast(cxx::Expr* e, int line, int& result)
+{
+    const sema::Type* to = exprType(e);
+    cxx::Expr* x = e->kids[0];
+    const bool ref = isReference(to);
+    if (!ref && to->kind != sema::Type::Pointer) return false;
+    const sema::Type* target = m_semaTypes.unqualified(to->inner);
+    const sema::Type* srcT = 0;
+    if (ref) srcT = m_semaTypes.unqualified(m_semaTypes.unref(exprType(x)));
+    else { const sema::Type* pt = m_semaTypes.decay(m_semaTypes.unref(exprType(x))); if (pt->kind == sema::Type::Pointer) srcT = m_semaTypes.unqualified(pt->inner); }
+    if (!srcT || srcT->kind != sema::Type::Class || !srcT->decl || !srcT->decl->isPolymorphic) return false;
+    if (target->kind == sema::Type::Class && target->decl && (target->decl == srcT->decl || isBaseOf(srcT->decl, target->decl))) return false;
+    if (target->kind != sema::Type::Class && target->kind != sema::Type::Void) return false;
+    const sema::Type* vp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void));
+    const sema::Type* chp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Char));
+    const sema::Type* it = m_semaTypes.basic(sema::Type::Int);
+    int p;
+    if (ref) { LValue lv = lvalue(x); p = lv.kind == LValue::None ? value(x) : addressOf(lv, line); }
+    else p = value(x);
+    const int in = ref ? vfptrSubobject(p, srcT->decl, line) : vfptrSubobjectOrNull(p, srcT->decl, line);
+    if (target->kind == sema::Type::Void) {
+        IrInst c = make(IrInst::Call, vp, line);
+        c.sub = "__RTCastToVoid";
+        c.args.push_back(IrOperand::temp(in, oldType(vp)));
+        result = emit(c);
+        return true;
+    }
+    // VfDelta: how far the vfptr's subobject lies from the pointer (0 unless the first vfptr is inside a virtual base)
+    int delta = in == p ? constant(0, it, line) : convert(binary("-", in, chp, p, chp, m_semaTypes.basic(sema::Type::LongLong), line), m_semaTypes.basic(sema::Type::LongLong), it, line);
+    IrInst sd = make(IrInst::AddrGlobal, vp, line); sd.args.push_back(IrOperand::global(typeDescriptor(srcT), oldType(m_semaTypes.basic(sema::Type::Void))));
+    IrInst td = make(IrInst::AddrGlobal, vp, line); td.args.push_back(IrOperand::global(typeDescriptor(target), oldType(m_semaTypes.basic(sema::Type::Void))));
+    const int src = emit(sd), dst = emit(td);
+    const sema::Type* rp = m_semaTypes.pointer(target);
+    IrInst c = make(IrInst::Call, rp, line);
+    c.sub = "__RTDynamicCast";
+    c.args.push_back(IrOperand::temp(in, oldType(vp)));
+    c.args.push_back(IrOperand::temp(delta, oldType(it)));
+    c.args.push_back(IrOperand::temp(src, oldType(vp)));
+    c.args.push_back(IrOperand::temp(dst, oldType(vp)));
+    c.args.push_back(IrOperand::temp(constant(0, it, line), oldType(it)));
+    int r = emit(c);
+    if (ref) {
+        Symbol* thrower = stdFunction("__cppparse_throw_bad_cast");
+        if (thrower) {
+            int ok = m_out->newBlock("dyncast.ok"), bad = m_out->newBlock("dyncast.bad");
+            condbr(toBool(r, rp, line), ok, bad, line);
+            m_block = bad;
+            std::vector<cxx::Expr*> none;
+            callFunction(thrower, -1, -1, none, 0, false, line);
+            br(ok, line);
+            m_block = ok;
+        }
+    }
+    result = r;
+    return true;
 }
 
 // the IR name of a class's vftable t (0: the one at offset 0, "vtable@D"; then "vtable@D{for PB@16}")
@@ -4497,6 +4777,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
 {
     m_x86 = &x86;
     m_msvcNames = msvc;
+    if (msvc) { x86.registerGlobalName("rtti_type_info_vftable", "??_7type_info@@6B@"); }   // vcruntime's, the first word of every type descriptor
     for (size_t i = 0; i < m_prog.symbols.size(); ++i) {
         Symbol* s = m_prog.symbols[i];
         if (s->kind == Symbol::Class && s->isDefinition && s->isPolymorphic && !s->isDependentContext && s->layoutDone) {
@@ -4576,6 +4857,21 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
                     v.entries.push_back(thunk);
                     x86.addThunk(thunk, target, adjust);
                     if (msvc) x86.registerSymbolName(thunk, m->isDestructor ? deletingName(msvcMangleThunkSymbol(*m, adjust)) : msvcMangleThunkSymbol(*m, adjust));
+                }
+                // cl's RTTI locator in the 8 bytes before the table: the vfptr's offset in the complete object, the type
+                // descriptor and the class hierarchy
+                {
+                    const Symbol* forBase = n > 1 && !paths[t].empty() ? paths[t][pick[t]] : 0;
+                    const std::string col = "rtti_col_" + rttiKey(name.substr(7));
+                    std::vector<IrDataItem> items;
+                    items.push_back(dataInt(1, 4));
+                    items.push_back(dataInt(s->vftables.empty() ? 0 : s->vftables[t].offset, 4));
+                    items.push_back(dataInt(0, 4));
+                    items.push_back(dataRva(typeDescriptor(s->type)));
+                    items.push_back(dataRva(classHierarchy(s)));
+                    items.push_back(dataRva(col));
+                    rttiGlobal(col, msvcMangleCompleteObjectLocator(*s, forBase), items, true);
+                    v.locator = col;
                 }
                 x86.addVtable(v);
                 if (msvc) x86.registerGlobalName(name, msvcMangleVtableSymbol(*s, n > 1 && !paths[t].empty() ? paths[t][pick[t]] : 0));

@@ -19,7 +19,15 @@ public:
     std::string vtable(const sema::Symbol& c, const sema::Symbol* forBase);
     std::string vbtable(const sema::Symbol& c, const std::vector<sema::Symbol*>& path);
     std::string vcallThunk(const sema::Symbol& c, long slotOffset);
+    // RTTI: the name a type descriptor holds (".?AUD@@", ".H") and the descriptors' symbols
+    std::string rttiTypeName(const sema::Type* t);
+    std::string typeDescriptor(const sema::Type* t) { return "??_R0" + rttiTypeName(t).substr(1) + "@8"; }
+    std::string classHierarchy(const sema::Symbol& c) { return "??_R3" + classScoped(c) + "8"; }
+    std::string baseClassArray(const sema::Symbol& c) { return "??_R2" + classScoped(c) + "8"; }
+    std::string baseClassDescriptor(const sema::Symbol& c, long mdisp, long pdisp, long vdisp, long attributes);
+    std::string completeObjectLocator(const sema::Symbol& c, const sema::Symbol* forBase) { std::string v = vtable(c, forBase); return "??_R4" + v.substr(4); }
 private:
+    std::string classScoped(const sema::Symbol& c) { return symbolName(&c) + scopesOf(c.scope) + "@"; }
     std::string storageType(const sema::Type* t);
     std::string memberPointerType(const sema::Type* t);
     std::string memberClass(const sema::Type* t);
@@ -407,6 +415,27 @@ std::string SemaMangler::vtable(const sema::Symbol& c, const sema::Symbol* forBa
     return out + "@@";
 }
 
+// the name in a type descriptor: "." and the type's code, a class or enum with its cv-qualifier letter (".?AUD@@",
+// ".?AVstring@std@@", ".H", ".PEAUD@@"); typeid strips the top-level qualifiers and references (5.2.8)
+std::string SemaMangler::rttiTypeName(const sema::Type* t)
+{
+    if (t && t->kind == sema::Type::Reference) t = t->inner;
+    if (t && (t->kind == sema::Type::Class || t->kind == sema::Type::Enum)) return ".?A" + type(t);
+    return "." + type(t);
+}
+
+// cl's base class descriptor: ??_R1<mdisp><pdisp><vdisp><attributes><class>@8, "D::`RTTI Base Class Descriptor at
+// (16,-1,0,64)'" is ??_R1BA@?0A@EA@D@@8
+std::string SemaMangler::baseClassDescriptor(const sema::Symbol& c, long mdisp, long pdisp, long vdisp, long attributes)
+{
+    std::string out = "??_R1";
+    out += number(mdisp);
+    out += number(pdisp);
+    out += number(vdisp);
+    out += number(attributes);
+    return out + classScoped(c) + "8";
+}
+
 // a vbtable, named by the bases that tell it from the class's others: ??_8D@@7B@, ??_8VX@@7BVL@@@, ??_8R@@7BB@@P@@@
 std::string SemaMangler::vbtable(const sema::Symbol& c, const std::vector<sema::Symbol*>& path)
 {
@@ -444,6 +473,12 @@ std::string msvcMangleVtableSymbol(const sema::Symbol& c, const sema::Symbol* fo
 std::string msvcMangleVbtableSymbol(const sema::Symbol& c, const std::vector<sema::Symbol*>& path) { SemaMangler m; return m.vbtable(c, path); }
 std::string msvcMangleThunkSymbol(const sema::Symbol& fn, long adjust) { SemaMangler m; return m.function(fn, adjust); }
 std::string msvcMangleVcallThunk(const sema::Symbol& c, long slotOffset) { SemaMangler m; return m.vcallThunk(c, slotOffset); }
+std::string msvcRttiTypeName(const sema::Type* t) { SemaMangler m; return m.rttiTypeName(t); }
+std::string msvcMangleTypeDescriptor(const sema::Type* t) { SemaMangler m; return m.typeDescriptor(t); }
+std::string msvcMangleClassHierarchy(const sema::Symbol& c) { SemaMangler m; return m.classHierarchy(c); }
+std::string msvcMangleBaseClassArray(const sema::Symbol& c) { SemaMangler m; return m.baseClassArray(c); }
+std::string msvcMangleBaseClassDescriptor(const sema::Symbol& c, long mdisp, long pdisp, long vdisp, long attributes) { SemaMangler m; return m.baseClassDescriptor(c, mdisp, pdisp, vdisp, attributes); }
+std::string msvcMangleCompleteObjectLocator(const sema::Symbol& c, const sema::Symbol* forBase) { SemaMangler m; return m.completeObjectLocator(c, forBase); }
 std::string msvcMangleReturnThunk(const sema::Symbol& fn, const sema::Symbol& root) { SemaMangler m; return m.function(fn, 0, root.type && root.type->kind == sema::Type::Function ? root.type->inner : 0); }
 std::string msvcMangleVtordispThunk(const sema::Symbol& fn, long adjust) { SemaMangler m; return m.function(fn, adjust, 0, true); }
 std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index) { SemaMangler m; return m.staticGuard(fn, discriminator, index); }

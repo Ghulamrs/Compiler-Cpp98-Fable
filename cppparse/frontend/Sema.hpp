@@ -378,6 +378,8 @@ private:
     const Type* exprAssign(cxx::Expr* e, Scope* in);
     const Type* exprNew(cxx::Expr* e, Scope* in);
     const Type* exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked);
+    bool        dynamicCastCheck(cxx::Expr* e, const Type* to);
+    Symbol*     stdClass(const char* name);       // std::type_info, std::bad_cast when declared
     bool        floatingConstant(cxx::Expr* e, double& v, bool toFloating, int depth);
     const Type* valueType(cxx::Expr* e);          // lvalue-to-rvalue: the type after decay, without top-level cv
     // brace initialisation of aggregates: elided braces become explicit InitList nodes and every element

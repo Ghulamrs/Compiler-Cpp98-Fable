@@ -897,6 +897,46 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
     return r;
 }
 
+// a class of namespace std by name (type_info, bad_cast), 0 when it is not declared (the header is not included)
+Symbol* Sema::stdClass(const char* name)
+{
+    const std::vector<Symbol*>* ns = m_prog.global->find("std");
+    if (!ns) return 0;
+    for (size_t i = 0; i < ns->size(); ++i) {
+        Symbol* n = (*ns)[i];
+        if (n->kind != Symbol::Namespace || !n->members) continue;
+        const std::vector<Symbol*>* v = n->members->find(name);
+        if (v) for (size_t k = 0; k < v->size(); ++k) if ((*v)[k]->kind == Symbol::Class && (*v)[k]->isDefinition) return (*v)[k];
+    }
+    return 0;
+}
+
+// 5.2.7: dynamic_cast<T>(v) converts to a pointer or reference to a class, or to void*; a conversion to a base is
+// static; anything else (a cast down or across, to void*) needs a polymorphic operand and, for a reference, the
+// std::bad_cast it throws
+bool Sema::dynamicCastCheck(cxx::Expr* e, const Type* to)
+{
+    const Type* vt = valueType(e->kids[0]);
+    if (vt->kind == Type::Dependent || vt->kind == Type::Error) return true;
+    const Type* srcClass = 0;
+    const Type* target = 0;
+    if (to->kind == Type::Pointer) {
+        target = m_types.unqualified(to->inner);
+        if (vt->kind != Type::Pointer) { error(e->loc, "S147", "dynamic_cast to a pointer needs a pointer operand, not " + vt->text()); return false; }
+        srcClass = m_types.unqualified(vt->inner);
+    } else if (to->kind == Type::Reference) {
+        target = m_types.unqualified(to->inner);
+        srcClass = m_types.unqualified(m_types.unref(e->kids[0]->semaType));
+    } else { error(e->loc, "S147", "dynamic_cast converts to a pointer or reference to a class, or to void*, not to " + to->text()); return false; }
+    if (!srcClass || srcClass->kind != Type::Class || !srcClass->decl) { error(e->loc, "S147", "the operand of dynamic_cast must be a class, not " + srcClass->text()); return false; }
+    if (!target || (target->kind != Type::Class && !(to->kind == Type::Pointer && target->kind == Type::Void))) { error(e->loc, "S147", "dynamic_cast converts to a pointer or reference to a class, or to void*, not to " + to->text()); return false; }
+    if (target->kind == Type::Class && target->decl && (target->decl == srcClass->decl || derivesFrom(srcClass->decl, target->decl, 0))) return true;   // static
+    if (!srcClass->decl->isPolymorphic) { error(e->loc, "S147", "'" + srcClass->decl->qualifiedName() + "' is not a polymorphic type: dynamic_cast needs a class with a virtual function (cl C2683)"); return false; }
+    if (target->kind == Type::Class && target->decl && !target->decl->isDefinition) { error(e->loc, "S113", "incomplete class '" + target->decl->qualifiedName() + "' in a dynamic_cast"); return false; }
+    if (to->kind == Type::Reference && !stdClass("bad_cast")) { error(e->loc, "S146", "dynamic_cast to a reference throws std::bad_cast: include <typeinfo>"); return false; }
+    return true;
+}
+
 const Type* Sema::exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked)
 {
     // e->kids are the operands (one for casts, any number for a functional cast)
@@ -904,6 +944,7 @@ const Type* Sema::exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked
     if (!to || to->kind == Type::Error) return m_types.error();
     if (to->kind == Type::Dependent) return to;
     const Type* tu = m_types.unref(to);
+    if (e->kind == cxx::Expr::NamedCast && e->text == "dynamic_cast" && e->kids.size() == 1 && e->kids[0]->semaType && !dynamicCastCheck(e, to)) return m_types.error();
     if (e->kids.size() == 1 && e->kids[0]->semaType) {
         // a cast between a class and one of its bases held more than once (up or down; cl C2594)
         const Type* fu = m_types.unqualified(m_types.unref(e->kids[0]->semaType));
@@ -1508,7 +1549,17 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
     case cxx::Expr::New: t = exprNew(e, in); break;
     case cxx::Expr::Delete: { expr(e->kids[0], in); const Type* pt = valueType(e->kids[0]); if (pt->kind != Type::Pointer && pt->kind != Type::Dependent && pt->kind != Type::Error) error(e->loc, "S109", "delete of a non-pointer of type " + pt->text()); t = m_types.basic(Type::Void); break; }
     case cxx::Expr::Throw: if (!e->kids.empty()) expr(e->kids[0], in); t = m_types.basic(Type::Void); break;
-    case cxx::Expr::Typeid: if (!e->kids.empty()) expr(e->kids[0], in); t = m_types.error(); break;
+    case cxx::Expr::Typeid: {
+        // 5.2.8: an lvalue of type const std::type_info; typeid(type-id) and typeid(expr) of a non-polymorphic
+        // operand name the static type (IrGen evaluates the operand only when it is a polymorphic class lvalue)
+        if (e->type) { const Type* ot = typeOf(e->type->spec, in); if (e->type->decl) ot = applyDeclarator(ot, *e->type->decl, in, 0); e->semaOperand = ot; }
+        else if (!e->kids.empty()) { expr(e->kids[0], in); e->semaOperand = e->kids[0]->semaType; }
+        Symbol* ti = stdClass("type_info");
+        if (!ti) { error(e->loc, "S146", "typeid needs std::type_info: include <typeinfo> (cl C2027)"); t = m_types.error(); break; }
+        t = m_types.reference(m_types.qualified(m_types.classType(ti), true, false));
+        e->semaLvalue = true;
+        break;
+    }
     case cxx::Expr::InitList: error(e->loc, "S105", "a braced list is not an expression"); t = m_types.error(); break;
     case cxx::Expr::Error: t = m_types.error(); break;
     }

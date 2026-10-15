@@ -158,7 +158,8 @@ struct Expr {
     bool               semaLvalue;
     bool               semaConst;   // a constant expression
     long               semaValue;   // its value when semaConst
-    Expr() : kind(Error), type(0), arrayDelete(false), hasInit(false), arrowMember(false), globalScope(false), semaType(0), semaSym(0), semaLvalue(false), semaConst(false), semaValue(0) {}
+    const sema::Type*  semaOperand; // Typeid: the type the operand names or has (typeid(int), typeid(x))
+    Expr() : kind(Error), type(0), arrayDelete(false), hasInit(false), arrowMember(false), globalScope(false), semaType(0), semaSym(0), semaLvalue(false), semaConst(false), semaValue(0), semaOperand(0) {}
 };
 
 

@@ -11,8 +11,10 @@ constructors and destructors (members destroyed before the handler, rethrow at i
 passed through a function returning const T&; Base* ranked over void*; argument-dependent lookup on ordinary calls
 (the namespaces of the arguments' classes, bases, template arguments and enumerations) and friend functions declared
 in a class (functions of the enclosing namespace, found by ADL alone until the namespace declares them); internal
-linkage of const globals and COMDAT static data members of class templates (two units link).
-Open from that review: RTTI, templates (partial ordering, explicit specialisation, SFINAE, template
+linkage of const globals and COMDAT static data members of class templates (two units link); RTTI (cl's type
+descriptors, hierarchy descriptors and complete object locators before every vftable, typeid and dynamic_cast through
+vcruntime's __RTtypeid/__RTDynamicCast/__RTCastToVoid, <typeinfo> with bad_cast and bad_typeid).
+Open from that review: templates (partial ordering, explicit specialisation, SFINAE, template
 template parameters), 20 of the 32 library headers, the exception runtime's 32-handler limit, diagnostics and
 robustness, #if arithmetic and #line, debug information, char* from a literal, chained operator->, the driver.
 

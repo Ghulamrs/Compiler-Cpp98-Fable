@@ -1627,7 +1627,11 @@ void X86Module::emitVtables()
         const IrVtable& v = m_vtables[i];
         std::string tableSym = globalSymbol("vtable@" + v.className);
         m_dataSymbols.insert(tableSym);
-        std::string table = ";@comdat any\n" + tableSym + " LABEL QWORD\n";   // every translation unit that needs the table emits it
+        std::string table = ";@comdat any\n";   // every translation unit that needs the table emits it
+        // cl's layout: the RTTI complete object locator in the 8 bytes before the table (the vptr points at slot 0;
+        // vcruntime's __RTtypeid and __RTDynamicCast read it at vptr - 8)
+        if (!v.locator.empty()) { table += "        DQ OFFSET " + globalSymbol(v.locator) + "\n"; useGlobal(v.locator); }
+        table += tableSym + " LABEL QWORD\n";
         for (size_t k = 0; k < v.entries.size(); ++k) {
             std::string sym = v.entries[k].empty() ? std::string("") : symbol(v.entries[k]);
             if (!sym.empty() && !m_defined.count(sym)) m_externs.insert(sym);
@@ -1657,6 +1661,12 @@ void X86Module::emitGlobals()
                 else if (it.kind == IrDataItem::Int) def += std::string(dir) + " " + intToString(static_cast<int>(it.value));
                 else if (it.kind == IrDataItem::Float) def += std::string(it.size == 4 ? "REAL4 " : "REAL8 ") + it.text;
                 else if (it.kind == IrDataItem::String) def += "DQ OFFSET " + stringLabel(it.text);
+                else if (it.kind == IrDataItem::Bytes) {
+                    // the bytes as numbers (a type descriptor's name with its terminator)
+                    def += "DB ";
+                    for (size_t b = 0; b < it.text.size(); ++b) def += (b ? "," : "") + intToString(static_cast<unsigned char>(it.text[b]));
+                }
+                else if (it.kind == IrDataItem::Rva) { def += "DD IMAGEREL " + globalSymbol(it.text); useGlobal(it.text); }   // an image-relative address (RTTI descriptors)
                 else { def += "DQ OFFSET " + globalSymbol(it.text); useGlobal(it.text); }
             }
         }

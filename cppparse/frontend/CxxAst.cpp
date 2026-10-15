@@ -438,7 +438,7 @@ struct Cloner {
         for (size_t i = 0; i < c->kids.size(); ++i) c->kids[i] = expr(c->kids[i]);
         for (size_t i = 0; i < c->placement.size(); ++i) c->placement[i] = expr(c->placement[i]);
         if (c->type) c->type = typeId(c->type);
-        c->semaType = 0; c->semaSym = 0; c->semaLvalue = false; c->semaConst = false; c->semaValue = 0;
+        c->semaType = 0; c->semaSym = 0; c->semaLvalue = false; c->semaConst = false; c->semaValue = 0; c->semaOperand = 0;
         return c;
     }
     Stmt* stmt(const Stmt* s)

@@ -946,6 +946,14 @@ bool Encoder::dataLine(const std::string& raw, int line)
             for (long k = 0; k < count; ++k) { if (size == 8) qword(u); else imm(static_cast<long>(u.lo), size); }
             continue;
         }
+        if (lv.compare(0, 9, "imagerel ") == 0) {
+            // an image-relative address (cl's RTTI descriptors reference each other so): a 32-bit ADDR32NB relocation
+            if (size != 4) return fail("IMAGEREL needs DD: " + val, line);
+            Reloc rl; rl.offset = pos(); rl.symbol = trimWs(val.substr(9)); rl.type = RelAddr32Nb;
+            m_c.relocs.push_back(rl);
+            for (int i = 0; i < 4; ++i) byte(0);
+            continue;
+        }
         if (lv.compare(0, 7, "offset ") == 0 || (!val.empty() && isIdentStart(val[0]) && !isNumberText(val))) {
             std::string sym = trimWs(lv.compare(0, 7, "offset ") == 0 ? val.substr(7) : val);
             if (size != 8) return fail("an address needs DQ: " + val, line);
@@ -1139,7 +1147,9 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             // has no PUBLIC line before it, and must not join the COMDAT section the linker may discard
             // (an ALIGN starts the next item too: it pads for the definition after it)
             const bool labelled = u0 != "DB" && u0 != "DW" && u0 != "DD" && u0 != "DQ" && u0 != "REAL4" && u0 != "REAL8" && u0 != "ALIGN";
-            if (!comdatNext && (labelled || u0 == "ALIGN") && currentPiece && currentPiece->comdat) currentPiece = 0;
+            // (a label after unlabelled data at the start of a COMDAT item names that item: a vftable's symbol follows
+            // its RTTI locator word, as in cl's objects, where the symbol is 8 bytes into its section)
+            if (!comdatNext && (labelled || u0 == "ALIGN") && currentPiece && currentPiece->comdat && !currentPiece->chunk.symbols.empty()) currentPiece = 0;
             if (comdatNext) {
                 pieces.push_back(new DataPiece(section, true)); currentPiece = pieces.back(); comdatNext = false;
                 if (comdatAlign > currentPiece->chunk.maxAlign) currentPiece->chunk.maxAlign = comdatAlign;

@@ -1238,6 +1238,18 @@ void show()
 }
 }
 
+namespace arrow {   // M14: operator-> is applied repeatedly until a pointer comes out (13.5.6)
+struct Inner { int v; Inner() : v(5) {} Inner* operator->() { return this; } };
+struct Mid { Inner in; int calls; Mid() : calls(0) {} Inner& operator->() { ++calls; return in; } };
+struct Outer { Mid mid; Mid& operator->() { return mid; } };
+void show()
+{
+    Mid m; Outer o;
+    int a = m->v; o->v = 7;
+    std::printf("arrow %d %d %d\n", a, o.mid.in.v, m.calls + o.mid.calls);
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -1280,6 +1292,7 @@ int main()
     templ::show();
     placement::show();
     membername::show();
+    arrow::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

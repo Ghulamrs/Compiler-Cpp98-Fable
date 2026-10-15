@@ -353,6 +353,10 @@ private:
     bool     lookupInScope(Scope* s, const std::string& name, bool typesOnly, std::vector<Symbol*>& out, std::set<Scope*>& seen);
     bool     lookupMember(Symbol* cls, const std::string& name, std::vector<Symbol*>& out, int depth = 0);
     Symbol*  resolveName(const cxx::QualifiedName& n, Scope* from, bool typesOnly, std::vector<Symbol*>* overloads);
+    // argument-dependent lookup (3.4.2): the namespaces associated with a type, and the functions named name
+    // declared in the namespaces associated with the arguments' types (in-class friend definitions among them)
+    void     associatedNamespaces(const Type* t, std::vector<Scope*>& out, int depth);
+    void     adlCandidates(const std::string& name, const std::vector<cxx::Expr*>& args, size_t firstArg, std::vector<Symbol*>& cands);
 
     // types
     const Type* namedType(const cxx::QualifiedName& n, Scope* in, const std::string& elaborated, const cxx::Loc& loc);

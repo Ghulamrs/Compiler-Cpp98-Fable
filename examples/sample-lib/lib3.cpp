@@ -79,3 +79,14 @@ int streamManipulators()                   // 2551: hex and dec manipulators (a 
     if (in3 >> v) r += 1;
     return r;
 }
+
+struct Point { int x, y; Point(int a, int b) : x(a), y(b) {}
+    friend std::ostream& operator<<(std::ostream& os, const Point& p) { return os << "(" << p.x << "," << p.y << ")"; } };
+struct Q3 { int v; Q3(int a) : v(a) {} };
+std::ostream& operator<<(std::ostream& os, const Q3& q) { return os << "Q" << q.v; }
+int streamFriends()                        // 303: operator<< as an in-class friend (found by ADL) and at namespace scope
+{
+    std::ostringstream o;
+    o << Point(1, 2) << " " << Q3(3);
+    return o.str() == "(1,2) Q3" ? 303 : 0;
+}

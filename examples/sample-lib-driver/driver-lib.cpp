@@ -17,6 +17,7 @@ int streamFormatting();
 int streamParsing();
 int fileRoundTrip();
 int streamManipulators();
+int streamFriends();
 
 static int g_failures = 0;
 
@@ -43,6 +44,7 @@ int main()
     check("streamParsing()", streamParsing(), 1234);
     check("fileRoundTrip()", fileRoundTrip(), 77);
     check("streamManipulators()", streamManipulators(), 2551);
+    check("streamFriends()", streamFriends(), 303);
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

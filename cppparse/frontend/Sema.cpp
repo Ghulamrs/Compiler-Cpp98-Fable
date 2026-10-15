@@ -419,11 +419,51 @@ bool Sema::lookupInScope(Scope* s, const std::string& name, bool typesOnly, std:
         }
     } else {
         const std::vector<Symbol*>* v = s->find(name);
-        if (v) for (size_t i = 0; i < v->size(); ++i) if (!typesOnly || (*v)[i]->isType() || (*v)[i]->kind == Symbol::ClassTemplate) { out.push_back((*v)[i]); found = true; }
+        // a function declared only as a friend inside a class is not found by ordinary lookup (7.3.1.2/3), only by
+        // argument-dependent lookup, until the namespace declares it
+        if (v) for (size_t i = 0; i < v->size(); ++i) if (!(*v)[i]->isFriendDecl && (!typesOnly || (*v)[i]->isType() || (*v)[i]->kind == Symbol::ClassTemplate)) { out.push_back((*v)[i]); found = true; }
     }
     // namespaces nominated by using-directives in this scope
     for (size_t u = 0; u < s->usingDirectives.size(); ++u) if (lookupInScope(s->usingDirectives[u], name, typesOnly, out, seen)) found = true;
     return found;
+}
+
+// 3.4.2/2: the namespaces associated with a class are the innermost enclosing namespaces of the class, of its
+// direct and indirect bases and of the classes its template arguments name; of an enumeration its namespace; of a
+// pointer, reference or array those of the pointed-to or element type; of a function type those of its parameter
+// and return types
+void Sema::associatedNamespaces(const Type* t, std::vector<Scope*>& out, int depth)
+{
+    if (!t || depth > 16) return;
+    switch (t->kind) {
+    case Type::Pointer: case Type::Reference: case Type::Array: associatedNamespaces(t->inner, out, depth + 1); return;
+    case Type::Function: associatedNamespaces(t->inner, out, depth + 1); for (size_t i = 0; i < t->params.size(); ++i) associatedNamespaces(t->params[i], out, depth + 1); return;
+    case Type::Class: case Type::Enum: break;
+    default: return;
+    }
+    Symbol* d = t->decl;
+    if (!d) return;
+    Scope* ns = d->scope;
+    while (ns && !ns->isNamespaceLike()) ns = ns->parent;
+    if (ns && std::find(out.begin(), out.end(), ns) == out.end()) out.push_back(ns);
+    if (t->kind != Type::Class) return;
+    for (size_t b = 0; b < d->bases.size(); ++b) if (d->bases[b].cls) associatedNamespaces(d->bases[b].cls->type, out, depth + 1);
+    for (size_t a = 0; a < d->templateArgs.size(); ++a) if (d->templateArgs[a]) associatedNamespaces(d->templateArgs[a], out, depth + 1);
+}
+
+void Sema::adlCandidates(const std::string& name, const std::vector<cxx::Expr*>& args, size_t firstArg, std::vector<Symbol*>& cands)
+{
+    std::vector<Scope*> nss;
+    for (size_t a = firstArg; a < args.size(); ++a) if (args[a] && args[a]->semaType) associatedNamespaces(m_types.unref(args[a]->semaType), nss, 0);
+    for (size_t n = 0; n < nss.size(); ++n) {
+        const std::vector<Symbol*>* v = nss[n]->find(name);
+        if (!v) continue;
+        for (size_t k = 0; k < v->size(); ++k) {
+            Symbol* f = (*v)[k];
+            if (f->kind != Symbol::Function && f->kind != Symbol::FunctionTemplate) continue;
+            if (std::find(cands.begin(), cands.end(), f) == cands.end()) cands.push_back(f);
+        }
+    }
 }
 
 Symbol* Sema::lookupUnqualified(const std::string& name, Scope* from, bool typesOnly, std::vector<Symbol*>* all)
@@ -1065,6 +1105,14 @@ Symbol* Sema::declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::Dec
     if (n.parts.back().convType) name = "operator " + n.parts.back().convType->text();
     Scope* target = in;
     Symbol* owner = in->kind == Scope::Class ? in->owner : 0;
+    // a friend function declared (or defined) in a class is a function of the innermost enclosing namespace
+    // (11.4/5, 7.3.1.2/3), not a member; found only by argument-dependent lookup until that namespace declares it
+    const bool friendInClass = spec.isFriend && in->kind == Scope::Class && n.parts.size() == 1;
+    if (friendInClass) {
+        while (target && !target->isNamespaceLike()) target = target->parent;
+        if (!target) target = m_prog.global;
+        owner = 0;
+    }
     if (n.parts.size() > 1) {
         Scope* q = scopeForQualifier(n, in);
         if (!q) { if (!m_reportedUnknown.count(n.text())) { m_reportedUnknown.insert(n.text()); error(dcl->loc, "S101", "unknown scope in '" + n.text() + "'"); } return 0; }
@@ -1090,6 +1138,7 @@ Symbol* Sema::declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::Dec
         if (e->kind == Symbol::Function && sameSignature(e->type, ft)) {
             if (n.parts.size() > 1 || e->scope == target) {
                 dcl->semaSym = e;
+                if (!friendInClass && !spec.isFriend) e->isFriendDecl = false;   // the namespace declares it: visible to ordinary lookup now
                 // an out-of-line definition supplies the parameter names
                 if (!params.empty() && e->params.size() == params.size()) for (size_t k = 0; k < params.size(); ++k) if (e->params[k]->name.empty()) e->params[k]->name = params[k]->name;
                 if (!params.empty()) {
@@ -1114,7 +1163,8 @@ Symbol* Sema::declareFunction(cxx::Decl* d, cxx::Declarator* dcl, const cxx::Dec
     fn->isInline = spec.isInline || (in->kind == Scope::Class && d->kind == cxx::Decl::Function);   // defined in the class body
     fn->isVirtual = spec.isVirtual; fn->isConstructor = ctor; fn->isDestructor = dtor; fn->isConversion = conv;
     fn->isOperator = name.compare(0, 8, "operator") == 0 && !conv;
-    fn->isDependentContext = in->kind == Scope::TemplateParams || (owner && owner->isDependentContext);
+    fn->isFriendDecl = friendInClass;
+    fn->isDependentContext = in->kind == Scope::TemplateParams || (owner && owner->isDependentContext) || (friendInClass && in->owner && in->owner->isDependentContext);
     fn->requiredParams = static_cast<int>(params.size());
     for (size_t k = 0; k < params.size(); ++k) if (params[k]->init) { fn->requiredParams = static_cast<int>(k); break; }
     // default arguments are analysed with the bodies, in the class or declaring scope (a member may be declared later)
@@ -1177,7 +1227,7 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
         }
         if (t->kind == Type::Function) {
             Symbol* fn = declareFunction(d, dcl, d->spec, in, access, t, params);
-            if (fn) { if (id.pureVirtual) { fn->isPureVirtual = true; fn->isVirtual = true; } if (d->spec.isFriend) fn->isFriendDecl = true; }
+            if (fn && id.pureVirtual) { fn->isPureVirtual = true; fn->isVirtual = true; }
             continue;
         }
         // a bit-field: its width is a constant; an unnamed one (": n") only shapes the layout

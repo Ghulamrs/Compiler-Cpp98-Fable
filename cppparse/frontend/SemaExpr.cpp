@@ -688,16 +688,9 @@ Symbol* Sema::classOperator(const std::string& op, cxx::Expr* e, const std::vect
     }
     std::vector<Symbol*> cands;
     lookupUnqualified(name, in, false, &cands);
-    // argument-dependent lookup: the namespaces of the operand classes
-    for (size_t i = 0; i < operands.size(); ++i) {
-        const Type* t = m_types.unref(operands[i]->semaType);
-        if (t && t->kind == Type::Pointer) t = t->inner;
-        if (t && t->kind == Type::Class && t->decl) {
-            Scope* ns = t->decl->scope;
-            while (ns && !ns->isNamespaceLike()) ns = ns->parent;
-            if (ns) { const std::vector<Symbol*>* v = ns->find(name); if (v) for (size_t k = 0; k < v->size(); ++k) { bool dup = false; for (size_t q = 0; q < cands.size(); ++q) if (cands[q] == (*v)[k]) dup = true; if (!dup) cands.push_back((*v)[k]); } }
-        }
-    }
+    // argument-dependent lookup: the namespaces associated with the operands' types (those of the classes, their
+    // bases and template arguments; in-class friend definitions among the functions found)
+    adlCandidates(name, operands, 0, cands);
     std::vector<Symbol*> free;
     for (size_t i = 0; i < cands.size(); ++i) if ((cands[i]->kind == Symbol::Function && !cands[i]->ownerClass) || cands[i]->kind == Symbol::FunctionTemplate) free.push_back(cands[i]);
     if (free.empty()) return 0;
@@ -824,8 +817,21 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
     if (callee->kind == cxx::Expr::Name) {
         Symbol* s = resolveName(callee->name, in, false, &cands);
         what = callee->name.text();
+        // argument-dependent lookup (3.4.2): the functions of the namespaces associated with the arguments' types
+        // join the candidates, unless ordinary lookup found a class member, a block-scope declaration or something
+        // that is not a function (then only those count)
+        bool adl = callee->name.parts.size() == 1 && !callee->name.global;
+        for (size_t k = 0; k < cands.size() && adl; ++k) {
+            Symbol* c = cands[k];
+            if ((c->kind != Symbol::Function && c->kind != Symbol::FunctionTemplate) || c->ownerClass || c->isLocal || !c->scope || !c->scope->isNamespaceLike()) adl = false;
+        }
+        if (adl) {
+            for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in);
+            adlCandidates(callee->name.last(), e->kids, 1, cands);
+            if (!s && !cands.empty()) s = cands[0];
+        }
         if (!s) {
-            for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in);
+            for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in);
             ++m_stats.namesUnresolved;
             if (!m_reportedUnknown.count(what)) { m_reportedUnknown.insert(what); error(e->loc, "S103", "call to undeclared function '" + what + "'"); }
             return m_types.error();
@@ -845,9 +851,9 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
             // a function pointer, or a class with operator()
             const Type* vt = m_types.unref(s->type);
             callee->semaSym = s; callee->semaType = s->type;
-            if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); promoteVariadic(e->kids, 1, vt->inner); return vt->inner->inner; }
+            if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in); promoteVariadic(e->kids, 1, vt->inner); return vt->inner->inner; }
             if (vt->kind == Type::Class && vt->decl) { cands.clear(); lookupMember(vt->decl, "operator()", cands); thisExpr = callee; what = vt->decl->name + "::operator()"; }
-            else { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); if (vt->kind != Type::Dependent && vt->kind != Type::Error) error(e->loc, "S118", "'" + what + "' is not a function"); return m_types.error(); }
+            else { for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in); if (vt->kind != Type::Dependent && vt->kind != Type::Error) error(e->loc, "S118", "'" + what + "' is not a function"); return m_types.error(); }
         }
         // a member function called from within a member function: the implicit this
         if (!thisExpr && !cands.empty() && cands[0]->ownerClass && m_currentClass && cands[0]->kind == Symbol::Function && !cands[0]->isStatic) thisExpr = callee;
@@ -856,7 +862,7 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
         const Type* mt = exprMember(callee, in);
         Symbol* s = callee->semaSym;
         if (!s) {
-            for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in);
+            for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in);
             if (mt && mt->kind == Type::Function && !callee->name.parts.empty() && !callee->name.last().empty() && callee->name.last()[0] == '~') return m_types.basic(Type::Void);   // pseudo-destructor
             return m_types.error();
         }
@@ -870,19 +876,19 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
             // a data member: a function pointer (called through its value) or a class with operator()
             callee->semaType = mt;
             const Type* vt = m_types.unref(mt);
-            if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); promoteVariadic(e->kids, 1, vt->inner); return vt->inner->inner; }
+            if (vt->kind == Type::Pointer && vt->inner->kind == Type::Function) { for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in); promoteVariadic(e->kids, 1, vt->inner); return vt->inner->inner; }
             if (vt->kind == Type::Class && vt->decl) { lookupMember(vt->decl, "operator()", cands); thisExpr = callee; }
-            else { for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in); return vt->kind == Type::Dependent ? vt : m_types.error(); }
+            else { for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in); return vt->kind == Type::Dependent ? vt : m_types.error(); }
         }
     } else {
         const Type* ct = m_types.unref(expr(callee, in));
-        for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in);
+        for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in);
         if (ct->kind == Type::Pointer && ct->inner->kind == Type::Function) { promoteVariadic(e->kids, 1, ct->inner); return ct->inner->inner; }
         if (ct->kind == Type::Function) { promoteVariadic(e->kids, 1, ct); return ct->inner; }
         if (ct->kind == Type::Class && ct->decl) { lookupMember(ct->decl, "operator()", cands); thisExpr = callee; what = "operator()"; }
         else { if (ct->kind != Type::Dependent && ct->kind != Type::Error) error(e->loc, "S118", "called object is not a function"); return ct->kind == Type::Dependent ? ct : m_types.error(); }
     }
-    for (size_t a = 1; a < e->kids.size(); ++a) expr(e->kids[a], in);
+    for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in);
     Symbol* f = resolveOverload(cands, e->kids, 1, thisExpr, in, e->loc, what, true);
     if (!f) return m_types.error();
     e->semaSym = f;

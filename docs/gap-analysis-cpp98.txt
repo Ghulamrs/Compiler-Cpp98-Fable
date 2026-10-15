@@ -8,8 +8,10 @@ converted scalar argument, at namespace scope too); the arguments of calls throu
 (Der& to Base& adjusted: std::cout << std::hex works); ++/-- on narrow types at -O2; the implicit constructor of
 `struct Leaf : Base {}` for a global (and global arrays of such classes constructed at all); function-try-blocks of
 constructors and destructors (members destroyed before the handler, rethrow at its end); the lifetime of a temporary
-passed through a function returning const T&; Base* ranked over void*.
-Open from that review: ADL on ordinary calls and in-class friend definitions, internal linkage of const globals and
+passed through a function returning const T&; Base* ranked over void*; argument-dependent lookup on ordinary calls
+(the namespaces of the arguments' classes, bases, template arguments and enumerations) and friend functions declared
+in a class (functions of the enclosing namespace, found by ADL alone until the namespace declares them).
+Open from that review: internal linkage of const globals and
 COMDAT static members of templates, RTTI, templates (partial ordering, explicit specialisation, SFINAE, template
 template parameters), 20 of the 32 library headers, the exception runtime's 32-handler limit, diagnostics and
 robustness, #if arithmetic and #line, debug information, char* from a literal, chained operator->, the driver.

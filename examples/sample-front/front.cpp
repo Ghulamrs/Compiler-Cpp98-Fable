@@ -1047,6 +1047,46 @@ void show()
 }
 }
 
+namespace adl {   // B2: argument-dependent lookup on ordinary calls, in-class friend definitions
+namespace N {
+    struct S { int v; S(int x) : v(x) {} };
+    int dbl2(S s) { return s.v * 2; }
+    int dbl2(S* p) { return p->v * 3; }
+    enum Color { Red, Green };
+    int paint(Color c) { return c == Red ? 1 : 2; }
+    namespace Inner { struct T : S { T(int x) : S(x) {} }; int thrice(const T& t) { return t.v * 3; } }
+    template <class X> struct Box { X x; Box(X a) : x(a) {} };
+    template <class X> int unbox(const Box<X>& b) { return b.x; }
+}
+namespace M { struct U { int u; }; int viaArg(const N::Box<U>& b) { return b.x.u; } }
+struct V {
+    int x; V(int a) : x(a) {}
+    friend V operator+(const V& a, const V& b) { return V(a.x + b.x); }
+    friend int norm(const V& v) { return v.x < 0 ? -v.x : v.x; }
+    friend void swap(V& a, V& b) { int t = a.x; a.x = b.x; b.x = t; }
+    friend int later(const V& v);
+    friend bool operator==(const V& a, const V& b) { return a.x == b.x; }
+};
+int later(const V& v) { return v.x + 1000; }
+struct W : V { W(int a) : V(a) {} };
+template <class T> struct Tmpl { T t; Tmpl(T v) : t(v) {} friend int peek(const Tmpl& b) { return (int)b.t * 10; } };
+template <class T> int callDbl2(T t) { return dbl2(t); }        // found by ADL at the instantiation
+int local(int) { return -1; }
+namespace Q { struct R {}; int local(R) { return 7; } int shadow(R) { return 1; } }
+int shadow(int) { return 2; }
+void show()
+{
+    N::S s(21); N::Inner::T t(5); M::U u0 = { 9 }; N::Box<M::U> bu(u0); N::Box<int> bi(4);
+    std::printf("adl %d %d %d %d %d %d %d %d\n", dbl2(s), dbl2(&s), paint(N::Green), thrice(t), dbl2(t), viaArg(bu), unbox(bi), callDbl2(s));
+    V a(-3), b(5); W w(8);
+    std::printf("adl friends %d %d %d %d %d\n", (a + b).x, norm(a), later(b), norm(w), (int)(a == b));
+    swap(a, b); std::printf("adl swap %d %d\n", a.x, b.x);
+    Tmpl<double> td(2.5); Tmpl<int> ti(3);
+    std::printf("adl template friends %d %d\n", peek(td), peek(ti));
+    Q::R r; std::printf("adl rules %d %d %d\n", local(r), shadow(r), shadow(1));
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -1084,6 +1124,7 @@ int main()
     narrow::show();
     leafctor::show();
     ranking::show();
+    adl::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

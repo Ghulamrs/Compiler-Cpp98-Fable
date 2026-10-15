@@ -9,4 +9,8 @@ __fileostream cerr(2);
 __fileostream clog(2);
 __fileistream cin(0);
 
+// cin and cerr are tied to cout (27.3.1): cout is flushed before they read or write
+struct __tie_streams { __tie_streams() { cin.tie(&cout); cerr.tie(&cout); } };
+static __tie_streams __tie_streams_now;
+
 }

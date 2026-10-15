@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <stdexcept>
+#include <__iterator>
 #include <__traits>
 
 namespace std {
@@ -21,6 +23,9 @@ public:
     typedef const T* const_iterator;
     typedef T&       reference;
     typedef const T& const_reference;
+    typedef ptrdiff_t difference_type;
+    typedef std::reverse_iterator<iterator>       reverse_iterator;
+    typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
 
     vector() : m_data(0), m_size(0), m_cap(0) {}
     explicit vector(size_t n) : m_data(0), m_size(0), m_cap(0) { resize(n); }
@@ -58,8 +63,8 @@ public:
 
     T&       operator[](size_t i) { return m_data[i]; }
     const T& operator[](size_t i) const { return m_data[i]; }
-    T&       at(size_t i) { if (i >= m_size) abort(); return m_data[i]; }
-    const T& at(size_t i) const { if (i >= m_size) abort(); return m_data[i]; }
+    T&       at(size_t i) { if (i >= m_size) throw out_of_range("invalid vector subscript"); return m_data[i]; }
+    const T& at(size_t i) const { if (i >= m_size) throw out_of_range("invalid vector subscript"); return m_data[i]; }
     T&       front() { return m_data[0]; }
     const T& front() const { return m_data[0]; }
     T&       back() { return m_data[m_size - 1]; }
@@ -67,6 +72,10 @@ public:
     T*       data() { return m_data; }
     const T* data() const { return m_data; }
     iterator       begin() { return m_data; }
+    reverse_iterator       rbegin() { return reverse_iterator(end()); }
+    reverse_iterator       rend() { return reverse_iterator(begin()); }
+    const_reverse_iterator rbegin() const { return const_reverse_iterator(end()); }
+    const_reverse_iterator rend() const { return const_reverse_iterator(begin()); }
     iterator       end() { return m_data + m_size; }
     const_iterator begin() const { return m_data; }
     const_iterator end() const { return m_data + m_size; }

@@ -20,6 +20,12 @@ int streamManipulators();
 int streamFriends();
 int linkageA();
 int linkageB();
+int limitsBasics();
+int iteratorsAndFunctors();
+int numericOps();
+int containersAdaptors();
+int bitsAndManipulators();
+int exceptionsAndNew();
 
 static int g_failures = 0;
 
@@ -49,6 +55,12 @@ int main()
     check("streamFriends()", streamFriends(), 303);
     check("linkageA()", linkageA(), 1122);
     check("linkageB()", linkageB(), 2225);
+    check("limitsBasics()", limitsBasics(), 1111);
+    check("iteratorsAndFunctors()", iteratorsAndFunctors(), 3421);
+    check("numericOps()", numericOps(), 2460);
+    check("containersAdaptors()", containersAdaptors(), 1234);
+    check("bitsAndManipulators()", bitsAndManipulators(), 5321);
+    check("exceptionsAndNew()", exceptionsAndNew(), 731);
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

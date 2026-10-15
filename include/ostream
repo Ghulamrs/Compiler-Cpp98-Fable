@@ -98,7 +98,7 @@ public:
     virtual ~ostream() {}
 
     ostream& put(char c) { return write(&c, 1); }
-    ostream& write(const char* s, streamsize n) { if (good()) sink(s, static_cast<size_t>(n)); return *this; }
+    ostream& write(const char* s, streamsize n) { if (good()) { flushTie(); sink(s, static_cast<size_t>(n)); } return *this; }
     ostream& flush() { sync(); return *this; }
 
     ostream& operator<<(const char* s) { return padded(s, strlen(s)); }
@@ -137,9 +137,11 @@ protected:
     virtual void sink(const char* s, size_t n) = 0;
     virtual void sync() {}
 
+    void flushTie() { if (m_tie) m_tie->flush(); }   // the stream tied to this one (cout to cerr) is flushed first
     ostream& padded(const char* s, size_t n)
     {
         if (!good()) return *this;
+        flushTie();
         size_t w = m_width > 0 ? static_cast<size_t>(m_width) : 0;
         m_width = 0;
         bool leftAdjusted = (m_flags & left) != 0;
@@ -260,7 +262,7 @@ protected:
     {
         size_t n = 0;
         if (v != v) { out[n++] = 'n'; out[n++] = 'a'; out[n++] = 'n'; return n; }
-        if (v < 0) { out[n++] = '-'; v = -v; }
+        if (v < 0 || (v == 0 && 1 / v < 0)) { out[n++] = '-'; v = -v; }   // -0 keeps its sign, as cl prints it
         else if (m_flags & showpos) out[n++] = '+';
         if (v > 1.7976931348623157e308) { out[n++] = 'i'; out[n++] = 'n'; out[n++] = 'f'; return n; }
         int p = static_cast<int>(m_precision);

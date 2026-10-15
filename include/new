@@ -1,10 +1,13 @@
-// new - cppparse's C++98 library: the global allocation functions, placement new and bad_alloc. New- and
-// delete-expressions call the global operators by their MSVC names without looking them up here; the C++ library
-// defines them, and a program may replace them in any of its units.
+// new - cppparse's C++98 library: the global allocation functions, placement new, the nothrow forms and bad_alloc.
+// New- and delete-expressions call the global operators by their MSVC names without looking them up here; the
+// C++ library defines them, and a program may replace them in any of its units. The nothrow forms are the
+// library's own (malloc: null when it fails), since the C runtime's operator new reports failure through MSVC's
+// exception handling.
 #ifndef CPPPARSE_NEW
 #define CPPPARSE_NEW
 
 #include <cstddef>
+#include <cstdlib>
 #include <exception>
 
 namespace std {
@@ -13,8 +16,13 @@ class bad_alloc : public exception {
 public:
     bad_alloc() {}
     virtual ~bad_alloc() {}
-    virtual const char* what() const { return "bad_alloc"; }
+    virtual const char* what() const { return "bad allocation"; }
 };
+
+struct nothrow_t {};
+const nothrow_t nothrow = {};
+
+typedef void (*new_handler)();
 
 }
 
@@ -26,5 +34,9 @@ inline void* operator new(size_t, void* place) { return place; }
 inline void* operator new[](size_t, void* place) { return place; }
 inline void  operator delete(void*, void*) {}
 inline void  operator delete[](void*, void*) {}
+inline void* operator new(size_t n, const std::nothrow_t&) { return malloc(n ? n : 1); }
+inline void* operator new[](size_t n, const std::nothrow_t&) { return malloc(n ? n : 1); }
+inline void  operator delete(void* p, const std::nothrow_t&) { free(p); }
+inline void  operator delete[](void* p, const std::nothrow_t&) { free(p); }
 
 #endif

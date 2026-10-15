@@ -6,7 +6,7 @@ New-Item -ItemType Directory -Force "$Sandbox\out\lib" | Out-Null
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
 $objs = @()
-foreach ($unit in @("examples\sample-lib\lib1.cpp", "examples\sample-lib\lib2.cpp", "examples\sample-lib\lib3.cpp", "libcpp\iostream.cpp")) {
+foreach ($unit in @("examples\sample-lib\lib1.cpp", "examples\sample-lib\lib2.cpp", "examples\sample-lib\lib3.cpp", "examples\sample-lib\lib4.cpp", "libcpp\iostream.cpp")) {
     $name = [System.IO.Path]::GetFileNameWithoutExtension($unit) + $Lvl
     & $Exe --compile6 "-O$Lvl" --obj --msvc-mangling -I ..\include -o out\lib -n $name "..\$unit" 2>&1 | Select-String -Pattern "error|sema|compile6|note" | ForEach-Object { $_.Line }
     if (-not (Test-Path "out\lib\${name}6.obj")) { Write-Host "no object for $unit"; exit 1 }

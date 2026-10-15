@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <new>
 #include <typeinfo>
 #include <cstdlib>
 #include <cstring>
@@ -1196,6 +1197,28 @@ void show()
 }
 }
 
+namespace placement {   // B6 (row 21): a placement new whose arguments are not one address calls the operator new it resolves
+struct Arena { char buf[64]; int used; Arena() : used(0) {} };
+}
+// an allocation function lives in the global namespace (3.7.3/2)
+void* operator new(size_t n, placement::Arena& a) { void* p = a.buf + a.used; a.used += (int)n; return p; }
+void operator delete(void*, placement::Arena&) {}
+namespace placement {
+struct Q { int id; Q(int x) : id(x) {} static void* operator new(size_t n, int tag) { g_tag = tag; return malloc(n); } static void operator delete(void* p) { free(p); } static int g_tag; };
+int Q::g_tag = 0;
+struct P { int v; P(int x) : v(x) {} };
+void show()
+{
+    Arena a;
+    P* p1 = new (a) P(1); P* p2 = new (a) P(2);
+    Q* q = new (7) Q(3);
+    int* n = new (std::nothrow) int(4);
+    char raw[sizeof(P)]; P* p3 = new (raw) P(5);
+    std::printf("placement %d %d %d %d %d %d %d\n", p1->v, p2->v, a.used == 2 * (int)sizeof(P), q->id, Q::g_tag, *n, p3->v);
+    delete q; delete n; p3->~P();
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -1236,6 +1259,7 @@ int main()
     adl::show();
     rtti::show();
     templ::show();
+    placement::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

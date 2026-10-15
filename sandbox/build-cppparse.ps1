@@ -679,7 +679,7 @@ try {
     $failed = 0
     foreach ($lvl in @(0, 2)) {
         $objs = @()
-        foreach ($unit in @("examples\sample-lib\lib1.cpp", "examples\sample-lib\lib2.cpp", "examples\sample-lib\lib3.cpp", "libcpp\iostream.cpp")) {
+        foreach ($unit in @("examples\sample-lib\lib1.cpp", "examples\sample-lib\lib2.cpp", "examples\sample-lib\lib3.cpp", "examples\sample-lib\lib4.cpp", "libcpp\iostream.cpp")) {
             $name = [System.IO.Path]::GetFileNameWithoutExtension($unit) + "L$lvl"
             $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
             $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $name "..\$unit" 2>&1 | Out-String
@@ -759,7 +759,7 @@ try {
         @{ unit = "goto-refused"; expect = @("error S132: line 5: goto x jumps past the initialisation of an object with a destructor (ill-formed)", "error S132: line 6: goto y jumps into a try block or a handler (ill-formed)") },
         @{ unit = "covariant-refused"; expect = @("(8): error S131: 'CD::get' overrides 'SB::get' with a covariant return type, and its return conversion goes through a virtual base", "(14): error S131: 'D::g' overrides 'B::g' with a covariant return type, and the slot needs a this adjustment as well as the return adjustment") },
         @{ unit = "goto-handler"; expect = @("error S132: line 5: a goto out of a catch handler ('out')", "error S132: line 6: a goto out of a catch handler ('out')") },
-        @{ unit = "new-refused"; expect = @("error S132: line 8: a placement new-expression of 'Q'", "error S132: line 9: new of a multidimensional array of 'S'", "error S132: line 9: delete[] of a multidimensional array of 'S'") },
+        @{ unit = "new-refused"; expect = @("error S132: line 8: new of a multidimensional array of 'S'", "error S132: line 8: delete[] of a multidimensional array of 'S'") },
         @{ unit = "memptr-refused"; expect = @("error S132: line 16: conversion of a pointer to member from 'int W::*' to 'int VW::*' is not supported yet", "error S132: line 17: conversion of a pointer to member from 'int VX::*' to 'int X::*' is not supported yet", "error S132: line 18: conversion of a pointer to member from 'int I1::*' to 'int I2::*', whose inheritance model is unspecified") },
         @{ unit = "ambiguous-base"; expect = @("(8): error S141: 'F': direct base 'V' is inaccessible; already a base of 'W'", "(9): error S141: 'H2': direct base 'V' is inaccessible; already a base of 'WV'", "(10): error S141: 'H5': direct base 'V' is inaccessible; already a base of 'X'", "(11): warning S142: 'G2': base-class 'V' is already a base-class of 'W'", "(12): warning S142: 'H3': base-class 'V' is already a base-class of 'WV'", "(16): warning S142: 'T7': base-class 'V' is already a base-class of 'XV'", "(17): error S141: 'T8': direct base 'V' is inaccessible; already a base of 'XV'") },
         @{ unit = "inftempl"; expect = @("error S148: template instantiation depth exceeds 1000 instantiating 'Inf<int*") },

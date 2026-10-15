@@ -583,9 +583,29 @@ bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::
             a = a->inner;
             continue;
         }
+        if (pt.kind == cxx::DeclaratorPart::MemberPointer) {
+            // R (T::*)(A): the class deduces from the member pointer's class, the member's type from its target
+            if (a->kind != Type::MemberPointer || !a->memberClass || !a->inner) return false;
+            const cxx::QualifiedName& mc = pt.memberClass;
+            bool classParam = false;
+            if (mc.parts.size() == 1 && !mc.global && tscope) { const std::vector<Symbol*>* v = tscope->find(mc.parts[0].ident); if (v) for (size_t k = 0; k < v->size(); ++k) if ((*v)[k]->kind == Symbol::TemplateParam) classParam = true; }
+            if (classParam && !m_fixedTemplateParams.count(mc.parts[0].ident)) {
+                std::map<std::string, const Type*>::iterator it = bindings.find(mc.parts[0].ident);
+                const Type* bound = m_types.unqualified(a->memberClass);
+                if (it == bindings.end()) bindings[mc.parts[0].ident] = bound;
+                else if (it->second != bound) return false;
+            } else if (!classParam) {
+                const Type* ct = namedType(mc, tscope ? tscope : m_prog.global, "", p->loc);
+                if (!ct || m_types.unqualified(ct) != m_types.unqualified(a->memberClass)) return false;
+            }
+            a = a->inner;
+            continue;
+        }
         if (pt.kind == cxx::DeclaratorPart::Function) {
-            // R (*)(A, B): the parameters deduce from the function type's, the rest from its result (14.8.2.4)
+            // R (*)(A, B): the parameters deduce from the function type's, the rest from its result (14.8.2.4); a
+            // member function's const must match its pointer's
             if (a->kind != Type::Function || pt.params.size() != a->params.size() || pt.variadic != a->variadic) return false;
+            if (pt.isConst != a->constMethod) return false;
             for (size_t k = 0; k < pt.params.size(); ++k) if (!pt.params[k] || !deduce(pt.params[k], a->params[k], tscope, bindings, ints)) return false;
             a = a->inner;
             continue;
@@ -663,7 +683,9 @@ bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::
             return true;
         }
     }
-    // a concrete type: it must match
+    // a concrete type names no parameter: nothing to deduce (the argument must convert to it, which overload
+    // resolution checks); in partial ordering it must match
+    if (!m_strictDeduce) return true;
     const Type* pt = typeOf(spec, tscope ? tscope : m_prog.global);
     return m_types.unqualified(pt) == m_types.unqualified(a) || pt->kind == Type::Error;
 }
@@ -1248,6 +1270,40 @@ const Type* Sema::exprNew(cxx::Expr* e, Scope* in)
         full = applyDeclarator(t, d, in, 0);
     }
     for (size_t k = 0; k < e->kids.size(); ++k) expr(e->kids[k], in);
+    // a placement new whose arguments are not one pointer (new (std::nothrow) T, new (arena, 4) T) calls the global
+    // operator new that takes (size_t, the arguments...): the call replaces the arguments and yields the address
+    if (!e->placement.empty() && !(e->placement.size() == 1 && (valueType(e->placement[0])->kind == Type::Pointer || valueType(e->placement[0])->kind == Type::NullPtr))) {
+        bool anyError = false;
+        for (size_t p = 0; p < e->placement.size(); ++p) if (!e->placement[p]->semaType || e->placement[p]->semaType->kind == Type::Error || e->placement[p]->semaType->kind == Type::Dependent) anyError = true;
+        if (anyError) return m_types.pointer(full);
+        if (newArray || full->kind == Type::Array) { error(e->loc, "S132", "a placement new of an array with arguments other than an address is not supported yet"); return m_types.pointer(full); }
+        const Type* cu0 = m_types.unqualified(full);
+        if (cu0->kind == Type::Class && cu0->decl && !cu0->decl->isDefinition) { error(e->loc, "S113", "new of incomplete class '" + cu0->decl->qualifiedName() + "'"); return m_types.pointer(full); }
+        // the class's own operator new (its own or inherited) hides the global ones (12.5/2), unless ::new
+        std::vector<Symbol*> cands;
+        if (!e->globalScope && cu0->kind == Type::Class && cu0->decl) lookupMember(cu0->decl, "operator new", cands);
+        if (cands.empty()) {
+            const std::vector<Symbol*>* v = m_prog.global->find("operator new");
+            if (v) for (size_t k = 0; k < v->size(); ++k) if ((*v)[k]->kind == Symbol::Function && !(*v)[k]->ownerClass) cands.push_back((*v)[k]);
+        }
+        cxx::Expr* sz = nodeArena().expr(cxx::Expr::IntLit, e->loc);
+        sz->text = intToString(m_types.sizeOf(cu0) > 0 ? m_types.sizeOf(cu0) : 1);
+        sz->semaType = m_types.sizeType(); sz->semaConst = true; sz->semaValue = m_types.sizeOf(cu0) > 0 ? m_types.sizeOf(cu0) : 1;
+        std::vector<cxx::Expr*> args;
+        args.push_back(sz);
+        for (size_t p = 0; p < e->placement.size(); ++p) args.push_back(e->placement[p]);
+        Symbol* f = resolveOverload(cands, args, 0, 0, in, e->loc, "operator new", true);
+        if (!f) return m_types.pointer(full);
+        cxx::Expr* callee = nodeArena().expr(cxx::Expr::Name, e->loc);
+        cxx::NameComponent nc; nc.ident = "operator new"; callee->name.parts.push_back(nc);
+        callee->semaSym = f; callee->semaType = f->type;
+        cxx::Expr* c = nodeArena().expr(cxx::Expr::Call, e->loc);
+        c->kids.push_back(callee);
+        for (size_t a = 0; a < args.size(); ++a) c->kids.push_back(args[a]);
+        c->semaSym = f; c->semaType = m_types.pointer(m_types.basic(Type::Void));
+        noteUse(f);
+        e->placement.assign(1, c);
+    }
     if (newArray) { e->semaSym = 0; return m_types.pointer(full); }
     if (full->kind == Type::Array) { e->semaSym = 0; return m_types.pointer(full->inner); }
     const Type* cu = m_types.unqualified(full);

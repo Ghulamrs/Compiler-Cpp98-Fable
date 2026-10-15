@@ -2213,7 +2213,10 @@ void IrGen::handlerCleanups(size_t mark, int line)
     int term = -1;
     const int tid = beginTerminateRegion(term, line);
     ++m_inPad;   // no cleanups are registered meanwhile: m_flagged is being walked
+    // the destructors run while the exception is being unwound: std::uncaught_exception() is true in them
+    { IrInst u = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line); u.sub = "cppparse_unwind_enter"; emit(u); }
     for (size_t i = m_flagged.size(); i > mark; --i) runCleanup(m_flagged[i - 1], true, line);
+    { IrInst u = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line); u.sub = "cppparse_unwind_leave"; emit(u); }
     --m_inPad;
     endTerminateRegion(tid, term, line);
 }
@@ -2728,7 +2731,10 @@ int IrGen::value(cxx::Expr* e)
             // not generated as cl does yet: refused (S132) rather than calling the wrong allocator
             const sema::Type* inner = m_semaTypes.unqualified(elem);
             while (inner->kind == sema::Type::Array) inner = m_semaTypes.unqualified(inner->inner);
-            if (!e->globalScope && !e->placement.empty() && isClassType(elem) && elem->decl && classOperatorDelete(elem->decl, 0, isArray ? "operator new[]" : "operator new", 16))
+            // (sema turned a placement new with arguments other than one address into a call of the operator new
+            // it resolved, the class's own included: that call is the address)
+            const bool resolvedCall = e->placement.size() == 1 && e->placement[0]->kind == cxx::Expr::Call && e->placement[0]->semaSym && e->placement[0]->semaSym->name == "operator new";
+            if (!resolvedCall && !e->globalScope && !e->placement.empty() && isClassType(elem) && elem->decl && classOperatorDelete(elem->decl, 0, isArray ? "operator new[]" : "operator new", 16))
                 unsupported(line, "a placement new-expression of '" + elem->decl->qualifiedName() + "', a class with its own operator new, is not supported yet by --compile6");
             if (!e->globalScope && elem->kind == sema::Type::Array && isClassType(inner) && inner->decl
                 && (classOperatorDelete(inner->decl, 0, "operator new[]", 16) || classOperatorDelete(inner->decl, 0, "operator delete[]", 16)))
@@ -4929,6 +4935,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
         m_initSymbol = m_prog.newSymbol(Symbol::Function, "__cppparse_init_" + base, m_prog.global);
         m_initSymbol->type = m_semaTypes.function(m_semaTypes.basic(sema::Type::Void), std::vector<const sema::Type*>(), false, false);
         m_initSymbol->isExternC = true;
+        m_initSymbol->isStatic = true;   // internal: two units whose first dynamic global comes from one header would define the same name
         m_initSymbol->hasBody = true;
         x86.addInitializer(irName(m_initSymbol));
     }

@@ -325,6 +325,16 @@ int cppparseMain(int argc, char* argv[])
             if (!fileExists(inputs[i])) { std::cerr << "error: cannot read " << inputs[i] << "\n"; ++totalErrors; continue; }
             Preprocessor pp(ppOpt);
             pp.run(inputs[i]);
+            // the preprocessor's diagnostics (an unterminated comment or #if, a bad #if expression, #error) count as
+            // errors of the unit like the parser's
+            int ppErrors = 0;
+            {
+                const std::vector<PpDiag>& pd = pp.diagnostics();
+                for (size_t k = 0; k < pd.size(); ++k) {
+                    if (pd[k].severity == PpDiag::Error) ++ppErrors;
+                    if (k < 20) std::cout << "  " << (pd[k].file.empty() ? inputs[i] : pd[k].file) << "(" << pd[k].line << "): " << (pd[k].severity == PpDiag::Error ? "error" : "warning") << ": " << pd[k].message << "\n";
+                }
+            }
             if (compile6 && !pp.missingIncludes().empty()) {
                 // an object compiled without one of its headers would rest on undeclared names and guessed types
                 for (size_t k = 0; k < pp.missingIncludes().size(); ++k)
@@ -346,7 +356,7 @@ int cppparseMain(int argc, char* argv[])
             bool winMissing = false;
             for (size_t k = 0; k < pp.missingIncludes().size(); ++k) if (toLower(pp.missingIncludes()[k]) == "windows.h") winMissing = true;
             if (winMissing) for (int k = 0; kWinTypes[k]; ++k) parser.assumeType(kWinTypes[k]);
-            int errors = parser.parse(tu);
+            int errors = parser.parse(tu) + ppErrors;
             totalErrors += errors;
             cxx::Counts c;
             cxx::countTranslationUnit(tu, c);

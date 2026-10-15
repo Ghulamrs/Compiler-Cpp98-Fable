@@ -70,7 +70,8 @@ void ppLex(const std::string& source, int fileIndex, std::vector<PpToken>& out)
         if (c == '/' && pos + 1 < n && src[pos + 1] == '/') { while (pos < n && src[pos] != '\n') ++pos; space = true; continue; }
         if (c == '/' && pos + 1 < n && src[pos + 1] == '*') {
             size_t e = src.find("*/", pos + 2);
-            pos = e == std::string::npos ? n : e + 2;
+            if (e == std::string::npos) { out.push_back(makeTok(PpToken::Other, "/*", fileIndex, lineOf[pos])); pos = n; continue; }   // unterminated: reported by the preprocessor
+            pos = e + 2;
             space = true;
             continue;
         }
@@ -191,6 +192,7 @@ void Preprocessor::processFile(int fileIndex, const std::string& source, int dep
 {
     std::vector<PpToken> toks;
     ppLex(source, fileIndex, toks);
+    for (size_t k = 0; k < toks.size(); ++k) if (toks[k].kind == PpToken::Other && toks[k].text == "/*") { diag(PpDiag::Error, fileIndex, toks[k].line, "unterminated comment (cl C1071)"); toks.erase(toks.begin() + static_cast<long>(k)); break; }
     std::vector<Cond> conds;
     std::vector<PpToken> chunk;      // text lines between directives: macro invocations may span them
     size_t i = 0;
@@ -204,12 +206,16 @@ void Preprocessor::processFile(int fileIndex, const std::string& source, int dep
             std::vector<PpToken> line(toks.begin() + static_cast<long>(i) + 1, toks.begin() + static_cast<long>(e));
             directive(line, fileIndex, conds, depth);
         } else if (conditionsActive(conds)) {
-            chunk.insert(chunk.end(), toks.begin() + static_cast<long>(i), toks.begin() + static_cast<long>(e));
+            std::map<int, std::pair<int, int> >::const_iterator lm = m_lineMap.find(fileIndex);
+            for (size_t k = i; k < e; ++k) {
+                chunk.push_back(toks[k]);
+                if (lm != m_lineMap.end()) { chunk.back().line += lm->second.first; chunk.back().file = lm->second.second; }   // after #line
+            }
         }
         i = e + 1;
     }
     if (!chunk.empty()) expandChunk(chunk);
-    for (size_t c = 0; c < conds.size(); ++c) diag(PpDiag::Error, fileIndex, conds[c].line, "#if without #endif at end of file");
+    for (size_t c = 0; c < conds.size(); ++c) diag(PpDiag::Error, fileIndex, conds[c].line, "#if without #endif at end of file (cl C1070)");
 }
 
 void Preprocessor::directive(std::vector<PpToken>& line, int fileIndex, std::vector<Cond>& conds, int depth)
@@ -270,7 +276,24 @@ void Preprocessor::directive(std::vector<PpToken>& line, int fileIndex, std::vec
         if (line.size() >= 2 && line[1].text == "pack") packPragma(line, fileIndex);
         return;                                                 // other pragmas are ignored
     }
-    if (name == "line" || name == "ident" || name == "sccs" || name == "assert" || name == "unassert" || name == "import" || name == "include_next") {
+    if (name == "line") {
+        // #line N ["name"] (16.4): the next source line is N, in the named file (a file entry of its own, so that
+        // __FILE__ and the diagnostics report it); the tokens that follow in this file are retargeted as they are read
+        std::vector<PpToken> rest(line.begin() + 1, line.end());
+        std::vector<PpToken> expanded;
+        expandTokens(rest, expanded);
+        if (expanded.empty() || expanded[0].kind != PpToken::Number) { diag(PpDiag::Error, fileIndex, ln, "#line needs a line number"); return; }
+        int target = atoi(expanded[0].text.c_str());
+        int file = m_lineMap.count(fileIndex) ? m_lineMap[fileIndex].second : fileIndex;
+        if (expanded.size() >= 2 && expanded[1].kind == PpToken::String && expanded[1].text.size() >= 2) {
+            std::string nm = expanded[1].text.substr(1, expanded[1].text.size() - 2);
+            file = static_cast<int>(m_files.size());
+            m_files.push_back(nm);
+        }
+        m_lineMap[fileIndex] = std::make_pair(target - (ln + 1), file);
+        return;
+    }
+    if (name == "ident" || name == "sccs" || name == "assert" || name == "unassert" || name == "import" || name == "include_next") {
         if (name == "import" || name == "include_next") diag(PpDiag::Warning, fileIndex, ln, "#" + name + " is not supported");
         return;
     }
@@ -375,31 +398,62 @@ void Preprocessor::includeDirective(std::vector<PpToken>& line, size_t at, int f
 namespace {
 
 struct CondParser {
+    // a value of the #if arithmetic (16.1/4): 64 bits, unsigned when a u suffix or a value beyond long long makes it
+    // so, or the usual arithmetic conversions do; dead: the arm not taken of ?:, && and || is parsed, but its
+    // division by zero is no error
+    struct Val {
+        unsigned long long u; bool isUnsigned;
+        Val() : u(0), isUnsigned(false) {}
+        Val(unsigned long long v, bool un) : u(v), isUnsigned(un) {}
+        long long s() const { return static_cast<long long>(u); }
+        bool truth() const { return u != 0; }
+    };
     const std::vector<PpToken>& t;
     size_t i;
     bool bad;
-    CondParser(const std::vector<PpToken>& toks) : t(toks), i(0), bad(false) {}
+    int dead;
+    CondParser(const std::vector<PpToken>& toks) : t(toks), i(0), bad(false), dead(0) {}
 
     bool at(const char* s) const { return i < t.size() && t[i].text == s; }
-    long charValue(const std::string& lit)
+    Val charValue(const std::string& lit)
     {
         int count = 0;
-        return charLiteralValue(lit, count);
+        return Val(static_cast<unsigned long long>(static_cast<long long>(charLiteralValue(lit, count))), false);
     }
-    long number(const std::string& s)
+    Val number(const std::string& s)
     {
         std::string digits = s;
-        while (!digits.empty() && (tolower(static_cast<unsigned char>(digits[digits.size() - 1])) == 'u' || tolower(static_cast<unsigned char>(digits[digits.size() - 1])) == 'l')) digits.erase(digits.size() - 1);
-        return strtol(digits.c_str(), 0, 0);
+        bool un = false;
+        while (!digits.empty()) {
+            char c = static_cast<char>(tolower(static_cast<unsigned char>(digits[digits.size() - 1])));
+            if (c == 'u') un = true; else if (c != 'l') break;
+            digits.erase(digits.size() - 1);
+        }
+        unsigned long long v = 0;
+        bool big = false;
+        size_t k = 0;
+        unsigned long long base = 10;
+        if (digits.size() > 1 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) { base = 16; k = 2; }
+        else if (digits.size() > 1 && digits[0] == '0') { base = 8; k = 1; }
+        for (; k < digits.size(); ++k) {
+            char c = static_cast<char>(tolower(static_cast<unsigned char>(digits[k])));
+            unsigned long long d = c >= '0' && c <= '9' ? static_cast<unsigned long long>(c - '0') : c >= 'a' && c <= 'f' ? static_cast<unsigned long long>(c - 'a' + 10) : 99;
+            if (d >= base) { bad = true; break; }
+            if (v > (~0ULL - d) / base) big = true;
+            v = v * base + d;
+        }
+        if (big) v = ~0ULL;
+        if (v > 0x7fffffffffffffffULL) un = true;
+        return Val(v, un);
     }
-    long primary()
+    Val primary()
     {
-        if (i >= t.size()) { bad = true; return 0; }
+        if (i >= t.size()) { bad = true; return Val(); }
         const PpToken& k = t[i];
-        if (k.is("(")) { ++i; long v = ternary(); if (!at(")")) bad = true; else ++i; return v; }
-        if (k.is("!")) { ++i; return !primary(); }
-        if (k.is("~")) { ++i; return ~primary(); }
-        if (k.is("-")) { ++i; return -primary(); }
+        if (k.is("(")) { ++i; Val v = ternary(); if (!at(")")) bad = true; else ++i; return v; }
+        if (k.is("!")) { ++i; return Val(!primary().truth(), false); }
+        if (k.is("~")) { ++i; Val v = primary(); return Val(~v.u, v.isUnsigned); }
+        if (k.is("-")) { ++i; Val v = primary(); return Val(0 - v.u, v.isUnsigned); }
         if (k.is("+")) { ++i; return primary(); }
         ++i;
         if (k.kind == PpToken::Number) return number(k.text);
@@ -409,43 +463,61 @@ struct CondParser {
             if (k.text.compare(0, 6, "__has_") == 0 && at("(")) {
                 int depth = 0;
                 for (; i < t.size(); ++i) { if (t[i].is("(")) ++depth; else if (t[i].is(")") && --depth == 0) { ++i; break; } }
-                return 0;
+                return Val();
             }
-            return k.text == "true" ? 1 : 0;                                  // unknown identifiers are 0
+            return Val(k.text == "true" ? 1 : 0, false);                      // unknown identifiers are 0
         }
         bad = true;
-        return 0;
+        return Val();
     }
-    long binary(int level)
+    Val binary(int level)
     {
         static const char* const ops[][5] = { {"||",0,0,0,0}, {"&&",0,0,0,0}, {"|",0,0,0,0}, {"^",0,0,0,0}, {"&",0,0,0,0}, {"==","!=",0,0,0},
                                              {"<","<=",">",">=",0}, {"<<",">>",0,0,0}, {"+","-",0,0,0}, {"*","/","%",0,0} };
         if (level == 10) return primary();
-        long v = binary(level + 1);
+        Val v = binary(level + 1);
         for (;;) {
             std::string op;
             for (int k = 0; k < 5 && ops[level][k]; ++k) if (at(ops[level][k])) op = ops[level][k];
             if (op.empty()) return v;
             ++i;
-            long r = binary(level + 1);
-            if (op == "||") v = v || r; else if (op == "&&") v = v && r; else if (op == "|") v = v | r; else if (op == "^") v = v ^ r;
-            else if (op == "&") v = v & r; else if (op == "==") v = v == r; else if (op == "!=") v = v != r;
-            else if (op == "<") v = v < r; else if (op == "<=") v = v <= r; else if (op == ">") v = v > r; else if (op == ">=") v = v >= r;
-            else if (op == "<<") v = v << r; else if (op == ">>") v = v >> r; else if (op == "+") v = v + r; else if (op == "-") v = v - r;
-            else if (op == "*") v = v * r; else if (op == "/") { if (r == 0) { bad = true; v = 0; } else v = v / r; }
-            else if (op == "%") { if (r == 0) { bad = true; v = 0; } else v = v % r; }
+            if (op == "||" || op == "&&") {
+                // short circuit: the right operand decides nothing when the left one did
+                const bool decided = op == "||" ? v.truth() : !v.truth();
+                if (decided) ++dead;
+                Val r = binary(level + 1);
+                if (decided) --dead;
+                v = Val(op == "||" ? (v.truth() || r.truth()) : (v.truth() && r.truth()), false);
+                continue;
+            }
+            Val r = binary(level + 1);
+            const bool un = (op == "<<" || op == ">>") ? v.isUnsigned : (v.isUnsigned || r.isUnsigned);
+            if (op == "|") v = Val(v.u | r.u, un); else if (op == "^") v = Val(v.u ^ r.u, un); else if (op == "&") v = Val(v.u & r.u, un);
+            else if (op == "==") v = Val(v.u == r.u, false); else if (op == "!=") v = Val(v.u != r.u, false);
+            else if (op == "<") v = Val(un ? v.u < r.u : v.s() < r.s(), false); else if (op == "<=") v = Val(un ? v.u <= r.u : v.s() <= r.s(), false);
+            else if (op == ">") v = Val(un ? v.u > r.u : v.s() > r.s(), false); else if (op == ">=") v = Val(un ? v.u >= r.u : v.s() >= r.s(), false);
+            else if (op == "<<") v = Val(r.u >= 64 ? 0 : v.u << r.u, un);
+            else if (op == ">>") v = Val(r.u >= 64 ? (un || v.s() >= 0 ? 0 : ~0ULL) : (un ? v.u >> r.u : static_cast<unsigned long long>(v.s() >> r.u)), un);
+            else if (op == "+") v = Val(v.u + r.u, un); else if (op == "-") v = Val(v.u - r.u, un); else if (op == "*") v = Val(v.u * r.u, un);
+            else if (op == "/") { if (r.u == 0) { if (dead == 0) bad = true; v = Val(); } else v = Val(un ? v.u / r.u : static_cast<unsigned long long>(v.s() / r.s()), un); }
+            else if (op == "%") { if (r.u == 0) { if (dead == 0) bad = true; v = Val(); } else v = Val(un ? v.u % r.u : static_cast<unsigned long long>(v.s() % r.s()), un); }
         }
     }
-    long ternary()
+    Val ternary()
     {
-        long c = binary(0);
+        Val c = binary(0);
         if (!at("?")) return c;
         ++i;
-        long a = ternary();
-        if (!at(":")) { bad = true; return 0; }
+        const bool take = c.truth();
+        if (!take) ++dead;
+        Val a = ternary();
+        if (!take) --dead;
+        if (!at(":")) { bad = true; return Val(); }
         ++i;
-        long b = ternary();
-        return c ? a : b;
+        if (take) ++dead;
+        Val b = ternary();
+        if (take) --dead;
+        return take ? a : b;
     }
 };
 
@@ -474,9 +546,9 @@ bool Preprocessor::evalCondition(std::vector<PpToken>& line, size_t at, int file
     expandTokens(pre, expanded);
     if (expanded.empty()) { diag(PpDiag::Error, fileIndex, ln, "#if with no expression"); return false; }
     CondParser p(expanded);
-    long v = p.ternary();
+    CondParser::Val v = p.ternary();
     if (p.bad || p.i != expanded.size()) { diag(PpDiag::Error, fileIndex, ln, "cannot evaluate the #if expression"); return false; }
-    return v != 0;
+    return v.truth();
 }
 
 

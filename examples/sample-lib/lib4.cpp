@@ -131,7 +131,7 @@ static int g_unwinding = -1;
 struct Probe { ~Probe() { g_unwinding = std::uncaught_exception() ? 1 : 0; } };
 static void throwing() { Probe p; throw 7; }
 
-int exceptionsAndNew()                     // 731: uncaught_exception during unwinding, nothrow new, auto_ptr, set_terminate's return
+int exceptionsAndNew()                     // 2731: uncaught_exception during unwinding, nothrow new, auto_ptr, set_terminate's return, bad_alloc
 {
     int r = 0;
     try { throwing(); } catch (int e) { if (e == 7 && g_unwinding == 1) r += 700; }
@@ -144,5 +144,8 @@ int exceptionsAndNew()                     // 731: uncaught_exception during unw
     if (ap.get() == 0 && bp->get() == 1) r += 1;
     std::terminate_handler old = std::set_terminate(0);
     std::set_terminate(old);
+    // the library's own operator new throws bad_alloc when malloc fails (the C runtime's reports it through MSVC's
+    // exception handling, which no cppparse frame catches)
+    try { char* big = new char[0x7fffffffffffULL]; delete[] big; } catch (std::bad_alloc& e) { if (e.what()[0] == 'b') r += 2000; }
     return r;
 }

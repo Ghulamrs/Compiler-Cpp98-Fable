@@ -74,8 +74,23 @@ static void dropException(struct cppparse_exception* e)
 static void (*g_terminateHandler)(void) = 0;
 static void (*g_unexpectedHandler)(void) = 0;
 void cppparse_terminate(void);
-static __declspec(thread) struct cppparse_exception g_caught[32];
-static __declspec(thread) int                       g_caughtCount = 0;
+/* the exceptions caught and not yet released, innermost last (a handler that calls deeper keeps its own alive):
+   a per-thread array that doubles as handlers nest */
+static __declspec(thread) struct cppparse_exception* g_caught = 0;
+static __declspec(thread) int                        g_caughtCount = 0;
+static __declspec(thread) int                        g_caughtCap = 0;
+
+static void pushCaught(const struct cppparse_exception* e)
+{
+    if (g_caughtCount == g_caughtCap) {
+        int cap = g_caughtCap ? g_caughtCap * 2 : 32;
+        struct cppparse_exception* grown = (struct cppparse_exception*)realloc(g_caught, (size_t)cap * sizeof(struct cppparse_exception));
+        if (!grown) { fprintf(stderr, "cppparse runtime: out of memory for %d nested handlers\n", cap); abort(); }
+        g_caught = grown;
+        g_caughtCap = cap;
+    }
+    g_caught[g_caughtCount++] = *e;
+}
 
 void cppparse_push_frame(struct cppparse_frame* f)
 {
@@ -296,8 +311,7 @@ int cppparse_match(const char* catchType)
 void* cppparse_catch_begin(void)
 {
     void* obj = g_inflight.object;
-    if (g_caughtCount < 32) g_caught[g_caughtCount++] = g_inflight;
-    else { dropException(&g_inflight); obj = 0; }  /* too deeply nested: the object is dropped */
+    pushCaught(&g_inflight);
     if (obj && g_matchPointer && g_inflight.slot) {
         /* the thrown pointer converted to the handler's: the thrown one stays as it was for a "throw;" */
         *g_inflight.slot = adjustPointer(*(char**)obj);

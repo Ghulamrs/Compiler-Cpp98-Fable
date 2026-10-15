@@ -19,10 +19,12 @@ SFINAE, deduction from function types, non-deduced contexts), template template 
 limit and a 512 MB stack for the compiler (3000 nested blocks and 5000 nested parentheses compile); the library:
 <climits> <cfloat> <limits> <cerrno> <ciso646> <csignal> <csetjmp> <clocale> <cwchar> <cwctype> <iterator> <functional>
 <numeric> <memory> <deque> <list> <stack> <queue> <bitset> <iomanip>, <algorithm> over any iterator with the C++98
-algorithms, reverse iterators, nothrow new, set_terminate/uncaught_exception, cerr and cin tied to cout, -0.
-Open from that review: the exception runtime's 32-handler limit, diagnostics, #if arithmetic and #line, debug
-information, char* from a literal, chained operator->, the driver; a pointer to member as a template argument stays
-refused; no basic_string/wstring, <complex> <valarray> <locale> <streambuf> <strstream>.
+algorithms, reverse iterators, nothrow new, set_terminate/uncaught_exception, cerr and cin tied to cout, -0; the exception
+runtime's stack of caught exceptions grows (40 nested live handlers) and operator new's failure throws a catchable
+std::bad_alloc (libcpp defines the allocation functions).
+Open from that review: diagnostics, #if arithmetic and #line, debug information, char* from a literal, chained
+operator->, the driver; exceptions across cl-compiled frames (cl's own exception model, deferred); a pointer to member as a
+template argument stays refused; no basic_string/wstring, <complex> <valarray> <locale> <streambuf> <strstream>.
 
 Fixed on 2026-10-14 (lanes V, A, L; verified: suite, selfhost generation two, suite under the self-built compiler, cprog, matrix, eh, mix):
 T() value-initialisation zeroes as cl; a float passed to printf or any variadic function is promoted to double;

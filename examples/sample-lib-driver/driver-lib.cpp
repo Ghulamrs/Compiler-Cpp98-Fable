@@ -60,7 +60,7 @@ int main()
     check("numericOps()", numericOps(), 2460);
     check("containersAdaptors()", containersAdaptors(), 1234);
     check("bitsAndManipulators()", bitsAndManipulators(), 5321);
-    check("exceptionsAndNew()", exceptionsAndNew(), 731);
+    check("exceptionsAndNew()", exceptionsAndNew(), 2731);
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

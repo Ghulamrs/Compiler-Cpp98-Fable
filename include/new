@@ -1,8 +1,9 @@
 // new - cppparse's C++98 library: the global allocation functions, placement new, the nothrow forms and bad_alloc.
-// New- and delete-expressions call the global operators by their MSVC names without looking them up here; the
-// C++ library defines them, and a program may replace them in any of its units. The nothrow forms are the
-// library's own (malloc: null when it fails), since the C runtime's operator new reports failure through MSVC's
-// exception handling.
+// New- and delete-expressions call the global operators by their MSVC names without looking them up here;
+// libcpp/iostream.cpp defines them (malloc; bad_alloc thrown through cppparse's runtime when it fails), a program
+// that does not link it gets the C runtime's (whose failure is reported through MSVC's exception handling, which no
+// cppparse frame can catch), and a program may replace them in any of its units. The nothrow forms are inline here
+// (malloc: null when it fails).
 #ifndef CPPPARSE_NEW
 #define CPPPARSE_NEW
 

@@ -613,3 +613,13 @@ int ehRtti(int k)
     catch (std::bad_cast& e) { return 20 + (e.what()[0] == 'B' ? 1 : 0) + (dynamic_cast<RtD*>(pb) == 0 ? 100 : 0); }
     catch (std::bad_typeid& e) { return 30 + (e.what()[0] == 'A' ? 1 : 0); }
 }
+
+// ---- nested live handlers: a handler that calls deeper while its own exception is still caught; the runtime's
+// stack of caught exceptions grows as needed (it held 32 and dropped the 33rd) ----
+int ehDeepHandlers(int n)
+{
+    int r = 0;
+    try { throw n; }
+    catch (int e) { r = e; if (n < 40) r += ehDeepHandlers(n + 1); }
+    return r;
+}

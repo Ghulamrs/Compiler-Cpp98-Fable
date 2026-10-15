@@ -50,7 +50,7 @@ bool Parser::isDeclSpecKeyword(const std::string& s)
 }
 
 Parser::Parser(const std::vector<PpToken>& tokens, CxxArena& arena)
-    : m_toks(tokens), m_arena(arena), m_pos(0), m_tentative(0), m_errors(0), m_templateDepth(0), m_noGreater(0)
+    : m_toks(tokens), m_arena(arena), m_pos(0), m_tentative(0), m_errors(0), m_templateDepth(0), m_noGreater(0), m_declInitFailed(false)
 {
     PpToken end;
     end.kind = PpToken::End;
@@ -86,7 +86,7 @@ void Parser::skipTo(const char* a, const char* b)
         if (cur().kind == PpToken::Punct) {
             if (t == "(" || t == "[" || t == "{") { ++depth; advance(); continue; }
             if (t == ")" || t == "]") { if (depth > 0) --depth; advance(); continue; }
-            if (t == "}") { if (depth > 0) { --depth; advance(); continue; } if (std::string(b) == "}") return; advance(); continue; }
+            if (t == "}") { if (depth > 0) { --depth; advance(); if (depth == 0) return; continue; } if (std::string(b) == "}") return; advance(); continue; }
             if (depth == 0 && (t == a || t == b)) { if (t == ";") advance(); return; }
         }
         advance();
@@ -104,13 +104,15 @@ void Parser::skipBalanced()
     } while (depth > 0 && !atEnd());
 }
 
-int Parser::declspecArguments()
+int Parser::declspecArguments(bool* noreturn)
 {
     if (!at("(")) return 0;
     int align = 0;
     const size_t start = m_pos;
     skipBalanced();
-    // __declspec( align(N) ) among other attributes such as dllimport or noinline
+    // __declspec( align(N) ) among other attributes such as dllimport or noinline; noreturn is kept for the flow
+    // analysis (a call of such a function ends the control path, as cl knows for abort and exit)
+    for (size_t p = start + 1; p < m_pos; ++p) if (noreturn && m_toks[p].kind == PpToken::Ident && m_toks[p].text == "noreturn") *noreturn = true;
     for (size_t p = start + 1; p + 3 < m_pos; ++p)
         if (m_toks[p].kind == PpToken::Ident && m_toks[p].text == "align" && m_toks[p + 1].is("(") && m_toks[p + 2].kind == PpToken::Number && m_toks[p + 3].is(")")) {
             int n = std::atoi(m_toks[p + 2].text.c_str());
@@ -202,6 +204,7 @@ bool Parser::isTypeName(const QualifiedName& n) const
         for (size_t i = m_scopes.size(); i > 0; --i) {
             const Scope& s = m_scopes[i - 1];
             if (s.types.count(last.ident)) return true;      // class templates are in 'types' too; function templates only in 'templates'
+            if (s.others.count(last.ident)) return false;    // a variable, parameter or function of this scope hides the type further out
         }
         return false;
     }
@@ -403,9 +406,9 @@ bool Parser::declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef)
         if (w == "inline") { spec.isInline = true; advance(); any = true; continue; }
         if (w == "const") { spec.isConst = true; advance(); any = true; continue; }
         if (w == "volatile") { spec.isVolatile = true; advance(); any = true; continue; }
-        if (w == "__declspec") {                                // Microsoft extension: align(N) is kept, the rest ignored
+        if (w == "__declspec") {                                // Microsoft extension: align(N) and noreturn are kept, the rest ignored
             advance();
-            int a = declspecArguments();
+            int a = declspecArguments(&spec.noreturn);
             if (a > spec.align) spec.align = a;
             any = true; continue;
         }
@@ -533,9 +536,15 @@ bool Parser::declaratorSuffixes(Declarator& d, bool inParams)
             if (maybeInit) --m_tentative;
             if (!params) {
                 if (!maybeInit) return false;
+                m_pos = parenAt; m_diags.resize(errs); m_errors = errorsBefore;
+                // "int f(int a { ... }": the parenthesis held parameters after all when the failure is at a '{' or
+                // the end of the statement (no initializer argument has one); the parameter list's error is reported
+                size_t probe = m_pos; ++m_tentative; advance(); { DeclaratorPart q; q.kind = DeclaratorPart::Function; parameterList(q); } --m_tentative;
+                const bool parameters = at("{") || at(";") || atEnd();
+                m_pos = probe; m_diags.resize(errs); m_errors = errorsBefore;
+                if (parameters) { advance(); parameterList(p); return false; }
                 // "T x(U(1, 2), v)": the parenthesis starts with a type name but holds initializer arguments, not
                 // parameters; the initializer is read after the declarator
-                m_pos = parenAt; m_diags.resize(errs); m_errors = errorsBefore;
                 break;
             }
             while (at("const") || at("volatile")) { if (at("const")) p.isConst = true; else p.isVolatile = true; advance(); }
@@ -774,7 +783,7 @@ Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, boo
         InitDeclarator id;
         id.decl = d;
         if (d->isFunction() && at("=") && peek().text == "0" && peek(2).text == ";") { advance(); advance(); id.pureVirtual = true; }
-        else if (!initializer(id.init)) return 0;
+        else if (!initializer(id.init)) { if (!d->name.parts.empty()) m_declInitFailed = true; return 0; }
         registerDeclaredNames(spec, *d);
         decl->declarators.push_back(id);
         if (!accept(",")) break;
@@ -820,6 +829,27 @@ Decl* Parser::classSpecifier(DeclSpec& spec, Loc here)
     std::string scopeName = simple.empty() ? "(anonymous)" : simple;
     pushScope(scopeName, true);
     declareType(simple);
+    {
+        // the names of the member functions declared anywhere in the body (ident '(' at the body's own level, outside
+        // parentheses, after a type, a declarator operator or a specifier): a member hides a type of the same name
+        // of an enclosing scope in the member bodies, which see the whole class (3.3.6)
+        int depth = 0, parens = 0;
+        for (size_t p = m_pos; p < m_toks.size(); ++p) {
+            const PpToken& t = m_toks[p];
+            if (t.kind == PpToken::Punct) {
+                if (t.text == "{") ++depth; else if (t.text == "}") { if (depth == 0) break; --depth; }
+                else if (depth == 0 && (t.text == "(" || t.text == "[")) ++parens;
+                else if (depth == 0 && (t.text == ")" || t.text == "]")) { if (parens > 0) --parens; }
+                continue;
+            }
+            if (depth != 0 || parens != 0 || t.kind != PpToken::Ident || p + 1 >= m_toks.size() || !m_toks[p + 1].is("(") || p == 0) continue;
+            if (t.text == simple || t.text == "operator" || isKeyword(t.text)) continue;
+            const PpToken& prev = m_toks[p - 1];
+            const bool afterDeclaratorPrefix = prev.kind == PpToken::Ident ? !(prev.text == "return" || prev.text == "new" || prev.text == "throw" || prev.text == "sizeof" || prev.text == "case" || prev.text == "typedef" || prev.text == "class" || prev.text == "struct" || prev.text == "union" || prev.text == "enum" || prev.text == "typename" || prev.text == "template" || prev.text == "namespace" || prev.text == "operator")
+                                              : (prev.kind == PpToken::Punct && (prev.text == "*" || prev.text == "&" || prev.text == ">"));
+            if (afterDeclaratorPrefix) declareOther(t.text);
+        }
+    }
     // the base classes' member type names are visible in the body, and through this class's name
     for (size_t b = 0; b < c->bases.size(); ++b) {
         const NamedScope* ns = findNamedScope(c->bases[b].name, c->bases[b].name.parts.size());
@@ -1144,12 +1174,22 @@ Stmt* Parser::declarationStatement()
     int errorsBefore = m_errors;
     Loc here = loc();
     const std::set<std::string> othersBefore = m_scopes.back().others;   // a failed attempt declares nothing
+    m_declInitFailed = false;
     ++m_tentative;
     DeclSpec spec;
     bool any = declSpecifiers(spec, false, true);
     Decl* d = 0;
     if (any && spec.hasType()) d = simpleOrFunction(false, spec, here, false, 0);
     --m_tentative;
+    if (!d && m_declInitFailed && spec.hasType() && m_tentative == 0) {
+        // "int v = 3 +;": the specifiers and a named declarator made it a declaration; its initializer's error is
+        // the one to report, not that of the expression statement the text is not
+        m_pos = save; m_diags.resize(errs); m_errors = errorsBefore; m_scopes.back().others = othersBefore;
+        DeclSpec again;
+        if (declSpecifiers(again, false, true)) simpleOrFunction(false, again, here, false, 0);
+        skipTo(";", "}");
+        return m_arena.stmt(Stmt::Error, here);
+    }
     if (!d) { m_pos = save; m_diags.resize(errs); m_errors = errorsBefore; m_scopes.back().others = othersBefore; return 0; }
     Stmt* s = m_arena.stmt(Stmt::DeclStmt, here);
     s->decl = d;

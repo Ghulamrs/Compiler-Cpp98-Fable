@@ -25,7 +25,7 @@ public:
         return c;
     }
     istream& get(char& c) { int v = get(); if (v >= 0) c = static_cast<char>(v); return *this; }
-    int peek() { if (m_peek == -2) m_peek = underflow(); if (m_peek < 0) setstate(eofbit); return m_peek < 0 ? -1 : m_peek; }
+    int peek() { if (m_peek == -2) { if (m_tie) m_tie->flush(); m_peek = underflow(); } if (m_peek < 0) setstate(eofbit); return m_peek < 0 ? -1 : m_peek; }
     istream& read(char* s, streamsize n)
     {
         m_count = 0;

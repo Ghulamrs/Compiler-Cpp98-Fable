@@ -84,3 +84,34 @@ int noargs = NOARGS();
 #define CALL_SQ SQ PAREN 3)
 int called = CALL_SQ;
 long big = __cplusplus;
+
+/* #if arithmetic (16.1/4): 64-bit values, unsigned when an operand is, short circuit and dead arms are not
+   evaluated (1/0 in the arm not taken); the 2026-10-15 review's ppar.cpp and pp3.cpp */
+#if (0xFFFFFFFF > 0) && (1 << 31 != 0) && (~0 == -1) && (-1 > 0u ? 1 : 0) && (0xFFFFFFFFFFFFFFFF == -1) && (4294967296 > 0) && (4294967296 / 2 == 2147483648) && (18446744073709551615u != 0)
+int ppArith = 1;
+#else
+int ppArith = 0;
+#endif
+#if 1 ? 2 : (1/0)
+int ppTern = 1;
+#else
+int ppTern = 0;
+#endif
+#if 0 && (1/0)
+int ppDead = 0;
+#elif 1 || (1 % 0)
+int ppDead = 1;
+#else
+int ppDead = 2;
+#endif
+#if (-1 < 0) && (5 / 2 == 2) && (5 % 3 == 2) && (-7 / 2 == -3) && (-7 % 2 == -1) && (1u << 63 == 0x8000000000000000) && (0x8000000000000000 >> 63 == 1) && (-1 >> 1 == -1)
+int ppDiv = 1;
+#else
+int ppDiv = 0;
+#endif
+/* #line (16.4): the line and, when given, the file of what follows */
+#line 100 "renamed.cpp"
+int ppLine = __LINE__; const char* ppFile = __FILE__;
+#line 200
+int ppLine2 = __LINE__;
+int ppLine3 = __LINE__;

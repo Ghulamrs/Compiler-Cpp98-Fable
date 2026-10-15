@@ -184,6 +184,16 @@ private:
     int  materialize(cxx::Expr* e, const sema::Type* t, int dst, int line);
     void destroy(const sema::Type* t, int objAddr, int line, bool viaVtable, bool complete = true);   // complete: with its virtual bases
 
+    // RTTI (cl's data, read by vcruntime's __RTtypeid / __RTDynamicCast / __RTCastToVoid)
+    int  typeidAddress(cxx::Expr* e, int line);                    // the type_info object of typeid(...)
+    bool dynamicCast(cxx::Expr* e, int line, int& result);        // false: a conversion to a base, done statically
+    int  vfptrSubobject(int addr, sema::Symbol* cls, int line);  // the subobject that holds the class's first vfptr
+    int  vfptrSubobjectOrNull(int p, sema::Symbol* cls, int line);   // the same for a pointer that may be null
+    std::string typeDescriptor(const sema::Type* t);              // the IR name of the type descriptor global, emitted once
+    std::string classHierarchy(sema::Symbol* cls);                // the IR name of the class hierarchy descriptor, with its base class array and descriptors
+    void rttiGlobal(const std::string& name, const std::string& decorated, const std::vector<IrDataItem>& items, bool readOnly);
+    sema::Symbol* stdFunction(const char* name);                  // std::__cppparse_throw_bad_cast and the like (0 without <typeinfo>)
+
     // lifetimes
     int  registerCleanup(int slot, const sema::Type* t, bool viaPointer, int mode, int line);
     void runCleanup(const Cleanup& c, bool guarded, int line);
@@ -264,6 +274,8 @@ private:
     int    operatorCall(cxx::Expr* e);
     int    adjustThis(sema::Symbol* fn, int objAddr, const sema::Type* objType, int line);
     int    rvalue(int r, cxx::Expr* e, int line);
+    int    conversionCall(cxx::Expr* e, int line);   // a cast through the conversion function e->semaSym, converted on to the cast's type
+    int    incremented(int cur, const sema::Type* ot, bool up, int line);   // cur + 1 or cur - 1 in cur's type, as ++/-- compute it
     int    callFunction(sema::Symbol* fn, int thisPtr, int sretAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, bool virtualCall, int line);
     int    construct(sema::Symbol* ctor, int objAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, int line);
     int    argument(cxx::Expr* a, const sema::Type* paramType, int line);
@@ -295,6 +307,7 @@ private:
     std::vector<sema::Symbol*> m_dynamicGlobals;   // globals built by the module's initialiser, in declaration order
     sema::Symbol*              m_initSymbol;
     std::vector<ExitThunk>     m_exitThunks;       // destructor thunks registered with atexit; generated after the functions
+    std::set<std::string>      m_rttiDone;         // the RTTI globals emitted so far (by IR name)
     size_t                     m_exitThunksDone;
     X86Module*                 m_x86;              // receives the globals that static locals become
     bool                       m_msvcNames;        // --msvc-mangling: static locals get cl's decorated names
@@ -321,6 +334,7 @@ private:
     int                        m_guardCount;    // guarded static locals so far in the function (cl's $TSS<n>)
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block
     std::vector<std::set<std::string> > m_handlerLabels;   // the labels inside each catch handler being generated
+    cxx::Decl*                 m_functionTryDef;   // a constructor or destructor whose body is a function-try-block (0: none)
     static void collectLabels(const cxx::Stmt* s, std::set<std::string>& out);
 
     IrFunction*                m_out;

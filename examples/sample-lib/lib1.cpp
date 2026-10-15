@@ -82,3 +82,19 @@ int stableSorting()                        // 4: stable_sort keeps the input ord
     if (items[39].first == 2 && items[39].second == 38) ok += 3;
     return ok;
 }
+
+// linkage across the units of sample-lib (C++98 3.5/3, 14.7.1): a namespace-scope const object is internal to its
+// unit (both units define kLinkShared with different values), the static data member of a class template is one
+// object for the program (a COMDAT), the static local of an inline function too
+const int kLinkShared = 1;
+static int s_linkHidden = 1;
+inline int linkInline(int x) { static int calls = 0; return x + ++calls; }
+template <class T> struct LinkBox { T v; LinkBox(T x) : v(x) {} T get() const { return v; } static int made; };
+template <class T> int LinkBox<T>::made = 0;
+
+int linkageA()                             // 1122: kLinkShared 1, s_linkHidden 1, linkInline(21) on its first call 22, made 1 after one object
+{
+    LinkBox<int> b(3);
+    LinkBox<int>::made += 1;
+    return kLinkShared * 1000 + s_linkHidden * 100 + linkInline(21) + LinkBox<int>::made * 0 + (LinkBox<int>::made == 1 ? 0 : -1) + b.get() * 0;
+}

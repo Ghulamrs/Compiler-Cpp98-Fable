@@ -234,6 +234,15 @@ struct Symbol {
     // decides the inheritance model there and keeps the unspecified one (data 12, functions 24) once it is defined
     bool          memberPointerUnspecified;
     int           defOrder;               // class: the order its definition began in (0: inside a function body)
+    // access control (clause 11): the friends of a class (functions and classes; the friend declarations of a
+    // template's definition are repeated in each instantiation); friendsUnknown when a friend declaration could
+    // not be resolved (a template, a function of another scope): then nothing of the class is checked
+    std::vector<Symbol*>     friends;
+    std::vector<std::string> friendNames;   // "friend class List;" before List is declared: matched by name
+    bool          friendsUnknown;
+    bool          isUsed;                 // variable, parameter: referred to by an expression (C4100, C4101, C4189)
+    bool          isNoreturn;             // function: __declspec(noreturn)
+    std::string   deletedWhy;             // implicit copy assignment that cannot be generated (12.8/12): why
     std::string   mangled;                // filled by code generation
 
     Symbol();
@@ -291,9 +300,10 @@ struct Conversion {
     Rank        rank;
     Symbol*     userFunction;    // converting constructor or conversion operator
     const Type* target;
-    bool        derivedToBase;   // a pointer/reference conversion to a base class (worse than identity among Standard)
+    bool        derivedToBase;   // a pointer/reference conversion to a base class (better than the other standard conversions, 13.3.3.2/4)
     bool        qualification;   // only cv-qualification added
-    Conversion() : rank(None), userFunction(0), target(0), derivedToBase(false), qualification(false) {}
+    Rank        second;          // UserDefined: the rank of the standard conversion after the user conversion (13.3.3.2/3)
+    Conversion() : rank(None), userFunction(0), target(0), derivedToBase(false), qualification(false), second(Exact) {}
 };
 
 class Sema {
@@ -342,6 +352,24 @@ private:
     // is reachable from code that is not itself tentative
     bool   isLazyMember(const Symbol* fn) const;
     void   noteUse(Symbol* used);           // m_currentFunction (0 at namespace scope) refers to used
+    // access control (clause 11) and the other checks of the 2026-10-15 review's M12
+    bool   accessible(Symbol* member, Scope* from);
+    void   accessCheck(Symbol* member, const cxx::Loc& loc, Scope* from);
+    bool   isFriendOf(Symbol* x, Symbol* cls);
+    void   abstractCheck(const Type* t, const cxx::Loc& loc);
+    bool   assignmentDeleted(Symbol* cls);
+    void   narrowingWarning(cxx::Expr* from, const Type* to, const char* what);
+    // the warnings cl gives at /W4 that need the whole body (functionWarnings runs after analyzeFunctionBody)
+    void   functionWarnings(Symbol* fn, cxx::Decl* def, size_t diagMark);
+    bool   mayFallThrough(cxx::Stmt* s);
+    bool   hasJump(cxx::Stmt* s, bool wantContinue);
+    bool   hasDefault(cxx::Stmt* s);
+    bool   generatesCode(cxx::Stmt* s);
+    bool   isNoreturnCall(cxx::Expr* e);
+    void   unreachableCheck(cxx::Stmt* s);
+    void   uninitStmt(cxx::Stmt* s, std::set<Symbol*>& assigned);
+    void   uninitDecl(cxx::Decl* d, std::set<Symbol*>& assigned);
+    void   uninitExpr(cxx::Expr* e, std::set<Symbol*>& assigned, bool write);
     void   reportUsedFailedMembers();       // releases the held diagnostics of every member reachable from real code
     void   analyzeFunctionBody(Symbol* fn, cxx::Decl* def, Scope* enclosing);
     void   stmt(cxx::Stmt* s, Scope* in, Symbol* fn);
@@ -352,6 +380,10 @@ private:
     bool     lookupInScope(Scope* s, const std::string& name, bool typesOnly, std::vector<Symbol*>& out, std::set<Scope*>& seen);
     bool     lookupMember(Symbol* cls, const std::string& name, std::vector<Symbol*>& out, int depth = 0);
     Symbol*  resolveName(const cxx::QualifiedName& n, Scope* from, bool typesOnly, std::vector<Symbol*>* overloads);
+    // argument-dependent lookup (3.4.2): the namespaces associated with a type, and the functions named name
+    // declared in the namespaces associated with the arguments' types (in-class friend definitions among them)
+    void     associatedNamespaces(const Type* t, std::vector<Scope*>& out, int depth);
+    void     adlCandidates(const std::string& name, const std::vector<cxx::Expr*>& args, size_t firstArg, std::vector<Symbol*>& cands);
 
     // types
     const Type* namedType(const cxx::QualifiedName& n, Scope* in, const std::string& elaborated, const cxx::Loc& loc);
@@ -373,6 +405,8 @@ private:
     const Type* exprAssign(cxx::Expr* e, Scope* in);
     const Type* exprNew(cxx::Expr* e, Scope* in);
     const Type* exprCast(cxx::Expr* e, Scope* in, const Type* to, bool checked);
+    bool        dynamicCastCheck(cxx::Expr* e, const Type* to);
+    Symbol*     stdClass(const char* name);       // std::type_info, std::bad_cast when declared
     bool        floatingConstant(cxx::Expr* e, double& v, bool toFloating, int depth);
     const Type* valueType(cxx::Expr* e);          // lvalue-to-rvalue: the type after decay, without top-level cv
     // brace initialisation of aggregates: elided braces become explicit InitList nodes and every element
@@ -386,10 +420,14 @@ private:
     bool   completeForSizeof(const Type* t, Scope* in, const cxx::Loc& loc);   // false, with S113, for an incomplete type
     bool   constantValue(cxx::Expr* e, long& out);
     Symbol* classOperator(const std::string& op, cxx::Expr* e, const std::vector<cxx::Expr*>& operands, Scope* in, const Type*& result);
-    Symbol* resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report);
+    // explicitArgs: the template arguments written on the call (f<int>(x)), bound before deduction
+    Symbol* resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report, const std::vector<cxx::TemplateArg>* explicitArgs = 0);
     Conversion convert(cxx::Expr* from, const Type* to, Scope* in);
     Conversion convertType(const Type* from, bool lvalue, bool nullConstant, const Type* to, Scope* in, bool allowUser);
-    Symbol* instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::Expr*>& args, size_t firstArg, Scope* in, const cxx::Loc& loc);
+    Symbol* instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::Expr*>& args, size_t firstArg, Scope* in, const cxx::Loc& loc, const std::vector<cxx::TemplateArg>* explicitArgs = 0);
+    bool   atLeastAsSpecialized(Symbol* a, Symbol* b);   // 14.5.5.2: b's parameters deduce from a's with a's parameters unique types
+    static bool typeHasError(const Type* t);
+    void   declareFunctionSpecialization(cxx::Decl* d, cxx::Decl* inner, cxx::Declarator* dcl, Scope* in, cxx::Access access);
     bool   deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::map<std::string, const Type*>& bindings, std::map<std::string, long>& ints);
     const Type* resultOfCall(Symbol* fn);
 
@@ -407,10 +445,17 @@ private:
     Symbol*                    m_currentFunction;
     Symbol*                    m_currentClass;
     int                        m_loopDepth, m_switchDepth, m_depth;
+    std::vector<Symbol*>       m_locals;          // the scalar locals of the body being analysed (functionWarnings)
+    std::set<Symbol*>          m_uninitCandidates;
+    bool                       m_hasGoto;         // the body has a goto: no flow warnings
     int                        m_classOrder;      // class definitions begun so far in the declaration pass
     int                        m_bodyOrder;       // the order of the body being analysed (-1: declaration pass)
     int                        m_definingDepth;   // class definitions open
     std::set<std::string>      m_reportedUnknown;
+    std::set<std::string>      m_fixedTemplateParams;   // the template parameters given explicitly on the call being deduced (not deduced, converted)
+    bool                       m_strictDeduce;          // partial ordering: a const in the parameter needs a const in the argument
+    int                        m_instantiationDepth;    // class template instantiations nested (cl stops at 1000: C2999)
+    bool                       m_instantiationOverflow; // the limit was reported once
     std::map<Symbol*, std::set<Symbol*> > m_uses;          // function (0: namespace scope) -> functions it refers to
     std::set<Symbol*>                     m_lazyMembers;   // members analysed tentatively
     std::map<Symbol*, std::vector<Diag> > m_held;          // their held-back diagnostics

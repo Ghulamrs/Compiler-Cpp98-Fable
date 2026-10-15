@@ -70,6 +70,7 @@ struct DeclSpec {                   // decl-specifier-seq
     EnumDecl*     enumDef;          // Enum: the definition
     Loc           loc;
     int           align;            // __declspec(align(N)) among the specifiers (0: none)
+    bool          noreturn;         // __declspec(noreturn)
     DeclSpec();
     bool hasType() const { return kind != None; }
     std::string text() const;       // "const unsigned int", "std::vector<int>"
@@ -158,7 +159,8 @@ struct Expr {
     bool               semaLvalue;
     bool               semaConst;   // a constant expression
     long               semaValue;   // its value when semaConst
-    Expr() : kind(Error), type(0), arrayDelete(false), hasInit(false), arrowMember(false), globalScope(false), semaType(0), semaSym(0), semaLvalue(false), semaConst(false), semaValue(0) {}
+    const sema::Type*  semaOperand; // Typeid: the type the operand names or has (typeid(int), typeid(x))
+    Expr() : kind(Error), type(0), arrayDelete(false), hasInit(false), arrowMember(false), globalScope(false), semaType(0), semaSym(0), semaLvalue(false), semaConst(false), semaValue(0), semaOperand(0) {}
 };
 
 

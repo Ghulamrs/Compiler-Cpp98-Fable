@@ -70,7 +70,7 @@ private:
     void  error(const std::string& msg);
     void  skipTo(const char* a, const char* b);       // error recovery: skip to a or b at depth 0 (consumes a ';', not a '}')
     void  skipBalanced();                             // skip a balanced (...) [...] {...}
-    int   declspecArguments();                        // after __declspec: skips "(...)", returns N of an align(N) in it (0: none)
+    int   declspecArguments(bool* noreturn = 0);      // after __declspec: skips "(...)", returns N of an align(N) in it (0: none); *noreturn when it holds noreturn
     static bool isKeyword(const std::string& s);
     static bool isTypeKeyword(const std::string& s);
     static bool isDeclSpecKeyword(const std::string& s);
@@ -144,6 +144,7 @@ private:
     int                         m_errors;
     int                         m_templateDepth;      // inside template <...> declaration (typename allowed)
     int                         m_noGreater;          // > 0 while parsing template arguments: '>' ends the expression
+    bool                        m_declInitFailed;     // the last tentative declaration failed inside an initializer: it was a declaration
     std::vector<std::string>    m_qualifierStack;     // current qualified scope names for m_named
 };
 

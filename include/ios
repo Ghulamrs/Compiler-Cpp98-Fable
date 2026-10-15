@@ -46,7 +46,9 @@ protected:
 
 class ios : public ios_base {
 public:
-    ios() : m_state(0), m_fill(' ') {}
+    ios() : m_state(0), m_fill(' '), m_tie(0) {}
+    ostream* tie() const { return m_tie; }
+    ostream* tie(ostream* o) { ostream* old = m_tie; m_tie = o; return old; }
     bool    good() const { return m_state == 0; }
     bool    eof() const { return (m_state & eofbit) != 0; }
     bool    fail() const { return (m_state & (failbit | badbit)) != 0; }
@@ -62,6 +64,7 @@ public:
 protected:
     iostate m_state;
     char    m_fill;
+    ostream* m_tie;    // flushed before this stream reads or writes (cin and cerr are tied to cout)
 };
 
 }

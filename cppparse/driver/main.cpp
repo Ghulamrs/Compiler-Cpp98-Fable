@@ -22,12 +22,17 @@
 //   <name>-diagram.dot    Graphviz source (dot -Tpng -o diagram.png <name>-diagram.dot)
 //
 // Strict C++98.
-#if defined(_MSC_VER) && defined(_DEBUG)
-#include <crtdbg.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
+#if defined(_MSC_VER) && defined(_DEBUG)
+#include <crtdbg.h>
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
 #endif
@@ -224,7 +229,7 @@ int reportToStderr(int reportType, char* message, int* returnValue)
 }
 #endif
 
-int main(int argc, char* argv[])
+int cppparseMain(int argc, char* argv[])
 {
 #if defined(_MSC_VER) && defined(_DEBUG)
     _CrtSetReportHook(reportToStderr);
@@ -320,6 +325,16 @@ int main(int argc, char* argv[])
             if (!fileExists(inputs[i])) { std::cerr << "error: cannot read " << inputs[i] << "\n"; ++totalErrors; continue; }
             Preprocessor pp(ppOpt);
             pp.run(inputs[i]);
+            // the preprocessor's diagnostics (an unterminated comment or #if, a bad #if expression, #error) count as
+            // errors of the unit like the parser's
+            int ppErrors = 0;
+            {
+                const std::vector<PpDiag>& pd = pp.diagnostics();
+                for (size_t k = 0; k < pd.size(); ++k) {
+                    if (pd[k].severity == PpDiag::Error) ++ppErrors;
+                    if (k < 20) std::cout << "  " << (pd[k].file.empty() ? inputs[i] : pd[k].file) << "(" << pd[k].line << "): " << (pd[k].severity == PpDiag::Error ? "error" : "warning") << ": " << pd[k].message << "\n";
+                }
+            }
             if (compile6 && !pp.missingIncludes().empty()) {
                 // an object compiled without one of its headers would rest on undeclared names and guessed types
                 for (size_t k = 0; k < pp.missingIncludes().size(); ++k)
@@ -341,7 +356,7 @@ int main(int argc, char* argv[])
             bool winMissing = false;
             for (size_t k = 0; k < pp.missingIncludes().size(); ++k) if (toLower(pp.missingIncludes()[k]) == "windows.h") winMissing = true;
             if (winMissing) for (int k = 0; kWinTypes[k]; ++k) parser.assumeType(kWinTypes[k]);
-            int errors = parser.parse(tu);
+            int errors = parser.parse(tu) + ppErrors;
             totalErrors += errors;
             cxx::Counts c;
             cxx::countTranslationUnit(tu, c);
@@ -599,4 +614,26 @@ int main(int argc, char* argv[])
     }
     if (strictExit) return strictExit;
     return ok ? 0 : 1;
+}
+
+#ifdef _WIN32
+#ifndef STACK_SIZE_PARAM_IS_A_RESERVATION
+#define STACK_SIZE_PARAM_IS_A_RESERVATION 0x00010000
+#endif
+namespace {
+struct MainArgs { int argc; char** argv; int result; };
+DWORD WINAPI cppparseMainThread(LPVOID p) { MainArgs* a = static_cast<MainArgs*>(p); a->result = cppparseMain(a->argc, a->argv); return 0; }
+}
+#endif
+
+// the compiler recurses as deep as the program nests (template instantiations up to the 1000 of cl's C2999, nested
+// blocks and parentheses): it runs on a thread with a 512 MB stack reservation instead of the default 1 MB
+int main(int argc, char* argv[])
+{
+#ifdef _WIN32
+    MainArgs a; a.argc = argc; a.argv = argv; a.result = 1;
+    HANDLE h = CreateThread(0, 512u * 1024u * 1024u, cppparseMainThread, &a, STACK_SIZE_PARAM_IS_A_RESERVATION, 0);
+    if (h) { WaitForSingleObject(h, INFINITE); CloseHandle(h); return a.result; }
+#endif
+    return cppparseMain(argc, argv);
 }

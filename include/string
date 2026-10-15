@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iosfwd>
+#include <__iterator>
 
 namespace std {
 
@@ -19,6 +20,9 @@ public:
     typedef const char* const_iterator;
     typedef char&       reference;
     typedef const char& const_reference;
+    typedef ptrdiff_t   difference_type;
+    typedef std::reverse_iterator<iterator>       reverse_iterator;
+    typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
     static const size_t npos = ~static_cast<size_t>(0);
 
     string() : m_data(0), m_size(0), m_cap(0) { init(0, 0); }
@@ -62,6 +66,10 @@ public:
     char&       at(size_t i) { if (i >= m_size) abort(); return m_data[i]; }
     const char& at(size_t i) const { if (i >= m_size) abort(); return m_data[i]; }
     iterator       begin() { return m_data; }
+    reverse_iterator       rbegin() { return reverse_iterator(end()); }
+    reverse_iterator       rend() { return reverse_iterator(begin()); }
+    const_reverse_iterator rbegin() const { return const_reverse_iterator(end()); }
+    const_reverse_iterator rend() const { return const_reverse_iterator(begin()); }
     iterator       end() { return m_data + m_size; }
     const_iterator begin() const { return m_data; }
     const_iterator end() const { return m_data + m_size; }

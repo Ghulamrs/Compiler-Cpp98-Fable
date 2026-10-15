@@ -68,8 +68,29 @@ static void dropException(struct cppparse_exception* e)
     e->dtor = 0;
     e->slot = 0;
 }
-static __declspec(thread) struct cppparse_exception g_caught[32];
-static __declspec(thread) int                       g_caughtCount = 0;
+/* std::set_terminate / set_unexpected: the handlers the library installs; the defaults abort and (unexpected)
+   terminate, as C++98 18.6 says; an unhandled exception and an exception leaving a destructor during unwinding
+   call terminate */
+static void (*g_terminateHandler)(void) = 0;
+static void (*g_unexpectedHandler)(void) = 0;
+void cppparse_terminate(void);
+/* the exceptions caught and not yet released, innermost last (a handler that calls deeper keeps its own alive):
+   a per-thread array that doubles as handlers nest */
+static __declspec(thread) struct cppparse_exception* g_caught = 0;
+static __declspec(thread) int                        g_caughtCount = 0;
+static __declspec(thread) int                        g_caughtCap = 0;
+
+static void pushCaught(const struct cppparse_exception* e)
+{
+    if (g_caughtCount == g_caughtCap) {
+        int cap = g_caughtCap ? g_caughtCap * 2 : 32;
+        struct cppparse_exception* grown = (struct cppparse_exception*)realloc(g_caught, (size_t)cap * sizeof(struct cppparse_exception));
+        if (!grown) { fprintf(stderr, "cppparse runtime: out of memory for %d nested handlers\n", cap); abort(); }
+        g_caught = grown;
+        g_caughtCap = cap;
+    }
+    g_caught[g_caughtCount++] = *e;
+}
 
 void cppparse_push_frame(struct cppparse_frame* f)
 {
@@ -127,8 +148,8 @@ static void dispatch(void)
         /* the walk has left the stack frame that holds the innermost setjmp frame */
         if (g_top && (DWORD64)g_top < ctx.Rsp) longjmp(g_top->buf, 1);
     }
-    fprintf(stderr, "cppparse runtime: unhandled exception of type %s\n", g_inflight.type ? g_inflight.type : "?");
-    abort();
+    if (!g_terminateHandler) fprintf(stderr, "cppparse runtime: unhandled exception of type %s\n", g_inflight.type ? g_inflight.type : "?");
+    cppparse_terminate();   /* the handler std::set_terminate installed, else abort */
 }
 
 void cppparse_throw(const void* object, const char* type, unsigned long size)
@@ -290,8 +311,7 @@ int cppparse_match(const char* catchType)
 void* cppparse_catch_begin(void)
 {
     void* obj = g_inflight.object;
-    if (g_caughtCount < 32) g_caught[g_caughtCount++] = g_inflight;
-    else { dropException(&g_inflight); obj = 0; }  /* too deeply nested: the object is dropped */
+    pushCaught(&g_inflight);
     if (obj && g_matchPointer && g_inflight.slot) {
         /* the thrown pointer converted to the handler's: the thrown one stays as it was for a "throw;" */
         *g_inflight.slot = adjustPointer(*(char**)obj);
@@ -340,8 +360,24 @@ void cppparse_catch_unwind(void* handled)
 
 /* an exception left a destructor that the stack unwinding called (the landing pad's own region): C++98 15.5.1 calls
    terminate, whose default handler is abort, as cl's code does */
+void (*cppparse_set_terminate(void (*f)(void)))(void) { void (*old)(void) = g_terminateHandler; g_terminateHandler = f; return old; }
+void (*cppparse_set_unexpected(void (*f)(void)))(void) { void (*old)(void) = g_unexpectedHandler; g_unexpectedHandler = f; return old; }
+/* the landing pads count the destructors they run while an exception is unwinding (cppparse_catch_begin has
+   taken the exception by then): std::uncaught_exception() is true there and from the throw to the handler */
+static __declspec(thread) int g_unwinding = 0;
+void cppparse_unwind_enter(void) { ++g_unwinding; }
+void cppparse_unwind_leave(void) { --g_unwinding; }
+int cppparse_uncaught_exception(void) { return g_inflight.object != 0 || g_unwinding > 0; }
+void cppparse_unexpected(void)
+{
+    if (g_unexpectedHandler) g_unexpectedHandler();
+    if (g_terminateHandler) g_terminateHandler();
+    abort();
+}
+
 void cppparse_terminate(void)
 {
+    if (g_terminateHandler) { g_terminateHandler(); abort(); }
     fprintf(stderr, "cppparse runtime: terminate: an exception left a destructor during stack unwinding\n");
     abort();
 }

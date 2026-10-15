@@ -30,7 +30,7 @@
 #include <vector>
 
 namespace cppparse {
-namespace sema { struct Symbol; }
+namespace sema { struct Symbol; struct Type; }
 
 std::string msvcMangleFunction(const FunctionInfo& f, TypeTable& types);
 std::string msvcMangleVariable(const VariableInfo& v, TypeTable& types);   // globals and static data members
@@ -60,6 +60,16 @@ std::string msvcMangleReturnThunk(const sema::Symbol& fn, const sema::Symbol& ro
 std::string msvcMangleVtordispThunk(const sema::Symbol& fn, long adjust);
 // cl's thread-safe-static guard of a function's index-th guarded static local: "?$TSS0@?1??f@@YAAEAUCnt@@XZ@4HA"
 std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index);
+// cl's RTTI: the name a type descriptor holds (".?AUD@@", ".H"), the type descriptor (??_R0?AUD@@@8), a class's
+// hierarchy descriptor (??_R3D@@8) and base class array (??_R2D@@8), a base class descriptor with its displacements
+// and attributes (??_R1BA@?0A@EA@C@@8: C at 16, no vbtable, attributes 0x40), and the complete object locator of a
+// vftable (??_R4D@@6BB@@@, named as the vftable ??_7D@@6BB@@@)
+std::string msvcRttiTypeName(const sema::Type* t);
+std::string msvcMangleTypeDescriptor(const sema::Type* t);
+std::string msvcMangleClassHierarchy(const sema::Symbol& c);
+std::string msvcMangleBaseClassArray(const sema::Symbol& c);
+std::string msvcMangleBaseClassDescriptor(const sema::Symbol& c, long mdisp, long pdisp, long vdisp, long attributes);
+std::string msvcMangleCompleteObjectLocator(const sema::Symbol& c, const sema::Symbol* forBase);
 
 } // namespace cppparse
 

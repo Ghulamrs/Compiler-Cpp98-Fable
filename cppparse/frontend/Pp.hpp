@@ -117,6 +117,7 @@ private:
     std::vector<std::pair<std::string, int> > m_packStack;   // push records: identifier (may be empty), value
     void packPragma(const std::vector<PpToken>& line, int fileIndex);
     std::map<std::string, std::string> m_fileCache;
+    std::map<int, std::pair<int, int> > m_lineMap;   // #line: per file, the line delta and the file index to report
     int                             m_errors;
 };
 

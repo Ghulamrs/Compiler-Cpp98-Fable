@@ -1,5 +1,35 @@
 GAP ANALYSIS OF C++98 (main 7e9bfbe, 2026-10-14; every item reproduced against cl)
 
+Review of 2026-10-15 (sandbox\out\fable-review\REPORT.md, 35 gaps; the state of each in docs/next-targets.md):
+fixed so far, each against cl at -O0 and -O2: casts through conversion functions ((int)obj, static_cast, (double)obj,
+(bool)(in >> v); the best conversion function, and two sequences through one conversion function ordered by the
+standard conversion after it); references bound to temporaries (const int& r = 5, const std::string& s = "x", a
+converted scalar argument, at namespace scope too); the arguments of calls through function pointers converted
+(Der& to Base& adjusted: std::cout << std::hex works); ++/-- on narrow types at -O2; the implicit constructor of
+`struct Leaf : Base {}` for a global (and global arrays of such classes constructed at all); function-try-blocks of
+constructors and destructors (members destroyed before the handler, rethrow at its end); the lifetime of a temporary
+passed through a function returning const T&; Base* ranked over void*; argument-dependent lookup on ordinary calls
+(the namespaces of the arguments' classes, bases, template arguments and enumerations) and friend functions declared
+in a class (functions of the enclosing namespace, found by ADL alone until the namespace declares them); internal
+linkage of const globals and COMDAT static data members of class templates (two units link); RTTI (cl's type
+descriptors, hierarchy descriptors and complete object locators before every vftable, typeid and dynamic_cast through
+vcruntime's __RTtypeid/__RTDynamicCast/__RTCastToVoid, <typeinfo> with bad_cast and bad_typeid); function templates
+(explicit arguments on calls, explicit specialisations of templates and of members of class templates, partial ordering,
+SFINAE, deduction from function types, non-deduced contexts), template template parameters, a 1000-deep instantiation
+limit and a 512 MB stack for the compiler (3000 nested blocks and 5000 nested parentheses compile); the library:
+<climits> <cfloat> <limits> <cerrno> <ciso646> <csignal> <csetjmp> <clocale> <cwchar> <cwctype> <iterator> <functional>
+<numeric> <memory> <deque> <list> <stack> <queue> <bitset> <iomanip>, <algorithm> over any iterator with the C++98
+algorithms, reverse iterators, nothrow new, set_terminate/uncaught_exception, cerr and cin tied to cout, -0; the exception
+runtime's stack of caught exceptions grows (40 nested live handlers) and operator new's failure throws a catchable
+std::bad_alloc (libcpp defines the allocation functions); 64-bit #if arithmetic with the usual conversions and short
+circuit, #line, an unterminated comment or #if is an error the compile path reports; access control (private and protected
+members, friends), abstract classes, the implicit assignment a reference or const member forbids, and cl /W4's warnings
+(unreferenced parameter and local, missing return, uninitialised local, unreachable code, shadowing, assignment as a
+condition, narrowing) with the parser's messages and recovery of cl.
+Open from that review: debug information, char* from a literal, chained operator->, the driver; exceptions across
+cl-compiled frames (cl's own exception model, deferred); a pointer to member as a template argument stays refused; no
+basic_string/wstring, <complex> <valarray> <locale> <streambuf> <strstream>.
+
 Fixed on 2026-10-14 (lanes V, A, L; verified: suite, selfhost generation two, suite under the self-built compiler, cprog, matrix, eh, mix):
 T() value-initialisation zeroes as cl; a float passed to printf or any variadic function is promoted to double;
 catch (Base*) matches a thrown Derived* with the pointer adjusted; replaced global operator new/delete are called;

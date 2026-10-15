@@ -3,9 +3,13 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <new>
+#include <typeinfo>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <set>
+#include <bitset>
 
 // sizeof(T&) is sizeof(T) (C++98 5.3.3/2), not the size of a pointer
 struct Forty { char a[40]; };
@@ -935,6 +939,305 @@ void show()
 }
 }
 
+// the review of 2026-10-15 (silent miscompiles B3, B4, M4, M5, M6, M8, M9): each case against cl at -O0 and -O2
+namespace convop {   // B3: casts through conversion functions
+struct Ci { int re; Ci(int r) : re(r) {} operator int() const { return re; } };
+struct Cd { double re; Cd(double r) : re(r) {} operator double() const { return re; } };
+struct Cp { const char* s; Cp(const char* p) : s(p) {} operator const char*() const { return s; } };
+struct Der : Ci { Der(int x) : Ci(x) {} };
+struct Ref { int w; Ref(int x) : w(x) {} operator const int&() const { return w; } };
+struct Str { const char* s; Str(const char* p) : s(p) {} };
+struct ToStr { operator Str() const { return Str("conv"); } };
+struct Both { operator int() const { return 3; } operator double() const { return 2.5; } };
+struct Vp { int v; Vp(int x) : v(x) {} operator void*() const { return v ? const_cast<Vp*>(this) : 0; } };
+Ci mki() { return Ci(4); }
+Cd mkd() { return Cd(2.5); }
+int uc(int) { return 1; } int uc(double) { return 2; } int uc(long) { return 3; }
+void show()
+{
+    Ci a(7); Cd b(1.5); Cp c("str"); Der d(9); Ref r(11); ToStr ts; Both bo; Vp yes(1), no(0);
+    std::printf("convop int %d %d %d %d | %d %d %d %d\n", (int)a, int(a), static_cast<int>(a), a, (int)mki(), int(mki()), static_cast<int>(mki()), mki());
+    std::printf("convop double %g %g %g | %g %g %g\n", (double)b, double(b), static_cast<double>(b), (double)mkd(), static_cast<double>(mkd()), b * 2);
+    std::printf("convop pointer %s %s %s\n", (const char*)c, static_cast<const char*>(c), c);
+    std::printf("convop wider %ld %g %hd %d | %d %ld %d\n", (long)a, (double)a, (short)a, (unsigned char)d, (int)r, (long)r, static_cast<int>(r));
+    Str s1 = (Str)ts; Str s2 = static_cast<Str>(ts); Str s3 = Str(ts); Str s4 = (Str)"lit";
+    std::printf("convop class %s %s %s %s\n", s1.s, s2.s, s3.s, s4.s);
+    std::printf("convop best %d %g | %d %d %d\n", (int)bo, (double)bo, uc(a), uc(d), uc(Ci(2)));
+    std::printf("convop bool %d %d %d %d\n", (int)(bool)yes, (int)static_cast<bool>(no), yes ? 1 : 0, (void*)no == 0);
+}
+}
+
+namespace reftemp {   // B4: references bound to temporaries; M9: the lifetime of the other temporaries of the initializer
+struct L { int v; L(int x) : v(x) { std::printf("L%d ", v); } L(const L& o) : v(o.v + 100) { std::printf("Lc%d ", v); } ~L() { std::printf("~L%d ", v); } };
+struct ToL { int k; ToL(int x) : k(x) {} operator L() const { return L(k); } };
+const int& gr = 5;
+const double& gd = 3;
+const L& gl = 7;
+static const L& gsl = 8;
+int sum(const int (&a)[3]) { return a[0] + a[1] + a[2]; }
+long twice(const long& x) { return x * 2; }
+double dbl(const double& d) { return d * 2; }
+int byRef(const int& x) { return x + 1; }
+const L& pass(const L& l) { return l; }
+L mk(int x) { return L(x); }
+int use(const L& l) { return l.v; }
+void show()
+{
+    std::printf("reftemp globals %d %g %d %d\n", gr, gd, gl.v, gsl.v);
+    { const L& r = 9; std::printf("| %d ", r.v); } std::printf("| scope\n");
+    { ToL t(4); const L& r = t; std::printf("| %d ", r.v); } std::printf("| scope\n");
+    { short s = 6; int i = 3; const long& lr = s; const int& ir = s + 1; const double& cd = i; const int& cr = 5; std::printf("reftemp scalars %ld %d %g %d %ld %g %d\n", lr, ir, cd, cr, twice(s), dbl(i), byRef(41)); }
+    { int a[3] = { 1, 2, 3 }; std::printf("reftemp array %d\n", sum(a)); }
+    { static const int& si = 11; static const L& sl = 12; std::printf("reftemp statics %d %d\n", si, sl.v); }
+    { const char* const& p = "lit"; char buf[4] = "abc"; const char* const& p2 = buf; std::printf("reftemp ptrs %s %s\n", p, p2); }
+    { const L& r = pass(L(20)); std::printf("| after full expr %d ", r.v == r.v); } std::printf("| scope\n");
+    { const L& r = L(21); std::printf("| bound "); } std::printf("| scope\n");
+    { const L& r = mk(22); std::printf("| bound "); } std::printf("| scope\n");
+    { int v = use(mk(23)) + use(L(24)); std::printf("| %d ", v); } std::printf("| scope\n");
+    { L a(25); const L& r = true ? L(26) : a; std::printf("| ?: %d ", r.v); } std::printf("| scope\n");
+}
+}
+
+namespace indirect {   // M5: argument conversions of a call through a function pointer
+struct Base { int flags; Base() : flags(0) {} };
+struct Der : Base { virtual ~Der() {} int extra; Der() : extra(0) {}
+    Der& apply(Base& (*m)(Base&)) { m(*this); return *this; }
+    Der& applyPtr(Base* (*m)(Base*)) { m(this); return *this; } };
+Base& setHex(Base& b) { b.flags |= 8; return b; }
+Base* setOct(Base* b) { b->flags |= 16; return b; }
+Base& direct(Der& d, Base& (*m)(Base&)) { return m(d); }
+double half(const double& d) { return d / 2; }
+long widen(long x, double y, const Base& b) { return x * 1000 + (long)y + b.flags; }
+void show()
+{
+    Der d, e, f, g;
+    d.apply(setHex); e.applyPtr(setOct); direct(f, setHex); setHex(g);
+    double (*ph)(const double&) = half; long (*pw)(long, double, const Base&) = widen;
+    int i = 7; short s = 2; Der h; h.flags = 3;
+    std::printf("indirect %d %d %d %d %d | %g %ld\n", d.flags, e.flags, f.flags, g.flags, d.extra, ph(i), pw(s, 1.5f, h));
+}
+}
+
+namespace narrow {   // M4: ++ and -- on narrow types
+void show()
+{
+    unsigned char ov = 255; ov++; short sh = 32767; sh++; signed char sc = 127; ++sc; unsigned short us = 65535; us++;
+    unsigned char ov2 = 0; ov2--; short sh2 = -32768; --sh2; bool b = false; b++; char c = 127; c++;
+    unsigned char arr[2] = { 255, 0 }; arr[0]++; ++arr[1]; float fl = 1.5f; fl++; --fl;
+    std::printf("narrow %d %d %d %d | %d %d %d %d | %d %d %g\n", ov, sh, sc, us, ov2, sh2, b, c, arr[0], arr[1], fl);
+    unsigned char x = 255; int y = x++; int z = ++x; std::printf("narrow values %d %d %d\n", x, y, z);
+}
+}
+
+namespace leafctor {   // M8: an implicit default constructor first needed by a global's initialiser
+struct Base { int v; Base() : v(7) {} };
+struct Leaf : Base {};
+struct Leaf2 : Base { int w; };
+Leaf g;
+Leaf2 g2[2];
+void show() { Leaf2 l; std::printf("leafctor %d %d %d %d\n", g.v, g2[0].v, g2[1].v, l.v); }
+}
+
+namespace ranking {   // M6: overload ranking of conversions to a base over void* and bool
+struct Base {}; struct Der : Base {}; struct Der2 : Der {};
+int db(Base*) { return 1; } int db(void*) { return 2; }
+int dr(const Base&) { return 1; } int dr(bool) { return 2; }
+int bl(bool) { return 1; } int bl(Base*) { return 2; }
+int cv(const Der*) { return 1; } int cv(void*) { return 2; }
+void show()
+{
+    Der d; Der2 d2; Base b;
+    std::printf("ranking %d %d %d %d %d %d %d\n", db(&d), db(&d2), db(&b), dr(d), bl(&d), cv(&d2), cv((Base*)&d));
+}
+}
+
+namespace adl {   // B2: argument-dependent lookup on ordinary calls, in-class friend definitions
+namespace N {
+    struct S { int v; S(int x) : v(x) {} };
+    int dbl2(S s) { return s.v * 2; }
+    int dbl2(S* p) { return p->v * 3; }
+    enum Color { Red, Green };
+    int paint(Color c) { return c == Red ? 1 : 2; }
+    namespace Inner { struct T : S { T(int x) : S(x) {} }; int thrice(const T& t) { return t.v * 3; } }
+    template <class X> struct Box { X x; Box(X a) : x(a) {} };
+    template <class X> int unbox(const Box<X>& b) { return b.x; }
+}
+namespace M { struct U { int u; }; int viaArg(const N::Box<U>& b) { return b.x.u; } }
+struct V {
+    int x; V(int a) : x(a) {}
+    friend V operator+(const V& a, const V& b) { return V(a.x + b.x); }
+    friend int norm(const V& v) { return v.x < 0 ? -v.x : v.x; }
+    friend void swap(V& a, V& b) { int t = a.x; a.x = b.x; b.x = t; }
+    friend int later(const V& v);
+    friend bool operator==(const V& a, const V& b) { return a.x == b.x; }
+};
+int later(const V& v) { return v.x + 1000; }
+struct W : V { W(int a) : V(a) {} };
+template <class T> struct Tmpl { T t; Tmpl(T v) : t(v) {} friend int peek(const Tmpl& b) { return (int)b.t * 10; } };
+template <class T> int callDbl2(T t) { return dbl2(t); }        // found by ADL at the instantiation
+int local(int) { return -1; }
+namespace Q { struct R {}; int local(R) { return 7; } int shadow(R) { return 1; } }
+int shadow(int) { return 2; }
+void show()
+{
+    N::S s(21); N::Inner::T t(5); M::U u0 = { 9 }; N::Box<M::U> bu(u0); N::Box<int> bi(4);
+    std::printf("adl %d %d %d %d %d %d %d %d\n", dbl2(s), dbl2(&s), paint(N::Green), thrice(t), dbl2(t), viaArg(bu), unbox(bi), callDbl2(s));
+    V a(-3), b(5); W w(8);
+    std::printf("adl friends %d %d %d %d %d\n", (a + b).x, norm(a), later(b), norm(w), (int)(a == b));
+    swap(a, b); std::printf("adl swap %d %d\n", a.x, b.x);
+    Tmpl<double> td(2.5); Tmpl<int> ti(3);
+    std::printf("adl template friends %d %d\n", peek(td), peek(ti));
+    Q::R r; std::printf("adl rules %d %d %d\n", local(r), shadow(r), shadow(1));
+}
+}
+
+namespace rtti {   // B1: typeid and dynamic_cast through cl's RTTI data and vcruntime
+
+struct B { virtual ~B() {} int b; };
+struct C { virtual ~C() {} int c; };
+struct D : B, C { int d; };
+struct E : virtual B { int e; };
+struct F : virtual B { int f; };
+struct G : E, F { int g; };
+struct NB { int nb; };
+struct V : NB { virtual int f() { return 1; } };
+struct W : virtual V { int w; };
+struct X : W { int x; };
+struct Plain { int p; };
+
+void show()
+{
+    D d; B* pb = &d; C* pc = &d;
+    std::printf("rtti down: %d\n", dynamic_cast<D*>(pb) == &d);
+    std::printf("rtti down from C: %d\n", dynamic_cast<D*>(pc) == &d);
+    std::printf("rtti cross: %d %d\n", dynamic_cast<C*>(pb) == pc, dynamic_cast<B*>(pc) == pb);
+    B lone; B* pl = &lone;
+    std::printf("rtti fail is null: %d\n", dynamic_cast<D*>(pl) == 0);
+    std::printf("rtti fail cross null: %d\n", dynamic_cast<C*>(pl) == 0);
+    G g; B* gb = &g; E* ge = &g; F* gf = &g;
+    std::printf("rtti vbase down: %d %d %d\n", dynamic_cast<G*>(gb) == &g, dynamic_cast<G*>(ge) == &g, dynamic_cast<G*>(gf) == &g);
+    std::printf("rtti vbase to E/F: %d %d %d\n", dynamic_cast<E*>(gb) == static_cast<E*>(&g), dynamic_cast<F*>(gb) == static_cast<F*>(&g), dynamic_cast<F*>(ge) == static_cast<F*>(&g));
+    std::printf("rtti void*: %d %d %d\n", dynamic_cast<void*>(pc) == (void*)&d, dynamic_cast<void*>(gf) == (void*)&g, dynamic_cast<void*>(pl) == (void*)&lone);
+    X xo; V* xv = &xo; W* xw = &xo;
+    std::printf("rtti vbase chain: %d %d %d\n", dynamic_cast<X*>(xv) == &xo, dynamic_cast<W*>(xv) == xw, dynamic_cast<NB*>(xw) == static_cast<NB*>(&xo));
+    std::printf("rtti null in: %d %d\n", dynamic_cast<D*>((B*)0) == 0, dynamic_cast<void*>((C*)0) == 0);
+    std::printf("rtti typeid same: %d %d %d\n", typeid(*pb) == typeid(D), typeid(*pl) == typeid(D), typeid(*pl) == typeid(B));
+    std::printf("rtti typeid static: %d %d %d %d\n", typeid(int) == typeid(int), typeid(int) == typeid(long), typeid(d) == typeid(D), typeid(Plain) != typeid(D));
+    std::printf("rtti typeid refs: %d %d\n", typeid(*gb) == typeid(G), typeid(*xv) == typeid(X));
+    const std::type_info& t = typeid(*ge);
+    std::printf("rtti typeid through vbase: %d %d\n", t == typeid(G), typeid(*xw) == typeid(X));
+    std::printf("rtti names: %s %s %s %s\n", typeid(d).name(), typeid(int).name(), typeid(const char*).name(), typeid(*pl).name());
+    std::printf("rtti raw names: %s %s\n", typeid(D).raw_name(), typeid(double).raw_name());
+    std::printf("rtti before: %d %d\n", typeid(B).before(typeid(C)) != typeid(C).before(typeid(B)), typeid(B).before(typeid(B)));
+    try { D& r = dynamic_cast<D&>(*pb); std::printf("rtti ref ok %d\n", &r == &d); } catch (std::bad_cast&) { std::printf("rtti bad_cast?\n"); }
+    try { dynamic_cast<D&>(*pl); std::printf("rtti no throw\n"); } catch (std::bad_cast& e) { std::printf("rtti bad_cast %s\n", e.what()); }
+    try { dynamic_cast<C&>(*pl); std::printf("rtti no throw\n"); } catch (std::exception& e) { std::printf("rtti as exception %s\n", e.what()); }
+    B* nullp = 0;
+    try { typeid(*nullp); std::printf("rtti no throw\n"); } catch (std::bad_typeid& e) { std::printf("rtti bad_typeid %s\n", e.what()); }
+    std::printf("rtti typeid of null expression not dereferenced: %d\n", typeid(nullp) == typeid(B*));
+    std::printf("rtti sizes %d %d\n", (int)sizeof(std::type_info) > 8, (int)sizeof(std::bad_cast) > 0);
+}
+}
+
+namespace templ {   // M2, M1, M13: function templates (explicit arguments, specialisations, partial ordering, SFINAE, deduction from function types), template template parameters
+template <class T> int kind(T) { return 1; }
+template <> int kind<double>(double) { return 2; }
+int kind(char) { return 3; }
+template <class T> int kind2(T) { return 1; }
+template <> int kind2(float) { return 4; }                    // the argument deduced from the parameter
+template <class T> T make(int v) { return T(v); }
+template <class R, class A> R conv2(A a) { return static_cast<R>(a); }
+struct Cv { template <class U> U conv(double t) { return static_cast<U>(t); } int plain(int x) { return x + 1; } };
+template <class T> int depcall(T& t) { return t.template conv<int>(2.7); }
+template <class T> char probe(typename T::type*);
+template <class T> long probe(...);
+struct HasType { typedef int type; };
+struct NoType {};
+template <class T> int order(T) { return 1; }
+template <class T> int order(T*) { return 2; }
+template <class T> int order(const T*) { return 3; }
+template <class T> int ref(T&) { return 1; }
+template <class T> int ref(const T&) { return 2; }
+template <class T> struct Box { T v; Box(T x) : v(x) {} int tag() const; };
+template <class T> int Box<T>::tag() const { return 1; }
+template <> int Box<char>::tag() const { return 2; }           // member specialisation
+template class Box<long>;                                      // explicit instantiation
+template int order<short>(short);
+template <class R, class A> int arity(R (*)(A)) { return 1; }
+template <class R, class A, class B> int arity(R (*)(A, B)) { return 2; }
+template <class R> int retOf(R (*)()) { return sizeof(R); }
+int one(int) { return 0; } int two(int, double) { return 0; } double three() { return 0; }
+template <class T> struct Id { typedef T type; };
+template <class T> int nondeduced(typename Id<T>::type x, T y) { return x + y; }
+template <class T, int N> int bound(const T (&)[N]) { return N; }
+template <class T> struct Counter { static int count; Counter() { ++count; } };
+template <class T> int Counter<T>::count = 0;
+template <class T> struct Outer { template <class U> struct Inner { U u; }; template <class U> U conv(T t) { return static_cast<U>(t); } };
+template <class T> struct BoxT { T v; BoxT(T x) : v(x) {} T twice() const { return v * 2; } };
+template <class T, template <class> class Holder> struct Wrap { Holder<T> h; Wrap(T x) : h(x) {} T get() const { return h.v; } T get2() const { return h.twice(); } int size() const { return (int)sizeof(h); } };
+template <class T> struct Rec { static int depth() { return 1 + Rec<typename T::next>::depth(); } };
+struct End {};
+template <> struct Rec<End> { static int depth() { return 0; } };
+struct L2 { typedef End next; }; struct L1 { typedef L2 next; };
+void show()
+{
+    std::printf("templ spec %d %d %d %d | %d %d\n", kind(1), kind(2.0), kind('c'), kind<int>('c'), kind2(1.5f), kind2(2));
+    std::printf("templ explicit %d %d %d %ld\n", make<int>(77), (int)make<double>(5), conv2<int>(3.9), conv2<long, double>(2.5));
+    Cv c; Outer<double> od;
+    std::printf("templ member explicit %d %d %d %d\n", c.conv<int>(3.9), c.plain(1), depcall(c), od.conv<int>(4.6));
+    std::printf("templ sfinae %d %d\n", (int)(sizeof(probe<HasType>(0)) == 1), (int)(sizeof(probe<NoType>(0)) == 1));
+    int x = 0; const int* cp = &x; const char arr[7] = "abcdef";
+    std::printf("templ order %d %d %d | %d %d\n", order(x), order(&x), order(cp), ref(x), ref(5));
+    std::printf("templ member spec %d %d %d\n", Box<int>(1).tag(), Box<char>('a').tag(), Box<long>(2L).tag());
+    std::printf("templ fn types %d %d %d | nondeduced %d bound %d\n", arity(one), arity(two), retOf(three), nondeduced<int>(1, 2), bound(arr));
+    Counter<int> a, b; Counter<double> cc;
+    std::printf("templ static %d %d\n", Counter<int>::count, Counter<double>::count);
+    Outer<double>::Inner<char> in; in.u = 'z';
+    Wrap<int, BoxT> w(5);
+    std::printf("templ tt %c %d %d %d %d\n", in.u, w.get(), w.get2(), w.size(), (int)sizeof(w));
+    std::printf("templ rec %d\n", Rec<L1>::depth());
+}
+}
+
+namespace placement {   // B6 (row 21): a placement new whose arguments are not one address calls the operator new it resolves
+struct Arena { char buf[64]; int used; Arena() : used(0) {} };
+}
+// an allocation function lives in the global namespace (3.7.3/2)
+void* operator new(size_t n, placement::Arena& a) { void* p = a.buf + a.used; a.used += (int)n; return p; }
+void operator delete(void*, placement::Arena&) {}
+namespace placement {
+struct Q { int id; Q(int x) : id(x) {} static void* operator new(size_t n, int tag) { g_tag = tag; return malloc(n); } static void operator delete(void* p) { free(p); } static int g_tag; };
+int Q::g_tag = 0;
+struct P { int v; P(int x) : v(x) {} };
+void show()
+{
+    Arena a;
+    P* p1 = new (a) P(1); P* p2 = new (a) P(2);
+    Q* q = new (7) Q(3);
+    int* n = new (std::nothrow) int(4);
+    char raw[sizeof(P)]; P* p3 = new (raw) P(5);
+    std::printf("placement %d %d %d %d %d %d %d\n", p1->v, p2->v, a.used == 2 * (int)sizeof(P), q->id, Q::g_tag, *n, p3->v);
+    delete q; delete n; p3->~P();
+}
+}
+
+namespace membername {   // M12 (found on the way): a member function named like a type of an enclosing scope
+// bitset::set with <set> included: "set(i)" in a member body is a call of the member, declared later in the class
+// (3.3.6), not a declaration of i of type std::set; the parser pre-scans the member names of a class body
+struct Counter {
+    int n;
+    Counter() : n(0) { for (int i = 1; i <= 3; ++i) set(i); }
+    void set(int v) { n += v; }
+    std::set<int> keep;
+};
+void show()
+{
+    std::bitset<8> b(std::string("101"));
+    Counter c; c.keep.insert(2);
+    std::printf("membername %d %d %d\n", (int)b.count(), c.n, (int)c.keep.size());
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -966,6 +1269,17 @@ int main()
     memptr::show();
     covariant::show();
     pvbase::show();
+    convop::show();
+    reftemp::show();
+    indirect::show();
+    narrow::show();
+    leafctor::show();
+    ranking::show();
+    adl::show();
+    rtti::show();
+    templ::show();
+    placement::show();
+    membername::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

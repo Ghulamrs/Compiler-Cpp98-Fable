@@ -10,8 +10,8 @@ extern "C" {
     void*         calloc(size_t count, size_t n);
     void*         realloc(void* p, size_t n);
     void          free(void* p);
-    void          abort(void);
-    void          exit(int code);
+    __declspec(noreturn) void abort(void);
+    __declspec(noreturn) void exit(int code);
     int           atexit(void (*fn)(void));
     int           atoi(const char* s);
     long          atol(const char* s);

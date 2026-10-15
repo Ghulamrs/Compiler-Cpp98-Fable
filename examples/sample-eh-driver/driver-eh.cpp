@@ -32,6 +32,9 @@ int ehTempDtor(int k);
 int ehCatchPointer(int k);
 int ehGlobalFree(int k);
 int ehCatchVbase(int k);
+const char* ehFunctionTry(int k);
+int ehRtti(int k);
+int ehDeepHandlers(int n);
 extern int g_destroyed;
 
 static int g_walked = -2;
@@ -114,6 +117,9 @@ int main()
     printf("ehCatchVbase:");
     for (int k = 0; k <= 16; ++k) printf(" %d", ehCatchVbase(k));
     printf("\n");
+    for (int k = 0; k <= 5; ++k) printf("ehFunctionTry(%d) = %s\n", k, ehFunctionTry(k));
+    for (int k = 0; k <= 2; ++k) printf("ehRtti(%d) = %d\n", k, ehRtti(k));
+    printf("ehDeepHandlers(1) = %d, ehDeepHandlers(10) = %d\n", ehDeepHandlers(1), ehDeepHandlers(10));
     printf("destructors: %d\n", g_destroyed);
     check("try frames left", (unsigned long long)cppparse_frame_depth(), 0);
     check("caught exceptions left", (unsigned long long)cppparse_caught_depth(), 0);

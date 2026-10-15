@@ -26,16 +26,17 @@ namespace cppparse {
 struct IrVtable {
     std::string              className;    // qualified class name
     std::vector<std::string> entries;      // IR function names in slot order; "" for a pure virtual slot
+    std::string              locator;      // the IR name of the RTTI complete object locator stored in the 8 bytes before the table (cl's layout); "" for none
 };
 
 // one piece of a global's initial contents, emitted as data: zero bytes, an integer, a floating-point literal, the
 // address of a string literal, or the address of a global or function (a relocation)
 struct IrDataItem {
-    enum Kind { Zero, Int, Float, String, Address };
+    enum Kind { Zero, Int, Float, String, Address, Bytes, Rva };
     Kind        kind;
-    int         size;        // bytes; Zero: the length of the run
+    int         size;        // bytes; Zero: the length of the run; Bytes: the number of them
     long        value;       // Int
-    std::string text;        // Float: the literal; String: the literal with its quotes; Address: the IR name
+    std::string text;        // Float: the literal; String: the literal with its quotes; Address, Rva: the IR name; Bytes: the bytes themselves
     IrDataItem() : kind(Zero), size(0), value(0) {}
 };
 

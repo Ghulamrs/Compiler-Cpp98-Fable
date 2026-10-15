@@ -679,7 +679,7 @@ try {
     $failed = 0
     foreach ($lvl in @(0, 2)) {
         $objs = @()
-        foreach ($unit in @("examples\sample-lib\lib1.cpp", "examples\sample-lib\lib2.cpp", "examples\sample-lib\lib3.cpp", "libcpp\iostream.cpp")) {
+        foreach ($unit in @("examples\sample-lib\lib1.cpp", "examples\sample-lib\lib2.cpp", "examples\sample-lib\lib3.cpp", "examples\sample-lib\lib4.cpp", "libcpp\iostream.cpp")) {
             $name = [System.IO.Path]::GetFileNameWithoutExtension($unit) + "L$lvl"
             $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
             $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $name "..\$unit" 2>&1 | Out-String
@@ -759,9 +759,13 @@ try {
         @{ unit = "goto-refused"; expect = @("error S132: line 5: goto x jumps past the initialisation of an object with a destructor (ill-formed)", "error S132: line 6: goto y jumps into a try block or a handler (ill-formed)") },
         @{ unit = "covariant-refused"; expect = @("(8): error S131: 'CD::get' overrides 'SB::get' with a covariant return type, and its return conversion goes through a virtual base", "(14): error S131: 'D::g' overrides 'B::g' with a covariant return type, and the slot needs a this adjustment as well as the return adjustment") },
         @{ unit = "goto-handler"; expect = @("error S132: line 5: a goto out of a catch handler ('out')", "error S132: line 6: a goto out of a catch handler ('out')") },
-        @{ unit = "new-refused"; expect = @("error S132: line 8: a placement new-expression of 'Q'", "error S132: line 9: new of a multidimensional array of 'S'", "error S132: line 9: delete[] of a multidimensional array of 'S'") },
+        @{ unit = "new-refused"; expect = @("error S132: line 8: new of a multidimensional array of 'S'", "error S132: line 8: delete[] of a multidimensional array of 'S'") },
         @{ unit = "memptr-refused"; expect = @("error S132: line 16: conversion of a pointer to member from 'int W::*' to 'int VW::*' is not supported yet", "error S132: line 17: conversion of a pointer to member from 'int VX::*' to 'int X::*' is not supported yet", "error S132: line 18: conversion of a pointer to member from 'int I1::*' to 'int I2::*', whose inheritance model is unspecified") },
         @{ unit = "ambiguous-base"; expect = @("(8): error S141: 'F': direct base 'V' is inaccessible; already a base of 'W'", "(9): error S141: 'H2': direct base 'V' is inaccessible; already a base of 'WV'", "(10): error S141: 'H5': direct base 'V' is inaccessible; already a base of 'X'", "(11): warning S142: 'G2': base-class 'V' is already a base-class of 'W'", "(12): warning S142: 'H3': base-class 'V' is already a base-class of 'WV'", "(16): warning S142: 'T7': base-class 'V' is already a base-class of 'XV'", "(17): error S141: 'T8': direct base 'V' is inaccessible; already a base of 'XV'") },
+        @{ unit = "inftempl"; expect = @("error S148: template instantiation depth exceeds 1000 instantiating 'Inf<int*") },
+        @{ unit = "comment-unterminated"; expect = @("comment-unterminated.cpp(2): error: unterminated comment (cl C1071)") },
+        @{ unit = "if-unterminated"; expect = @("if-unterminated.cpp(3): error: #if without #endif at end of file (cl C1070)") },
+        @{ unit = "diagnostics"; expect = @("diagnostics.cpp(17): error S150: 'Priv::secret': cannot access private member declared in class 'Priv' (cl C2248)", "diagnostics.cpp(18): error S151: 'Ab': cannot instantiate abstract class ('f' is pure virtual) (cl C2259)", "diagnostics.cpp(19): error S151: 'Ab': cannot instantiate abstract class", "diagnostics.cpp(20): error S152: 'RefMem::operator=' cannot be generated: 'RefMem' has a data member 'r' of reference type (cl C2582)", "diagnostics.cpp(21): error S152: 'Holder::operator=' cannot be generated: 'Holder' has a data member 'm' whose class cannot be assigned", "diagnostics.cpp(9): error S150: 'Base::priv': cannot access private member declared in class 'Base'", "diagnostics.cpp(22): error S150: 'Base::prot': cannot access protected member declared in class 'Base'", "diagnostics.cpp(23): error S150: 'Hidden::Hidden': cannot access private member declared in class 'Hidden'", "diagnostics.cpp(14): error: expected ')' after the parameter list near '{'", "diagnostics.cpp(24): error: expected an expression near ';'") },
         @{ unit = "ambiguous"; expect = @("ambiguous.cpp(12): error S105: cannot initialise 'p1' of type A* from D*", "ambiguous.cpp(13): error S143: ambiguous conversions from 'D*' to 'A*'", "ambiguous.cpp(14): error S143:", "ambiguous.cpp(15): error S144: ambiguous access of 'a' in 'D'", "ambiguous.cpp(16): error S144: ambiguous access of 'f'", "ambiguous.cpp(17): error S105: cannot convert D to the return type A&", "ambiguous.cpp(26): error S145: 'XD': ambiguous inheritance of 'XV::f', overridden by 'XL::f' and 'XR::f' (cl C2250)") }
     )
     foreach ($r in $rejects) {
@@ -775,6 +779,26 @@ try {
         if ($rc -ne 0 -and $missing.Count -eq 0 -and $left.Count -eq 0) { Write-Host "  ok   $($r.unit).cpp: errors reported, exit code $rc, no object, listing or map" }
         else { Write-Host "  FAIL $($r.unit).cpp (exit $rc, missing diagnostics: $($missing -join ' | '), left behind: $($left -join ', ')):"; Write-Host $c6; $failed++ }
     }
+    # warnings.cpp: the warnings cl gives at /W4 (unreferenced parameter and local, missing return, uninitialised
+    # local, unreachable code, shadowing, assignment as a condition, narrowing) on the lines cl warns, and no other
+    $wantW = @("warnings.cpp(5): warning S155: 'missingReturn': not all control paths return a value", "warnings.cpp(6): warning S153: 'y': unreferenced parameter", "warnings.cpp(7): warning S120: comparison of signed and unsigned values", "warnings.cpp(8): warning S160: 'initializing': conversion from 'double' to 'int', possible loss of data", "warnings.cpp(9): warning S159: assignment used as a condition", "warnings.cpp(10): warning S156: uninitialized local variable 'u' used", "warnings.cpp(11): warning S157: unreachable code", "warnings.cpp(12): warning S158: declaration of 'a' hides function parameter", "warnings.cpp(12): warning S153: 'a': unreferenced parameter", "warnings.cpp(13): warning S160: 'initializing': truncation of constant value", "warnings.cpp(14): warning S160: 'initializing': conversion from 'int' to 'short', possible loss of data", "warnings.cpp(15): warning S154: 'w': local variable is initialized but not referenced", "warnings.cpp(16): warning S160: 'return': conversion from 'long long' to 'int', possible loss of data", "warnings.cpp(17): warning S160: 'argument': conversion from 'int' to 'short', possible loss of data")
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n front-warnings "..\examples\sample-front\warnings.cpp" 2>&1 | Out-String
+    $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+    $missingW = @($wantW | Where-Object { -not $c6.Contains($_) })
+    $countW = ([regex]::Matches($c6, "warning S1")).Count
+    if ($rc -eq 0 -and $missingW.Count -eq 0 -and $countW -eq $wantW.Count) { Write-Host "  ok   warnings.cpp: the $countW warnings of cl /W4 and no other" }
+    else { Write-Host "  FAIL warnings.cpp (exit $rc, $countW warnings, missing: $($missingW -join ' | ')):"; Write-Host $c6; $failed++ }
+    # deep-nesting.cpp: 3000 nested blocks, 5000 nested parentheses and a 2000-term expression compile and run
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n front-deep "..\examples\sample-front\deep-nesting.cpp" 2>&1 | Out-String
+    $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+    if ($rc -eq 0 -and (Test-Path "out\x64\front-deep6.obj")) {
+        $null = & $cl /nologo "/Foout\x64\" "/Feout\x64\front-deep.exe" "out\x64\front-deep6.obj" "out\x64\cppparse_rt.obj" 2>&1
+        & "out\x64\front-deep.exe" | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Host "  ok   deep-nesting.cpp: 3000 nested blocks and 5000 nested parentheses compile and run" }
+        else { Write-Host "  FAIL deep-nesting.cpp runs with exit code $LASTEXITCODE"; $failed++ }
+    } else { Write-Host "  FAIL deep-nesting.cpp (exit $rc):"; Write-Host ($c6 -split "`n" | Select-Object -First 5); $failed++ }
     # S130 is a refusal of code generation only: the analysis of the same unit accepts its virtual bases (the
     # polymorphic ones that --compile6 generates are run against cl in front.cpp, pvbase::)
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"

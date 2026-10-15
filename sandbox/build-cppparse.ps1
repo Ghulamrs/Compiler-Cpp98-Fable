@@ -762,6 +762,7 @@ try {
         @{ unit = "new-refused"; expect = @("error S132: line 8: a placement new-expression of 'Q'", "error S132: line 9: new of a multidimensional array of 'S'", "error S132: line 9: delete[] of a multidimensional array of 'S'") },
         @{ unit = "memptr-refused"; expect = @("error S132: line 16: conversion of a pointer to member from 'int W::*' to 'int VW::*' is not supported yet", "error S132: line 17: conversion of a pointer to member from 'int VX::*' to 'int X::*' is not supported yet", "error S132: line 18: conversion of a pointer to member from 'int I1::*' to 'int I2::*', whose inheritance model is unspecified") },
         @{ unit = "ambiguous-base"; expect = @("(8): error S141: 'F': direct base 'V' is inaccessible; already a base of 'W'", "(9): error S141: 'H2': direct base 'V' is inaccessible; already a base of 'WV'", "(10): error S141: 'H5': direct base 'V' is inaccessible; already a base of 'X'", "(11): warning S142: 'G2': base-class 'V' is already a base-class of 'W'", "(12): warning S142: 'H3': base-class 'V' is already a base-class of 'WV'", "(16): warning S142: 'T7': base-class 'V' is already a base-class of 'XV'", "(17): error S141: 'T8': direct base 'V' is inaccessible; already a base of 'XV'") },
+        @{ unit = "inftempl"; expect = @("error S148: template instantiation depth exceeds 1000 instantiating 'Inf<int*") },
         @{ unit = "ambiguous"; expect = @("ambiguous.cpp(12): error S105: cannot initialise 'p1' of type A* from D*", "ambiguous.cpp(13): error S143: ambiguous conversions from 'D*' to 'A*'", "ambiguous.cpp(14): error S143:", "ambiguous.cpp(15): error S144: ambiguous access of 'a' in 'D'", "ambiguous.cpp(16): error S144: ambiguous access of 'f'", "ambiguous.cpp(17): error S105: cannot convert D to the return type A&", "ambiguous.cpp(26): error S145: 'XD': ambiguous inheritance of 'XV::f', overridden by 'XL::f' and 'XR::f' (cl C2250)") }
     )
     foreach ($r in $rejects) {
@@ -775,6 +776,16 @@ try {
         if ($rc -ne 0 -and $missing.Count -eq 0 -and $left.Count -eq 0) { Write-Host "  ok   $($r.unit).cpp: errors reported, exit code $rc, no object, listing or map" }
         else { Write-Host "  FAIL $($r.unit).cpp (exit $rc, missing diagnostics: $($missing -join ' | '), left behind: $($left -join ', ')):"; Write-Host $c6; $failed++ }
     }
+    # deep-nesting.cpp: 3000 nested blocks, 5000 nested parentheses and a 2000-term expression compile and run
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n front-deep "..\examples\sample-front\deep-nesting.cpp" 2>&1 | Out-String
+    $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+    if ($rc -eq 0 -and (Test-Path "out\x64\front-deep6.obj")) {
+        $null = & $cl /nologo "/Foout\x64\" "/Feout\x64\front-deep.exe" "out\x64\front-deep6.obj" "out\x64\cppparse_rt.obj" 2>&1
+        & "out\x64\front-deep.exe" | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Host "  ok   deep-nesting.cpp: 3000 nested blocks and 5000 nested parentheses compile and run" }
+        else { Write-Host "  FAIL deep-nesting.cpp runs with exit code $LASTEXITCODE"; $failed++ }
+    } else { Write-Host "  FAIL deep-nesting.cpp (exit $rc):"; Write-Host ($c6 -split "`n" | Select-Object -First 5); $failed++ }
     # S130 is a refusal of code generation only: the analysis of the same unit accepts its virtual bases (the
     # polymorphic ones that --compile6 generates are run against cl in front.cpp, pvbase::)
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"

@@ -429,7 +429,7 @@ int compareConversions(const Conversion& a, const Conversion& b)
 
 } // namespace
 
-Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report)
+Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report, const std::vector<cxx::TemplateArg>* explicitArgs)
 {
     size_t nargs = args.size() - firstArg;
     for (size_t a = firstArg; a < args.size(); ++a) if (!args[a]->semaType) expr(args[a], in);
@@ -449,13 +449,14 @@ Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vect
     // function templates: deduce and instantiate, then take part like ordinary functions
     for (size_t i = 0; i < all.size(); ++i) {
         if (all[i]->kind == Symbol::FunctionTemplate) {
-            Symbol* inst = instantiateFunctionTemplate(all[i], args, firstArg, in, loc);
+            Symbol* inst = instantiateFunctionTemplate(all[i], args, firstArg, in, loc, explicitArgs);
             if (inst) all.push_back(inst);
         }
     }
     for (size_t i = 0; i < all.size(); ++i) {
         Symbol* f = all[i];
         if (f->kind != Symbol::Function || !f->type || f->type->kind != Type::Function) continue;
+        if (explicitArgs && !f->instantiatedFrom) continue;   // f<int>(x) names a template: no plain function is a candidate
         const Type* ft = f->type;
         if (nargs < static_cast<size_t>(f->requiredParams) || (nargs > ft->params.size() && !ft->variadic)) continue;
         Viable v; v.fn = f; v.exactThis = true;
@@ -497,6 +498,12 @@ Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vect
         // a non-template function beats a template specialisation
         bool iInst = viable[i].fn->instantiatedFrom != 0, bInst = viable[best].fn->instantiatedFrom != 0;
         if (better == 0 && worse == 0 && iInst != bInst) { if (bInst) better = 1; else worse = 1; }
+        // two specialisations of different templates: the more specialised template wins (14.5.5.2)
+        if (better == 0 && worse == 0 && iInst && bInst && viable[i].fn->instantiatedFrom != viable[best].fn->instantiatedFrom) {
+            const bool iMore = atLeastAsSpecialized(viable[i].fn->instantiatedFrom, viable[best].fn->instantiatedFrom);
+            const bool bMore = atLeastAsSpecialized(viable[best].fn->instantiatedFrom, viable[i].fn->instantiatedFrom);
+            if (iMore && !bMore) better = 1; else if (bMore && !iMore) worse = 1;
+        }
         if (better > 0 && worse == 0) { best = i; ambiguous = false; }
         else if (better == 0 && worse == 0) ambiguous = true;
     }
@@ -514,8 +521,48 @@ Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vect
     return viable[best].fn;
 }
 
+namespace {
+
+// the parameter's written type names a template parameter of tscope that is not among the fixed ones (given
+// explicitly on the call): only then is there anything to deduce from the argument (14.8.2.1); a qualified name
+// (T::type) is a non-deduced context
+bool specMentionsOpen(const cxx::DeclSpec& spec, const Scope* tscope, const std::set<std::string>& fixed);
+bool declaratorMentionsOpen(const cxx::Declarator* d, const Scope* tscope, const std::set<std::string>& fixed)
+{
+    if (!d) return false;
+    for (size_t i = 0; i < d->parts.size(); ++i)
+        for (size_t k = 0; k < d->parts[i].params.size(); ++k)
+            if (d->parts[i].params[k] && (specMentionsOpen(d->parts[i].params[k]->spec, tscope, fixed) || declaratorMentionsOpen(d->parts[i].params[k]->decl, tscope, fixed))) return true;
+    return false;
+}
+bool specMentionsOpen(const cxx::DeclSpec& spec, const Scope* tscope, const std::set<std::string>& fixed)
+{
+    if (spec.kind != cxx::DeclSpec::Named || !tscope) return false;
+    if (spec.name.parts.size() == 1 && !spec.name.global && !spec.name.parts[0].hasTemplateArgs) {
+        const std::vector<Symbol*>* v = tscope->find(spec.name.parts[0].ident);
+        if (v) for (size_t k = 0; k < v->size(); ++k) if ((*v)[k]->kind == Symbol::TemplateParam) return !fixed.count(spec.name.parts[0].ident);
+        return false;
+    }
+    if (spec.name.parts.size() != 1) return false;
+    const cxx::NameComponent& c = spec.name.parts[0];
+    for (size_t k = 0; k < c.templateArgs.size(); ++k) {
+        const cxx::TemplateArg& ta = c.templateArgs[k];
+        if (ta.type && (specMentionsOpen(ta.type->spec, tscope, fixed) || declaratorMentionsOpen(ta.type->decl, tscope, fixed))) return true;
+        if (ta.expr && ta.expr->kind == cxx::Expr::Name && ta.expr->name.parts.size() == 1) {
+            const std::vector<Symbol*>* v = tscope->find(ta.expr->name.parts[0].ident);
+            if (v) for (size_t q = 0; q < v->size(); ++q) if ((*v)[q]->kind == Symbol::TemplateParam && !fixed.count(ta.expr->name.parts[0].ident)) return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::map<std::string, const Type*>& bindings, std::map<std::string, long>& ints)
 {
+    // nothing to deduce: the parameter's type is fixed by the explicit arguments (or mentions no parameter); the
+    // argument must convert to the substituted type later
+    if (!m_fixedTemplateParams.empty() && !specMentionsOpen(p->spec, tscope, m_fixedTemplateParams) && !declaratorMentionsOpen(p->decl, tscope, m_fixedTemplateParams)) return true;
     // walks the parameter's declarator against the argument type
     const Type* a = argType;
     if (a->kind == Type::Reference) a = a->inner;
@@ -528,8 +575,21 @@ bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::
     // peel the declarator from the outside in
     for (size_t i = parts.size(); i > 0; --i) {
         const cxx::DeclaratorPart& pt = parts[i - 1];
+        if (pt.kind == cxx::DeclaratorPart::Paren) continue;
         if (pt.kind == cxx::DeclaratorPart::Reference) { if (a->kind == Type::Reference) a = a->inner; continue; }
-        if (pt.kind == cxx::DeclaratorPart::Pointer) { if (a->kind != Type::Pointer) return false; a = a->inner; continue; }
+        if (pt.kind == cxx::DeclaratorPart::Pointer) {
+            if (a->kind != Type::Pointer) return false;
+            if (m_strictDeduce && ((pt.isConst && !a->isConst) || (pt.isVolatile && !a->isVolatile))) return false;
+            a = a->inner;
+            continue;
+        }
+        if (pt.kind == cxx::DeclaratorPart::Function) {
+            // R (*)(A, B): the parameters deduce from the function type's, the rest from its result (14.8.2.4)
+            if (a->kind != Type::Function || pt.params.size() != a->params.size() || pt.variadic != a->variadic) return false;
+            for (size_t k = 0; k < pt.params.size(); ++k) if (!pt.params[k] || !deduce(pt.params[k], a->params[k], tscope, bindings, ints)) return false;
+            a = a->inner;
+            continue;
+        }
         if (pt.kind == cxx::DeclaratorPart::Array) {
             if (a->kind != Type::Array && a->kind != Type::Pointer) return false;
             // the bound: "T (&a)[N]" deduces N from an array argument (14.8.2.4); a constant bound must match
@@ -555,12 +615,17 @@ bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::
         return false;
     }
     const cxx::DeclSpec& spec = p->spec;
+    if (m_strictDeduce && ((spec.isConst && !a->isConst) || (spec.isVolatile && !a->isVolatile))) return false;
     if (spec.isConst && a->isConst) a = m_types.unqualified(a);
+    // a qualified name (typename Id<T>::type) is a non-deduced context (14.8.2.4/4): nothing to learn from it, the
+    // argument must convert to the substituted type
+    if (spec.kind == cxx::DeclSpec::Named && spec.name.parts.size() > 1) return true;
     if (spec.kind == cxx::DeclSpec::Named && spec.name.parts.size() == 1 && !spec.name.global) {
         const cxx::NameComponent& c = spec.name.parts[0];
         // a template parameter?
         bool isParam = false;
         if (tscope) { const std::vector<Symbol*>* v = tscope->find(c.ident); if (v) for (size_t k = 0; k < v->size(); ++k) if ((*v)[k]->kind == Symbol::TemplateParam) isParam = true; }
+        if (isParam && !c.hasTemplateArgs && m_fixedTemplateParams.count(c.ident)) return true;   // given explicitly: not deduced, converted
         if (isParam && !c.hasTemplateArgs) {
             std::map<std::string, const Type*>::iterator it = bindings.find(c.ident);
             const Type* bound = m_types.unqualified(a);
@@ -603,7 +668,7 @@ bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::
     return m_types.unqualified(pt) == m_types.unqualified(a) || pt->kind == Type::Error;
 }
 
-Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::Expr*>& args, size_t firstArg, Scope* in, const cxx::Loc& loc)
+Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::Expr*>& args, size_t firstArg, Scope* in, const cxx::Loc& loc, const std::vector<cxx::TemplateArg>* explicitArgs)
 {
     (void)loc;
     cxx::Decl* decl = tmpl->declAst;
@@ -616,12 +681,26 @@ Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::E
     size_t nargs = args.size() - firstArg;
     if (nargs > fp->params.size() && !fp->variadic) return 0;
     for (size_t k = nargs; k < fp->params.size(); ++k) if (!fp->params[k]->defaultValue) return 0;   // too few arguments: not a candidate, no instantiation
+    // the template arguments written on the call bind the first parameters (14.8.1); they are not deduced
+    const std::set<std::string> savedFixed = m_fixedTemplateParams;
+    m_fixedTemplateParams.clear();
+    if (explicitArgs && !explicitArgs->empty()) {
+        std::vector<const Type*> etypes; std::vector<long> eints; std::string etext;
+        if (explicitArgs->size() > tmpl->templateParams.size() || !templateArgText(*explicitArgs, in, etypes, eints, etext)) { m_fixedTemplateParams = savedFixed; return 0; }
+        for (size_t i = 0; i < etypes.size(); ++i) {
+            const std::string& pn = tmpl->templateParams[i]->name;
+            const bool typeParam = tmpl->templateParams[i]->type && tmpl->templateParams[i]->type->kind == Type::Dependent;
+            if (typeParam != (etypes[i] != 0)) { m_fixedTemplateParams = savedFixed; return 0; }   // a type for a value parameter or the other way round
+            if (etypes[i]) bind[pn] = etypes[i]; else ints[pn] = eints[i];
+            m_fixedTemplateParams.insert(pn);
+        }
+    }
     for (size_t a = 0; a < nargs && a < fp->params.size(); ++a) {
         if (!args[firstArg + a]->semaType) expr(args[firstArg + a], in);
         const Type* at = args[firstArg + a]->semaType;
-        if (!at || at->kind == Type::Error) return 0;
-        if (!deduce(fp->params[a], at, tscope, bind, ints)) return 0;
+        if (!at || at->kind == Type::Error || !deduce(fp->params[a], at, tscope, bind, ints)) { m_fixedTemplateParams = savedFixed; return 0; }
     }
+    m_fixedTemplateParams = savedFixed;
     std::string key = "<";
     for (size_t i = 0; i < tmpl->templateParams.size(); ++i) {
         const std::string& pn = tmpl->templateParams[i]->name;
@@ -645,9 +724,19 @@ Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::E
     cxx::Declarator* dcopy = copy->kind == cxx::Decl::Function ? copy->declarator : copy->declarators[0].decl;
     dcopy->name.parts.back().ident = tmpl->name + key;
     dcopy->name.parts.back().hasTemplateArgs = false;
+    // substitution: a parameter or result type that does not exist for these arguments (typename T::type with no
+    // such member) is no error, the template is just not a candidate (14.8.2/2, SFINAE)
+    const size_t diagMark = m_diags.size();
+    const std::set<std::string> savedUnknown = m_reportedUnknown;
     const Type* base = typeOf(copy->spec, iscope);
     std::vector<Symbol*> params;
     const Type* ft = applyDeclarator(base, *dcopy, iscope, &params);
+    bool substitutionFailed = false;
+    if (ft && ft->kind == Type::Function) {
+        for (size_t k = 0; k < ft->params.size(); ++k) if (typeHasError(ft->params[k])) substitutionFailed = true;
+        if (copy->spec.hasType() && typeHasError(ft->inner)) substitutionFailed = true;   // a constructor template has no result type
+    }
+    if (substitutionFailed) { m_diags.resize(diagMark); m_reportedUnknown = savedUnknown; return 0; }
     Symbol* fn = declareFunction(copy, dcopy, copy->spec, iscope, cxx::AccessPublic, ft, params);
     if (!fn) return 0;
     fn->instantiatedFrom = tmpl;
@@ -670,6 +759,55 @@ Symbol* Sema::instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::E
         PendingBody pb; pb.fn = fn; pb.def = copy; pb.scope = iscope; queueBody(pb);
     }
     return fn;
+}
+
+// t, or a part of it, is the error type (a substitution that failed)
+bool Sema::typeHasError(const Type* t)
+{
+    if (!t) return false;
+    if (t->kind == Type::Error) return true;
+    if (t->inner && typeHasError(t->inner)) return true;
+    for (size_t i = 0; i < t->params.size(); ++i) if (typeHasError(t->params[i])) return true;
+    return false;
+}
+
+// partial ordering of function templates (14.5.5.2): a is at least as specialised as b when every parameter of b
+// can be deduced from a's parameter types with a's template parameters replaced by unique types (a const in b's
+// parameter needs a const in a's)
+bool Sema::atLeastAsSpecialized(Symbol* a, Symbol* b)
+{
+    if (!a || !b || !a->declAst || !b->declAst) return false;
+    cxx::Declarator* ad = a->declAst->kind == cxx::Decl::Function ? a->declAst->declarator : (a->declAst->declarators.empty() ? 0 : a->declAst->declarators[0].decl);
+    cxx::Declarator* bd = b->declAst->kind == cxx::Decl::Function ? b->declAst->declarator : (b->declAst->declarators.empty() ? 0 : b->declAst->declarators[0].decl);
+    if (!ad || !bd || !ad->isFunction() || !bd->isFunction()) return false;
+    const cxx::DeclaratorPart* afp = ad->functionPart();
+    const cxx::DeclaratorPart* bfp = bd->functionPart();
+    if (afp->params.size() != bfp->params.size()) return false;
+    Scope* ascope = a->templateParams.empty() ? 0 : a->templateParams[0]->scope;
+    Scope* unique = m_prog.newScope(Scope::Instantiation, ascope && ascope->parent ? ascope->parent : m_prog.global, a);
+    for (size_t i = 0; i < a->templateParams.size(); ++i) {
+        const std::string& pn = a->templateParams[i]->name;
+        if (a->templateParams[i]->type && a->templateParams[i]->type->kind == Type::Dependent) {
+            Symbol* u = m_prog.newSymbol(Symbol::Class, "$unique" + numText(static_cast<long>(i)), unique);
+            u->type = m_types.classType(u); u->isDefinition = true; u->isStruct = true;
+            Symbol* td = m_prog.newSymbol(Symbol::Typedef, pn, unique); td->type = u->type;
+        } else { Symbol* v = m_prog.newSymbol(Symbol::Enumerator, pn, unique); v->type = m_types.basic(Type::Int); v->hasConstValue = true; v->constValue = 1; }
+    }
+    Scope* bscope = b->templateParams.empty() ? 0 : b->templateParams[0]->scope;
+    std::map<std::string, const Type*> bb; std::map<std::string, long> bi;
+    const size_t diagMark = m_diags.size();
+    const bool savedStrict = m_strictDeduce;
+    m_strictDeduce = true;
+    bool ok = true;
+    for (size_t k = 0; k < afp->params.size() && ok; ++k) {
+        const cxx::Param* ap = afp->params[k];
+        const Type* at = typeOf(ap->spec, unique);
+        if (ap->decl) at = applyDeclarator(at, *ap->decl, unique, 0);
+        if (typeHasError(at) || !bfp->params[k] || !deduce(bfp->params[k], at, bscope, bb, bi)) ok = false;
+    }
+    m_strictDeduce = savedStrict;
+    m_diags.resize(diagMark);
+    return ok;
 }
 
 Symbol* Sema::classOperator(const std::string& op, cxx::Expr* e, const std::vector<cxx::Expr*>& operands, Scope* in, const Type*& result)
@@ -889,7 +1027,8 @@ const Type* Sema::exprCall(cxx::Expr* e, Scope* in)
         else { if (ct->kind != Type::Dependent && ct->kind != Type::Error) error(e->loc, "S118", "called object is not a function"); return ct->kind == Type::Dependent ? ct : m_types.error(); }
     }
     for (size_t a = 1; a < e->kids.size(); ++a) if (!e->kids[a]->semaType) expr(e->kids[a], in);
-    Symbol* f = resolveOverload(cands, e->kids, 1, thisExpr, in, e->loc, what, true);
+    const std::vector<cxx::TemplateArg>* explicitArgs = (callee->kind == cxx::Expr::Name || callee->kind == cxx::Expr::Member) && !callee->name.parts.empty() && callee->name.parts.back().hasTemplateArgs ? &callee->name.parts.back().templateArgs : 0;
+    Symbol* f = resolveOverload(cands, e->kids, 1, thisExpr, in, e->loc, what, true, explicitArgs);
     if (!f) return m_types.error();
     e->semaSym = f;
     const Type* r = resultOfCall(f);
@@ -1393,7 +1532,9 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
     if (!e) return m_types.error();
     if (e->semaType) return e->semaType;
     ++m_stats.expressionsTyped;
-    if (++m_depth > 400) { --m_depth; return e->semaType = m_types.error(); }
+    // the compiler runs on a 512 MB stack (driver/main.cpp): an expression nested deeper than this is refused, not
+    // silently typed as an error (cl's limits lie beyond 5000 parentheses)
+    if (++m_depth > 50000) { --m_depth; if (m_depth == 50000) error(e->loc, "S149", "expression nested too deeply (more than 50000 levels)"); return e->semaType = m_types.error(); }
     const Type* t = m_types.error();
     switch (e->kind) {
     case cxx::Expr::IntLit: {

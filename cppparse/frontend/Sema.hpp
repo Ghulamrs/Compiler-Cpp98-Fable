@@ -393,10 +393,14 @@ private:
     bool   completeForSizeof(const Type* t, Scope* in, const cxx::Loc& loc);   // false, with S113, for an incomplete type
     bool   constantValue(cxx::Expr* e, long& out);
     Symbol* classOperator(const std::string& op, cxx::Expr* e, const std::vector<cxx::Expr*>& operands, Scope* in, const Type*& result);
-    Symbol* resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report);
+    // explicitArgs: the template arguments written on the call (f<int>(x)), bound before deduction
+    Symbol* resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report, const std::vector<cxx::TemplateArg>* explicitArgs = 0);
     Conversion convert(cxx::Expr* from, const Type* to, Scope* in);
     Conversion convertType(const Type* from, bool lvalue, bool nullConstant, const Type* to, Scope* in, bool allowUser);
-    Symbol* instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::Expr*>& args, size_t firstArg, Scope* in, const cxx::Loc& loc);
+    Symbol* instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::Expr*>& args, size_t firstArg, Scope* in, const cxx::Loc& loc, const std::vector<cxx::TemplateArg>* explicitArgs = 0);
+    bool   atLeastAsSpecialized(Symbol* a, Symbol* b);   // 14.5.5.2: b's parameters deduce from a's with a's parameters unique types
+    static bool typeHasError(const Type* t);
+    void   declareFunctionSpecialization(cxx::Decl* d, cxx::Decl* inner, cxx::Declarator* dcl, Scope* in, cxx::Access access);
     bool   deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::map<std::string, const Type*>& bindings, std::map<std::string, long>& ints);
     const Type* resultOfCall(Symbol* fn);
 
@@ -418,6 +422,10 @@ private:
     int                        m_bodyOrder;       // the order of the body being analysed (-1: declaration pass)
     int                        m_definingDepth;   // class definitions open
     std::set<std::string>      m_reportedUnknown;
+    std::set<std::string>      m_fixedTemplateParams;   // the template parameters given explicitly on the call being deduced (not deduced, converted)
+    bool                       m_strictDeduce;          // partial ordering: a const in the parameter needs a const in the argument
+    int                        m_instantiationDepth;    // class template instantiations nested (cl stops at 1000: C2999)
+    bool                       m_instantiationOverflow; // the limit was reported once
     std::map<Symbol*, std::set<Symbol*> > m_uses;          // function (0: namespace scope) -> functions it refers to
     std::set<Symbol*>                     m_lazyMembers;   // members analysed tentatively
     std::map<Symbol*, std::vector<Diag> > m_held;          // their held-back diagnostics

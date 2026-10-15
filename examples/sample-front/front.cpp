@@ -1136,6 +1136,66 @@ void show()
 }
 }
 
+namespace templ {   // M2, M1, M13: function templates (explicit arguments, specialisations, partial ordering, SFINAE, deduction from function types), template template parameters
+template <class T> int kind(T) { return 1; }
+template <> int kind<double>(double) { return 2; }
+int kind(char) { return 3; }
+template <class T> int kind2(T) { return 1; }
+template <> int kind2(float) { return 4; }                    // the argument deduced from the parameter
+template <class T> T make(int v) { return T(v); }
+template <class R, class A> R conv2(A a) { return static_cast<R>(a); }
+struct Cv { template <class U> U conv(double t) { return static_cast<U>(t); } int plain(int x) { return x + 1; } };
+template <class T> int depcall(T& t) { return t.template conv<int>(2.7); }
+template <class T> char probe(typename T::type*);
+template <class T> long probe(...);
+struct HasType { typedef int type; };
+struct NoType {};
+template <class T> int order(T) { return 1; }
+template <class T> int order(T*) { return 2; }
+template <class T> int order(const T*) { return 3; }
+template <class T> int ref(T&) { return 1; }
+template <class T> int ref(const T&) { return 2; }
+template <class T> struct Box { T v; Box(T x) : v(x) {} int tag() const; };
+template <class T> int Box<T>::tag() const { return 1; }
+template <> int Box<char>::tag() const { return 2; }           // member specialisation
+template class Box<long>;                                      // explicit instantiation
+template int order<short>(short);
+template <class R, class A> int arity(R (*)(A)) { return 1; }
+template <class R, class A, class B> int arity(R (*)(A, B)) { return 2; }
+template <class R> int retOf(R (*)()) { return sizeof(R); }
+int one(int) { return 0; } int two(int, double) { return 0; } double three() { return 0; }
+template <class T> struct Id { typedef T type; };
+template <class T> int nondeduced(typename Id<T>::type x, T y) { return x + y; }
+template <class T, int N> int bound(const T (&)[N]) { return N; }
+template <class T> struct Counter { static int count; Counter() { ++count; } };
+template <class T> int Counter<T>::count = 0;
+template <class T> struct Outer { template <class U> struct Inner { U u; }; template <class U> U conv(T t) { return static_cast<U>(t); } };
+template <class T> struct BoxT { T v; BoxT(T x) : v(x) {} T twice() const { return v * 2; } };
+template <class T, template <class> class Holder> struct Wrap { Holder<T> h; Wrap(T x) : h(x) {} T get() const { return h.v; } T get2() const { return h.twice(); } int size() const { return (int)sizeof(h); } };
+template <class T> struct Rec { static int depth() { return 1 + Rec<typename T::next>::depth(); } };
+struct End {};
+template <> struct Rec<End> { static int depth() { return 0; } };
+struct L2 { typedef End next; }; struct L1 { typedef L2 next; };
+void show()
+{
+    std::printf("templ spec %d %d %d %d | %d %d\n", kind(1), kind(2.0), kind('c'), kind<int>('c'), kind2(1.5f), kind2(2));
+    std::printf("templ explicit %d %d %d %ld\n", make<int>(77), (int)make<double>(5), conv2<int>(3.9), conv2<long, double>(2.5));
+    Cv c; Outer<double> od;
+    std::printf("templ member explicit %d %d %d %d\n", c.conv<int>(3.9), c.plain(1), depcall(c), od.conv<int>(4.6));
+    std::printf("templ sfinae %d %d\n", (int)(sizeof(probe<HasType>(0)) == 1), (int)(sizeof(probe<NoType>(0)) == 1));
+    int x = 0; const int* cp = &x; const char arr[7] = "abcdef";
+    std::printf("templ order %d %d %d | %d %d\n", order(x), order(&x), order(cp), ref(x), ref(5));
+    std::printf("templ member spec %d %d %d\n", Box<int>(1).tag(), Box<char>('a').tag(), Box<long>(2L).tag());
+    std::printf("templ fn types %d %d %d | nondeduced %d bound %d\n", arity(one), arity(two), retOf(three), nondeduced<int>(1, 2), bound(arr));
+    Counter<int> a, b; Counter<double> cc;
+    std::printf("templ static %d %d\n", Counter<int>::count, Counter<double>::count);
+    Outer<double>::Inner<char> in; in.u = 'z';
+    Wrap<int, BoxT> w(5);
+    std::printf("templ tt %c %d %d %d %d\n", in.u, w.get(), w.get2(), w.size(), (int)sizeof(w));
+    std::printf("templ rec %d\n", Rec<L1>::depth());
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -1175,6 +1235,7 @@ int main()
     ranking::show();
     adl::show();
     rtti::show();
+    templ::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

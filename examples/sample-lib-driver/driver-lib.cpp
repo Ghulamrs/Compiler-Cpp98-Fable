@@ -18,6 +18,8 @@ int streamParsing();
 int fileRoundTrip();
 int streamManipulators();
 int streamFriends();
+int linkageA();
+int linkageB();
 
 static int g_failures = 0;
 
@@ -45,6 +47,8 @@ int main()
     check("fileRoundTrip()", fileRoundTrip(), 77);
     check("streamManipulators()", streamManipulators(), 2551);
     check("streamFriends()", streamFriends(), 303);
+    check("linkageA()", linkageA(), 1122);
+    check("linkageB()", linkageB(), 2225);
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

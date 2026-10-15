@@ -66,3 +66,18 @@ int treeStress(int n)                      // n: n keys inserted in a scrambled 
     for (std::map<int, int>::iterator it = m.begin(); it != m.end(); ++it) { if (it->first != expect || it->second != expect * 2) return -2; expect += 2; }
     return removed + static_cast<int>(m.size());
 }
+
+// linkage across the units of sample-lib (C++98 3.5/3, 14.7.1): a namespace-scope const object is internal to its
+// unit (both units define kLinkShared with different values), the static data member of a class template is one
+// object for the program (a COMDAT), the static local of an inline function too
+const int kLinkShared = 2;
+static int s_linkHidden = 2;
+inline int linkInline(int x) { static int calls = 0; return x + ++calls; }
+template <class T> struct LinkBox { T v; LinkBox(T x) : v(x) {} T get() const { return v; } static int made; };
+template <class T> int LinkBox<T>::made = 0;
+
+int linkageB()                             // 2225: kLinkShared 2, s_linkHidden 2, linkInline(22) on its second call 24, made 1 + 10 = 11 -> 2000 + 200 + 24 + 1
+{
+    LinkBox<int>::made += 10;
+    return kLinkShared * 1000 + s_linkHidden * 100 + linkInline(22) + (LinkBox<int>::made == 11 ? 1 : -100) + LinkBox<long>(5L).get() * 0;
+}

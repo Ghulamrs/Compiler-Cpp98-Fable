@@ -29,11 +29,13 @@ bool isNonStaticMember(const sema::Symbol* s)
     return s->kind == sema::Symbol::Function && s->ownerClass && !s->isConstructor && !s->isDestructor;
 }
 
-// internal linkage: a static function or variable at namespace scope, or anything in an anonymous namespace
+// internal linkage: a static function or variable at namespace scope, a namespace-scope object declared const
+// and not extern (3.5/3: `const int k = 1;` in two units is two objects), or anything in an anonymous namespace
 bool hasInternalLinkage(const sema::Symbol* s)
 {
     if (!s) return false;
     if (s->isStatic && !s->ownerClass && !s->isLocal) return true;
+    if (s->kind == sema::Symbol::Variable && !s->isMember && !s->isLocal && !s->isParam && !s->isExtern && s->type && s->type->kind != sema::Type::Reference && s->type->isConst && !s->type->isVolatile) return true;
     for (const sema::Scope* sc = s->scope; sc; sc = sc->parent)
         if (sc->kind == sema::Scope::Namespace && sc->owner && sc->owner->name.empty()) return true;
     return false;
@@ -4602,6 +4604,9 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             g.size = sizeOf(s->type) > 0 ? sizeOf(s->type) : 8;
             g.isFloat = s->type && s->type->isFloating();
             g.internal = hasInternalLinkage(s);
+            // a static data member of a class template instantiation: one object for the program (14.7.1), a
+            // COMDAT every unit that instantiates it defines, as cl emits it
+            g.linkOnce = s->isMember && s->isStatic && s->ownerClass && s->ownerClass->isImplicitInstantiation && !g.internal;
             g.align = isReference(s->type) ? 8 : alignOf(s->type);
             if (s->declAlign > g.align) g.align = s->declAlign;
             bool dynamic = false;

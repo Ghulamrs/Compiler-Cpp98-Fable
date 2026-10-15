@@ -902,18 +902,19 @@ const Type* Sema::exprMember(cxx::Expr* e, Scope* in)
     const Type* ot = expr(e->kids[0], in);
     const Type* t = m_types.unref(ot);
     if (e->arrowMember) {
-        if (t->kind == Type::Class && t->decl) {
-            // operator->: the object becomes the operand of a unary node that calls it and yields the pointer
+        // operator->: the object becomes the operand of a unary node that calls it and yields the pointer; applied
+        // again while the result is a class with operator-> (13.5.6: until a pointer comes out)
+        for (int depth = 0; depth < 32 && t->kind == Type::Class && t->decl; ++depth) {
             std::vector<Symbol*> ops; lookupMember(t->decl, "operator->", ops);
-            if (!ops.empty()) {
-                cxx::Expr* w = nodeArena().expr(cxx::Expr::Unary, e->kids[0]->loc);
-                w->text = "->";
-                w->kids.push_back(e->kids[0]);
-                w->semaSym = ops[0];
-                w->semaType = resultOfCall(ops[0]);
-                e->kids[0] = w;
-                t = m_types.unref(w->semaType);
-            }
+            if (ops.empty()) break;
+            cxx::Expr* w = nodeArena().expr(cxx::Expr::Unary, e->kids[0]->loc);
+            w->text = "->";
+            w->kids.push_back(e->kids[0]);
+            w->semaSym = ops[0];
+            w->semaType = resultOfCall(ops[0]);
+            noteUse(ops[0]);
+            e->kids[0] = w;
+            t = m_types.unref(w->semaType);
         }
         if (t->kind != Type::Pointer) { if (t->kind != Type::Error && t->kind != Type::Dependent) error(e->loc, "S117", "'->' applied to a non-pointer of type " + t->text()); return t->kind == Type::Dependent ? t : m_types.error(); }
         t = t->inner;

@@ -5,6 +5,7 @@
 #include "TypeCheck.hpp"
 
 #include <cstdlib>
+#include <cstring>
 #include <sstream>
 
 namespace cppparse {
@@ -16,7 +17,14 @@ std::string IrOperand::str() const
     switch (kind) {
     case Temp: return "t" + intToString(id);
     case Imm: return "#" + intToString(static_cast<int>(ival));
-    case FImm: { std::ostringstream s; s << "#" << fval; return s.str(); }
+    case FImm: {
+        // the shortest form when it reads back as the same value, else all 17 digits: the text is also the
+        // operand's identity in the optimiser's value-numbering keys (0.1 and 0.1000001 are not one constant)
+        if (fval == 0.0) { unsigned char b[sizeof(double)]; std::memcpy(b, &fval, sizeof(double)); return (b[sizeof(double) - 1] & 0x80) ? "#-0" : "#0"; }
+        std::ostringstream s; s << fval;
+        if (std::strtod(s.str().c_str(), 0) != fval) { std::ostringstream p; p.precision(17); p << fval; return "#" + p.str(); }
+        return "#" + s.str();
+    }
     case Local: return "local" + intToString(id);
     case Global: return "@" + name;
     case Block: return "B" + intToString(id);
@@ -125,10 +133,15 @@ void IrFunction::computeCfg()
                 addUniqueInt(blocks[static_cast<size_t>(blocks[i].succs[s])].preds, static_cast<int>(i));
 }
 
-void IrFunction::computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut) const
+void IrFunction::computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut,
+                                 const std::vector<std::vector<int> >* extraSuccs) const
 {
     const size_t n = blocks.size();
     std::vector<std::vector<int> > succ(n);
+    if (extraSuccs)
+        for (size_t b = 0; b < n && b < extraSuccs->size(); ++b)
+            for (size_t s = 0; s < (*extraSuccs)[b].size(); ++s)
+                if ((*extraSuccs)[b][s] >= 0 && static_cast<size_t>((*extraSuccs)[b][s]) < n) addUniqueInt(succ[b], (*extraSuccs)[b][s]);
     std::vector<std::set<int> > used(n), defined(n);
     for (size_t b = 0; b < n; ++b)
         for (size_t k = 0; k < blocks[b].insts.size(); ++k) {

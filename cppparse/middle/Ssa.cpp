@@ -3,10 +3,21 @@
 #include "Optimizer.hpp"
 #include "PathUtil.hpp"
 
+#include <cstring>
 #include <map>
 #include <set>
 
 namespace cppparse {
+
+std::string operandKey(const IrOperand& o)
+{
+    if (o.kind != IrOperand::FImm) return o.str();
+    unsigned char b[sizeof(double)];
+    std::memcpy(b, &o.fval, sizeof b);
+    std::string k = "#f";
+    for (size_t i = 0; i < sizeof b; ++i) k += intToString(static_cast<int>(b[i])) + ".";
+    return k;
+}
 
 namespace {
 
@@ -245,7 +256,7 @@ int simplifyPhis(IrFunction& f)
                 const IrOperand& o = in.args[a];
                 if (o.kind == IrOperand::Temp && o.id == in.dst) continue;
                 if (!any) { only = o; any = true; continue; }
-                bool eq = o.kind == only.kind && ((o.kind == IrOperand::Temp && o.id == only.id) || (o.kind == IrOperand::Imm && o.ival == only.ival) || (o.kind == IrOperand::FImm && o.fval == only.fval));
+                bool eq = o.kind == only.kind && ((o.kind == IrOperand::Temp && o.id == only.id) || (o.kind == IrOperand::Imm && o.ival == only.ival) || (o.kind == IrOperand::FImm && o.str() == only.str()));   // exact: -0.0 is not 0.0
                 if (!eq) { same = false; break; }
             }
             if (!any || !same) continue;
@@ -274,7 +285,7 @@ struct GvnState {
         for (size_t a = 0; a < in.args.size(); ++a) {
             IrOperand o = in.args[a];
             if (o.kind == IrOperand::Temp) { std::map<int, int>::iterator r = replaced.find(o.id); if (r != replaced.end()) o.id = r->second; }
-            k += o.str() + ",";
+            k += operandKey(o) + ",";
         }
         return k;
     }

@@ -17,7 +17,8 @@ struct CompileOptions {
     bool x86;            // version 4: also generate x86-64 MASM
     int  threads;        // worker threads for the per-function phases
     bool msvcNames;      // version 5: MSVC-compatible decorated names in the x86-64 output
-    CompileOptions() : optLevel(0), emitAst(true), x86(true), threads(1), msvcNames(false) {}
+    bool tableEh;        // try regions as unwind range tables with landing pads (--eh=table) instead of setjmp
+    CompileOptions() : optLevel(0), emitAst(true), x86(true), threads(1), msvcNames(false), tableEh(true) {}
 };
 
 struct CompileSummary {

@@ -3,6 +3,7 @@
 #include "PathUtil.hpp"
 #include "Sema.hpp"
 
+#include <sstream>
 #include <vector>
 
 namespace cppparse {
@@ -11,15 +12,31 @@ namespace {
 
 class SemaMangler {
 public:
-    std::string function(const sema::Symbol& f);
+    std::string function(const sema::Symbol& f, long thunk = 0, const sema::Type* resultOverride = 0, bool vtordisp = false);
     std::string variable(const sema::Symbol& v);
-    std::string vtable(const sema::Symbol& c);
+    std::string initializerEntry(const sema::Symbol& v);
+    std::string staticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
+    std::string staticGuard(const sema::Symbol& fn, long discriminator, int index);
+    std::string vtable(const sema::Symbol& c, const sema::Symbol* forBase);
+    std::string vbtable(const sema::Symbol& c, const std::vector<sema::Symbol*>& path);
+    std::string vcallThunk(const sema::Symbol& c, long slotOffset);
+    // RTTI: the name a type descriptor holds (".?AUD@@", ".H") and the descriptors' symbols
+    std::string rttiTypeName(const sema::Type* t);
+    std::string typeDescriptor(const sema::Type* t) { return "??_R0" + rttiTypeName(t).substr(1) + "@8"; }
+    std::string classHierarchy(const sema::Symbol& c) { return "??_R3" + classScoped(c) + "8"; }
+    std::string baseClassArray(const sema::Symbol& c) { return "??_R2" + classScoped(c) + "8"; }
+    std::string baseClassDescriptor(const sema::Symbol& c, long mdisp, long pdisp, long vdisp, long attributes);
+    std::string completeObjectLocator(const sema::Symbol& c, const sema::Symbol* forBase) { std::string v = vtable(c, forBase); return "??_R4" + v.substr(4); }
 private:
+    std::string classScoped(const sema::Symbol& c) { return symbolName(&c) + scopesOf(c.scope, true) + "@"; }
+    std::string storageType(const sema::Type* t);
+    std::string memberPointerType(const sema::Type* t);
+    std::string memberClass(const sema::Type* t);
     std::string number(long v);
     std::string name(const std::string& component);
     std::string symbolName(const sema::Symbol* s);
     std::string templateName(const sema::Symbol* inst, const std::string& base, bool baseIsOperatorCode, bool isFunction);
-    std::string scopesOf(const sema::Scope* s);
+    std::string scopesOf(const sema::Scope* s, bool ofClass = false);   // ofClass: the scopes of a class symbol itself
     std::string type(const sema::Type* t);
     std::string resultType(const sema::Type* t);
     std::string templateArgType(const sema::Type* t);
@@ -95,12 +112,27 @@ std::string SemaMangler::symbolName(const sema::Symbol* s)
     return name(s->name);
 }
 
-std::string SemaMangler::scopesOf(const sema::Scope* s)
+std::string SemaMangler::scopesOf(const sema::Scope* s, bool ofClass)
 {
     std::string out;
+    bool local = ofClass;   // the scopes of a class itself: declared in a function, it is a local class
     for (; s; s = s->parent) {
-        if ((s->kind == sema::Scope::Namespace || s->kind == sema::Scope::Class) && s->owner) out += symbolName(s->owner);
-        if (s->kind == sema::Scope::Function || s->kind == sema::Scope::Block) break;
+        if ((s->kind == sema::Scope::Namespace || s->kind == sema::Scope::Class) && s->owner) { out += symbolName(s->owner); if (s->kind == sema::Scope::Class) local = true; }
+        if (s->kind == sema::Scope::Function || s->kind == sema::Scope::Block) {
+            // a local class (the scopes of a class were passed): cl's local scope, "?<block>?<the function's name>", whose
+            // closing "@" the caller supplies ("?f@L@?1??t4@@YAHH@Z@SAHH@Z"); the body is block 2, a nested block gets
+            // 2 plus its number (unique in the function, cl's own numbering only for the body)
+            if (local) {
+                const sema::Scope* f = s;
+                while (f && f->kind != sema::Scope::Function) f = f->parent;
+                if (f && f->owner) {
+                    std::string fn = function(*f->owner);
+                    if (fn.empty() || fn[0] != '?') fn = "?" + fn + "@@9";
+                    out += "?" + number(2 + (s->kind == sema::Scope::Block ? s->blockIndex : 0)) + "?" + fn;
+                }
+            }
+            break;
+        }
     }
     return out;
 }
@@ -112,7 +144,7 @@ std::string SemaMangler::classType(const sema::Type* t)
     if (!c) return std::string(1, letter) + "unknown@@";
     std::string out(1, letter);
     out += symbolName(c);          // before the scopes: the back-reference table follows the call order
-    out += scopesOf(c->scope);
+    out += scopesOf(c->scope, true);
     return out + "@";
 }
 
@@ -163,9 +195,34 @@ std::string SemaMangler::type(const sema::Type* t)
         s += resultType(t->inner);
         return s + paramList(t) + "Z";
     }
-    case sema::Type::MemberPointer: return "PEAX";
+    case sema::Type::MemberPointer: return memberPointerType(t);
     default: return "X";
     }
+}
+
+// the class of a pointer to member as its pointee's qualifier: the name and scopes without the U/V letter
+std::string SemaMangler::memberClass(const sema::Type* t)
+{
+    const sema::Type* c = t->memberClass;
+    if (!c || c->kind != sema::Type::Class || !c->decl) return "unknown@@";
+    return classType(c).substr(1);
+}
+
+// a pointer to data member: the pointer (P, Q const, R volatile, S both), __ptr64, the member's class as the
+// pointee's qualifier (Q, R for a const member, S volatile, T both) and the member's type: "PEQP@@H"; to a member
+// function: "P8P@@EAAHXZ", the class, then the function's this qualifier (A, B const), calling convention, result
+// and parameters
+std::string SemaMangler::memberPointerType(const sema::Type* t)
+{
+    const char* ptr = t->isConst ? (t->isVolatile ? "S" : "Q") : (t->isVolatile ? "R" : "P");
+    const sema::Type* in = t->inner;
+    if (in && in->kind == sema::Type::Function) {
+        std::string s = std::string(ptr) + "8" + memberClass(t) + "E" + (in->constMethod ? "B" : "A") + "A";
+        s += resultType(in->inner);
+        return s + paramList(in) + "Z";
+    }
+    const char* mq = in && in->isConst ? (in->isVolatile ? "T" : "R") : (in && in->isVolatile ? "S" : "Q");
+    return std::string(ptr) + "E" + mq + memberClass(t) + type(in);
 }
 
 // a class, union or enum result, and a cv-qualified non-pointer one, is prefixed with "?" and its qualifiers
@@ -222,7 +279,10 @@ std::string SemaMangler::operatorCode(const std::string& fname, bool& ok)
     return "";
 }
 
-std::string SemaMangler::function(const sema::Symbol& f)
+// resultOverride: a return-adjusting thunk is spelled as the function, non-virtual, returning the overridden
+// function's type; vtordisp: cl's $4 thunk, the vtordisp's place (-4, as an unsigned hex number) and the adjustment
+// in place of the access code
+std::string SemaMangler::function(const sema::Symbol& f, long thunk, const sema::Type* resultOverride, bool vtordisp)
 {
     const sema::Symbol* owner = f.ownerClass;
     if (f.isExternC) return f.name;
@@ -250,8 +310,10 @@ std::string SemaMangler::function(const sema::Symbol& f)
     const sema::Type* ft = f.type;
     if (owner && !f.isStatic) {
         char acc = access == cxx::AccessPrivate ? 'A' : access == cxx::AccessProtected ? 'I' : 'Q';
-        if (f.isVirtual) acc = static_cast<char>(acc + 4);
-        out += acc;
+        if (f.isVirtual && !resultOverride) acc = static_cast<char>(acc + 4);
+        if (thunk) acc = static_cast<char>(acc + 2);   // an adjustor thunk (G, O, W) and its adjustment
+        if (vtordisp) { out += "$4PPPPPPPM@"; out += number(thunk); }
+        else { out += acc; if (thunk) out += number(thunk); }
         out += "E";
         out += ft && ft->constMethod ? "B" : "A";
         out += "A";
@@ -260,7 +322,7 @@ std::string SemaMangler::function(const sema::Symbol& f)
         out += "A";
     } else out += "YA";
     if (ctor || f.isDestructor) out += "@";
-    else out += resultType(ft ? ft->inner : 0);
+    else out += resultType(resultOverride ? resultOverride : ft ? ft->inner : 0);
     out += ft ? paramList(ft) : std::string("X");
     return out + "Z";
 }
@@ -275,12 +337,71 @@ std::string SemaMangler::variable(const sema::Symbol& v)
     out += "@";
     if (v.isMember) out += v.access == cxx::AccessPrivate ? "0" : v.access == cxx::AccessProtected ? "1" : "2";
     else out += "3";
-    const sema::Type* t = v.type;
+    out += storageType(v.type);
+    return out;
+}
+
+// the symbol of the .CRT$XCU entry of a COMDAT variable's dynamic initializer, as cl spells it:
+// ??made$initializer$@?$Box@H@@2P6AXXZEA@@3P6AXXZEA (the name with "$initializer$", the scopes, the member's access, a
+// pointer to a function)
+std::string SemaMangler::initializerEntry(const sema::Symbol& v)
+{
+    std::string out = "??" + v.name + "$initializer$@";
+    out += scopesOf(v.scope);
+    out += "@";
+    out += v.isMember ? (v.access == cxx::AccessPrivate ? "0" : v.access == cxx::AccessProtected ? "1" : "2") : "3";
+    return out + "P6AXXZEA@@3P6AXXZEA";
+}
+
+// as cl spells a static local: the name, then a scope made of the block's number and the function's own
+// decorated name (whose names join this name's back-reference table; a C function is "?name@@9"), then
+// storage class 4 and the type as for a global
+std::string SemaMangler::staticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator)
+{
+    std::string out = "?";
+    out += name(v.name);
+    out += "?";
+    out += number(discriminator);
+    std::string f = function(fn);
+    if (f.empty() || f[0] != '?') f = "?" + f + "@@9";
+    out += "?" + f + "@";
+    out += "4";
+    out += storageType(v.type);
+    return out;
+}
+
+// cl's guard of the index-th dynamically initialised static local of fn: an int "$TSS<index>" in the same block
+std::string SemaMangler::staticGuard(const sema::Symbol& fn, long discriminator, int index)
+{
+    std::ostringstream id; id << "$TSS" << index;
+    std::string out = "?";
+    out += name(id.str());
+    out += "?";
+    out += number(discriminator);
+    std::string f = function(fn);
+    if (f.empty() || f[0] != '?') f = "?" + f + "@@9";
+    out += "?" + f + "@";
+    out += "4HA";
+    return out;
+}
+
+// the type part of a variable's name: "HA", "PEBDEB", "PAPEAUItem@1@A", ...
+std::string SemaMangler::storageType(const sema::Type* t)
+{
+    std::string out;
     if (t && (t->kind == sema::Type::Pointer || t->kind == sema::Type::Reference)) {
         // "int* p" -> "PEAHEA": the pointer, then its own __ptr64 and the pointee's qualifiers again
         out += type(t);
         out += "E";
         out += cvCode(t->inner);
+    } else if (t && t->kind == sema::Type::MemberPointer) {
+        // "int P::* pm" -> "PEQP@@HEQ1@": the pointee's qualifier is its class again (back-referenced)
+        out += type(t);
+        out += "E";
+        const sema::Type* in = t->inner;
+        const bool fn = in && in->kind == sema::Type::Function;
+        out += !fn && in && in->isConst ? (in->isVolatile ? "T" : "R") : (!fn && in && in->isVolatile ? "S" : "Q");
+        out += memberClass(t);
     } else if (t && t->kind == sema::Type::Array) {
         // "T a[4]" -> "PA" T "A": a pointer to the element without __ptr64, the outer dimension is dropped;
         // "int a[2][3]" -> "PAY02HA"
@@ -309,12 +430,73 @@ std::string SemaMangler::variable(const sema::Symbol& v)
     return out;
 }
 
-std::string SemaMangler::vtable(const sema::Symbol& c)
+// a class with several vftables names each after the class that introduced its vfptr: ??_7D@@6BPB@@@
+std::string SemaMangler::vtable(const sema::Symbol& c, const sema::Symbol* forBase)
 {
     std::string out = "??_7";
     out += symbolName(&c);
-    out += scopesOf(c.scope);
-    return out + "@6B@";
+    out += scopesOf(c.scope, true);
+    if (!forBase) return out + "@6B@";
+    out += "@6B";
+    out += symbolName(forBase);
+    out += scopesOf(forBase->scope, true);
+    return out + "@@";
+}
+
+// the name in a type descriptor: "." and the type's code, a class or enum with its cv-qualifier letter (".?AUD@@",
+// ".?AVstring@std@@", ".H", ".PEAUD@@"); typeid strips the top-level qualifiers and references (5.2.8)
+std::string SemaMangler::rttiTypeName(const sema::Type* t)
+{
+    if (t && t->kind == sema::Type::Reference) t = t->inner;
+    if (t && (t->kind == sema::Type::Class || t->kind == sema::Type::Enum)) return ".?A" + type(t);
+    if (t && t->kind == sema::Type::Array) {
+        // an array type as cl's descriptor spells it: "$$BY" + the rank + each dimension + the element (".$$BY02H" for
+        // int[3], ".$$BY113US@@" for S[2][4]), which undecorates to "int [3]"; a parameter's array would be a pointer
+        std::vector<long> dims;
+        const sema::Type* e = t;
+        while (e && e->kind == sema::Type::Array) { dims.push_back(e->arraySize > 0 ? e->arraySize : 0); e = e->inner; }
+        std::string s = ".$$BY" + number(static_cast<long>(dims.size()));
+        for (size_t i = 0; i < dims.size(); ++i) s += number(dims[i]);
+        return s + type(e);
+    }
+    return "." + type(t);
+}
+
+// cl's base class descriptor: ??_R1<mdisp><pdisp><vdisp><attributes><class>@8, "D::`RTTI Base Class Descriptor at
+// (16,-1,0,64)'" is ??_R1BA@?0A@EA@D@@8
+std::string SemaMangler::baseClassDescriptor(const sema::Symbol& c, long mdisp, long pdisp, long vdisp, long attributes)
+{
+    std::string out = "??_R1";
+    out += number(mdisp);
+    out += number(pdisp);
+    out += number(vdisp);
+    out += number(attributes);
+    return out + classScoped(c) + "8";
+}
+
+// a vbtable, named by the bases that tell it from the class's others: ??_8D@@7B@, ??_8VX@@7BVL@@@, ??_8R@@7BB@@P@@@
+std::string SemaMangler::vbtable(const sema::Symbol& c, const std::vector<sema::Symbol*>& path)
+{
+    std::string out = "??_8";
+    out += symbolName(&c);
+    out += scopesOf(c.scope, true);
+    out += "@7B";
+    for (size_t p = 0; p < path.size(); ++p) {
+        out += symbolName(path[p]);
+        out += scopesOf(path[p]->scope, true);
+        out += "@";
+    }
+    return out + "@";
+}
+
+std::string SemaMangler::vcallThunk(const sema::Symbol& c, long slotOffset)
+{
+    std::string out = "??_9";
+    out += symbolName(&c);
+    out += scopesOf(c.scope, true);
+    out += "@$B";
+    out += number(slotOffset);
+    return out + "AA";
 }
 
 } // namespace
@@ -324,6 +506,23 @@ unsigned long g_mangleUnitId = 0;
 void setMangleUnitId(unsigned long id) { g_mangleUnitId = id; }
 
 std::string msvcMangleVariableSymbol(const sema::Symbol& v) { SemaMangler m; return m.variable(v); }
-std::string msvcMangleVtableSymbol(const sema::Symbol& c) { SemaMangler m; return m.vtable(c); }
+// cl's dynamic initializer of a COMDAT variable ("void `dynamic initializer for 'Box<int>::made''(void)"), ??__E<the
+// variable's name without its '?'>@@YAXXZ, and the symbol of its .CRT$XCU entry, ??made$initializer$@?$Box@H@@2P6AXXZEA@@3P6AXXZEA
+std::string msvcMangleDynamicInitializer(const sema::Symbol& v) { SemaMangler m; return "??__E" + m.variable(v) + "@@YAXXZ"; }
+std::string msvcMangleInitializerEntry(const sema::Symbol& v) { SemaMangler m; return m.initializerEntry(v); }
+std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator) { SemaMangler m; return m.staticLocal(v, fn, discriminator); }
+std::string msvcMangleVtableSymbol(const sema::Symbol& c, const sema::Symbol* forBase) { SemaMangler m; return m.vtable(c, forBase); }
+std::string msvcMangleVbtableSymbol(const sema::Symbol& c, const std::vector<sema::Symbol*>& path) { SemaMangler m; return m.vbtable(c, path); }
+std::string msvcMangleThunkSymbol(const sema::Symbol& fn, long adjust) { SemaMangler m; return m.function(fn, adjust); }
+std::string msvcMangleVcallThunk(const sema::Symbol& c, long slotOffset) { SemaMangler m; return m.vcallThunk(c, slotOffset); }
+std::string msvcRttiTypeName(const sema::Type* t) { SemaMangler m; return m.rttiTypeName(t); }
+std::string msvcMangleTypeDescriptor(const sema::Type* t) { SemaMangler m; return m.typeDescriptor(t); }
+std::string msvcMangleClassHierarchy(const sema::Symbol& c) { SemaMangler m; return m.classHierarchy(c); }
+std::string msvcMangleBaseClassArray(const sema::Symbol& c) { SemaMangler m; return m.baseClassArray(c); }
+std::string msvcMangleBaseClassDescriptor(const sema::Symbol& c, long mdisp, long pdisp, long vdisp, long attributes) { SemaMangler m; return m.baseClassDescriptor(c, mdisp, pdisp, vdisp, attributes); }
+std::string msvcMangleCompleteObjectLocator(const sema::Symbol& c, const sema::Symbol* forBase) { SemaMangler m; return m.completeObjectLocator(c, forBase); }
+std::string msvcMangleReturnThunk(const sema::Symbol& fn, const sema::Symbol& root) { SemaMangler m; return m.function(fn, 0, root.type && root.type->kind == sema::Type::Function ? root.type->inner : 0); }
+std::string msvcMangleVtordispThunk(const sema::Symbol& fn, long adjust) { SemaMangler m; return m.function(fn, adjust, 0, true); }
+std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index) { SemaMangler m; return m.staticGuard(fn, discriminator, index); }
 
 } // namespace cppparse

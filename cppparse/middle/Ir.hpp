@@ -97,7 +97,9 @@ struct IrLocal {
     bool        addressTaken;
     bool        isParam;
     bool        isThis;
-    IrLocal() : type(0), size(8), align(8), addressTaken(false), isParam(false), isThis(false) {}
+    bool        nonNull;     // a parameter that always holds a valid address: this, a reference, an object passed by
+                             // address, the hidden result pointer (loads through it cannot fault)
+    IrLocal() : type(0), size(8), align(8), addressTaken(false), isParam(false), isThis(false), nonNull(false) {}
 };
 
 struct IrFunction {
@@ -112,15 +114,21 @@ struct IrFunction {
     bool                     hasTry;
     bool                     linkOnce;   // inline, template instantiation or implicit member: one copy survives linking (COMDAT)
     bool                     internal;   // internal linkage (a static function, a member of an anonymous namespace): not PUBLIC
+    bool                     variadic;   // ends in "...": the parameters live in their home slots, where va_start finds them
     std::vector<std::string> notes;      // constructs that were approximated
     std::map<int, const Type*> tempTypes;
+    std::string              sourceFile; // the definition's source file (an absolute Windows path) and line, for the
+    int                      sourceLine; // CodeView line table; empty / 0 when unknown (the version 3 pipeline)
 
-    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false), internal(false) {}
+    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false), internal(false), variadic(false), sourceLine(0) {}
     int  newTemp(const Type* t) { tempTypes[nextTemp] = t; return nextTemp++; }
     int  newBlock(const std::string& label);
     void computeCfg();
-    // temporaries live on entry to and on exit from every block, with the successors taken from the branches
-    void computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut) const;
+    // temporaries live on entry to and on exit from every block, with the successors taken from the branches;
+    // extraSuccs (optional, one list per block) adds edges no instruction names: the back end's exception edges
+    // from a block whose calls may throw to the handlers of the table regions around them
+    void computeLiveness(std::vector<std::set<int> >& liveIn, std::vector<std::set<int> >& liveOut,
+                         const std::vector<std::vector<int> >* extraSuccs = 0) const;
     int  instCount() const;
     const Type* typeOf(int temp) const;
 };

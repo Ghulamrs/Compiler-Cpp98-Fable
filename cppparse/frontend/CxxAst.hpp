@@ -70,6 +70,7 @@ struct DeclSpec {                   // decl-specifier-seq
     EnumDecl*     enumDef;          // Enum: the definition
     Loc           loc;
     int           align;            // __declspec(align(N)) among the specifiers (0: none)
+    bool          noreturn;         // __declspec(noreturn)
     DeclSpec();
     bool hasType() const { return kind != None; }
     std::string text() const;       // "const unsigned int", "std::vector<int>"
@@ -150,6 +151,7 @@ struct Expr {
     bool               arrayDelete; // Delete
     bool               hasInit;     // New: parentheses present
     bool               arrowMember; // Member: ->
+    bool               globalScope; // New, Delete: ::new, ::delete (the class's operators are not looked up)
     Loc                loc;
     // filled by semantic analysis (version 6 stage 3)
     const sema::Type*  semaType;    // the expression's type after lvalue-to-rvalue etc. is NOT applied (see semaLvalue)
@@ -157,7 +159,8 @@ struct Expr {
     bool               semaLvalue;
     bool               semaConst;   // a constant expression
     long               semaValue;   // its value when semaConst
-    Expr() : kind(Error), type(0), arrayDelete(false), hasInit(false), arrowMember(false), semaType(0), semaSym(0), semaLvalue(false), semaConst(false), semaValue(0) {}
+    const sema::Type*  semaOperand; // Typeid: the type the operand names or has (typeid(int), typeid(x))
+    Expr() : kind(Error), type(0), arrayDelete(false), hasInit(false), arrowMember(false), globalScope(false), semaType(0), semaSym(0), semaLvalue(false), semaConst(false), semaValue(0), semaOperand(0) {}
 };
 
 
@@ -196,6 +199,8 @@ struct MemInit {                    // constructor initializer: name ( args )
     QualifiedName      name;
     std::vector<Expr*> args;
     Loc                loc;
+    sema::Symbol*      semaSym;   // the constructor chosen by overload resolution for a class (stage 3)
+    MemInit() : semaSym(0) {}
 };
 
 struct TemplateParam {
@@ -318,6 +323,8 @@ private:
 
 // text dump of a translation unit (one node per line, indented), used by --parse6 and the tests
 std::string dumpTranslationUnit(const TranslationUnit& tu);
+// an expression as source-like text, as the dump shows it ("R - 1")
+std::string expressionText(const Expr* e);
 
 struct Counts {
     int namespaces, classes, enums, functionsDefined, functionsDeclared, variables, typedefs, templates, statements, expressions, usings;

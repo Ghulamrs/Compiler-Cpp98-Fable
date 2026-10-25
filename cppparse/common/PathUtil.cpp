@@ -472,17 +472,24 @@ bool readResponseFile(const std::string& path, std::vector<std::string>& args)
 {
     std::string text;
     if (!readFile(path, text)) return false;
-    std::string line;
+    // arguments separated by white space, any number per line, as cl's and link's response files: a path with
+    // spaces goes in double quotes (the quotes may enclose part of a token: -I"a b" is one argument); a line whose
+    // first token starts with # is a comment
+    std::string tok;
+    bool inQuote = false, any = false, lineStart = true, comment = false;
     for (size_t i = 0; i <= text.size(); ++i) {
         char c = i < text.size() ? text[i] : '\n';
-        if (c == '\n' || c == '\r') {
-            std::string t = trim(line);
-            if (!t.empty() && t[0] != '#') {
-                if (t.size() >= 2 && t[0] == '"' && t[t.size() - 1] == '"') t = t.substr(1, t.size() - 2);
-                args.push_back(t);
-            }
-            line.clear();
-        } else line += c;
+        if (comment) { if (c == '\n' || c == '\r') { comment = false; lineStart = true; } continue; }
+        if (inQuote) { if (c == '"') inQuote = false; else tok += c; continue; }
+        if (c == '"') { inQuote = true; any = true; lineStart = false; continue; }
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (any) args.push_back(tok);
+            tok.clear(); any = false;
+            if (c == '\n' || c == '\r') lineStart = true;
+            continue;
+        }
+        if (c == '#' && lineStart && !any) { comment = true; continue; }
+        tok += c; any = true; lineStart = false;
     }
     return true;
 }

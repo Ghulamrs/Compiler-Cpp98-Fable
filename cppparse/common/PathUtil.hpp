@@ -58,7 +58,8 @@ bool isDirectory(const std::string& p);
 // "src\*.cpp" -> every matching file ('*' and '?' in the last path component);
 // a pattern without wildcards is returned as is. Returns the number of matches.
 int  expandWildcards(const std::string& pattern, std::vector<std::string>& out);
-// "@list.txt": one path, pattern or option per line; '#' starts a comment
+// "@list.txt": paths, patterns and options separated by white space (any number per line), a path with spaces
+// in double quotes, as cl's response files; a line starting with '#' is a comment
 bool readResponseFile(const std::string& path, std::vector<std::string>& args);
 // recursively collects header and source files under 'dir' (folders whose
 // name starts with '.' are skipped); 'dirsWithHeaders' receives every folder

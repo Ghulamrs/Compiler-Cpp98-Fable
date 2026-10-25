@@ -48,6 +48,7 @@ private:
         std::set<std::string> types;        // type names declared here
         std::set<std::string> templates;    // template names declared here
         std::set<std::string> namespaces;
+        std::set<std::string> others;       // variables, parameters, functions declared here: they hide outer templates
         std::string           name;         // class or namespace name ("" for blocks)
         bool                  isClass;
         Scope() : isClass(false) {}
@@ -69,7 +70,7 @@ private:
     void  error(const std::string& msg);
     void  skipTo(const char* a, const char* b);       // error recovery: skip to a or b at depth 0 (consumes a ';', not a '}')
     void  skipBalanced();                             // skip a balanced (...) [...] {...}
-    int   declspecArguments();                        // after __declspec: skips "(...)", returns N of an align(N) in it (0: none)
+    int   declspecArguments(bool* noreturn = 0);      // after __declspec: skips "(...)", returns N of an align(N) in it (0: none); *noreturn when it holds noreturn
     static bool isKeyword(const std::string& s);
     static bool isTypeKeyword(const std::string& s);
     static bool isDeclSpecKeyword(const std::string& s);
@@ -80,16 +81,18 @@ private:
     void  declareType(const std::string& name);
     void  declareTemplate(const std::string& name);
     void  declareNamespace(const std::string& name);
+    void  declareOther(const std::string& name);      // a name that is neither a type nor a template
     bool  isTypeName(const QualifiedName& n) const;
     bool  isTemplateName(const QualifiedName& n) const;
     bool  isNamespaceName(const std::string& n) const;
     bool  looksLikeTypeStart() const;                 // the current token can start a type-specifier
     bool  qualifiedNameAhead(size_t& endPos, bool& hasTemplate) const;
-    const NamedScope* findNamedScope(const QualifiedName& qualifier, size_t parts) const;
+    const NamedScope* findNamedScope(const QualifiedName& qualifier, size_t parts, std::string* key = 0) const;   // key: the scope's full name
     std::string currentClassName() const;
 
     // declarations
     Decl* declaration(bool inClass, Access& access);
+    bool  memberDeclarator(Declarator& d, bool inClass);
     Decl* simpleOrFunction(bool inClass, const DeclSpec& spec, Loc at, bool firstDeclaratorParsed, Declarator* first);
     bool  declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef);
     bool  declarator(Declarator& d, bool abstractAllowed, bool nameRequired, bool inParams);
@@ -141,6 +144,7 @@ private:
     int                         m_errors;
     int                         m_templateDepth;      // inside template <...> declaration (typename allowed)
     int                         m_noGreater;          // > 0 while parsing template arguments: '>' ends the expression
+    bool                        m_declInitFailed;     // the last tentative declaration failed inside an initializer: it was a declaration
     std::vector<std::string>    m_qualifierStack;     // current qualified scope names for m_named
 };
 

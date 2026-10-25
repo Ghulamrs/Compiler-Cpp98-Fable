@@ -127,9 +127,15 @@ bool Instantiator::argumentsDependent(const std::string& argsText, TypeTable& ty
         lx.run(toks);
         toks.pop_back();
         if (toks.empty()) return true;
-        bool anyIdent = false;
-        for (size_t k = 0; k < toks.size(); ++k) if (toks[k].type == TokIdentifier) anyIdent = true;
+        bool anyIdent = false, anyOperator = false;
+        for (size_t k = 0; k < toks.size(); ++k) {
+            if (toks[k].type == TokIdentifier) anyIdent = true;
+            else if (toks[k].type == TokPunct && toks[k].text != "::" && toks[k].text != "*" && toks[k].text != "&" && toks[k].text != "<" && toks[k].text != ">" && toks[k].text != "," && toks[k].text != "[" && toks[k].text != "]" && toks[k].text != "(" && toks[k].text != ")") anyOperator = true;
+        }
         if (!anyIdent) continue;                                   // a number or numeric expression
+        // a non-type argument with a name in it ("C - 1") is still a parameter's value even when a class of that
+        // name exists elsewhere in the folder; instantiating it would nest without end (Matrix<T, C - 1 - 1, ...>)
+        if (anyOperator) return true;
         std::string stripped = stripTemplateArgs(args[i]);
         std::string base = stripped;
         size_t cut = base.find_first_of("*&[");
@@ -268,6 +274,7 @@ ClassInfo* Instantiator::instantiateClass(const ClassInfo* tmpl, const std::stri
     if (argumentsDependent(argsText, types)) return 0;          // Vector<T, N> inside another template
     if (m_ownedClasses.size() > 400) return 0;                    // runaway guard
     std::string args = normalizeArgs(argsText);
+    if (args.size() > 512) return 0;                               // arguments that keep growing: the same runaway
     std::string key = tmpl->qualifiedName + "<" + args + ">";
     std::map<std::string, ClassInfo*>::iterator it = m_classes.find(key);
     if (it != m_classes.end()) return it->second;

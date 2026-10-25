@@ -32,7 +32,7 @@ DeclSpec::DeclSpec()
     : isTypedef(false), isStatic(false), isExtern(false), isMutable(false), isRegister(false), isAuto(false), isFriend(false),
       isVirtual(false), isExplicit(false), isInline(false), isConst(false), isVolatile(false), kind(None),
       builtinChar(0), builtinInt(0), builtinLong(0), builtinShort(0), builtinSigned(0), builtinUnsigned(0), builtinFloat(0),
-      builtinDouble(0), builtinVoid(0), builtinBool(0), builtinWchar(0), classDef(0), enumDef(0), align(0) {}
+      builtinDouble(0), builtinVoid(0), builtinBool(0), builtinWchar(0), classDef(0), enumDef(0), align(0), noreturn(false) {}
 
 std::string DeclSpec::text() const
 {
@@ -385,6 +385,8 @@ void countDecl(const Decl* d, Counts& c)
 
 } // namespace
 
+std::string expressionText(const Expr* e) { return exprText(e); }
+
 std::string dumpTranslationUnit(const TranslationUnit& tu)
 {
     std::ostringstream out;
@@ -436,7 +438,7 @@ struct Cloner {
         for (size_t i = 0; i < c->kids.size(); ++i) c->kids[i] = expr(c->kids[i]);
         for (size_t i = 0; i < c->placement.size(); ++i) c->placement[i] = expr(c->placement[i]);
         if (c->type) c->type = typeId(c->type);
-        c->semaType = 0; c->semaSym = 0; c->semaLvalue = false; c->semaConst = false; c->semaValue = 0;
+        c->semaType = 0; c->semaSym = 0; c->semaLvalue = false; c->semaConst = false; c->semaValue = 0; c->semaOperand = 0;
         return c;
     }
     Stmt* stmt(const Stmt* s)
@@ -523,7 +525,7 @@ struct Cloner {
         declSpec(c->spec);
         for (size_t i = 0; i < c->declarators.size(); ++i) { c->declarators[i].decl = declarator(c->declarators[i].decl); init(c->declarators[i].init); }
         c->declarator = declarator(c->declarator);
-        for (size_t i = 0; i < c->memInits.size(); ++i) { name(c->memInits[i].name); for (size_t k = 0; k < c->memInits[i].args.size(); ++k) c->memInits[i].args[k] = expr(c->memInits[i].args[k]); }
+        for (size_t i = 0; i < c->memInits.size(); ++i) { c->memInits[i].semaSym = 0; name(c->memInits[i].name); for (size_t k = 0; k < c->memInits[i].args.size(); ++k) c->memInits[i].args[k] = expr(c->memInits[i].args[k]); }
         c->body = stmt(c->body);
         c->classDef = classDecl(c->classDef);
         c->enumDef = enumDecl(c->enumDef);

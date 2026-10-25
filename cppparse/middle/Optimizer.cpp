@@ -440,6 +440,7 @@ int Optimizer::copyPropagation(IrFunction& f)
             IrInst& in = insts[i];
             if (in.op == IrInst::StoreMem && in.args.size() == 2 && in.args[0].kind == IrOperand::Temp) {
                 int addr = in.args[0].id;
+                if (in.isVolatile) { mem.clear(); continue; }   // the next read of a volatile object reads memory again
                 std::map<int, Def>::iterator da = defs.find(addr);
                 const IrInst* ad = da == defs.end() ? 0 : &f.blocks[static_cast<size_t>(da->second.block)].insts[static_cast<size_t>(da->second.index)];
                 for (std::map<int, IrOperand>::iterator m = mem.begin(); m != mem.end();) {
@@ -458,6 +459,7 @@ int Optimizer::copyPropagation(IrFunction& f)
                 continue;
             }
             if (in.op == IrInst::LoadMem && in.args.size() == 1 && in.args[0].kind == IrOperand::Temp) {
+                if (in.isVolatile) { mem.erase(in.args[0].id); continue; }
                 std::map<int, IrOperand>::iterator m = mem.find(in.args[0].id);
                 if (m != mem.end()) {
                     const Type* t = in.type;
@@ -557,7 +559,7 @@ int Optimizer::deadCode(IrFunction& f)
             std::vector<IrInst> kept;
             for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
                 const IrInst& in = f.blocks[b].insts[i];
-                bool dead = in.dst >= 0 && uses[in.dst] == 0 && (in.pure() || in.readsMemory());
+                bool dead = in.dst >= 0 && uses[in.dst] == 0 && (in.pure() || (in.readsMemory() && !in.isVolatile));
                 if (in.op == IrInst::Nop) dead = true;
                 if (dead) ++removed; else kept.push_back(in);
             }
@@ -819,7 +821,7 @@ int Optimizer::licm(IrFunction& f)
                         !f.locals[static_cast<size_t>(in.args[0].id)].addressTaken && !hasCall) candidate = true;
                     // an int or pointer field the loop cannot change (no call, only floating-point stores) at an
                     // address that cannot fault: b.cols(), the data pointer of a vector member
-                    if (in.op == IrInst::LoadMem && in.dst >= 0 && !hasCall && onlyFloatStores && in.type && !isFloatingType(in.type) &&
+                    if (in.op == IrInst::LoadMem && in.dst >= 0 && !in.isVolatile && !hasCall && onlyFloatStores && in.type && !isFloatingType(in.type) &&
                         !in.args.empty() && dereferenceable(f, in.args[0], defs, 0)) candidate = true;
                     if (!candidate) continue;
                     bool invariant = true;

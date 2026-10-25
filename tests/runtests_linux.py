@@ -400,6 +400,21 @@ for fn, want in [("continueToHeader", 8), ("continueToStep", 4)]:
 for fn, wrong in [("continueSkipsStep", 3), ("stepInInnerLoop", 2)]:
     t = optimised("unroll3", fn)
     ok(t and 'ret #%d' % wrong not in t and not undefinedTemps(t), "unrollcontinue -O3: %s is not unrolled to ret #%d" % (fn, wrong))
+def volatiles(text, op):
+    return len(re.findall(r'(?m)^\s+(?:t\d+ = )?%s .*\bvolatile\b' % op, text))
+for l in (2, 3):
+    opt6("volatile%d" % l, "../examples/sample-optfix/volatile.cpp", l)
+    g = optimised("volatile%d" % l, "globalTwice")
+    ok(volatiles(g, 'storeglobal') == 2 and volatiles(g, 'loadglobal') == 2, "volatile -O%d: globalTwice keeps two stores and two loads" % l)
+    ok(volatiles(optimised("volatile%d" % l, "localStores"), 'storelocal') >= 2, "volatile -O%d: localStores keeps the stores to spin" % l)
+    ok(volatiles(optimised("volatile%d" % l, "localRead"), 'loadlocal') == 2, "volatile -O%d: localRead reads x twice" % l)
+    t = optimised("volatile%d" % l, "throughPointer")
+    ok(volatiles(t, 'loadmem') == 1 and 'ret #1' not in t, "volatile -O%d: throughPointer reads *p back" % l)
+    for fn in ("spinWait", "Device::wait"):
+        w = blockOf(optimised("volatile%d" % l, fn), r'loadmem .*volatile')
+        ok(w == "while.cond", "volatile -O%d: %s reads in the loop condition (in %s)" % (l, fn, w or "none"))
+    c = optimised("volatile%d" % l, "Device::command")
+    ok(volatiles(c, 'loadmem') == 2 and volatiles(c, 'storemem') == 2, "volatile -O%d: Device::command reads and writes control twice, no read-back" % l)
 
 print("\n=== Summary ===")
 T = [0, 0, 0]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Linux port of the portable parts of sandbox/build-cppparse.ps1.
 # Checks that need cl / ml64 / link / dumpbin are reported as SKIP.
-import os, re, subprocess, sys, glob
+import os, re, subprocess, sys, glob, struct
 
 EXE = os.path.abspath(sys.argv[1])
 CPP = os.path.abspath(sys.argv[2])
@@ -36,6 +36,18 @@ def rd(p):
 
 def mk(d): os.makedirs(d, exist_ok=True)
 
+def coffSection(obj, number):
+    # the raw bytes of section `number` (1-based) of a COFF object, or None
+    try:
+        with open(obj, "rb") as f: data = f.read()
+        count, = struct.unpack_from("<H", data, 2)
+        optional, = struct.unpack_from("<H", data, 16)
+        if number < 1 or number > count: return None
+        size, pointer = struct.unpack_from("<II", data, 20 + optional + 40 * (number - 1) + 16)
+        return data[pointer:pointer + size]
+    except (IOError, struct.error):
+        return None
+
 def mapcheck(name, objname=None):
     # port of Test-ObjectMap; dumpbin /symbols is replaced by objdump -t
     path = "out/x64/%s.map" % name; probs = []
@@ -68,10 +80,23 @@ def mapcheck(name, objname=None):
         for i, x in enumerate(lst):
             limit = lst[i + 1]['off'] if i + 1 < len(lst) else sections[sec][0]
             if x['off'] + x['size'] > limit: probs.append("%s ends beyond %d" % (x['sym'], limit))
-        if sections[sec][1].startswith('.text'):
-            tot = sum(x['size'] for x in lst)
-            if tot != sections[sec][0]: probs.append("section %d: functions add up to %d, section has %d" % (sec, tot, sections[sec][0]))
     obj = "out/x64/%s.obj" % (objname or name)
+    for sec in set(x['sec'] for x in syms):
+        if sec not in sections or not sections[sec][1].startswith('.text'): continue
+        # the functions fill the code section, except that each one starts on a 16-byte boundary with the gap
+        # before it filled with int 3 (0xCC), as cl lays out code
+        lst = sorted([x for x in syms if x['sec'] == sec and x['type'] == 'function'], key=lambda x: x['off'])
+        raw = coffSection(obj, sec)
+        at = 0
+        for x in lst:
+            gap = x['off'] - at
+            if gap < 0 or gap > 15 or (gap and x['off'] % 16):
+                probs.append("section %d: %s starts at %d, the previous function ends at %d" % (sec, x['sym'], x['off'], at)); break
+            if gap and (raw is None or raw[at:x['off']] != b'\xcc' * gap):
+                probs.append("section %d: the %d bytes before %s are not int 3 padding" % (sec, gap, x['sym'])); break
+            at = x['off'] + x['size']
+        else:
+            if at != sections[sec][0]: probs.append("section %d: functions end at %d, section has %d" % (sec, at, sections[sec][0]))
     t = subprocess.run(["objdump", "-t", obj], capture_output=True, text=True).stdout
     real = {}
     for m in re.finditer(r'\(sec\s+(-?\d+)\)\(fl [^)]*\)\(ty\s+\w+\)\(scl\s+(\d+)\) \(nx \d+\) 0x([0-9a-f]+) (\S+)', t):
@@ -79,7 +104,7 @@ def mapcheck(name, objname=None):
     for x in syms:
         if x['sym'] not in real: probs.append(x['sym'] + " is not in the object"); continue
         if real[x['sym']] != (x['sec'], x['off']): probs.append("%s: map %d:%x, object %d:%x" % ((x['sym'], x['sec'], x['off']) + real[x['sym']]))
-    ok(not probs, "%s.map: %d symbols; flags, by-name list, sizes fill sections, addresses match objdump -t" % (name, len(syms)))
+    ok(not probs, "%s.map: %d symbols; flags, by-name list, sizes fill sections (16-byte int 3 padding), addresses match objdump -t" % (name, len(syms)))
     for p_ in probs[:8]: print("       " + p_)
 
 # ---- 1

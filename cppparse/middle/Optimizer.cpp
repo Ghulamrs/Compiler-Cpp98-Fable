@@ -475,6 +475,9 @@ int Optimizer::copyPropagation(IrFunction& f)
                 continue;
             }
             if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::CatchParam || in.op == IrInst::StoreGlobal) mem.clear();
+            // a store to an address-taken local writes memory a remembered address may point to ("*p = 1; x = 2; *p")
+            if (in.op == IrInst::StoreLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local &&
+                f.locals[static_cast<size_t>(in.args[0].id)].addressTaken) mem.clear();
         }
     }
     for (size_t b = 0; b < f.blocks.size(); ++b) {

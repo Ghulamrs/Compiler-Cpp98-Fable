@@ -343,6 +343,25 @@ test("Test 16: self-hosting constructs")
 for l in (0, 2, 3): c6("self%d" % l, "../examples/sample-self/self.cpp", l, ["-I", "../include"])
 skip("link + run of driver-self (Windows-only)")
 
+# ---- 17: optimiser regressions; each case is read in the IR after optimisation (out/fix/<name>-ir6.txt)
+def opt6(name, src, lvl):
+    mk("out/fix")
+    rc, out = run("--compile6", "-O%d" % lvl, "-o", "out/fix", "-n", name, src)
+    good = 'sema: 0 error' in out and os.path.exists("out/fix/%s-ir6.txt" % name)
+    ok(good, "%s -O%d compiles (exit %d)" % (src.split('/')[-1], lvl, rc))
+    if not good: print("\n".join("       " + l for l in out.splitlines()[-8:]))
+def optimised(name, fn):
+    for part in rd("out/fix/%s-ir6.txt" % name).split("=" * 80):
+        if ("function %s(" % fn) in part:
+            i = part.find("--- after -O"); return part[i:] if i >= 0 else ""
+    return ""
+
+test("Test 17: optimiser regressions")
+for l in (1, 2, 3):
+    opt6("storeload%d" % l, "../examples/sample-optfix/storeload.cpp", l)
+    f = optimised("storeload%d" % l, "storeThenLocal")
+    ok(f and 'ret #1' not in f and ('ret #2' in f or 'loadmem' in f), "storeload -O%d: *p after x = 2 is not the 1 stored before" % l)
+
 print("\n=== Summary ===")
 T = [0, 0, 0]
 for k, v in results.items():

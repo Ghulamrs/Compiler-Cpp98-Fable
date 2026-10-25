@@ -648,6 +648,23 @@ int Optimizer::simplifyCfg(IrFunction& f)
         for (size_t s = 0; s < succs.size(); ++s)
             if (succs[s] >= 0 && static_cast<size_t>(succs[s]) < reach.size() && !reach[static_cast<size_t>(succs[s])]) { reach[static_cast<size_t>(succs[s])] = true; work.push_back(succs[s]); }
     }
+    // phi operands of edges that are gone (a folded condbr, a block no longer reached): dropped, or the renumbering
+    // below would turn their block into B0 and leave SSA destruction a second, stale copy into the phi's value
+    for (size_t b = 0; b < f.blocks.size(); ++b) {
+        if (!reach[b]) continue;
+        const std::vector<int>& preds = f.blocks[b].preds;
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+            IrInst& phi = f.blocks[b].insts[i];
+            if (phi.op != IrInst::Phi) break;
+            std::vector<IrOperand> live;
+            for (size_t x = 0; x + 1 < phi.args.size(); x += 2) {
+                const int p = phi.args[x + 1].id;
+                if (p >= 0 && static_cast<size_t>(p) < reach.size() && reach[static_cast<size_t>(p)] &&
+                    std::find(preds.begin(), preds.end(), p) != preds.end()) { live.push_back(phi.args[x]); live.push_back(phi.args[x + 1]); }
+            }
+            if (live.size() != phi.args.size()) { phi.args.swap(live); ++changes; }
+        }
+    }
     // merge: A ends with br B, B has A as its only predecessor
     for (size_t a = 0; a < f.blocks.size(); ++a) {
         if (!reach[a] || f.blocks[a].insts.empty()) continue;

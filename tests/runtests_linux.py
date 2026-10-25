@@ -377,6 +377,22 @@ for l in (2, 3):
     ok(z == "for.body", "licmdiv -O%d: 100 / d stays in a body that may run zero times (in %s)" % (l, z or "none"))
     c = blockOf(optimised("licmdiv%d" % l, "constantDivide"), r'bin sdiv \S+, #4')
     ok(c == "entry", "licmdiv -O%d: k / 4 is still hoisted out of the loop (in %s)" % (l, c or "none"))
+def undefinedTemps(text):
+    # temps an instruction reads that no instruction of the function defines
+    defined = set(re.findall(r'(?m)^\s+t(\d+) = ', text))
+    used = set()
+    for line in text.splitlines():
+        body = line.split(';')[0]
+        m = re.match(r'^\s+(?:t\d+ = )?(.*)$', body)
+        if m and not re.match(r'^B\d+:', line.strip()): used |= set(re.findall(r'\bt(\d+)\b', m.group(1)))
+    return sorted(used - defined, key=int)
+for l in (2, 3):
+    opt6("deadphi%d" % l, "../examples/sample-optfix/deadphi.cpp", l)
+    a = optimised("deadphi%d" % l, "deadArm")
+    ok(a and not undefinedTemps(a) and re.search(r'bin add t\d+, #1', a) and not re.search(r'#5', a),
+       "deadphi -O%d: deadArm returns x + 1 (undefined temps: %s)" % (l, " ".join("t" + t for t in undefinedTemps(a)) or "none"))
+    b = optimised("deadphi%d" % l, "deadArmConstant")
+    ok('ret #7' in b, "deadphi -O%d: deadArmConstant folds to ret #7" % l)
 
 print("\n=== Summary ===")
 T = [0, 0, 0]

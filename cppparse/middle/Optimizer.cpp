@@ -792,6 +792,12 @@ int Optimizer::licm(IrFunction& f)
                     IrInst& in = blk.insts[i];
                     // never a phi: its value depends on the edge it is entered by, even when every argument is a constant
                     bool candidate = in.pure() && in.dst >= 0 && in.op != IrInst::Copy && in.op != IrInst::Phi;
+                    // an integer division traps on a zero divisor (signed: also INT_MIN / -1): run in the preheader it
+                    // would run where the program does not (under "if (d != 0)", or a loop entered zero times), so it
+                    // moves only from the header, which runs whenever the preheader does, or by a safe constant
+                    if (in.op == IrInst::Bin && (in.sub == "sdiv" || in.sub == "srem" || in.sub == "udiv" || in.sub == "urem") &&
+                        loop.blocks[k] != loop.header &&
+                        !(in.args.size() == 2 && in.args[1].kind == IrOperand::Imm && in.args[1].ival != 0 && in.args[1].ival != -1)) candidate = false;
                     if (in.op == IrInst::LoadLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local && !modifiedLocals.count(in.args[0].id) &&
                         !f.locals[static_cast<size_t>(in.args[0].id)].addressTaken && !hasCall) candidate = true;
                     // an int or pointer field the loop cannot change (no call, only floating-point stores) at an

@@ -361,6 +361,22 @@ for l in (1, 2, 3):
     opt6("storeload%d" % l, "../examples/sample-optfix/storeload.cpp", l)
     f = optimised("storeload%d" % l, "storeThenLocal")
     ok(f and 'ret #1' not in f and ('ret #2' in f or 'loadmem' in f), "storeload -O%d: *p after x = 2 is not the 1 stored before" % l)
+def blockOf(text, pattern):
+    # the label of the block holding the first instruction that matches pattern ("" when none does)
+    label = ""
+    for line in text.splitlines():
+        m = re.match(r'^B\d+:\s+;\s*(\S+)', line)
+        if m: label = m.group(1)
+        elif re.search(pattern, line): return label
+    return ""
+for l in (2, 3):
+    opt6("licmdiv%d" % l, "../examples/sample-optfix/licmdiv.cpp", l)
+    g = blockOf(optimised("licmdiv%d" % l, "guardedDivide"), r'bin sdiv')
+    ok(g == "if.then", "licmdiv -O%d: the guarded 100 / d stays under its if (in %s)" % (l, g or "none"))
+    z = blockOf(optimised("licmdiv%d" % l, "zeroTripDivide"), r'bin sdiv')
+    ok(z == "for.body", "licmdiv -O%d: 100 / d stays in a body that may run zero times (in %s)" % (l, z or "none"))
+    c = blockOf(optimised("licmdiv%d" % l, "constantDivide"), r'bin sdiv \S+, #4')
+    ok(c == "entry", "licmdiv -O%d: k / 4 is still hoisted out of the loop (in %s)" % (l, c or "none"))
 
 print("\n=== Summary ===")
 T = [0, 0, 0]

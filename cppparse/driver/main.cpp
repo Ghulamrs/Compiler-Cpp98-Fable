@@ -22,12 +22,17 @@
 //   <name>-diagram.dot    Graphviz source (dot -Tpng -o diagram.png <name>-diagram.dot)
 //
 // Strict C++98.
-#if defined(_MSC_VER) && defined(_DEBUG)
-#include <crtdbg.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
+#if defined(_MSC_VER) && defined(_DEBUG)
+#include <crtdbg.h>
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
 #endif
@@ -51,6 +56,7 @@
 #include "Symbols.hpp"
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -86,6 +92,8 @@ void usage()
         "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
         "  --obj            version 5: write <name>.obj with cppparse's own COFF writer (no ml64 needed)\n"
         "  --msvc-mangling  version 5: MSVC-compatible decorated names (?square@@YAHH@Z) so MSVC code links with plain C++ declarations\n"
+        "  --eh=table|sjlj  try regions as unwind range tables with landing pads, no code on the normal path (the\n"
+        "                   default), or as setjmp frames (version 5's model)\n"
         "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling;\n"
         "                   never more than the number of files read)\n"
         "  -E              version 6: preprocess the input files only and print the result (like cl /EP)\n"
@@ -94,19 +102,24 @@ void usage()
         "  --sema6          version 6: --parse6 plus semantic analysis; prints counts and S-coded diagnostics,\n"
         "                   and writes <name>-sym6.txt (symbols, layouts, vtables, instantiations)\n"
         "  --compile6       version 6: --sema6 plus IR generation and the back end: <name>-ir6.txt, -opt6.log,\n"
-        "                   -asm6.txt, <name>6.asm (and <name>6.obj with --obj); -O, --msvc-mangling apply\n"
+        "                   -asm6.txt, <name>6.asm (and <name>6.obj with --obj); -O, --msvc-mangling apply.\n"
+        "                   With --obj an input <name>.asm (a listing in cppparse's MASM subset) is assembled\n"
+        "                   by the COFF writer alone into <name>6.obj\n"
         "  -I <dir>         version 6: include directory for the preprocessor (also -Idir)\n"
         "  -D NAME[=value]  version 6: predefine a macro (also -DNAME=value); -U NAME undefines one\n"
         "  --target NAME    version 6: x86_64-windows (default; COFF objects, MSVC ABI) or x86_64-linux\n"
         "                   (LP64 sizes and macros for -E, --parse6, --sema6; no back end yet)\n"
         "                   predefined always: __cplusplus=199711L, __cppparse__=6, __STDC__=1; for\n"
-        "                   x86_64-windows also _WIN32=1, _WIN64=1, _M_X64=100 (not _MSC_VER, not _DEBUG);\n"
+        "                   x86_64-windows also _WIN32=1, _WIN64=1, _M_X64=100, _MT=1, _CPPUNWIND=1 (not _MSC_VER, not _DEBUG);\n"
         "                   for x86_64-linux __linux__, __unix__, __x86_64__, __LP64__, __ELF__\n"
         "                   --compile6 stops at a missing include file (the other modes warn)\n"
         "  src\\*.cpp        wildcard patterns are expanded by cppparse itself\n"
-        "  @list.txt        response file: one path, pattern or option per line\n"
-        "  -q               quiet: print only errors\n"
-        "  -h, --help       this text\n";
+        "  @list.txt        response file: paths, patterns and options separated by white space (any number per\n"
+        "                   line), a path with spaces in double quotes; a line starting with # is a comment\n"
+        "  -q               quiet: print only diagnostics (no statistics, no list of the files written)\n"
+        "  -h, --help       this text\n"
+        "The version 6 outputs of an input are named after its stem (two_a.cpp -> two_a6.obj); -n names them,\n"
+        "numbered (name-0, name-1, ...) when there are several inputs\n";
 }
 
 std::string stem(const std::string& path)
@@ -120,43 +133,110 @@ std::string stem(const std::string& path)
     return b;
 }
 
+// the name of an input without its directory and extension: what the version 6 outputs are named after
+std::string stemName(const std::string& input)
+{
+    std::string b = baseName(input);
+    size_t dot = b.rfind('.');
+    return dot == std::string::npos || dot == 0 ? b : b.substr(0, dot);
+}
+
+int g_writeFailures = 0;   // outputs that could not be written (a missing directory, a locked file): the exit code says so
+
 bool writeOut(const std::string& path, const std::string& content, bool quiet, std::vector<std::string>& written)
 {
-    if (!writeFile(path, content)) { std::cerr << "error: cannot write " << path << "\n"; return false; }
+    if (!writeFile(path, content)) { std::cerr << "error: cannot write " << path << "\n"; ++g_writeFailures; return false; }
     written.push_back(path + "  (" + intToString(static_cast<int>(content.size() / 1024)) + " KB)");
     if (!quiet) std::cout << "  wrote " << path << "\n";
     return true;
 }
 
+// a virtual base, direct or inherited: --compile6 does not lay those out as cl does yet (no vbptr, no shared
+// subobject), so it refuses the class rather than emit wrong code (S130)
+bool hasVirtualBase(const sema::Symbol* cls, int depth)
+{
+    if (!cls || depth > 32) return false;
+    for (size_t b = 0; b < cls->bases.size(); ++b)
+        if (cls->bases[b].isVirtual || hasVirtualBase(cls->bases[b].cls, depth + 1)) return true;
+    return false;
+}
+
+// what --compile6 cannot generate yet for a class with virtual bases (0: it can): an overrider that lies in another
+// virtual base (S130)
+const char* virtualBaseRefusal(const sema::Symbol* cls)
+{
+    for (size_t t = 0; t < cls->vftables.size(); ++t)
+        if (cls->vftables[t].vtordispex) return "a virtual function overridden in another virtual base (cl's vtordispex thunk, which reads the vbtable)";
+    return 0;
+}
+
+// a covariant override's slot (Sema::completeClass, VfTable::returnOf) that --compile6 cannot give cl's
+// return-adjusting thunk (S131): one whose return conversion goes through a virtual base (cl's thunk reads the
+// vbtable), one that also moves this (cl's $R thunks: a this and a return adjustment in one), or a variadic function
+// (the thunk cannot stage the unnamed arguments again); 0 when the slot is fine
+const char* returnThunkRefusal(const sema::VfTable& t, size_t s)
+{
+    if (s >= t.returnOf.size() || !t.returnOf[s]) return 0;
+    if (t.returnAdjust[s] < 0) return "its return conversion goes through a virtual base";
+    if (t.vbase) return "the overridden function's vftable lies in a virtual base";
+    if (t.thunks[s] != 0) return "the slot needs a this adjustment as well as the return adjustment";
+    const sema::Symbol* fn = t.fns[s];
+    if (fn && fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic) return "it is variadic";
+    return 0;
+}
+
+// a unit that is not compiled leaves no object, listing or map: one of an earlier run would be taken for its own
+void removeUnitOutputs(const std::string& base)
+{
+    std::remove((base + "6.obj").c_str());
+    std::remove((base + "6.asm").c_str());
+    std::remove((base + "6.map").c_str());
+}
+
 } // namespace
 
 #if defined(_MSC_VER) && defined(_DEBUG)
+// the call stack, symbolised from the .pdb next to the executable
+void printStack()
+{
+    void* frames[62];
+    const unsigned short n = CaptureStackBackTrace(0, 62, frames, 0);
+    HANDLE process = GetCurrentProcess();
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
+    if (SymInitialize(process, 0, TRUE)) {
+        char buffer[sizeof(SYMBOL_INFO) + 256];
+        for (unsigned short i = 0; i < n; ++i) {
+            SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+            std::memset(buffer, 0, sizeof(buffer));
+            symbol->SizeOfStruct = sizeof(SYMBOL_INFO); symbol->MaxNameLen = 255;
+            DWORD64 displacement = 0;
+            if (!SymFromAddr(process, reinterpret_cast<DWORD64>(frames[i]), &displacement, symbol)) continue;
+            IMAGEHLP_LINE64 line; std::memset(&line, 0, sizeof(line)); line.SizeOfStruct = sizeof(line);
+            DWORD lineDisplacement = 0;
+            if (SymGetLineFromAddr64(process, reinterpret_cast<DWORD64>(frames[i]), &lineDisplacement, &line)) std::fprintf(stderr, "  %s  %s(%lu)\n", symbol->Name, line.FileName, static_cast<unsigned long>(line.LineNumber));
+            else std::fprintf(stderr, "  %s\n", symbol->Name);
+        }
+    }
+    std::fflush(stderr);
+}
+
+// a stack overflow prints the innermost frames (the recursion) too; the handler runs on the stack the thread
+// reserved with SetThreadStackGuarantee
+LONG CALLBACK stackOverflowToStderr(EXCEPTION_POINTERS* info)
+{
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
+    std::fprintf(stderr, "debug runtime: stack overflow\n");
+    printStack();
+    _exit(4);
+}
+
 // a debug-runtime assertion (an iterator check, a heap check) is written to stderr and ends the process with
 // exit code 3, so that a build script or a bisection sees it instead of a dialog waiting for a click
 int reportToStderr(int reportType, char* message, int* returnValue)
 {
     std::fprintf(stderr, "debug runtime: %s", message ? message : "");
     if (reportType == _CRT_ASSERT || reportType == _CRT_ERROR) {
-        // the call stack, symbolised from the .pdb next to the executable
-        void* frames[62];
-        const unsigned short n = CaptureStackBackTrace(0, 62, frames, 0);
-        HANDLE process = GetCurrentProcess();
-        SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
-        if (SymInitialize(process, 0, TRUE)) {
-            char buffer[sizeof(SYMBOL_INFO) + 256];
-            for (unsigned short i = 0; i < n; ++i) {
-                SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
-                std::memset(buffer, 0, sizeof(buffer));
-                symbol->SizeOfStruct = sizeof(SYMBOL_INFO); symbol->MaxNameLen = 255;
-                DWORD64 displacement = 0;
-                if (!SymFromAddr(process, reinterpret_cast<DWORD64>(frames[i]), &displacement, symbol)) continue;
-                IMAGEHLP_LINE64 line; std::memset(&line, 0, sizeof(line)); line.SizeOfStruct = sizeof(line);
-                DWORD lineDisplacement = 0;
-                if (SymGetLineFromAddr64(process, reinterpret_cast<DWORD64>(frames[i]), &lineDisplacement, &line)) std::fprintf(stderr, "  %s  %s(%lu)\n", symbol->Name, line.FileName, static_cast<unsigned long>(line.LineNumber));
-                else std::fprintf(stderr, "  %s\n", symbol->Name);
-            }
-        }
-        std::fflush(stderr);
+        printStack();
         _exit(3);
     }
     if (returnValue) *returnValue = 0;
@@ -164,10 +244,13 @@ int reportToStderr(int reportType, char* message, int* returnValue)
 }
 #endif
 
-int main(int argc, char* argv[])
+int cppparseMain(int argc, char* argv[])
 {
 #if defined(_MSC_VER) && defined(_DEBUG)
     _CrtSetReportHook(reportToStderr);
+    ULONG guarantee = 256 * 1024;
+    SetThreadStackGuarantee(&guarantee);
+    AddVectoredExceptionHandler(1, stackOverflowToStderr);
 #endif
     std::vector<std::string> inputs;
     std::string outDir, outName;
@@ -209,6 +292,8 @@ int main(int argc, char* argv[])
         else if (a == "--assemble") assemble = true;
         else if (a == "--obj") obj = true;
         else if (a == "--msvc-mangling") copt.msvcNames = true;
+        else if (a == "--eh=table") copt.tableEh = true;
+        else if (a == "--eh=sjlj") copt.tableEh = false;
         else if (a == "-E" || a == "--preprocess") preprocessOnly = true;
         else if (a == "--parse6") parse6 = true;
         else if (a == "--sema6") { parse6 = true; sema6 = true; }
@@ -253,8 +338,35 @@ int main(int argc, char* argv[])
         ppOpt.defines.push_back("APIENTRY=");
         for (size_t i = 0; i < inputs.size(); ++i) {
             if (!fileExists(inputs[i])) { std::cerr << "error: cannot read " << inputs[i] << "\n"; ++totalErrors; continue; }
+            if (compile6 && obj && extension(inputs[i]) == ".asm") {
+                // a MASM listing in the subset X86.cpp writes (a <name>6.asm, edited or not), assembled by the COFF
+                // writer alone into <stem>6.obj: a way to rebuild an object from a listing, and how the writer's
+                // diagnostics are tested (test 13)
+                std::string text;
+                if (!readFile(inputs[i], text)) { std::cerr << "error: cannot read " << inputs[i] << "\n"; ++totalErrors; continue; }
+                const std::string base = joinPath(outDir.empty() ? "." : outDir, outName.empty() ? stemName(inputs[i]) : outName);
+                CoffResult cr;
+                if (writeCoffObject(text, base + "6.obj", copt.threads, cr)) { if (!quiet) std::cout << "  wrote " << base << "6.obj\n"; }
+                else if (cr.writeFailed) { std::cerr << "error: cannot write " << base << "6.obj\n"; ++g_writeFailures; }
+                else {
+                    std::cerr << "error: " << base << "6.obj not written: " << cr.errors.size() << " line(s) of " << inputs[i] << " cannot be encoded:\n";
+                    for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n";
+                    ++totalErrors;
+                }
+                continue;
+            }
             Preprocessor pp(ppOpt);
             pp.run(inputs[i]);
+            // the preprocessor's diagnostics (an unterminated comment or #if, a bad #if expression, #error) count as
+            // errors of the unit like the parser's
+            int ppErrors = 0;
+            {
+                const std::vector<PpDiag>& pd = pp.diagnostics();
+                for (size_t k = 0; k < pd.size(); ++k) {
+                    if (pd[k].severity == PpDiag::Error) ++ppErrors;
+                    if (k < 20) std::cout << "  " << (pd[k].file.empty() ? inputs[i] : pd[k].file) << "(" << pd[k].line << "): " << (pd[k].severity == PpDiag::Error ? "error" : "warning") << ": " << pd[k].message << "\n";
+                }
+            }
             if (compile6 && !pp.missingIncludes().empty()) {
                 // an object compiled without one of its headers would rest on undeclared names and guessed types
                 for (size_t k = 0; k < pp.missingIncludes().size(); ++k)
@@ -276,11 +388,11 @@ int main(int argc, char* argv[])
             bool winMissing = false;
             for (size_t k = 0; k < pp.missingIncludes().size(); ++k) if (toLower(pp.missingIncludes()[k]) == "windows.h") winMissing = true;
             if (winMissing) for (int k = 0; kWinTypes[k]; ++k) parser.assumeType(kWinTypes[k]);
-            int errors = parser.parse(tu);
+            int errors = parser.parse(tu) + ppErrors;
             totalErrors += errors;
             cxx::Counts c;
             cxx::countTranslationUnit(tu, c);
-            std::cout << inputs[i] << ": " << pp.tokens().size() << " tokens, " << errors << " syntax error(s); namespaces " << c.namespaces
+            if (!quiet) std::cout << inputs[i] << ": " << pp.tokens().size() << " tokens, " << errors << " syntax error(s); namespaces " << c.namespaces
                       << ", classes " << c.classes << ", enums " << c.enums << ", functions defined " << c.functionsDefined << ", declared " << c.functionsDeclared
                       << ", variables " << c.variables << ", typedefs " << c.typedefs << ", templates " << c.templates << ", statements " << c.statements
                       << ", expressions " << c.expressions << "\n";
@@ -295,7 +407,7 @@ int main(int argc, char* argv[])
                 sema.useArena(arena);   // nodes sema adds must outlive it: the AST dump runs later
                 sema.analyze(tu, pp.files());
                 const sema::SemaStats& st = sema.stats();
-                std::cout << "  sema: " << sema.errorCount() << " error(s); classes " << st.classes << ", functions analysed " << st.functionsDefined << ", variables " << st.variables
+                if (!quiet) std::cout << "  sema: " << sema.errorCount() << " error(s); classes " << st.classes << ", functions analysed " << st.functionsDefined << ", variables " << st.variables
                           << ", expressions " << st.expressionsTyped << ", names resolved " << st.namesResolved << ", unresolved " << st.namesUnresolved
                           << ", calls resolved " << st.callsResolved << ", ambiguous " << st.callsAmbiguous << ", instantiations " << st.classInstantiations << " classes / " << st.functionInstantiations << " functions\n";
                 const std::vector<sema::Diag>& sd = sema.diagnostics();
@@ -303,19 +415,62 @@ int main(int argc, char* argv[])
                     std::cout << "  " << (sd[k].loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(sd[k].loc.file)] : "?") << "(" << sd[k].loc.line << "): "
                               << (sd[k].severity == sema::Diag::Error ? "error" : "warning") << " " << sd[k].code << ": " << sd[k].message << "\n";
                 totalErrors += sema.errorCount();
-                std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
+                std::string base = joinPath(outDir.empty() ? "." : outDir, outName.empty() ? stemName(inputs[i]) : outName + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
                 std::vector<std::string> written;
                 if (!outDir.empty() || !outName.empty()) writeOut(base + "-sym6.txt", sema.dumpSymbols(), quiet, written);
-                if (compile6) {
+                int unsupported = 0;
+                if (compile6)
+                    for (size_t k = 0; k < program.symbols.size(); ++k) {
+                        const sema::Symbol* s = program.symbols[k];
+                        if (s->kind == sema::Symbol::Class && s->isDefinition && !s->isDependentContext) {
+                            for (size_t t = 0; t < s->vftables.size(); ++t)
+                                for (size_t slot = 0; slot < s->vftables[t].fns.size(); ++slot) {
+                                    const char* why = returnThunkRefusal(s->vftables[t], slot);
+                                    if (!why) continue;
+                                    const sema::Symbol* fn = s->vftables[t].fns[slot];
+                                    const sema::Symbol* root = s->vftables[t].returnOf[slot];
+                                    std::cout << "  " << (fn->loc.file >= 0 && fn->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(fn->loc.file)] : "?") << "(" << fn->loc.line
+                                              << "): error S131: '" << fn->qualifiedName() << "' overrides '" << root->qualifiedName()
+                                              << "' with a covariant return type, and " << why << ": not supported yet by --compile6\n";
+                                    ++unsupported;
+                                }
+                        }
+                        if (s->kind != sema::Symbol::Class || !s->isDefinition || s->isDependentContext || !hasVirtualBase(s, 0)) continue;
+                        const char* why = s->layoutDone ? virtualBaseRefusal(s) : "a class not laid out";
+                        if (!why) continue;
+                        std::cout << "  " << (s->loc.file >= 0 && s->loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(s->loc.file)] : "?") << "(" << s->loc.line
+                                  << "): error S130: '" << s->qualifiedName() << "' has a virtual base class: " << why << " is not supported yet by --compile6\n";
+                        ++unsupported;
+                    }
+                totalErrors += unsupported;
+                if (compile6 && errors + sema.errorCount() + unsupported > 0) {
+                    // a unit with syntax or semantic errors is not compiled, as cl does: an object built on
+                    // unresolved names and error types would reach the linker
+                    if (!quiet) std::cout << "  compile6: not compiled, " << (errors + sema.errorCount() + unsupported) << " error(s)\n";
+                    removeUnitOutputs(base);
+                }
+                else if (compile6) {
                     // version 6 stage 4: IR from the analysed tree, then the shared back end
                     IrGen gen(program, types);
+                    gen.setFiles(pp.files());   // the functions' source files, for the CodeView line tables
                     std::vector<IrFunction*> functions;
                     X86Module x86(copt.msvcNames);
+                    x86.setTableExceptions(copt.tableEh);
                     unsigned long unitId = 2166136261UL;   // FNV-1a of the input path: this unit's anonymous namespace id
                     for (size_t k = 0; k < inputs[i].size(); ++k) unitId = (unitId ^ static_cast<unsigned char>(inputs[i][k])) * 16777619UL;
                     setMangleUnitId(unitId & 0xFFFFFFFFUL);
+                    gen.setNamedReturnElision(copt.optLevel >= 1);   // NRVO only when optimising, as cl (/Od: a copy)
                     gen.registerMetadata(x86, copt.msvcNames);   // first: it queues the vtable members and the dynamic initialisers
                     gen.generate(functions);
+                    if (!gen.unsupported().empty()) {
+                        // constructs with virtual bases that would compile to wrong code: nothing is written (S132)
+                        const std::vector<std::string>& bad = gen.unsupported();
+                        for (size_t k = 0; k < bad.size(); ++k) std::cout << "  " << inputs[i] << ": error S132: " << bad[k] << "\n";
+                        totalErrors += static_cast<int>(bad.size());
+                        removeUnitOutputs(base);
+                        for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
+                        continue;
+                    }
                     if (!gen.failedMembersUsed().empty()) {
                         // a member of a class template instantiation whose body has errors is needed after all
                         // (an implicit call sema does not see): its held-back diagnostics are real, nothing is written
@@ -328,6 +483,7 @@ int main(int argc, char* argv[])
                                           << "(" << (*held)[h].loc.line << "): " << (*held)[h].code << ": " << (*held)[h].message << "\n";
                         }
                         totalErrors += static_cast<int>(bad.size());
+                        removeUnitOutputs(base);
                         for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
                         continue;
                     }
@@ -335,7 +491,7 @@ int main(int argc, char* argv[])
                     bo.optLevel = copt.optLevel; bo.threads = copt.threads; bo.x86 = copt.x86;
                     BackEndResult br;
                     runBackEnd(functions, &x86, bo, br);
-                    std::cout << "  compile6: " << gen.functionsGenerated() << " function(s), IR " << br.irBefore << " -> " << br.irAfter << " instructions, assembly " << br.asmInstructions << ", spills " << br.spills << "\n";
+                    if (!quiet) std::cout << "  compile6: " << gen.functionsGenerated() << " function(s), IR " << br.irBefore << " -> " << br.irAfter << " instructions, assembly " << br.asmInstructions << ", spills " << br.spills << "\n";
                     for (size_t k = 0; k < gen.notes().size() && k < 10; ++k) std::cout << "  note: " << gen.notes()[k] << "\n";
                     writeOut(base + "-ir6.txt", br.irText, quiet, written);
                     writeOut(base + "-opt6.log", br.log, quiet, written);
@@ -345,7 +501,15 @@ int main(int argc, char* argv[])
                         CoffResult cr;
                         if (!obj) { std::string bytes; assembleCoff(br.x86Text, copt.threads, bytes, cr); }   // only for the map
                         else if (writeCoffObject(br.x86Text, base + "6.obj", copt.threads, cr)) { if (!quiet) std::cout << "  wrote " << base << "6.obj\n"; }
-                        else { std::cerr << "error: " << base << "6.obj not written:\n"; for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n"; totalErrors += 1; }
+                        else if (cr.writeFailed) { std::cerr << "error: cannot write " << base << "6.obj\n"; ++g_writeFailures; }
+                        else {
+                            // the code generator wrote assembly the COFF writer cannot encode: an error of cppparse, not of the
+                            // unit; each line names the function and quotes the assembly line, the listing holds the rest
+                            std::cerr << "internal error: " << base << "6.obj not written: the code generator produced assembly the COFF writer cannot encode"
+                                      << " (an error of cppparse, please report it with the unit; the listing is " << base << "6.asm):\n";
+                            for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n";
+                            totalErrors += 1;
+                        }
                         std::string mapObject = obj ? baseName(base) + "6.obj" : baseName(base) + "6.asm, assembled in memory (no --obj, no object written)";
                         writeOut(base + "6.map", renderObjectMap(baseName(inputs[i]), mapObject, cr, br.symbolNames), quiet, written);
                     }
@@ -353,12 +517,12 @@ int main(int argc, char* argv[])
                 }
             }
             if (!outDir.empty() || !outName.empty()) {
-                std::string base = joinPath(outDir.empty() ? "." : outDir, (outName.empty() ? baseName(inputs[i]) : outName) + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
+                std::string base = joinPath(outDir.empty() ? "." : outDir, outName.empty() ? stemName(inputs[i]) : outName + (inputs.size() > 1 ? "-" + intToString(static_cast<int>(i)) : ""));
                 std::vector<std::string> written;
                 writeOut(base + "-ast6.txt", cxx::dumpTranslationUnit(tu), quiet, written);
             }
         }
-        return totalErrors == 0 ? 0 : 1;
+        return totalErrors == 0 && g_writeFailures == 0 ? 0 : 1;
     }
 
     if (preprocessOnly) {
@@ -449,8 +613,12 @@ int main(int argc, char* argv[])
                 if (!quiet) std::cout << "  wrote " << objPath << "  (" << cr.functions << " functions, " << cr.instructions << " instructions, .text "
                                       << cr.textBytes << " bytes, .data " << cr.dataBytes << ", .rdata " << cr.rdataBytes << ", "
                                       << cr.relocations << " relocations, " << cr.symbols << " symbols)\n";
+            } else if (cr.writeFailed) {
+                std::cerr << "error: cannot write " << objPath << "\n";
+                ok = false;
             } else {
-                std::cerr << "error: " << objPath << " not written, " << cr.errors.size() << " line(s) could not be encoded:\n";
+                std::cerr << "internal error: " << objPath << " not written, " << cr.errors.size() << " line(s) of the code generator's assembly could not be encoded"
+                          << " (an error of cppparse, please report it with the input; the listing is " << base << ".asm):\n";
                 for (size_t e = 0; e < cr.errors.size() && e < 10; ++e) std::cerr << "  " << cr.errors[e] << "\n";
                 ok = false;
             }
@@ -491,4 +659,26 @@ int main(int argc, char* argv[])
     }
     if (strictExit) return strictExit;
     return ok ? 0 : 1;
+}
+
+#ifdef _WIN32
+#ifndef STACK_SIZE_PARAM_IS_A_RESERVATION
+#define STACK_SIZE_PARAM_IS_A_RESERVATION 0x00010000
+#endif
+namespace {
+struct MainArgs { int argc; char** argv; int result; };
+DWORD WINAPI cppparseMainThread(LPVOID p) { MainArgs* a = static_cast<MainArgs*>(p); a->result = cppparseMain(a->argc, a->argv); return 0; }
+}
+#endif
+
+// the compiler recurses as deep as the program nests (template instantiations up to the 1000 of cl's C2999, nested
+// blocks and parentheses): it runs on a thread with a 512 MB stack reservation instead of the default 1 MB
+int main(int argc, char* argv[])
+{
+#ifdef _WIN32
+    MainArgs a; a.argc = argc; a.argv = argv; a.result = 1;
+    HANDLE h = CreateThread(0, 512u * 1024u * 1024u, cppparseMainThread, &a, STACK_SIZE_PARAM_IS_A_RESERVATION, 0);
+    if (h) { WaitForSingleObject(h, INFINITE); CloseHandle(h); return a.result; }
+#endif
+    return cppparseMain(argc, argv);
 }

@@ -73,7 +73,8 @@ void runParallel(ParallelJob& job, size_t count, int threads)
         HANDLE handles[63];
         int started = 0;
         for (int t = 0; t < threads; ++t) {
-            HANDLE h = CreateThread(0, 0, worker, &st, 0, 0);
+            // a 256 MB stack reservation (committed as used): the parsers recurse as deep as a file nests
+            HANDLE h = CreateThread(0, 256u * 1024u * 1024u, worker, &st, 0x00010000 /* STACK_SIZE_PARAM_IS_A_RESERVATION */, 0);
             if (!h) break;
             handles[started++] = h;
         }

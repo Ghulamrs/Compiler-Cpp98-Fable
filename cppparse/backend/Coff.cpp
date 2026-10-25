@@ -5,7 +5,13 @@
 //   ModRM = mod(2) reg(3) rm(3); rm=100 means a SIB byte follows; mod=00 rm=101 means RIP+disp32
 //   SIB = scale(2) index(3) base(3); index=100 means no index; base=101 with mod=00 means disp32 and no base
 //   mandatory prefixes 66/F2/F3 go before REX; 0F is the two-byte opcode escape
-// Relocations: IMAGE_REL_AMD64_REL32 (+n when n immediate bytes follow the field), IMAGE_REL_AMD64_ADDR64.
+// Relocations: IMAGE_REL_AMD64_REL32 (+n when n immediate bytes follow the field), IMAGE_REL_AMD64_ADDR64,
+// IMAGE_REL_AMD64_ADDR32NB (the function table in .pdata).
+// Unwind info: a PROC FRAME's prologue directives become its UNWIND_INFO in .xdata and a RUNTIME_FUNCTION entry
+// (begin, end, unwind info) in .pdata, as ml64 writes them; a COMDAT function's go into associative COMDAT sections.
+// Debug info: the ";@debug" and ";@line" markers of the listing become CodeView line tables and procedure symbols in
+// .debug$S sections (one for .text with the module's file tables, an associative one per COMDAT function), which
+// link /DEBUG puts in the PDB (see the CodeView helpers below).
 //
 // Strict C++98.
 #include "Coff.hpp"
@@ -264,7 +270,7 @@ bool parseOperand(const std::string& text, Operand& op, std::string& err)
 }
 
 
-enum { RelAddr64 = 0x0001, RelRel32 = 0x0004 };
+enum { RelAddr64 = 0x0001, RelAddr32Nb = 0x0003, RelRel32 = 0x0004 };   // ADDR32NB: image-relative (.pdata entries)
 
 struct Reloc {
     unsigned long  offset;    // within the section (chunk-relative until layout)
@@ -282,17 +288,30 @@ struct Fixup {                // rel32 to a label of the same function
     unsigned long opcodeAt;   // offset of the first opcode byte (jumps only)
 };
 
+// one prologue step of a PROC FRAME, from its unwind directive: where the instruction before it ends, and what it did
+struct UnwindStep {
+    enum Op { Push, Alloc, SaveXmm };
+    Op            op;
+    int           reg;        // Push: register number; SaveXmm: xmm number
+    unsigned long value;      // Alloc: bytes; SaveXmm: offset from rsp after the prologue
+    unsigned long offset;     // code offset just after the instruction
+};
+
 struct Chunk {
     std::vector<unsigned char>                bytes;
+    std::vector<UnwindStep>                   unwind;     // .pushreg / .allocstack / .savexmm128, in prologue order
+    long                                      prologEnd;  // .endprolog: code offset, -1 when absent
+    std::vector<std::vector<std::string> >    ehRanges;   // .ehrange begin, end, landing pad (labels of this function)
     std::vector<Reloc>                        relocs;
     std::vector<Fixup>                        fixups;
     std::map<std::string, unsigned long>      labels;    // local labels
     std::vector<std::pair<std::string, unsigned long> > symbols;   // named definitions (PROC names, data labels)
     std::vector<unsigned long>                padStarts;  // where ALIGN padding begins: a data item ends there
     unsigned long                             maxAlign;   // the largest ALIGN (or COMDAT marker alignment): the section's alignment
+    std::vector<std::pair<unsigned long, int> > lines;    // .line (the listing's ;@line markers): code offset, source line, in offset order
     std::vector<std::string>                  errors;
     int                                       instructions;
-    Chunk() : maxAlign(1), instructions(0) {}
+    Chunk() : prologEnd(-1), maxAlign(1), instructions(0) {}
 };
 
 
@@ -311,9 +330,18 @@ private:
     void dword(long v) { for (int i = 0; i < 4; ++i) byte(static_cast<int>(v >> (8 * i))); }
     void qword(const U64& v) { dword(static_cast<long>(v.lo)); dword(static_cast<long>(v.hi)); }
     void imm(long v, int bytes) { for (int i = 0; i < bytes; ++i) byte(static_cast<int>(v >> (8 * i))); }
-    bool fail(const std::string& what, int line) { m_c.errors.push_back("line " + numText(line) + ": " + what); return false; }
+    // "line N in <function or data item>: <what> [<the line>]": the chunk's latest symbol is the PROC being encoded (a
+    // code chunk holds its PROC name alone) or the data item the line belongs to; the driver reports the error as
+    // one of the code generator, so the message carries what a report needs
+    bool fail(const std::string& what, int line)
+    {
+        const std::string where = m_c.symbols.empty() ? std::string() : " in " + m_c.symbols.back().first;
+        m_c.errors.push_back("line " + numText(line) + where + ": " + what + (m_line.empty() ? std::string() : " [" + m_line + "]"));
+        return false;
+    }
 
     bool instruction(const std::string& mn, std::vector<Operand>& ops, int line);
+    bool unwindDirective(const std::string& mn, const std::vector<std::string>& opText, int line);
     void emitRm(int prefix, const unsigned char* op, int opLen, int regField, const Operand& rm, bool w, int trailing, bool forceRex);
     void rel32(const std::string& label, int line);
     void jump(int opcode, const std::string& label, int line);   // long form now, shortened in finish() when possible
@@ -326,7 +354,8 @@ private:
     }
     static int condCode(const std::string& cc);
 
-    Chunk& m_c;
+    Chunk&      m_c;
+    std::string m_line;   // the assembly line being encoded, quoted by the error messages
 };
 
 int Encoder::condCode(const std::string& cc)
@@ -433,6 +462,8 @@ void Encoder::shrinkJumps()
                 if (m_c.fixups[k].opcodeAt >= end) { m_c.fixups[k].opcodeAt -= removed; m_c.fixups[k].at -= removed; }
             }
             for (size_t r = 0; r < m_c.relocs.size(); ++r) if (m_c.relocs[r].offset >= end) m_c.relocs[r].offset -= removed;
+            for (size_t u = 0; u < m_c.unwind.size(); ++u) if (m_c.unwind[u].offset >= end) m_c.unwind[u].offset -= removed;
+            if (m_c.prologEnd >= static_cast<long>(end)) m_c.prologEnd -= static_cast<long>(removed);
             for (size_t s = 0; s < m_c.symbols.size(); ++s) if (m_c.symbols[s].second >= end) m_c.symbols[s].second -= removed;
             f.at = f.opcodeAt + 1;
             f.shortForm = true;
@@ -467,6 +498,7 @@ bool Encoder::codeLine(const std::string& raw, int line)
 {
     std::string text = trimWs(raw);
     if (text.empty()) return true;
+    m_line = text;
     if (text[text.size() - 1] == ':' && text.find(' ') == std::string::npos) {   // label
         std::string name = text.substr(0, text.size() - 1);
         if (m_c.labels.count(name)) return fail("duplicate label " + name, line);
@@ -477,6 +509,7 @@ bool Encoder::codeLine(const std::string& raw, int line)
     std::string mn = lowerText(sp == std::string::npos ? text : text.substr(0, sp));
     std::vector<std::string> opText;
     if (sp != std::string::npos) splitOperands(text.substr(sp + 1), opText);
+    if (mn[0] == '.') return unwindDirective(mn, opText, line);
     std::vector<Operand> ops(opText.size());
     for (size_t i = 0; i < opText.size(); ++i) {
         std::string err;
@@ -485,6 +518,109 @@ bool Encoder::codeLine(const std::string& raw, int line)
     size_t before = m_c.bytes.size();
     if (!instruction(mn, ops, line)) { m_c.bytes.resize(before); return false; }
     ++m_c.instructions;
+    return true;
+}
+
+// the MASM prologue directives of a PROC FRAME (the subset X86.cpp writes): each one describes the instruction
+// just before it, so it records the current code offset
+bool Encoder::unwindDirective(const std::string& mn, const std::vector<std::string>& opText, int line)
+{
+    if (mn == ".ehrange") {
+        // a code range of a try region and its landing pad, for the language-specific data after the handler
+        if (opText.size() != 3) return fail(".ehrange needs a begin label, an end label and a landing pad", line);
+        m_c.ehRanges.push_back(opText);
+        return true;
+    }
+    if (mn == ".line") {
+        // a ;@line marker of the listing: the source line of the code from this offset on (the last one at an offset wins)
+        long n = 0;
+        if (opText.size() != 1 || !parseLong(opText[0], n) || n < 0) return fail(".line needs a line number", line);
+        if (!m_c.lines.empty() && m_c.lines.back().first == pos()) m_c.lines.back().second = static_cast<int>(n);
+        else m_c.lines.push_back(std::make_pair(pos(), static_cast<int>(n)));
+        return true;
+    }
+    if (m_c.prologEnd >= 0) return fail(mn + " after .endprolog", line);
+    if (mn == ".endprolog") {
+        if (!opText.empty()) return fail(".endprolog takes no operands", line);
+        m_c.prologEnd = static_cast<long>(pos());
+        return true;
+    }
+    UnwindStep s;
+    s.offset = pos();
+    s.reg = 0;
+    s.value = 0;
+    int num = 0, size = 0;
+    long v = 0;
+    if (mn == ".pushreg") {
+        if (opText.size() != 1 || !lookupReg(lowerText(opText[0]), num, size) || size != 8) return fail(".pushreg needs a 64-bit register", line);
+        s.op = UnwindStep::Push; s.reg = num;
+    } else if (mn == ".allocstack") {
+        if (opText.size() != 1 || !parseLong(opText[0], v) || v <= 0 || v % 8) return fail(".allocstack needs a positive multiple of 8", line);
+        s.op = UnwindStep::Alloc; s.value = static_cast<unsigned long>(v);
+    } else if (mn == ".savexmm128") {
+        Operand x;
+        std::string err;
+        if (opText.size() != 2 || !parseOperand(opText[0], x, err) || x.kind != Operand::Xmm || !parseLong(opText[1], v) || v < 0 || v % 16)
+            return fail(".savexmm128 needs an xmm register and an offset that is a multiple of 16", line);
+        s.op = UnwindStep::SaveXmm; s.reg = x.reg; s.value = static_cast<unsigned long>(v);
+    } else return fail("unsupported directive " + mn, line);
+    m_c.unwind.push_back(s);
+    return true;
+}
+
+const unsigned long kEhMagic = 0x58505043UL;   // "CPPX": the range table that follows the handler is cppparse's
+
+// the UNWIND_INFO of a PROC FRAME (Windows x64 exception handling): version 1, the prologue size, the unwind codes in
+// reverse prologue order (each code slot: code offset, then operation | info << 4; larger values in the slots after
+// it), padded to an even number of slots. With a handler (PROC FRAME:handler): flag EHANDLER, the handler's address,
+// then cppparse's range table: "CPPX", the count, and per range its begin, end and landing pad. Every address is
+// image-relative (ADDR32NB); 'relocs' gets them, at offsets within 'out', against 'fn' or the handler
+bool buildUnwindInfo(const Chunk& c, const std::string& fn, const std::string& handler, std::vector<unsigned char>& out,
+                     std::vector<Reloc>& relocs, std::string& err)
+{
+    if (c.prologEnd < 0) { err = "PROC FRAME without .endprolog"; return false; }
+    if (c.prologEnd > 255) { err = "prologue longer than 255 bytes"; return false; }
+    std::vector<unsigned long> slots;   // 16-bit each
+    for (size_t k = c.unwind.size(); k-- > 0;) {
+        const UnwindStep& s = c.unwind[k];
+        const unsigned long at = s.offset;
+        if (s.op == UnwindStep::Push) slots.push_back(at | (static_cast<unsigned long>(s.reg) << 12));                      // UWOP_PUSH_NONVOL
+        else if (s.op == UnwindStep::Alloc) {
+            if (s.value <= 128) slots.push_back(at | (2UL << 8) | (((s.value - 8) / 8) << 12));                             // UWOP_ALLOC_SMALL
+            else if (s.value <= 524280UL) { slots.push_back(at | (1UL << 8)); slots.push_back(s.value / 8); }               // UWOP_ALLOC_LARGE, size/8
+            else { slots.push_back(at | (1UL << 8) | (1UL << 12)); slots.push_back(s.value & 0xFFFFUL); slots.push_back(s.value >> 16); }
+        } else {
+            if (s.value / 16 <= 0xFFFFUL) { slots.push_back(at | (8UL << 8) | (static_cast<unsigned long>(s.reg) << 12)); slots.push_back(s.value / 16); }   // UWOP_SAVE_XMM128
+            else { slots.push_back(at | (9UL << 8) | (static_cast<unsigned long>(s.reg) << 12)); slots.push_back(s.value & 0xFFFFUL); slots.push_back(s.value >> 16); }
+        }
+    }
+    if (slots.size() > 255) { err = "too many unwind codes"; return false; }
+    out.clear();
+    relocs.clear();
+    out.push_back(static_cast<unsigned char>(handler.empty() ? 1 : 1 | (1 << 3)));   // version 1, UNW_FLAG_EHANDLER
+    out.push_back(static_cast<unsigned char>(c.prologEnd));
+    out.push_back(static_cast<unsigned char>(slots.size()));
+    out.push_back(0);                                              // no frame register
+    if (slots.size() % 2) slots.push_back(0);
+    for (size_t k = 0; k < slots.size(); ++k) { out.push_back(static_cast<unsigned char>(slots[k] & 0xFF)); out.push_back(static_cast<unsigned char>((slots[k] >> 8) & 0xFF)); }
+    if (handler.empty()) {
+        if (!c.ehRanges.empty()) { err = ".ehrange in a PROC FRAME without a handler"; return false; }
+        return true;
+    }
+    std::vector<std::pair<std::string, unsigned long> > fields;   // symbol (empty: a plain value) and value / addend
+    fields.push_back(std::make_pair(handler, 0UL));
+    fields.push_back(std::make_pair(std::string(), kEhMagic));
+    fields.push_back(std::make_pair(std::string(), static_cast<unsigned long>(c.ehRanges.size())));
+    for (size_t r = 0; r < c.ehRanges.size(); ++r)
+        for (int k = 0; k < 3; ++k) {
+            std::map<std::string, unsigned long>::const_iterator l = c.labels.find(c.ehRanges[r][static_cast<size_t>(k)]);
+            if (l == c.labels.end()) { err = ".ehrange label " + c.ehRanges[r][static_cast<size_t>(k)] + " is not defined"; return false; }
+            fields.push_back(std::make_pair(fn, l->second));
+        }
+    for (size_t f = 0; f < fields.size(); ++f) {
+        if (!fields[f].first.empty()) { Reloc rl; rl.offset = static_cast<unsigned long>(out.size()); rl.symbol = fields[f].first; rl.type = RelAddr32Nb; relocs.push_back(rl); }
+        for (int b = 0; b < 4; ++b) out.push_back(static_cast<unsigned char>((fields[f].second >> (8 * b)) & 0xFF));
+    }
     return true;
 }
 
@@ -522,6 +658,7 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         if (mn == "ud2") { byte(0x0F); byte(0x0B); return true; }
         return fail("unknown instruction " + mn, line);
     }
+    if (mn == "int" && n == 1 && ops[0].kind == Operand::Imm && ops[0].imm == 3) { byte(0xCC); return true; }   // ml64's spelling
     const Operand& a = ops[0];
     const Operand* b = n > 1 ? &ops[1] : 0;
     bool mixed = false;
@@ -771,6 +908,7 @@ bool Encoder::dataLine(const std::string& raw, int line)
 {
     std::string text = trimWs(raw);
     if (text.empty()) return true;
+    m_line = text;
     std::vector<std::string> words;
     {
         std::istringstream in(text);
@@ -810,6 +948,13 @@ bool Encoder::dataLine(const std::string& raw, int line)
         std::string val = values[v];
         std::string lv = lowerText(val);
         if (dir == "REAL8" || dir == "REAL4") {
+            // MASM's encoded real: "03FD0000000000000r", the bits in hex (a folded constant, exactly)
+            const size_t digits = dir == "REAL8" ? 16 : 8;
+            if (lv.size() == digits + 2 && lv[0] == '0' && lv[lv.size() - 1] == 'r' && lv.find_first_not_of("0123456789abcdef", 1) == lv.size() - 1) {
+                for (size_t i = 0; i < digits / 2; ++i)   // little-endian: the last pair of digits first
+                    byte(static_cast<unsigned char>(std::strtoul(lv.substr(lv.size() - 3 - 2 * i, 2).c_str(), 0, 16)));
+                continue;
+            }
             double d = strtod(val.c_str(), 0);
             if (dir == "REAL8") { unsigned char buf[8]; std::memcpy(buf, &d, 8); for (int i = 0; i < 8; ++i) byte(buf[i]); }
             else { float f = static_cast<float>(d); unsigned char buf[4]; std::memcpy(buf, &f, 4); for (int i = 0; i < 4; ++i) byte(buf[i]); }
@@ -825,6 +970,14 @@ bool Encoder::dataLine(const std::string& raw, int line)
             std::string v2 = trimWs(inner.substr(1, inner.size() - 2));
             if (v2 != "?" && !parseU64(v2, u)) return fail("bad DUP value: " + val, line);
             for (long k = 0; k < count; ++k) { if (size == 8) qword(u); else imm(static_cast<long>(u.lo), size); }
+            continue;
+        }
+        if (lv.compare(0, 9, "imagerel ") == 0) {
+            // an image-relative address (cl's RTTI descriptors reference each other so): a 32-bit ADDR32NB relocation
+            if (size != 4) return fail("IMAGEREL needs DD: " + val, line);
+            Reloc rl; rl.offset = pos(); rl.symbol = trimWs(val.substr(9)); rl.type = RelAddr32Nb;
+            m_c.relocs.push_back(rl);
+            for (int i = 0; i < 4; ++i) byte(0);
             continue;
         }
         if (lv.compare(0, 7, "offset ") == 0 || (!val.empty() && isIdentStart(val[0]) && !isNumberText(val))) {
@@ -849,7 +1002,12 @@ struct CodeBlock {
     std::vector<std::pair<int, std::string> > lines;
     Chunk chunk;
     bool  comdat;      // one COMDAT section of its own (inline functions, template instantiations)
-    CodeBlock() : comdat(false) {}
+    bool  frame;       // PROC FRAME: gets unwind info (.xdata) and a function table entry (.pdata)
+    std::string handler;   // PROC FRAME:handler, empty without one
+    std::string sourceFile, displayName;   // ;@debug: the function's source file and the name its CodeView symbol shows
+    std::vector<unsigned char> xdata;
+    std::vector<Reloc> xdataRelocs;
+    CodeBlock() : comdat(false), frame(false) {}
 };
 
 struct EncodeJob : public ParallelJob {
@@ -861,6 +1019,9 @@ struct EncodeJob : public ParallelJob {
         b.chunk.symbols.push_back(std::make_pair(b.name, 0UL));
         for (size_t k = 0; k < b.lines.size(); ++k) enc.codeLine(b.lines[k].second, b.lines[k].first);
         enc.finish();
+        std::string err;
+        if (b.frame && !buildUnwindInfo(b.chunk, b.name, b.handler, b.xdata, b.xdataRelocs, err)) b.chunk.errors.push_back(b.name + ": " + err);
+        if (!b.frame && (b.chunk.prologEnd >= 0 || !b.chunk.unwind.empty() || !b.chunk.ehRanges.empty())) b.chunk.errors.push_back(b.name + ": unwind directives in a PROC without FRAME");
     }
 };
 
@@ -871,9 +1032,10 @@ struct Section {
     std::vector<unsigned char> bytes;
     std::vector<Reloc>         relocs;
     int                        selection;     // IMAGE_COMDAT_SELECT_* of a COMDAT section, 0 otherwise
+    int                        associated;    // selection 5 (associative): the 1-based section it goes with
     bool                       isCode;
     unsigned long              align;         // the largest alignment its contents ask for (ALIGN, COMDAT marker)
-    Section() : characteristics(0), selection(0), isCode(false), align(1) {}
+    Section() : characteristics(0), selection(0), associated(0), isCode(false), align(1) {}
 };
 
 struct SymbolEntry {
@@ -892,6 +1054,7 @@ struct DataPiece {
     Encoder* enc;
     int      kind;       // 2 data, 3 rdata, 4 CRT initialisers
     bool     comdat;
+    std::string assoc;   // ";@comdat assoc <symbol>": kept or dropped with the COMDAT data item of that symbol
     DataPiece(int k, bool c) : enc(0), kind(k), comdat(c) { enc = new Encoder(chunk); }
     ~DataPiece() { delete enc; }
 };
@@ -906,6 +1069,8 @@ const unsigned long kRdataFlags = 0x40500040UL;   // initialized | read | align 
 const unsigned long kCrtFlags   = 0x40400040UL;   // initialized | read | align 8
 const unsigned long kComdat     = 0x00001000UL;   // IMAGE_SCN_LNK_COMDAT
 const int           kSelectAny  = 2;              // IMAGE_COMDAT_SELECT_ANY
+const int           kSelectAssociative = 5;       // IMAGE_COMDAT_SELECT_ASSOCIATIVE: kept or dropped with another section
+const unsigned long kUnwindFlags = 0x40300040UL;  // .xdata / .pdata: initialized | read | align 4
 
 // bytes of the s-th definition of a chunk: up to the next definition, the start of ALIGN padding or the end
 // of the chunk, whichever comes first
@@ -929,9 +1094,134 @@ struct SymbolInfoOrder {
     }
 };
 
+// ---- CodeView debug information (.debug$S): line tables and procedure symbols -------------------------------------
+//
+// link /DEBUG reads them into the PDB, so Visual Studio, WinDbg and dbghelp (SymGetLineFromAddr64) map an address of
+// cppparse's code to its source line. The listing carries ";@debug "<file>" <name>" after a PROC and ";@line N"
+// before the code of a new line (comments to ml64); the encoder records the code offset of every ;@line.
+// A section is CV_SIGNATURE_C13 (4), then subsections of {DWORD kind, DWORD length, data, padding to 4}:
+//   DEBUG_S_SYMBOLS (0xF1): S_OBJNAME and S_COMPILE3 once per object, then per function S_GPROC32 (S_LPROC32 when it
+//     is not PUBLIC) and S_END; the function's offset and segment are SECREL and SECTION relocations on its symbol
+//   DEBUG_S_LINES (0xF2) per function: {offCon SECREL, segCon SECTION, flags 0, cbCon = the code size}, then one
+//     block {offFile, nLines, cbBlock, nLines x {code offset, line | 0x80000000 (a statement)}}, offFile the file's
+//     entry in the checksum table
+//   DEBUG_S_FILECHKSMS (0xF4): per file {offstName into the string table, cbChecksum 0, type 0 (none), padding}
+//   DEBUG_S_STRINGTABLE (0xF3): "" then the file names, null-terminated
+// As cl lays it out: the functions of .text share one .debug$S, which also holds the module's checksum and string
+// tables; a COMDAT function gets an associative .debug$S of its own (its symbols and lines) that refers to them.
+const unsigned long kDebugFlags = 0x42100040UL;   // .debug$S: initialized | discardable | read | align 1
+enum { RelSecRel = 0x000B, RelSection = 0x000A };
+enum { DebugSymbols = 0xF1, DebugLines = 0xF2, DebugStrings = 0xF3, DebugChecksums = 0xF4 };
+
+void pad4(std::string& s) { while (s.size() % 4) put8(s, 0); }
+
+// a subsection appended to a section's bytes; the relocations of its data are moved to the section's offsets
+void debugSubsection(std::string& sec, std::vector<Reloc>& secRelocs, unsigned long kind, const std::string& data, const std::vector<Reloc>& relocs)
+{
+    const unsigned long base = static_cast<unsigned long>(sec.size()) + 8;
+    for (size_t r = 0; r < relocs.size(); ++r) { Reloc rl = relocs[r]; rl.offset += base; secRelocs.push_back(rl); }
+    put32(sec, kind); put32(sec, static_cast<unsigned long>(data.size()));
+    sec += data;
+    pad4(sec);
+}
+
+// a symbol record: reclen (counting the type and the body, padded to 4), type, body
+void symbolRecord(std::string& syms, unsigned long type, const std::string& body)
+{
+    std::string r = body;
+    pad4(r);
+    put16(syms, static_cast<unsigned long>(r.size() + 2)); put16(syms, type); syms += r;
+}
+
+// S_OBJNAME (the object's file name) and S_COMPILE3 (C++ for x64, "cppparse 6")
+void moduleSymbols(std::string& syms, const std::string& objName)
+{
+    std::string b;
+    put32(b, 0); b += objName; b += '\0';
+    symbolRecord(syms, 0x1101, b);
+    b.clear();
+    put32(b, 1);                                     // flags: the language, CV_CFL_CXX
+    put16(b, 0xD0);                                  // machine: CV_CFL_X64
+    for (int k = 0; k < 8; ++k) put16(b, k == 0 || k == 4 ? 6 : 0);   // front end 6.0.0.0, back end 6.0.0.0
+    b += "cppparse 6"; b += '\0';
+    symbolRecord(syms, 0x113C, b);
+}
+
+// S_GPROC32 / S_LPROC32 and S_END of one function; the relocations are at offsets within 'syms'
+void procedureSymbols(std::string& syms, std::vector<Reloc>& relocs, const std::string& fn, const std::string& display, unsigned long codeSize, bool internal)
+{
+    std::string b;
+    put32(b, 0); put32(b, 0); put32(b, 0);           // pParent, pEnd, pNext: the linker fills them in
+    put32(b, codeSize); put32(b, 0); put32(b, codeSize);   // len, DbgStart, DbgEnd
+    put32(b, 0);                                     // typind: T_NOTYPE (no type information)
+    Reloc a; a.offset = static_cast<unsigned long>(syms.size() + 4 + b.size()); a.symbol = fn; a.type = RelSecRel; relocs.push_back(a);
+    put32(b, 0);                                     // off
+    Reloc s; s.offset = static_cast<unsigned long>(syms.size() + 4 + b.size()); s.symbol = fn; s.type = RelSection; relocs.push_back(s);
+    put16(b, 0);                                     // seg
+    put8(b, 0);                                      // flags
+    b += display; b += '\0';
+    symbolRecord(syms, internal ? 0x110F : 0x1110, b);
+    symbolRecord(syms, 0x0006, std::string());       // S_END
+}
+
+// the module's file tables: an entry per distinct file name, its offset in the checksum table returned
+struct DebugFiles {
+    std::string strings, checksums;
+    std::map<std::string, unsigned long> offsets;
+    DebugFiles() { strings += '\0'; }
+    unsigned long entry(const std::string& name)
+    {
+        std::map<std::string, unsigned long>::const_iterator it = offsets.find(name);
+        if (it != offsets.end()) return it->second;
+        const unsigned long off = static_cast<unsigned long>(checksums.size());
+        put32(checksums, static_cast<unsigned long>(strings.size()));
+        strings += name; strings += '\0';
+        put8(checksums, 0); put8(checksums, 0);      // cbChecksum 0, type 0: no checksum
+        pad4(checksums);
+        offsets[name] = off;
+        return off;
+    }
+};
+
+// the DEBUG_S_LINES data of one function: its chunk's (code offset, source line) pairs, already in offset order with
+// one line per offset, those inside the code
+std::string lineTable(std::vector<Reloc>& relocs, const std::string& fn, unsigned long fileEntry, unsigned long codeSize, const std::vector<std::pair<unsigned long, int> >& lines)
+{
+    std::vector<std::pair<unsigned long, int> > kept;
+    for (size_t i = 0; i < lines.size(); ++i) if (lines[i].first < codeSize && lines[i].second > 0) kept.push_back(lines[i]);
+    std::string d;
+    Reloc a; a.offset = 0; a.symbol = fn; a.type = RelSecRel; relocs.push_back(a);
+    put32(d, 0);                                     // offCon
+    Reloc s; s.offset = 4; s.symbol = fn; s.type = RelSection; relocs.push_back(s);
+    put16(d, 0); put16(d, 0);                        // segCon, flags (no columns)
+    put32(d, codeSize);
+    put32(d, fileEntry); put32(d, static_cast<unsigned long>(kept.size())); put32(d, 12 + 8 * static_cast<unsigned long>(kept.size()));
+    for (size_t i = 0; i < kept.size(); ++i) { put32(d, kept[i].first); put32(d, (static_cast<unsigned long>(kept[i].second) & 0xFFFFFFUL) | 0x80000000UL); }
+    return d;
+}
+
+// one .debug$S: the signature, then the subsections given
+void fillDebugSection(Section& sec, const std::string& syms, const std::vector<Reloc>& symRelocs,
+                      const std::vector<std::pair<std::string, std::vector<Reloc> > >& lineTables, const DebugFiles* files)
+{
+    std::string bytes;
+    std::vector<Reloc> relocs;
+    put32(bytes, 4);                                 // CV_SIGNATURE_C13
+    debugSubsection(bytes, relocs, DebugSymbols, syms, symRelocs);
+    for (size_t i = 0; i < lineTables.size(); ++i) debugSubsection(bytes, relocs, DebugLines, lineTables[i].first, lineTables[i].second);
+    if (files) {
+        debugSubsection(bytes, relocs, DebugChecksums, files->checksums, std::vector<Reloc>());
+        debugSubsection(bytes, relocs, DebugStrings, files->strings, std::vector<Reloc>());
+    }
+    sec.bytes.clear();
+    for (size_t i = 0; i < bytes.size(); ++i) sec.bytes.push_back(static_cast<unsigned char>(bytes[i]));
+    sec.relocs = relocs;
+}
+
 } // namespace
 
-bool assembleCoff(const std::string& masmText, int threads, std::string& objectBytes, CoffResult& result)
+// objName: what S_OBJNAME records (the object's file name; empty when no object is written)
+static bool assembleCoffNamed(const std::string& masmText, const std::string& objName, int threads, std::string& objectBytes, CoffResult& result)
 {
     std::vector<CodeBlock> blocks;
     std::vector<DataPiece*> pieces;
@@ -944,6 +1234,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     CodeBlock* current = 0;
     bool comdatNext = false;    // ";@comdat any" was seen: the next PROC or data item is a COMDAT
     unsigned long comdatAlign = 0;   // ";@comdat any align N": the alignment of that item's section
+    std::string comdatAssoc;    // ";@comdat assoc <symbol>": the data item goes with that symbol's COMDAT section
     std::vector<std::string> globalErrors;
 
     size_t lineStart = 0;
@@ -954,10 +1245,26 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         lineStart = nl == std::string::npos ? masmText.size() + 1 : nl + 1;
         ++lineNo;
         std::string marker = trimWs(raw);
+        if (marker.compare(0, 10, ";@ehrange ") == 0 && current) {   // a try range of the current PROC FRAME (a comment to ml64)
+            current->lines.push_back(std::make_pair(lineNo, ".ehrange " + marker.substr(10)));
+            continue;
+        }
+        if (marker.compare(0, 7, ";@line ") == 0) {   // the source line of the code that follows (a comment to ml64)
+            if (current) current->lines.push_back(std::make_pair(lineNo, ".line " + marker.substr(7)));
+            continue;
+        }
+        if (marker.compare(0, 8, ";@debug ") == 0) {
+            // ;@debug "<source file>" <display name>: the function's CodeView symbol and line table (a comment to ml64)
+            const size_t q1 = marker.find('"'), q2 = q1 == std::string::npos ? q1 : marker.find('"', q1 + 1);
+            if (current && q2 != std::string::npos) { current->sourceFile = marker.substr(q1 + 1, q2 - q1 - 1); current->displayName = trimWs(marker.substr(q2 + 1)); }
+            continue;
+        }
         if (marker.compare(0, 8, ";@comdat") == 0) {
             comdatNext = true;
             size_t al = marker.find(" align ");                  // ";@comdat any align 32": the item's section alignment
             comdatAlign = al == std::string::npos ? 0UL : static_cast<unsigned long>(atol(marker.c_str() + al + 7));
+            size_t as = marker.find(" assoc ");                  // ";@comdat assoc <symbol>": an associative data item
+            comdatAssoc = as == std::string::npos ? std::string() : marker.substr(as + 7, marker.find(' ', as + 7) == std::string::npos ? std::string::npos : marker.find(' ', as + 7) - (as + 7));
             continue;
         }
         size_t sc = raw.find(';');
@@ -965,9 +1272,14 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         std::string text = trimWs(raw);
         if (text.empty()) continue;
         std::istringstream in(text);
-        std::string w0, w1;
-        in >> w0 >> w1;
+        std::string w0, w1, w2;
+        in >> w0 >> w1 >> w2;
         std::string u0 = upperText(w0), u1 = upperText(w1);
+        // the prologue directives of a PROC FRAME belong to its code (the other '.' lines are section switches)
+        if (current && section == 1 && (u0 == ".PUSHREG" || u0 == ".ALLOCSTACK" || u0 == ".SAVEXMM128" || u0 == ".ENDPROLOG")) {
+            current->lines.push_back(std::make_pair(lineNo, text));
+            continue;
+        }
         if (u0 == ".CODE") { section = 1; currentPiece = 0; continue; }
         if (u0 == ".DATA") { section = 2; currentPiece = 0; continue; }
         if (u0 == ".CONST" || u0 == ".RDATA") { section = 3; currentPiece = 0; continue; }
@@ -984,6 +1296,9 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             blocks.push_back(CodeBlock());
             blocks.back().name = w0;
             blocks.back().comdat = comdatNext;
+            blocks.back().frame = upperText(w2.substr(0, 5)) == "FRAME" && (w2.size() == 5 || w2[5] == ':');
+            if (blocks.back().frame && w2.size() > 6) blocks.back().handler = w2.substr(6);
+            if (!blocks.back().handler.empty() && externSet.insert(blocks.back().handler).second) externs.push_back(blocks.back().handler);
             comdatNext = false;
             comdatAlign = 0;
             current = &blocks.back();
@@ -998,11 +1313,14 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             // has no PUBLIC line before it, and must not join the COMDAT section the linker may discard
             // (an ALIGN starts the next item too: it pads for the definition after it)
             const bool labelled = u0 != "DB" && u0 != "DW" && u0 != "DD" && u0 != "DQ" && u0 != "REAL4" && u0 != "REAL8" && u0 != "ALIGN";
-            if (!comdatNext && (labelled || u0 == "ALIGN") && currentPiece && currentPiece->comdat) currentPiece = 0;
+            // (a label after unlabelled data at the start of a COMDAT item names that item: a vftable's symbol follows
+            // its RTTI locator word, as in cl's objects, where the symbol is 8 bytes into its section)
+            if (!comdatNext && (labelled || u0 == "ALIGN") && currentPiece && currentPiece->comdat && !currentPiece->chunk.symbols.empty()) currentPiece = 0;
             if (comdatNext) {
                 pieces.push_back(new DataPiece(section, true)); currentPiece = pieces.back(); comdatNext = false;
                 if (comdatAlign > currentPiece->chunk.maxAlign) currentPiece->chunk.maxAlign = comdatAlign;
-                comdatAlign = 0;
+                currentPiece->assoc = comdatAssoc;
+                comdatAlign = 0; comdatAssoc.clear();
             }
             if (!currentPiece) {
                 if (!plain[section]) { pieces.push_back(new DataPiece(section, false)); plain[section] = pieces.back(); }
@@ -1025,6 +1343,26 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     secs[2].name = ".rdata"; secs[2].characteristics = kRdataFlags;
     if (plain[4]) { Section s; s.name = ".CRT$XCU"; s.characteristics = kCrtFlags; secs.push_back(s); }
     const size_t crtIndex = plain[4] ? 3 : 0;
+    // the unwind info and function table of the functions in .text (a COMDAT function has its own)
+    bool plainFrames = false;
+    for (size_t i = 0; i < blocks.size(); ++i) if (blocks[i].frame && !blocks[i].comdat) plainFrames = true;
+    size_t xdataIndex = 0, pdataIndex = 0;
+    if (plainFrames) {
+        Section x; x.name = ".xdata"; x.characteristics = kUnwindFlags; xdataIndex = secs.size(); secs.push_back(x);
+        Section p; p.name = ".pdata"; p.characteristics = kUnwindFlags; pdataIndex = secs.size(); secs.push_back(p);
+    }
+    // CodeView: one .debug$S for the functions of .text and the module's file tables (filled once every function is
+    // placed); a COMDAT function gets an associative .debug$S of its own in the loop below
+    bool anyLines = false;
+    for (size_t i = 0; i < blocks.size(); ++i) if (!blocks[i].chunk.lines.empty() && !blocks[i].sourceFile.empty()) anyLines = true;
+    size_t debugIndex = 0;
+    if (anyLines) { Section d; d.name = ".debug$S"; d.characteristics = kDebugFlags; debugIndex = secs.size(); secs.push_back(d); }
+    DebugFiles debugFiles;
+    std::string mainSyms;
+    std::vector<Reloc> mainSymRelocs;
+    std::vector<std::pair<std::string, std::vector<Reloc> > > mainLines;
+    if (anyLines) moduleSymbols(mainSyms, objName);
+    const size_t plainSections = secs.size();
     std::vector<SymbolEntry> symbols;
     std::map<std::string, size_t> symbolIndex;   // name -> index in 'symbols'
     // symbols of a COMDAT section follow its section symbol: collected per section, appended at the end
@@ -1046,8 +1384,13 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             secs.push_back(s);
             comdatSymbols.push_back(std::vector<SymbolEntry>());
             target = &secs.back(); base = 0; sectionNumber = static_cast<int>(secs.size());
-        } else { target = &secs[0]; base = static_cast<unsigned long>(secs[0].bytes.size()); sectionNumber = 1; }
-        target->bytes.insert(target->bytes.end(), c.bytes.begin(), c.bytes.end());   // no padding between functions, like ml64
+        } else {
+            // every function starts on a 16-byte boundary, the gap filled with int 3, as cl lays out code for
+            // speed (/Od, /O2): the section's own 16-byte alignment covers the first one and each COMDAT function
+            while (secs[0].bytes.size() % 16) secs[0].bytes.push_back(0xCC);
+            target = &secs[0]; base = static_cast<unsigned long>(secs[0].bytes.size()); sectionNumber = 1;
+        }
+        target->bytes.insert(target->bytes.end(), c.bytes.begin(), c.bytes.end());
         for (size_t r = 0; r < c.relocs.size(); ++r) { Reloc rl = c.relocs[r]; rl.offset += base; target->relocs.push_back(rl); }
         for (size_t s = 0; s < c.symbols.size(); ++s) {
             SymbolEntry f;
@@ -1060,8 +1403,67 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             mi.isFunction = true; mi.external = f.storageClass == 2;
             result.symbolList.push_back(mi);
         }
+        if (anyLines && !c.lines.empty() && !blocks[i].sourceFile.empty()) {
+            // the function's CodeView symbol and line table: in the associative .debug$S of a COMDAT function, in the
+            // module's for one of .text
+            const unsigned long codeSize = static_cast<unsigned long>(c.bytes.size());
+            const bool internal = !publics.count(blocks[i].name);
+            const unsigned long fileEntry = debugFiles.entry(blocks[i].sourceFile);
+            if (blocks[i].comdat) {
+                Section d; d.name = ".debug$S"; d.characteristics = kDebugFlags | kComdat; d.selection = kSelectAssociative; d.associated = sectionNumber;
+                std::string syms; std::vector<Reloc> symRelocs;
+                procedureSymbols(syms, symRelocs, blocks[i].name, blocks[i].displayName, codeSize, internal);
+                std::vector<std::pair<std::string, std::vector<Reloc> > > tables(1);
+                tables[0].first = lineTable(tables[0].second, blocks[i].name, fileEntry, codeSize, c.lines);
+                fillDebugSection(d, syms, symRelocs, tables, 0);
+                secs.push_back(d);
+                comdatSymbols.push_back(std::vector<SymbolEntry>());
+            } else {
+                procedureSymbols(mainSyms, mainSymRelocs, blocks[i].name, blocks[i].displayName, codeSize, internal);
+                mainLines.push_back(std::make_pair(std::string(), std::vector<Reloc>()));
+                mainLines.back().first = lineTable(mainLines.back().second, blocks[i].name, fileEntry, codeSize, c.lines);
+            }
+        }
+        if (!blocks[i].frame || blocks[i].xdata.empty()) continue;
+        // UNWIND_INFO ($unwind$f) and RUNTIME_FUNCTION ($pdata$f: begin, end, unwind info as image-relative
+        // addresses), named as cl names them; for a COMDAT function in sections that go with its code
+        const std::string& fn = blocks[i].name;
+        const std::string names[2] = { "$unwind$" + fn, "$pdata$" + fn };
+        for (int part = 0; part < 2; ++part) {
+            size_t si;
+            if (blocks[i].comdat) {
+                Section s; s.name = part ? ".pdata" : ".xdata"; s.characteristics = kUnwindFlags | kComdat;
+                s.selection = kSelectAssociative; s.associated = sectionNumber;
+                si = secs.size(); secs.push_back(s);
+                comdatSymbols.push_back(std::vector<SymbolEntry>());
+            } else si = part ? pdataIndex : xdataIndex;
+            Section& sec = secs[si];
+            const unsigned long at = static_cast<unsigned long>(sec.bytes.size());
+            if (part == 0) {
+                sec.bytes.insert(sec.bytes.end(), blocks[i].xdata.begin(), blocks[i].xdata.end());
+                for (size_t r = 0; r < blocks[i].xdataRelocs.size(); ++r) { Reloc rl = blocks[i].xdataRelocs[r]; rl.offset += at; sec.relocs.push_back(rl); }
+            }
+            else {
+                const unsigned long addend[3] = { 0, static_cast<unsigned long>(c.bytes.size()), 0 };
+                const std::string relocTo[3] = { fn, fn, names[0] };
+                for (int k = 0; k < 3; ++k) {
+                    for (int b = 0; b < 4; ++b) sec.bytes.push_back(static_cast<unsigned char>((addend[k] >> (8 * b)) & 0xFF));
+                    Reloc rl; rl.offset = at + 4 * static_cast<unsigned long>(k); rl.symbol = relocTo[k]; rl.type = RelAddr32Nb;
+                    sec.relocs.push_back(rl);
+                }
+            }
+            SymbolEntry u;
+            u.name = names[part]; u.value = at; u.section = static_cast<int>(si + 1); u.type = 0; u.storageClass = 3; u.isSection = false; u.selection = 0;
+            if (symbolIndex.count(u.name)) { result.errors.push_back("duplicate symbol " + u.name); continue; }
+            symbolIndex[u.name] = 0;
+            if (blocks[i].comdat) comdatSymbols.back().push_back(u); else plainSymbols.push_back(u);
+            CoffSymbolInfo mi; mi.name = u.name; mi.section = u.section; mi.offset = at;
+            mi.size = static_cast<unsigned long>(sec.bytes.size()) - at; mi.isFunction = false; mi.external = false;
+            result.symbolList.push_back(mi);
+        }
     }
     result.functions = static_cast<int>(blocks.size());
+    std::map<std::string, int> dataSectionOf;   // a data symbol -> its section (for the associative items that follow it)
     for (size_t p = 0; p < pieces.size(); ++p) {
         DataPiece& dp = *pieces[p];
         Chunk& c = dp.chunk;
@@ -1069,7 +1471,13 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
         Section* target;
         int sectionNumber;
         if (dp.comdat) {
-            Section s; s.name = dp.kind == 2 ? ".data" : ".rdata"; s.characteristics = (dp.kind == 2 ? kDataFlags : kRdataFlags) | kComdat; s.selection = kSelectAny;
+            // a COMDAT item of .data, .rdata or .CRT$XCU (the entry of a COMDAT variable's dynamic initializer, kept or
+            // dropped with the variable's own section, as cl emits it, so that /OPT:REF keeps the one the program uses)
+            Section s; s.name = dp.kind == 2 ? ".data" : dp.kind == 4 ? ".CRT$XCU" : ".rdata"; s.characteristics = (dp.kind == 2 ? kDataFlags : dp.kind == 4 ? kCrtFlags : kRdataFlags) | kComdat; s.selection = kSelectAny;
+            if (!dp.assoc.empty()) {
+                if (dataSectionOf.count(dp.assoc)) { s.selection = kSelectAssociative; s.associated = dataSectionOf[dp.assoc]; }
+                else result.errors.push_back("associative COMDAT item: no COMDAT data item named " + dp.assoc + " before it");
+            }
             secs.push_back(s);
             comdatSymbols.push_back(std::vector<SymbolEntry>());
             target = &secs.back(); sectionNumber = static_cast<int>(secs.size());
@@ -1085,7 +1493,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             f.storageClass = publics.count(f.name) ? 2 : 3; f.isSection = false; f.selection = 0;
             if (symbolIndex.count(f.name)) { result.errors.push_back("duplicate symbol " + f.name); continue; }
             symbolIndex[f.name] = 0;
-            if (dp.comdat) comdatSymbols.back().push_back(f); else plainSymbols.push_back(f);
+            if (dp.comdat) { comdatSymbols.back().push_back(f); dataSectionOf[f.name] = sectionNumber; } else plainSymbols.push_back(f);
             CoffSymbolInfo mi; mi.name = f.name; mi.section = sectionNumber; mi.offset = f.value; mi.size = symbolSize(c, k);
             mi.isFunction = false; mi.external = f.storageClass == 2;
             result.symbolList.push_back(mi);
@@ -1093,6 +1501,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     }
     for (size_t p = 0; p < pieces.size(); ++p) delete pieces[p];
     pieces.clear();
+    if (anyLines) fillDebugSection(secs[debugIndex], mainSyms, mainSymRelocs, mainLines, &debugFiles);
     // a section whose contents need more than its default alignment (16, or 8 for the initialisers) says so in its
     // IMAGE_SCN_ALIGN_* bits, which the linker honours when it places the section (a 32- or 64-byte aligned variable)
     for (size_t s = 0; s < secs.size(); ++s) {
@@ -1105,13 +1514,12 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     }
     for (size_t s = 0; s < secs.size(); ++s) {
         CoffSectionInfo si; si.number = static_cast<int>(s + 1); si.name = secs[s].name; si.size = static_cast<unsigned long>(secs[s].bytes.size());
-        si.isCode = secs[s].isCode; si.comdat = (secs[s].characteristics & kComdat) != 0;
+        si.isCode = secs[s].isCode; si.comdat = (secs[s].characteristics & kComdat) != 0; si.debug = secs[s].name == ".debug$S";
         result.sectionList.push_back(si);
     }
     std::stable_sort(result.symbolList.begin(), result.symbolList.end(), SymbolInfoOrder());
 
     // symbol table: the plain section symbols, the plain symbols, each COMDAT section symbol with its symbols, the externals
-    const size_t plainSections = crtIndex ? 4 : 3;
     for (size_t s = 0; s < plainSections; ++s) {
         SymbolEntry se; se.name = secs[s].name; se.value = 0; se.section = static_cast<int>(s + 1); se.type = 0; se.storageClass = 3; se.isSection = true; se.selection = 0;
         symbols.push_back(se);
@@ -1190,7 +1598,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
             const Section& sec = secs[static_cast<size_t>(s.section - 1)];
             put32(o, static_cast<unsigned long>(sec.bytes.size()));
             put16(o, sec.relocs.size() >= 0xFFFF ? 0xFFFF : static_cast<unsigned long>(sec.relocs.size()));
-            put16(o, 0); put32(o, 0); put16(o, 0); put8(o, s.selection); put8(o, 0); put8(o, 0); put8(o, 0);
+            put16(o, 0); put32(o, 0); put16(o, static_cast<unsigned long>(sec.associated)); put8(o, s.selection); put8(o, 0); put8(o, 0); put8(o, 0);
         }
     }
     unsigned long sl = static_cast<unsigned long>(strings.size());
@@ -1200,7 +1608,7 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     unsigned long relocations = 0, dataBytes = 0, rdataBytes = 0;
     for (size_t s = 0; s < n; ++s) {
         relocations += static_cast<unsigned long>(secs[s].relocs.size());
-        if (secs[s].isCode) continue;
+        if (secs[s].isCode || secs[s].name == ".debug$S") continue;
         if (secs[s].name == ".data") dataBytes += static_cast<unsigned long>(secs[s].bytes.size()); else rdataBytes += static_cast<unsigned long>(secs[s].bytes.size());
     }
     result.relocations = static_cast<int>(relocations);
@@ -1213,14 +1621,21 @@ bool assembleCoff(const std::string& masmText, int threads, std::string& objectB
     return true;
 }
 
+bool assembleCoff(const std::string& masmText, int threads, std::string& objectBytes, CoffResult& result)
+{
+    return assembleCoffNamed(masmText, std::string(), threads, objectBytes, result);
+}
+
 bool writeCoffObject(const std::string& masmText, const std::string& objPath, int threads, CoffResult& result)
 {
     std::string bytes;
-    if (!assembleCoff(masmText, threads, bytes, result)) return false;
+    // S_OBJNAME holds the object's file name alone: an absolute path would make the object depend on where it is written
+    if (!assembleCoffNamed(masmText, objPath.substr(objPath.find_last_of("/\\") + 1), threads, bytes, result)) return false;
     std::ofstream out(objPath.c_str(), std::ios::binary);
-    if (!out) { result.errors.push_back("cannot write " + objPath); return false; }
+    if (!out) { result.errors.push_back("cannot write " + objPath); result.writeFailed = true; return false; }
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    return out.good();
+    if (!out.good()) { result.errors.push_back("cannot write " + objPath); result.writeFailed = true; return false; }
+    return true;
 }
 
 } // namespace cppparse

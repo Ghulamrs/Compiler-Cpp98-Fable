@@ -16,8 +16,9 @@
 // const methods, constructors/destructors/operators, the fundamental types,
 // pointers/references with cv-qualifiers, class/struct/union/enum types,
 // template instances with type and integer arguments, name and type
-// back-references. Not covered: function pointer parameters beyond the
-// simple case, member pointers, varargs.
+// back-references; the version 6 mangler (MangleSema.cpp) also covers
+// pointers to members and vcall thunks. Not covered: function pointer
+// parameters beyond the simple case, varargs.
 //
 // Strict C++98.
 #ifndef CPPPARSE_MANGLE_HPP
@@ -26,9 +27,10 @@
 #include "Types.hpp"
 
 #include <string>
+#include <vector>
 
 namespace cppparse {
-namespace sema { struct Symbol; }
+namespace sema { struct Symbol; struct Type; }
 
 std::string msvcMangleFunction(const FunctionInfo& f, TypeTable& types);
 std::string msvcMangleVariable(const VariableInfo& v, TypeTable& types);   // globals and static data members
@@ -40,7 +42,37 @@ std::string msvcMangleSymbol(const sema::Symbol& fn);
 void        setMangleUnitId(unsigned long id);
 extern unsigned long g_mangleUnitId;
 std::string msvcMangleVariableSymbol(const sema::Symbol& v);
-std::string msvcMangleVtableSymbol(const sema::Symbol& c);
+// the dynamic initializer function of a COMDAT variable and the symbol of its .CRT$XCU entry, as cl names them
+std::string msvcMangleDynamicInitializer(const sema::Symbol& v);
+std::string msvcMangleInitializerEntry(const sema::Symbol& v);
+// a static local: "?n@?1??counterA@@YAHXZ@4HA", the variable in block <discriminator> (2: the function's body)
+std::string msvcMangleStaticLocal(const sema::Symbol& v, const sema::Symbol& fn, long discriminator);
+// a vftable; forBase names one of several (??_7D@@6BPB@@@: D's vftable for PB), 0 for a class with one
+std::string msvcMangleVtableSymbol(const sema::Symbol& c, const sema::Symbol* forBase = 0);
+// a vbtable, named by the bases of its path (??_8D@@7B@, ??_8VX@@7BVL@@@, ??_8R@@7BB@@P@@@)
+std::string msvcMangleVbtableSymbol(const sema::Symbol& c, const std::vector<sema::Symbol*>& path);
+// an adjustor thunk of a virtual function: ?f@D@@WBA@EAAHXZ, D::f`adjustor{16}'
+std::string msvcMangleThunkSymbol(const sema::Symbol& fn, long adjust);
+// cl's vcall thunk of the virtual function at slotOffset (8 per slot) of a class's vftable: ??_9P@@$B7AA, P::`vcall'{8}'
+std::string msvcMangleVcallThunk(const sema::Symbol& c, long slotOffset);
+// cl's return-adjusting thunk of the covariant override fn in the slot of root: fn as a non-virtual function with
+// root's return type, ?self@CD@@QEAAPEAUSB@@XZ
+std::string msvcMangleReturnThunk(const sema::Symbol& fn, const sema::Symbol& root);
+// cl's vtordisp thunk of an overrider in the vftable inside a virtual base: ?f@VL@@$4PPPPPPPM@7EBAHXZ (the vtordisp
+// at -4 before the base, then the adjustment 8)
+std::string msvcMangleVtordispThunk(const sema::Symbol& fn, long adjust);
+// cl's thread-safe-static guard of a function's index-th guarded static local: "?$TSS0@?1??f@@YAAEAUCnt@@XZ@4HA"
+std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index);
+// cl's RTTI: the name a type descriptor holds (".?AUD@@", ".H"), the type descriptor (??_R0?AUD@@@8), a class's
+// hierarchy descriptor (??_R3D@@8) and base class array (??_R2D@@8), a base class descriptor with its displacements
+// and attributes (??_R1BA@?0A@EA@C@@8: C at 16, no vbtable, attributes 0x40), and the complete object locator of a
+// vftable (??_R4D@@6BB@@@, named as the vftable ??_7D@@6BB@@@)
+std::string msvcRttiTypeName(const sema::Type* t);
+std::string msvcMangleTypeDescriptor(const sema::Type* t);
+std::string msvcMangleClassHierarchy(const sema::Symbol& c);
+std::string msvcMangleBaseClassArray(const sema::Symbol& c);
+std::string msvcMangleBaseClassDescriptor(const sema::Symbol& c, long mdisp, long pdisp, long vdisp, long attributes);
+std::string msvcMangleCompleteObjectLocator(const sema::Symbol& c, const sema::Symbol* forBase);
 
 } // namespace cppparse
 

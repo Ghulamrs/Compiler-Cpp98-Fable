@@ -136,11 +136,11 @@ std::string renderObjectMap(const std::string& title, const std::string& object,
     // the plain sections one per line; COMDAT sections (one per inline function, template instance or vtable)
     // grouped by name and class: the first and last section number, how many, and their total size
     s << " Start         Length     Name                   Class\n";
-    unsigned long code = 0, data = 0;
+    unsigned long code = 0, data = 0, debug = 0;
     for (size_t i = 0; i < r.sectionList.size(); ++i) {
         const CoffSectionInfo& c = r.sectionList[i];
-        if (c.isCode) code += c.size; else data += c.size;
-        if (!c.comdat) s << " " << address(c.number, 0) << " " << hexText(c.size, 8) << "H  " << pad(c.name, 22) << " " << (c.isCode ? "CODE" : "DATA") << "\n";
+        if (c.isCode) code += c.size; else if (c.debug) debug += c.size; else data += c.size;
+        if (!c.comdat) s << " " << address(c.number, 0) << " " << hexText(c.size, 8) << "H  " << pad(c.name, 22) << " " << (c.isCode ? "CODE" : c.debug ? "DEBUG" : "DATA") << "\n";
     }
     std::vector<std::string> groupOrder;
     std::map<std::string, std::pair<int, int> > groupRange;      // name/class -> first, last section number
@@ -148,7 +148,7 @@ std::string renderObjectMap(const std::string& title, const std::string& object,
     for (size_t i = 0; i < r.sectionList.size(); ++i) {
         const CoffSectionInfo& c = r.sectionList[i];
         if (!c.comdat) continue;
-        std::string key = pad(c.name, 22) + " " + (c.isCode ? "CODE" : "DATA");
+        std::string key = pad(c.name, 22) + " " + (c.isCode ? "CODE" : c.debug ? "DEBUG" : "DATA");
         if (!groupRange.count(key)) { groupOrder.push_back(key); groupRange[key] = std::make_pair(c.number, c.number); groupSize[key] = std::make_pair(0, 0UL); }
         groupRange[key].second = c.number;
         groupSize[key].first++;
@@ -161,7 +161,7 @@ std::string renderObjectMap(const std::string& title, const std::string& object,
     }
     int functions = 0, publics = 0;
     for (size_t i = 0; i < r.symbolList.size(); ++i) { if (r.symbolList[i].isFunction) ++functions; if (r.symbolList[i].external) ++publics; }
-    s << "\n Totals: code " << code << " bytes, data " << data << " bytes; " << r.symbolList.size() << " symbols ("
+    s << "\n Totals: code " << code << " bytes, data " << data << " bytes, debug " << debug << " bytes (CodeView, kept by link /DEBUG only); " << r.symbolList.size() << " symbols ("
       << functions << " functions), " << publics << " public, " << (r.symbolList.size() - static_cast<size_t>(publics)) << " static\n\n";
 
     s << " Publics by Value\n\n";

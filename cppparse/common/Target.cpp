@@ -23,6 +23,10 @@ Target makeWindows()
     t.predefines.push_back("_WIN32=1");
     t.predefines.push_back("_M_X64=100");
     t.predefines.push_back("_WIN64=1");
+    // what cl defines for the way cppparse builds programs: the static multithreaded CRT (libcmt, as /MT) and
+    // C++ exceptions (as /EHsc); not _MSC_VER, which would promise MSVC's extensions
+    t.predefines.push_back("_MT=1");
+    t.predefines.push_back("_CPPUNWIND=1");
     t.hasBackEnd = true;
     return t;
 }

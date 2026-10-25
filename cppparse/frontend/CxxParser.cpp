@@ -50,7 +50,7 @@ bool Parser::isDeclSpecKeyword(const std::string& s)
 }
 
 Parser::Parser(const std::vector<PpToken>& tokens, CxxArena& arena)
-    : m_toks(tokens), m_arena(arena), m_pos(0), m_tentative(0), m_errors(0), m_templateDepth(0), m_noGreater(0)
+    : m_toks(tokens), m_arena(arena), m_pos(0), m_tentative(0), m_errors(0), m_templateDepth(0), m_noGreater(0), m_declInitFailed(false)
 {
     PpToken end;
     end.kind = PpToken::End;
@@ -86,7 +86,7 @@ void Parser::skipTo(const char* a, const char* b)
         if (cur().kind == PpToken::Punct) {
             if (t == "(" || t == "[" || t == "{") { ++depth; advance(); continue; }
             if (t == ")" || t == "]") { if (depth > 0) --depth; advance(); continue; }
-            if (t == "}") { if (depth > 0) { --depth; advance(); continue; } if (std::string(b) == "}") return; advance(); continue; }
+            if (t == "}") { if (depth > 0) { --depth; advance(); if (depth == 0) return; continue; } if (std::string(b) == "}") return; advance(); continue; }
             if (depth == 0 && (t == a || t == b)) { if (t == ";") advance(); return; }
         }
         advance();
@@ -104,13 +104,15 @@ void Parser::skipBalanced()
     } while (depth > 0 && !atEnd());
 }
 
-int Parser::declspecArguments()
+int Parser::declspecArguments(bool* noreturn)
 {
     if (!at("(")) return 0;
     int align = 0;
     const size_t start = m_pos;
     skipBalanced();
-    // __declspec( align(N) ) among other attributes such as dllimport or noinline
+    // __declspec( align(N) ) among other attributes such as dllimport or noinline; noreturn is kept for the flow
+    // analysis (a call of such a function ends the control path, as cl knows for abort and exit)
+    for (size_t p = start + 1; p < m_pos; ++p) if (noreturn && m_toks[p].kind == PpToken::Ident && m_toks[p].text == "noreturn") *noreturn = true;
     for (size_t p = start + 1; p + 3 < m_pos; ++p)
         if (m_toks[p].kind == PpToken::Ident && m_toks[p].text == "align" && m_toks[p + 1].is("(") && m_toks[p + 2].kind == PpToken::Number && m_toks[p + 3].is(")")) {
             int n = std::atoi(m_toks[p + 2].text.c_str());
@@ -163,6 +165,12 @@ void Parser::declareNamespace(const std::string& name)
     if (!m_scopes.back().name.empty() && !m_qualifierStack.empty()) m_named[m_qualifierStack.back()].namespaces.insert(name);
 }
 
+void Parser::declareOther(const std::string& name)
+{
+    if (name.empty() || m_scopes.empty()) return;
+    m_scopes.back().others.insert(name);
+}
+
 std::string Parser::currentClassName() const
 {
     for (size_t i = m_scopes.size(); i > 0; --i) if (m_scopes[i - 1].isClass) return m_scopes[i - 1].name;
@@ -170,20 +178,22 @@ std::string Parser::currentClassName() const
 }
 
 // the scope a qualifier (the first 'parts' components of n) denotes, or 0 when unknown
-const Parser::NamedScope* Parser::findNamedScope(const QualifiedName& n, size_t parts) const
+const Parser::NamedScope* Parser::findNamedScope(const QualifiedName& n, size_t parts, std::string* key) const
 {
     std::string rel;
     for (size_t i = 0; i < parts; ++i) { if (i) rel += "::"; rel += n.parts[i].ident; }
     if (n.global) {
         std::map<std::string, NamedScope>::const_iterator it = m_named.find(rel);
+        if (it != m_named.end() && key) *key = it->first;
         return it == m_named.end() ? 0 : &it->second;
     }
     // relative to each enclosing named scope, innermost first, then global
     for (size_t q = m_qualifierStack.size(); q > 0; --q) {
         std::map<std::string, NamedScope>::const_iterator it = m_named.find(m_qualifierStack[q - 1] + "::" + rel);
-        if (it != m_named.end()) return &it->second;
+        if (it != m_named.end()) { if (key) *key = it->first; return &it->second; }
     }
     std::map<std::string, NamedScope>::const_iterator it = m_named.find(rel);
+    if (it != m_named.end() && key) *key = it->first;
     return it == m_named.end() ? 0 : &it->second;
 }
 
@@ -196,6 +206,7 @@ bool Parser::isTypeName(const QualifiedName& n) const
         for (size_t i = m_scopes.size(); i > 0; --i) {
             const Scope& s = m_scopes[i - 1];
             if (s.types.count(last.ident)) return true;      // class templates are in 'types' too; function templates only in 'templates'
+            if (s.others.count(last.ident)) return false;    // a variable, parameter or function of this scope hides the type further out
         }
         return false;
     }
@@ -213,7 +224,12 @@ bool Parser::isTemplateName(const QualifiedName& n) const
     if (n.parts.empty()) return false;
     const std::string& id = n.parts.back().ident;
     if (n.parts.size() == 1 && !n.global) {
-        for (size_t i = m_scopes.size(); i > 0; --i) if (m_scopes[i - 1].templates.count(id)) return true;
+        // the innermost scope that declares the name decides: a local variable, a parameter or a function
+        // hides a template of the same name further out ("int count = 0; count < n" after <algorithm>)
+        for (size_t i = m_scopes.size(); i > 0; --i) {
+            if (m_scopes[i - 1].templates.count(id)) return true;
+            if (m_scopes[i - 1].others.count(id)) return false;
+        }
         return false;
     }
     const NamedScope* ns = findNamedScope(n, n.parts.size() - 1);
@@ -392,9 +408,9 @@ bool Parser::declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef)
         if (w == "inline") { spec.isInline = true; advance(); any = true; continue; }
         if (w == "const") { spec.isConst = true; advance(); any = true; continue; }
         if (w == "volatile") { spec.isVolatile = true; advance(); any = true; continue; }
-        if (w == "__declspec") {                                // Microsoft extension: align(N) is kept, the rest ignored
+        if (w == "__declspec") {                                // Microsoft extension: align(N) and noreturn are kept, the rest ignored
             advance();
-            int a = declspecArguments();
+            int a = declspecArguments(&spec.noreturn);
             if (a > spec.align) spec.align = a;
             any = true; continue;
         }
@@ -522,9 +538,15 @@ bool Parser::declaratorSuffixes(Declarator& d, bool inParams)
             if (maybeInit) --m_tentative;
             if (!params) {
                 if (!maybeInit) return false;
+                m_pos = parenAt; m_diags.resize(errs); m_errors = errorsBefore;
+                // "int f(int a { ... }": the parenthesis held parameters after all when the failure is at a '{' or
+                // the end of the statement (no initializer argument has one); the parameter list's error is reported
+                size_t probe = m_pos; ++m_tentative; advance(); { DeclaratorPart q; q.kind = DeclaratorPart::Function; parameterList(q); } --m_tentative;
+                const bool parameters = at("{") || at(";") || atEnd();
+                m_pos = probe; m_diags.resize(errs); m_errors = errorsBefore;
+                if (parameters) { advance(); parameterList(p); return false; }
                 // "T x(U(1, 2), v)": the parenthesis starts with a type name but holds initializer arguments, not
                 // parameters; the initializer is read after the declarator
-                m_pos = parenAt; m_diags.resize(errs); m_errors = errorsBefore;
                 break;
             }
             while (at("const") || at("volatile")) { if (at("const")) p.isConst = true; else p.isVolatile = true; advance(); }
@@ -650,6 +672,7 @@ void Parser::registerDeclaredNames(const DeclSpec& spec, const Declarator& d)
 {
     if (d.name.parts.size() != 1 || d.name.global) return;
     if (spec.isTypedef) declareType(d.name.parts[0].ident);
+    else declareOther(d.name.parts[0].ident);
 }
 
 bool Parser::braceElements(std::vector<Expr*>& out)
@@ -704,6 +727,17 @@ bool Parser::memInitializers(Decl* fn)
     return true;
 }
 
+// a declarator, or in a class an unnamed bit-field ": width" (": 0" closes the bit-field allocation unit)
+bool Parser::memberDeclarator(Declarator& d, bool inClass)
+{
+    if (inClass && at(":")) {
+        advance();
+        d.bitfield = conditional();
+        return d.bitfield != 0;
+    }
+    return declarator(d, false, true, false);
+}
+
 Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, bool firstParsed, Declarator* first)
 {
     Declarator* d = first;
@@ -715,7 +749,7 @@ Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, boo
             return decl;
         }
         d = m_arena.declarator();
-        if (!declarator(*d, false, true, false)) return 0;
+        if (!memberDeclarator(*d, inClass)) return 0;
     }
     // function definition?
     if (d->isFunction() && (at("{") || at(":") || at("try"))) {
@@ -732,7 +766,11 @@ Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, boo
             m_scopes.push_back(s); pushedClass = true;
         }
         pushScope("", false);
-        // parameter names are not types; template parameters of the enclosing template are already in scope
+        // parameter names are not types; template parameters of the enclosing template are already in scope.
+        // They hide templates of the same name in the body
+        if (const DeclaratorPart* fp = d->functionPart())
+            for (size_t k = 0; k < fp->params.size(); ++k)
+                if (fp->params[k]->decl && fp->params[k]->decl->name.parts.size() == 1) declareOther(fp->params[k]->decl->name.parts[0].ident);
         if (accept(":")) { if (!memInitializers(fn)) { popScope(); if (pushedClass) m_scopes.pop_back(); return 0; } }
         if (at("try")) { Loc tl = loc(); advance(); if (accept(":")) { if (!memInitializers(fn)) { popScope(); if (pushedClass) m_scopes.pop_back(); return 0; } } fn->body = tryBlock(tl); }
         else fn->body = compound();
@@ -747,14 +785,13 @@ Decl* Parser::simpleOrFunction(bool inClass, const DeclSpec& spec, Loc here, boo
         InitDeclarator id;
         id.decl = d;
         if (d->isFunction() && at("=") && peek().text == "0" && peek(2).text == ";") { advance(); advance(); id.pureVirtual = true; }
-        else if (!initializer(id.init)) return 0;
+        else if (!initializer(id.init)) { if (!d->name.parts.empty()) m_declInitFailed = true; return 0; }
         registerDeclaredNames(spec, *d);
         decl->declarators.push_back(id);
         if (!accept(",")) break;
         d = m_arena.declarator();
-        if (!declarator(*d, false, true, false)) return 0;
+        if (!memberDeclarator(*d, inClass)) return 0;
     }
-    (void)inClass;
     if (!expect(";", "after the declaration")) return 0;
     return decl;
 }
@@ -790,10 +827,63 @@ Decl* Parser::classSpecifier(DeclSpec& spec, Loc here)
     }
     if (!expect("{", "after the class head")) return 0;
     c->isDefinition = true;
+    // a nested class defined out of its class ("struct Outer<T>::Inner { ... }"): the body sees the enclosing class's
+    // type names and its own names are registered under the enclosing class, as in the in-class form
+    bool pushedOwner = false;
+    if (c->name.parts.size() > 1) {
+        std::string ownerKey;
+        const NamedScope* owner = findNamedScope(c->name, c->name.parts.size() - 1, &ownerKey);
+        if (owner) {
+            Scope s; s.name = ""; s.isClass = true;
+            s.types = owner->types; s.templates = owner->templates; s.namespaces = owner->namespaces;
+            m_scopes.push_back(s);
+            m_qualifierStack.push_back(ownerKey);
+            pushedOwner = true;
+        }
+    }
     // members: inside the class the simple name is a named scope
     std::string scopeName = simple.empty() ? "(anonymous)" : simple;
     pushScope(scopeName, true);
     declareType(simple);
+    {
+        // the names of the member functions declared anywhere in the body (ident '(' at the body's own level, outside
+        // parentheses, after a type, a declarator operator or a specifier): a member hides a type of the same name
+        // of an enclosing scope in the member bodies, which see the whole class (3.3.6)
+        int depth = 0, parens = 0;
+        for (size_t p = m_pos; p < m_toks.size(); ++p) {
+            const PpToken& t = m_toks[p];
+            if (t.kind == PpToken::Punct) {
+                if (t.text == "{") ++depth; else if (t.text == "}") { if (depth == 0) break; --depth; }
+                else if (depth == 0 && (t.text == "(" || t.text == "[")) ++parens;
+                else if (depth == 0 && (t.text == ")" || t.text == "]")) { if (parens > 0) --parens; }
+                continue;
+            }
+            if (depth != 0 || parens != 0 || t.kind != PpToken::Ident || p + 1 >= m_toks.size() || p == 0) continue;
+            // the names of the nested types declared anywhere in the body (3.3.6: a member body sees them all): a nested
+            // class or enum, and a typedef's name (the identifier before its ';' or '[', or before the ')' of "(*Fn)")
+            if ((t.text == "struct" || t.text == "class" || t.text == "union" || t.text == "enum") && p + 2 < m_toks.size() && m_toks[p + 1].kind == PpToken::Ident && !isKeyword(m_toks[p + 1].text) && (m_toks[p + 2].is("{") || m_toks[p + 2].is(";") || m_toks[p + 2].is(":"))) declareType(m_toks[p + 1].text);
+            if (t.text == "typedef") {
+                int d2 = 0, p2 = 0;
+                for (size_t q = p + 1; q < m_toks.size(); ++q) {
+                    const PpToken& u = m_toks[q];
+                    if (u.kind == PpToken::Punct) {
+                        if (u.text == "{") ++d2; else if (u.text == "}") { if (d2 == 0) break; --d2; } else if (u.text == "(") ++p2; else if (u.text == ")") { if (p2 > 0) --p2; }
+                        else if (u.text == ";" && d2 == 0 && p2 == 0) break;
+                        continue;
+                    }
+                    if (d2 != 0 || u.kind != PpToken::Ident || isKeyword(u.text) || q + 1 >= m_toks.size()) continue;
+                    const PpToken& after = m_toks[q + 1];
+                    if ((p2 == 0 && (after.is(";") || after.is("["))) || (p2 == 1 && after.is(")") && (m_toks[q - 1].is("*") || m_toks[q - 1].is("&")))) declareType(u.text);
+                }
+            }
+            if (!m_toks[p + 1].is("(")) continue;
+            if (t.text == simple || t.text == "operator" || isKeyword(t.text)) continue;
+            const PpToken& prev = m_toks[p - 1];
+            const bool afterDeclaratorPrefix = prev.kind == PpToken::Ident ? !(prev.text == "return" || prev.text == "new" || prev.text == "throw" || prev.text == "sizeof" || prev.text == "case" || prev.text == "typedef" || prev.text == "class" || prev.text == "struct" || prev.text == "union" || prev.text == "enum" || prev.text == "typename" || prev.text == "template" || prev.text == "namespace" || prev.text == "operator")
+                                              : (prev.kind == PpToken::Punct && (prev.text == "*" || prev.text == "&" || prev.text == ">"));
+            if (afterDeclaratorPrefix) declareOther(t.text);
+        }
+    }
     // the base classes' member type names are visible in the body, and through this class's name
     for (size_t b = 0; b < c->bases.size(); ++b) {
         const NamedScope* ns = findNamedScope(c->bases[b].name, c->bases[b].name.parts.size());
@@ -811,6 +901,7 @@ Decl* Parser::classSpecifier(DeclSpec& spec, Loc here)
         if (m) { m->access = access; c->members.push_back(m); }
     }
     popScope();
+    if (pushedOwner) { m_qualifierStack.pop_back(); m_scopes.pop_back(); }
     if (!expect("}", "here the end of the class")) return 0;
     spec.kind = DeclSpec::Class;
     spec.classDef = c;
@@ -1034,10 +1125,16 @@ Decl* Parser::declaration(bool inClass, Access& access)
             else if (atIdent() || at("::")) {
                 size_t e; bool ht;
                 if (qualifiedNameAhead(e, ht)) {
-                    // "X(" where X is the class, or "A::X(" / "A::~X(" / "A::X<T>::X("
+                    // "X(" where X is the class, or "A::X(" / "A::~X(" / "A::X<T>::X(": the names outside template
+                    // argument lists ("Box<T>::Box(" is a constructor of the class template Box)
                     size_t last = e; (void)last;
                     std::string lastName; std::string prevName;
-                    for (size_t p = m_pos; p < e; ++p) if (m_toks[p].kind == PpToken::Ident) { prevName = lastName; lastName = m_toks[p].text; }
+                    int depth = 0;
+                    for (size_t p = m_pos; p < e; ++p) {
+                        const PpToken& tk = m_toks[p];
+                        if (tk.kind == PpToken::Punct) { if (tk.text == "<") ++depth; else if (tk.text == ">") --depth; else if (tk.text == ">>") depth -= 2; continue; }
+                        if (depth == 0 && tk.kind == PpToken::Ident) { prevName = lastName; lastName = tk.text; }
+                    }
                     if (m_toks[e].text == "(" && (lastName == cls || (!prevName.empty() && (prevName == lastName)))) ctorLike = true;
                     if (m_toks[e].text == "::" && m_toks[e + 1].text == "~") ctorLike = true;
                     if (m_toks[e].text == "::" && m_toks[e + 1].text == "operator") ctorLike = true;
@@ -1117,13 +1214,24 @@ Stmt* Parser::declarationStatement()
     size_t errs = m_diags.size();
     int errorsBefore = m_errors;
     Loc here = loc();
+    const std::set<std::string> othersBefore = m_scopes.back().others;   // a failed attempt declares nothing
+    m_declInitFailed = false;
     ++m_tentative;
     DeclSpec spec;
     bool any = declSpecifiers(spec, false, true);
     Decl* d = 0;
     if (any && spec.hasType()) d = simpleOrFunction(false, spec, here, false, 0);
     --m_tentative;
-    if (!d) { m_pos = save; m_diags.resize(errs); m_errors = errorsBefore; return 0; }
+    if (!d && m_declInitFailed && spec.hasType() && m_tentative == 0) {
+        // "int v = 3 +;": the specifiers and a named declarator made it a declaration; its initializer's error is
+        // the one to report, not that of the expression statement the text is not
+        m_pos = save; m_diags.resize(errs); m_errors = errorsBefore; m_scopes.back().others = othersBefore;
+        DeclSpec again;
+        if (declSpecifiers(again, false, true)) simpleOrFunction(false, again, here, false, 0);
+        skipTo(";", "}");
+        return m_arena.stmt(Stmt::Error, here);
+    }
+    if (!d) { m_pos = save; m_diags.resize(errs); m_errors = errorsBefore; m_scopes.back().others = othersBefore; return 0; }
     Stmt* s = m_arena.stmt(Stmt::DeclStmt, here);
     s->decl = d;
     return s;
@@ -1150,6 +1258,7 @@ bool Parser::condition(Stmt* s)
             InitDeclarator id; id.decl = d; id.init.kind = Initializer::Assign; id.init.args.push_back(e);
             decl->declarators.push_back(id);
             s->decl = decl;
+            registerDeclaredNames(spec, *d);
             return true;
         }
         m_pos = save; m_diags.resize(errs); m_errors = eb;
@@ -1425,7 +1534,7 @@ Expr* Parser::unary()
             return u;
         }
         if (op == "(") { Expr* c; if (tryCastExpr(c)) return c; }
-        if (op == "::" && (peek().text == "new" || peek().text == "delete")) advance();
+        if (op == "::" && (peek().text == "new" || peek().text == "delete")) { advance(); Expr* g = unary(); if (g && (g->kind == Expr::New || g->kind == Expr::Delete)) g->globalScope = true; return g; }
     }
     if (cur().kind == PpToken::Ident) {
         const std::string& w = cur().text;
@@ -1564,8 +1673,9 @@ Expr* Parser::primary()
     case PpToken::Char: { Expr* e = m_arena.expr(Expr::CharLit, here); e->text = t.text; advance(); return e; }
     case PpToken::String: {
         Expr* e = m_arena.expr(Expr::StringLit, here); e->text = t.text; advance();
-        // adjacent literals concatenate: the closing quote of one and the opening quote of the next go
-        while (cur().kind == PpToken::String && e->text.size() >= 2 && cur().text.size() >= 2) { e->text = e->text.substr(0, e->text.size() - 1) + cur().text.substr(1); advance(); }
+        // adjacent literals concatenate: kept as written, one space apart, since each piece's escapes are decoded
+        // on their own ("\x41" "b" is "Ab"; stringLiteralUnits)
+        while (cur().kind == PpToken::String) { e->text += " " + cur().text; advance(); }
         return e;
     }
     case PpToken::Punct:
@@ -1620,6 +1730,7 @@ Expr* Parser::primary()
             if (!callArguments(e->kids)) return 0;
             return e;
         }
+        if (t.text == "operator") break;   // "operator new[](n)", "operator delete(p)": the allocation functions called by name
         if (isKeyword(t.text)) { error("unexpected keyword"); return 0; }
         break;
     default:

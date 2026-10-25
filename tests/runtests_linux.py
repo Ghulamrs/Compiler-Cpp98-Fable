@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Linux port of the portable parts of sandbox/build-cppparse.ps1.
 # Checks that need cl / ml64 / link / dumpbin are reported as SKIP.
-import os, re, subprocess, sys, glob
+import os, re, subprocess, sys, glob, struct
 
 EXE = os.path.abspath(sys.argv[1])
 CPP = os.path.abspath(sys.argv[2])
@@ -36,6 +36,18 @@ def rd(p):
 
 def mk(d): os.makedirs(d, exist_ok=True)
 
+def coffSection(obj, number):
+    # the raw bytes of section `number` (1-based) of a COFF object, or None
+    try:
+        with open(obj, "rb") as f: data = f.read()
+        count, = struct.unpack_from("<H", data, 2)
+        optional, = struct.unpack_from("<H", data, 16)
+        if number < 1 or number > count: return None
+        size, pointer = struct.unpack_from("<II", data, 20 + optional + 40 * (number - 1) + 16)
+        return data[pointer:pointer + size]
+    except (IOError, struct.error):
+        return None
+
 def mapcheck(name, objname=None):
     # port of Test-ObjectMap; dumpbin /symbols is replaced by objdump -t
     path = "out/x64/%s.map" % name; probs = []
@@ -68,10 +80,23 @@ def mapcheck(name, objname=None):
         for i, x in enumerate(lst):
             limit = lst[i + 1]['off'] if i + 1 < len(lst) else sections[sec][0]
             if x['off'] + x['size'] > limit: probs.append("%s ends beyond %d" % (x['sym'], limit))
-        if sections[sec][1].startswith('.text'):
-            tot = sum(x['size'] for x in lst)
-            if tot != sections[sec][0]: probs.append("section %d: functions add up to %d, section has %d" % (sec, tot, sections[sec][0]))
     obj = "out/x64/%s.obj" % (objname or name)
+    for sec in set(x['sec'] for x in syms):
+        if sec not in sections or not sections[sec][1].startswith('.text'): continue
+        # the functions fill the code section, except that each one starts on a 16-byte boundary with the gap
+        # before it filled with int 3 (0xCC), as cl lays out code
+        lst = sorted([x for x in syms if x['sec'] == sec and x['type'] == 'function'], key=lambda x: x['off'])
+        raw = coffSection(obj, sec)
+        at = 0
+        for x in lst:
+            gap = x['off'] - at
+            if gap < 0 or gap > 15 or (gap and x['off'] % 16):
+                probs.append("section %d: %s starts at %d, the previous function ends at %d" % (sec, x['sym'], x['off'], at)); break
+            if gap and (raw is None or raw[at:x['off']] != b'\xcc' * gap):
+                probs.append("section %d: the %d bytes before %s are not int 3 padding" % (sec, gap, x['sym'])); break
+            at = x['off'] + x['size']
+        else:
+            if at != sections[sec][0]: probs.append("section %d: functions end at %d, section has %d" % (sec, at, sections[sec][0]))
     t = subprocess.run(["objdump", "-t", obj], capture_output=True, text=True).stdout
     real = {}
     for m in re.finditer(r'\(sec\s+(-?\d+)\)\(fl [^)]*\)\(ty\s+\w+\)\(scl\s+(\d+)\) \(nx \d+\) 0x([0-9a-f]+) (\S+)', t):
@@ -79,7 +104,7 @@ def mapcheck(name, objname=None):
     for x in syms:
         if x['sym'] not in real: probs.append(x['sym'] + " is not in the object"); continue
         if real[x['sym']] != (x['sec'], x['off']): probs.append("%s: map %d:%x, object %d:%x" % ((x['sym'], x['sec'], x['off']) + real[x['sym']]))
-    ok(not probs, "%s.map: %d symbols; flags, by-name list, sizes fill sections, addresses match objdump -t" % (name, len(syms)))
+    ok(not probs, "%s.map: %d symbols; flags, by-name list, sizes fill sections (16-byte int 3 padding), addresses match objdump -t" % (name, len(syms)))
     for p_ in probs[:8]: print("       " + p_)
 
 # ---- 1
@@ -342,6 +367,79 @@ skip("link + run of driver-lib, cl name comparison for sample-mangle (Windows-on
 test("Test 16: self-hosting constructs")
 for l in (0, 2, 3): c6("self%d" % l, "../examples/sample-self/self.cpp", l, ["-I", "../include"])
 skip("link + run of driver-self (Windows-only)")
+
+# ---- 17: optimiser regressions; each case is read in the IR after optimisation (out/fix/<name>-ir6.txt)
+def opt6(name, src, lvl):
+    mk("out/fix")
+    rc, out = run("--compile6", "-O%d" % lvl, "-o", "out/fix", "-n", name, src)
+    good = 'sema: 0 error' in out and os.path.exists("out/fix/%s-ir6.txt" % name)
+    ok(good, "%s -O%d compiles (exit %d)" % (src.split('/')[-1], lvl, rc))
+    if not good: print("\n".join("       " + l for l in out.splitlines()[-8:]))
+def optimised(name, fn):
+    for part in rd("out/fix/%s-ir6.txt" % name).split("=" * 80):
+        if ("function %s(" % fn) in part:
+            i = part.find("--- after -O"); return part[i:] if i >= 0 else ""
+    return ""
+
+test("Test 17: optimiser regressions")
+for l in (1, 2, 3):
+    opt6("storeload%d" % l, "../examples/sample-optfix/storeload.cpp", l)
+    f = optimised("storeload%d" % l, "storeThenLocal")
+    ok(f and 'ret #1' not in f and ('ret #2' in f or 'loadmem' in f), "storeload -O%d: *p after x = 2 is not the 1 stored before" % l)
+def blockOf(text, pattern):
+    # the label of the block holding the first instruction that matches pattern ("" when none does)
+    label = ""
+    for line in text.splitlines():
+        m = re.match(r'^B\d+:\s+;\s*(\S+)', line)
+        if m: label = m.group(1)
+        elif re.search(pattern, line): return label
+    return ""
+for l in (2, 3):
+    opt6("licmdiv%d" % l, "../examples/sample-optfix/licmdiv.cpp", l)
+    g = blockOf(optimised("licmdiv%d" % l, "guardedDivide"), r'bin sdiv')
+    ok(g == "if.then", "licmdiv -O%d: the guarded 100 / d stays under its if (in %s)" % (l, g or "none"))
+    z = blockOf(optimised("licmdiv%d" % l, "zeroTripDivide"), r'bin sdiv')
+    ok(z == "for.body", "licmdiv -O%d: 100 / d stays in a body that may run zero times (in %s)" % (l, z or "none"))
+    c = blockOf(optimised("licmdiv%d" % l, "constantDivide"), r'bin sdiv \S+, #4')
+    ok(c == "entry", "licmdiv -O%d: k / 4 is still hoisted out of the loop (in %s)" % (l, c or "none"))
+def undefinedTemps(text):
+    # temps an instruction reads that no instruction of the function defines
+    defined = set(re.findall(r'(?m)^\s+t(\d+) = ', text))
+    used = set()
+    for line in text.splitlines():
+        body = line.split(';')[0]
+        m = re.match(r'^\s+(?:t\d+ = )?(.*)$', body)
+        if m and not re.match(r'^B\d+:', line.strip()): used |= set(re.findall(r'\bt(\d+)\b', m.group(1)))
+    return sorted(used - defined, key=int)
+for l in (2, 3):
+    opt6("deadphi%d" % l, "../examples/sample-optfix/deadphi.cpp", l)
+    a = optimised("deadphi%d" % l, "deadArm")
+    ok(a and not undefinedTemps(a) and re.search(r'bin add t\d+, #1', a) and not re.search(r'#5', a),
+       "deadphi -O%d: deadArm returns x + 1 (undefined temps: %s)" % (l, " ".join("t" + t for t in undefinedTemps(a)) or "none"))
+    b = optimised("deadphi%d" % l, "deadArmConstant")
+    ok('ret #7' in b, "deadphi -O%d: deadArmConstant folds to ret #7" % l)
+opt6("unroll3", "../examples/sample-optfix/unrollcontinue.cpp", 3)
+for fn, want in [("continueToHeader", 8), ("continueToStep", 4)]:
+    t = optimised("unroll3", fn)
+    ok('ret #%d' % want in t, "unrollcontinue -O3: %s unrolls and folds to ret #%d" % (fn, want))
+for fn, wrong in [("continueSkipsStep", 3), ("stepInInnerLoop", 2)]:
+    t = optimised("unroll3", fn)
+    ok(t and 'ret #%d' % wrong not in t and not undefinedTemps(t), "unrollcontinue -O3: %s is not unrolled to ret #%d" % (fn, wrong))
+def volatiles(text, op):
+    return len(re.findall(r'(?m)^\s+(?:t\d+ = )?%s .*\bvolatile\b' % op, text))
+for l in (2, 3):
+    opt6("volatile%d" % l, "../examples/sample-optfix/volatile.cpp", l)
+    g = optimised("volatile%d" % l, "globalTwice")
+    ok(volatiles(g, 'storeglobal') == 2 and volatiles(g, 'loadglobal') == 2, "volatile -O%d: globalTwice keeps two stores and two loads" % l)
+    ok(volatiles(optimised("volatile%d" % l, "localStores"), 'storelocal') >= 2, "volatile -O%d: localStores keeps the stores to spin" % l)
+    ok(volatiles(optimised("volatile%d" % l, "localRead"), 'loadlocal') == 2, "volatile -O%d: localRead reads x twice" % l)
+    t = optimised("volatile%d" % l, "throughPointer")
+    ok(volatiles(t, 'loadmem') == 1 and 'ret #1' not in t, "volatile -O%d: throughPointer reads *p back" % l)
+    for fn in ("spinWait", "Device::wait"):
+        w = blockOf(optimised("volatile%d" % l, fn), r'loadmem .*volatile')
+        ok(w == "while.cond", "volatile -O%d: %s reads in the loop condition (in %s)" % (l, fn, w or "none"))
+    c = optimised("volatile%d" % l, "Device::command")
+    ok(volatiles(c, 'loadmem') == 2 and volatiles(c, 'storemem') == 2, "volatile -O%d: Device::command reads and writes control twice, no read-back" % l)
 
 print("\n=== Summary ===")
 T = [0, 0, 0]

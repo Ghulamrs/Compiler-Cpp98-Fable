@@ -21,10 +21,11 @@ namespace cppparse {
 // the layout of the assembled object, for the map file
 struct CoffSectionInfo {
     int           number;       // 1-based section number, as in the symbol table
-    std::string   name;         // .text, .data, .rdata, .CRT$XCU, .text$mn (a COMDAT function)
+    std::string   name;         // .text, .data, .rdata, .CRT$XCU, .text$mn (a COMDAT function), .debug$S
     unsigned long size;         // bytes
     bool          isCode;
     bool          comdat;
+    bool          debug;        // .debug$S: CodeView line tables and symbols, discarded by the linker without /DEBUG
 };
 
 struct CoffSymbolInfo {
@@ -40,9 +41,10 @@ struct CoffResult {
     int functions, instructions, relocations, symbols;
     unsigned long textBytes, dataBytes, rdataBytes, fileBytes;
     std::vector<std::string> errors;     // lines that could not be encoded (the file is not written)
+    bool writeFailed;                    // the object assembled, but the file could not be written (errors holds the path)
     std::vector<CoffSectionInfo> sectionList;   // every section, in section-number order
     std::vector<CoffSymbolInfo>  symbolList;    // every defined symbol, by section and offset
-    CoffResult() : functions(0), instructions(0), relocations(0), symbols(0), textBytes(0), dataBytes(0), rdataBytes(0), fileBytes(0) {}
+    CoffResult() : functions(0), instructions(0), relocations(0), symbols(0), textBytes(0), dataBytes(0), rdataBytes(0), fileBytes(0), writeFailed(false) {}
 };
 
 // assembles the MASM text and writes the object; false when a line could not be encoded or the file could not be written

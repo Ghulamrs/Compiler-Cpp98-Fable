@@ -57,7 +57,7 @@ private:
     int  deadStores(IrFunction& f);
     int  simplifyCfg(IrFunction& f);
     int  licm(IrFunction& f);
-    int  inlineCalls(IrFunction& f, int maxInsts);
+    int  inlineCalls(IrFunction& f, int maxInsts, int maxInstsInLoop);   // the second limit for calls inside a loop
     int  unrollLoops(IrFunction& f, int maxTrip, int maxBody);
     int  level1(IrFunction& f, std::vector<std::string>& log);
 

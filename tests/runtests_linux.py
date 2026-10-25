@@ -393,6 +393,13 @@ for l in (2, 3):
        "deadphi -O%d: deadArm returns x + 1 (undefined temps: %s)" % (l, " ".join("t" + t for t in undefinedTemps(a)) or "none"))
     b = optimised("deadphi%d" % l, "deadArmConstant")
     ok('ret #7' in b, "deadphi -O%d: deadArmConstant folds to ret #7" % l)
+opt6("unroll3", "../examples/sample-optfix/unrollcontinue.cpp", 3)
+for fn, want in [("continueToHeader", 8), ("continueToStep", 4)]:
+    t = optimised("unroll3", fn)
+    ok('ret #%d' % want in t, "unrollcontinue -O3: %s unrolls and folds to ret #%d" % (fn, want))
+for fn, wrong in [("continueSkipsStep", 3), ("stepInInnerLoop", 2)]:
+    t = optimised("unroll3", fn)
+    ok(t and 'ret #%d' % wrong not in t and not undefinedTemps(t), "unrollcontinue -O3: %s is not unrolled to ret #%d" % (fn, wrong))
 
 print("\n=== Summary ===")
 T = [0, 0, 0]

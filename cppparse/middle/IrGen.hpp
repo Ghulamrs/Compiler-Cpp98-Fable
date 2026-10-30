@@ -50,6 +50,9 @@ public:
     int functionsGenerated() const { return m_generated; }
     // builds a local that every return statement names directly in the caller's result object (cl /O2's NRVO)
     void setNamedReturnElision(bool on) { m_nrvoEnabled = on; }
+    // --eh=table: every object with a destructor gets a try region of its own whose landing pad destroys it (cl's
+    // states), no constructed flag; the setjmp model keeps the flags and one unwind handler per function
+    void setTableExceptions(bool on) { m_tableEh = on; }
     // the preprocessor's file table (Loc::file indexes it): every function's source file for the CodeView line tables
     void setFiles(const std::vector<std::string>& files);
     // members of class template instantiations whose bodies had errors (Symbol::instantiationFailed) that the
@@ -87,7 +90,10 @@ private:
         int               countSlot;   // freeKind 2: the local holding the element count
         bool              noCookie;    // freeKind 2: an array without a cookie (a sized operator delete[] gets count * size)
         int               freeSize;    // freeKind: the size of the object (of an element), for the sized global operators
-        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false), restIndex(-1), freeKind(0), freeCls(0), countSlot(-1), noCookie(false), freeSize(1) {}
+        int               index;       // its position in m_flagged
+        int               region;      // table model: the try region whose landing pad destroys the object; -1: none yet (the flag guards it), -2: retired on the normal path
+        bool              destroyOnExit;   // leaving its region on the normal path runs the destructor (not for unwindOnly cleanups except a destructor's parts)
+        Cleanup() : slot(-1), type(0), viaPointer(false), flag(-1), guarded(false), unwindOnly(false), baseSubobject(false), restIndex(-1), freeKind(0), freeCls(0), countSlot(-1), noCookie(false), freeSize(1), index(-1), region(-1), destroyOnExit(true) {}
     };
     struct ExitThunk {                 // destroys a global or static local at exit; registered with atexit once it is built
         sema::Symbol*     fn;
@@ -138,6 +144,7 @@ private:
     int  mpNull(const sema::Type* t, int line);
     int  mpAddressOf(sema::Symbol* m, const sema::Type* t, int line);
     int  mpConvert(int v, const sema::Type* from, const sema::Type* to, int line);
+    int  mpRemap(int v, const sema::Type* fu, const sema::Type* tu, sema::Symbol* fc, sema::Symbol* tc, int off, int line);   // into a class not sharing the vbptr
     int  mpCompare(int a, const sema::Type* ta, int b, const sema::Type* tb, bool ne, int line);
     int  mpToBool(int v, const sema::Type* t, int line);
     int  mpApply(cxx::Expr* e, int* code);
@@ -176,7 +183,6 @@ private:
     void bitField(LValue& lv, const sema::Symbol* field) const;   // marks lv as the bit-field field (when it is one)
     int  loadBits(const LValue& lv, const sema::Type* t, int line);
     void storeBits(const LValue& lv, int temp, const sema::Type* t, int line);
-    int  bitFieldResult(const LValue& lv, int v, const sema::Type* t, int line);
     int  bitConstant(unsigned long long v, const sema::Type* t, int line);
     void copyConstruct(const sema::Type* t, int dst, int src, int line);
     void copyAssign(const sema::Type* t, int dst, int src, int line);
@@ -208,6 +214,17 @@ private:
     void endFullExpr(int line, size_t from = 0);
     void keepTemporaries(size_t from);
     void handlerCleanups(size_t mark, int line);
+    // the table model's object regions on m_tryStack: an entry e <= -2 is the cleanup m_flagged[-2 - e]
+    static bool objectEntry(int e) { return e <= -2; }
+    static int  entryIndex(int e) { return -2 - e; }
+    void openRegion(int k, int line);                                   // a region and its landing pad for m_flagged[k], pushed on m_tryStack
+    void emitExits(size_t depth, int line);                             // leaves the regions above depth, newest first: tryend, and the destructor of an object whose region ends on the normal path
+    void popTo(size_t depth, int line);                                 // emitExits, and the entries are removed
+    void retireEntries(const std::vector<int>& ks, bool destroy, int line);   // ends the regions of these cleanups wherever they lie on the stack; the entries above them are closed and reopened
+    void retireEntry(int k, bool destroy, int line) { std::vector<int> ks(1, k); retireEntries(ks, destroy, line); }
+    void forgetEntry(int k);                                            // the cleanup leaves m_cleanups / m_temps
+    void openDeferredRegions(size_t from, int line);                    // regions for the flagged cleanups registered since m_flagged[from]
+    void emitPads(int line);                                            // the object regions' landing pads (finishFunction)
     int  beginTerminateRegion(int& term, int line);
     void endTerminateRegion(int tid, int term, int line);
     int  registerFree(int ptr, sema::Symbol* cls, bool array, int count, int elemSize, int line);
@@ -243,27 +260,40 @@ private:
     void storeVptr(sema::Symbol* cls, int objAddr, int line);
     int  vfptrThis(sema::Symbol* fn, int thisPtr, int line);
     static std::string vtableName(const sema::Symbol* cls, size_t t);
+    // cl's names of a class's vftables (MSVC 2012's scheme, as clang's MicrosoftVTableContext computes it): each vfptr's
+    // path from the class down to the class that introduced it, and the bases that tell it from another of the class's
+    struct VfPath {
+        std::vector<sema::Symbol*> chain;     // the subobjects from the class down to the one whose own vfptr it is
+        std::vector<bool>          virt;      // per step of chain: a virtual base
+        std::vector<sema::Symbol*> vbases;    // the virtual bases on the way
+        std::vector<sema::Symbol*> mangled;   // the bases that name the table apart (??_7D@@6BM@@@)
+        sema::Symbol*              next;      // the base added to mangled when the name would be another's
+        VfPath() : next(0) {}
+    };
+    void vfptrPaths(sema::Symbol* cls, std::vector<VfPath>& out, int depth) const;
+    int  vfPathOffset(const sema::Symbol* cls, const VfPath& p) const;   // the vfptr's offset in a complete cls
     // MSVC's vector deleting destructor of a virtual destructor (what its vtable slot holds): with bit 1 of its
     // flags clear it destroys the complete object, with bit 1 set the array whose count is in the cookie before
     // it, and frees it when bit 0 is set; made on first use, generated after the other functions
     std::string deletingDestructor(sema::Symbol* dtor, X86Module& x86, bool msvc);
     void genDeletingDestructors();
+    void emitVtables(sema::Symbol* cls);
     sema::Symbol* classOperatorDelete(sema::Symbol* cls, int depth, const char* name = "operator delete", size_t maxParams = 2) const;
     bool freeObject(sema::Symbol* cls, int p, int line);
     void freeArray(sema::Symbol* cls, int cookie, int count, int elemSize, int line, bool hasCookie = true);
     void freeGlobal(int p, int size, int line);
     void need(sema::Symbol* fn);
+    void needCallee(sema::Symbol* fn, bool virtualCall, int thisPtr);
     int  newLocal(const std::string& name, const sema::Type* t, bool addressTaken);
     int  subobject(int objAddr, const sema::Type* objType, const std::string& name, int offset, const sema::Type* partType, int line);
 
     // IR emission
     int    emit(IrInst inst);
     IrInst make(IrInst::Op op, const sema::Type* type, int line);
-    bool isVolatileAccess(const LValue& lv, const sema::Type* t) const;
     bool   terminated() const;
     void   br(int target, int line);
     void   condbr(int cond, int t, int f, int line);
-    int    constant(long v, const sema::Type* t, int line);
+    int    constant(long long v, const sema::Type* t, int line);   // a value outside the 32-bit immediates of a 64-bit type: bitConstant
     int    thisTemp(int line);
     int    addressOf(const LValue& lv, int line);
     int    load(const LValue& lv, const sema::Type* t, int line);
@@ -277,6 +307,7 @@ private:
     // expressions and statements
     int    value(cxx::Expr* e);
     LValue lvalue(cxx::Expr* e);
+    LValue builtinAssign(cxx::Expr* e, int& result);   // the right operand of = first, the left of op= first (cl)
     void   condition(cxx::Expr* e, int trueBlock, int falseBlock);
     int    conditional(cxx::Expr* e, bool byAddr);
     int    call(cxx::Expr* e, int sretAddr = -1);
@@ -286,6 +317,11 @@ private:
     int    conversionCall(cxx::Expr* e, int line);   // a cast through the conversion function e->semaSym, converted on to the cast's type
     int    incremented(int cur, const sema::Type* ot, bool up, int line);   // cur + 1 or cur - 1 in cur's type, as ++/-- compute it
     int    callFunction(sema::Symbol* fn, int thisPtr, int sretAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, bool virtualCall, int line);
+    // cl's argument order: phase 1 those that call or have side effects, right to left; phase 2 the reads, last
+    void   callArguments(sema::Symbol* fn, const sema::Type* ft, const std::vector<cxx::Expr*>& args, size_t firstArg, int phase, int line, std::vector<IrOperand>& out);
+    bool   readsOnly(cxx::Expr* a, const sema::Type* pt) const;
+    bool   pureExpr(cxx::Expr* e, int depth) const;
+    int    emitCall(sema::Symbol* fn, int thisPtr, int sretAddr, const std::vector<IrOperand>& argOps, bool virtualCall, int vbFlag, int line);
     int    construct(sema::Symbol* ctor, int objAddr, const std::vector<cxx::Expr*>& args, size_t firstArg, int line);
     int    argument(cxx::Expr* a, const sema::Type* paramType, int line);
     void   stmt(cxx::Stmt* s);
@@ -336,6 +372,9 @@ private:
     std::map<sema::Symbol*, sema::Symbol*> m_deleting;     // virtual destructor -> its deleting destructor
     std::vector<sema::Symbol*> m_deletingOrder;            // the virtual destructors, in the order their deleting ones were made
     size_t                     m_deletingDone;
+    std::set<sema::Symbol*>    m_vtablesNeeded;            // the classes whose vfptrs a generated function stores
+    std::vector<sema::Symbol*> m_vtableOrder;              // the same, in the order of the first store; their tables emitted
+    size_t                     m_vtablesDone;              // up to here
     std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtors;   // class -> its vbase destructor (??_D)
     std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtorOf;  // vbase destructor -> its class
     int                        m_ctorFlag;      // the "most derived" flag the next constructor call passes (1, 0 for a base)
@@ -383,6 +422,10 @@ private:
     int                        m_inPad;         // > 0 while a landing pad is generated: no cleanups are registered
     int                        m_unwindId;      // the function's catch-all region
     int                        m_bodyBlock;
+    bool                       m_tableEh;       // setTableExceptions
+    int                        m_deferRegions;  // table model, > 0: a cleanup registered now gets its flag, its region later (openRegion at the join)
+    std::vector<size_t>        m_scopeTry;      // table model: m_tryStack.size() at each open block scope
+    std::vector<std::pair<int, int> > m_pads;   // table model: the landing pad blocks to fill (block, cleanup index)
 };
 
 } // namespace cppparse

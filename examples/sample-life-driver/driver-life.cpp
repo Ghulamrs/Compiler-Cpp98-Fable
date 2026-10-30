@@ -38,9 +38,19 @@ int main()
     check("live after earlyReturn", liveObjects(), 0);
     check("copies()", copies(), 217);
     check("live after copies", liveObjects(), 0);
+    // LIFE_NRVO=1 (-O1 and up, as cl /O2): make() builds its local in the result object, one copy and one
+    // destruction fewer than at -O0 (cl /Od)
+#if LIFE_NRVO
+    check("byValue()", byValue(), 2108);
+#else
     check("byValue()", byValue(), 2208);
+#endif
     check("live after byValue", liveObjects(), 0);
+#if LIFE_NRVO
+    check("temporaries()", temporaries(), 26);
+#else
     check("temporaries()", temporaries(), 36);
+#endif
     check("live after temporaries", liveObjects(), 0);
     check("deepCopies()", deepCopies(), 3946);
     check("buffers after deepCopies", liveAllocs(), 0);

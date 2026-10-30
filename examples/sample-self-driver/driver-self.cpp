@@ -26,6 +26,33 @@ int carriedCounter(const int* left, int nl, const int* right, int nr, int* out);
 int sharedStatic();
 int nestedStatics();
 int wideConstants();
+double stackDoubles(double a, double b, double c, double d, double e, double f, double g);
+float stackFloats(float a, float b, float c, float d, float e, float f, float g);
+int exitOrder();
+int varargs();
+double sumMixed(int n, ...);
+int bumpShared();
+int constantTables();
+
+// built by this object's initializer, which runs before self.obj's (it is linked first): the constant tables it
+// reads must be static data, not built by cppparse's initializer
+static const long g_earlyTables = constantTables();
+
+// also in self.cpp: the linker keeps one copy of the function and one of its static local, whose names must be
+// cl's, or cppparse's code (with the call inlined at -O2) counts in a variable of its own
+inline int sharedCounter()
+{
+    static int n = 0;
+    return ++n;
+}
+
+static long sharedInline()
+{
+    int a = sharedCounter();
+    int b = bumpShared();
+    int c = sharedCounter();
+    return a * 100 + b * 10 + c;
+}
 
 static int g_failures = 0;
 
@@ -64,6 +91,13 @@ static long staticFromThreads()            // the threads race into the initiali
     for (int i = 0; i < 4; ++i) if (g_shared[i] != g_shared[0]) return -g_shared[i];
     return g_shared[0];
 }
+static long floatsOnStack()               // the double arguments leave bits in the upper halves of the stack slots
+{
+    double d = stackDoubles(1e300, -1e300, 3.25e-300, 7.5, 1.0 / 3.0, -2.0 / 3.0, 1.0 / 7.0);
+    float f = stackFloats(0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f);
+    return static_cast<long>(f * 1000) + (d > 7.3 && d < 7.31 ? 1 : 0);
+}
+
 static void check(const char* what, long got, long expected)
 {
     if (got == expected) std::printf("  ok   %-28s = %ld\n", what, got);
@@ -91,6 +125,13 @@ int main()
     check("sharedStatic() in 4 threads", staticFromThreads(), 421);
     check("nestedStatics()", nestedStatics(), 1005);
     check("wideConstants()", wideConstants(), 1415111);
+    check("stackFloats()", floatsOnStack(), 70001);
+    check("varargs()", varargs(), 110100805);
+    check("sumMixed() called by cl", static_cast<long>(sumMixed(7, 1.0, 2, 3.0, 4, 5.0, 6, 7.0) * 10), 12160);
+    check("inline static shared with cl", sharedInline(), 123);
+    check("constant tables before init", g_earlyTables, 545344853);
+    check("constantTables()", constantTables(), 545344853);
+    check("exitOrder() before exit", exitOrder(), 99);   // nothing destroyed yet; the order is printed after main
     std::printf(g_failures ? "%d FAILED\n" : "ALL OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

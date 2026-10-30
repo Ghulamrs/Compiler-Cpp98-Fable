@@ -94,7 +94,7 @@ void u64MulAdd(U64& v, unsigned long mul, unsigned long add)   // v = v * mul + 
 
 void u64Negate(U64& v)
 {
-    v.lo = ~v.lo & 0xFFFFFFFFUL; v.hi = ~v.hi & 0xFFFFFFFFUL;   // the halves stay 32-bit where unsigned long is wider
+    v.lo = ~v.lo; v.hi = ~v.hi;
     unsigned long lo = (v.lo + 1) & 0xFFFFFFFFUL;
     if (lo == 0) v.hi = (v.hi + 1) & 0xFFFFFFFFUL;
     v.lo = lo;
@@ -132,12 +132,9 @@ bool parseLong(const std::string& text, long& out)
 {
     U64 v;
     if (!parseU64(text, v)) return false;
-    // accept values that fit in a signed or unsigned 32-bit field, and keep the sign of a negative one: on an
-    // LP64 host long is 64 bits, so a plain cast of the low word would turn -1 into 4294967295
+    // accept values that fit in a signed or unsigned 32-bit field
     if (v.hi != 0 && v.hi != 0xFFFFFFFFUL) return false;
-    unsigned long lo = v.lo & 0xFFFFFFFFUL;
-    if (lo & 0x80000000UL) out = -static_cast<long>(((~lo + 1) & 0xFFFFFFFFUL) - 1) - 1;   // two's complement without overflowing a 32-bit long
-    else out = static_cast<long>(lo);
+    out = static_cast<long>(static_cast<unsigned int>(v.lo));
     return true;
 }
 
@@ -607,16 +604,39 @@ bool buildUnwindInfo(const Chunk& c, const std::string& fn, const std::string& h
         if (!c.ehRanges.empty()) { err = ".ehrange in a PROC FRAME without a handler"; return false; }
         return true;
     }
-    std::vector<std::pair<std::string, unsigned long> > fields;   // symbol (empty: a plain value) and value / addend
-    fields.push_back(std::make_pair(handler, 0UL));
-    fields.push_back(std::make_pair(std::string(), kEhMagic));
-    fields.push_back(std::make_pair(std::string(), static_cast<unsigned long>(c.ehRanges.size())));
-    for (size_t r = 0; r < c.ehRanges.size(); ++r)
+    // the ranges, sorted by their begin, become entries of one word each: the code offset in the function (20 bits)
+    // and the landing pad's number in the pad table that follows (12 bits, 0: none); an entry holds up to the next
+    // one's offset, a pad of 0 marks code outside every region (a gap between two ranges, the end of the last one).
+    // The entries are plain values; only the pad table's addresses need relocations
+    std::vector<std::pair<unsigned long, std::pair<unsigned long, unsigned long> > > ranges;   // begin -> (end, pad)
+    for (size_t r = 0; r < c.ehRanges.size(); ++r) {
+        unsigned long v[3] = { 0, 0, 0 };
         for (int k = 0; k < 3; ++k) {
             std::map<std::string, unsigned long>::const_iterator l = c.labels.find(c.ehRanges[r][static_cast<size_t>(k)]);
             if (l == c.labels.end()) { err = ".ehrange label " + c.ehRanges[r][static_cast<size_t>(k)] + " is not defined"; return false; }
-            fields.push_back(std::make_pair(fn, l->second));
+            v[k] = l->second;
         }
+        if (v[0] < v[1]) ranges.push_back(std::make_pair(v[0], std::make_pair(v[1], v[2])));   // (an empty range holds no code)
+    }
+    std::sort(ranges.begin(), ranges.end());
+    std::vector<unsigned long> entries, pads;
+    std::map<unsigned long, unsigned long> padIndex;
+    for (size_t r = 0; r < ranges.size(); ++r) {
+        const unsigned long pad = ranges[r].second.second;
+        std::map<unsigned long, unsigned long>::iterator p = padIndex.find(pad);
+        if (p == padIndex.end()) { pads.push_back(pad); p = padIndex.insert(std::make_pair(pad, static_cast<unsigned long>(pads.size()))).first; }
+        entries.push_back((ranges[r].first << 12) | p->second);
+        const unsigned long end = ranges[r].second.first;
+        if (r + 1 == ranges.size() || ranges[r + 1].first != end) entries.push_back(end << 12);
+    }
+    if (pads.size() > 4095 || (!ranges.empty() && ranges.back().second.first >= (1UL << 20))) { err = "too many landing pads or too much code for the range table of " + fn; return false; }
+    std::vector<std::pair<std::string, unsigned long> > fields;   // symbol (empty: a plain value) and value / addend
+    fields.push_back(std::make_pair(handler, 0UL));
+    fields.push_back(std::make_pair(std::string(), kEhMagic));
+    fields.push_back(std::make_pair(std::string(), static_cast<unsigned long>(entries.size())));
+    fields.push_back(std::make_pair(std::string(), static_cast<unsigned long>(pads.size())));
+    for (size_t e = 0; e < entries.size(); ++e) fields.push_back(std::make_pair(std::string(), entries[e]));
+    for (size_t p = 0; p < pads.size(); ++p) fields.push_back(std::make_pair(fn, pads[p]));
     for (size_t f = 0; f < fields.size(); ++f) {
         if (!fields[f].first.empty()) { Reloc rl; rl.offset = static_cast<unsigned long>(out.size()); rl.symbol = fields[f].first; rl.type = RelAddr32Nb; relocs.push_back(rl); }
         for (int b = 0; b < 4; ++b) out.push_back(static_cast<unsigned char>((fields[f].second >> (8 * b)) & 0xFF));

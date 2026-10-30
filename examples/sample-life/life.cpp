@@ -73,13 +73,13 @@ static int idOf(Tracker t)                 // by value: the callee destroys its 
     return t.id;
 }
 
-static Tracker make(int i)                 // copied into the hidden result object, t destroyed
+static Tracker make(int i)                 // copied into the hidden result object, t destroyed (NRVO at -O1+: built there)
 {
     Tracker t(i);
     return t;
 }
 
-int byValue()                              // 2208: two live objects, two copies, ids 3 + 5
+int byValue()                              // 2208: two live objects, two copies, ids 3 + 5 (2108 with NRVO)
 {
     int c0 = g_copy;
     Tracker a(3);
@@ -89,7 +89,7 @@ int byValue()                              // 2208: two live objects, two copies
     return liveObjects() * 1000 + (g_copy - c0) * 100 + s;
 }
 
-int temporaries()                          // 36: three destructions by the end of the statement, 4 + 2
+int temporaries()                          // 36: three destructions by the end of the statement, 4 + 2 (26 with NRVO)
 {
     int d0 = g_dtor;
     int v = make(4).id + Tracker(2).id;

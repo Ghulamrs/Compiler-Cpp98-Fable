@@ -1,7 +1,9 @@
 // self.cpp - constructs of cppparse's own sources that the self-built compiler got wrong, compiled by
 // cppparse --compile6 with its own headers and driven by examples/sample-self-driver/driver-self.cpp
 // (built with MSVC). Every function returns a number the driver compares with cl's result.
+#include <cstdarg>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
@@ -408,4 +410,132 @@ int wideConstants()                        // constant expressions of 64-bit typ
     r += static_cast<int>(c >> 62) * 100 + ((d >> 33) == -1 && (d & 0xFFFFFFFF) == 0 ? 10 : 0) + static_cast<int>(e >> 45);
     if ((mask >> 51) == 1 && (mask & 1) == 1) r += 1000000;
     return r;
+}
+
+// floats after the fourth parameter arrive in 8-byte stack slots whose upper half the caller leaves as it
+// was; each is homed in a 4-byte frame slot (the caller is the cl-built driver, which first passes doubles
+// through the same slots)
+double stackDoubles(double a, double b, double c, double d, double e, double f, double g)
+{
+    return a + b + c + d + e + f + g;
+}
+
+float stackFloats(float a, float b, float c, float d, float e, float f, float g)
+{
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7;
+}
+
+namespace {
+
+char g_exitOrder[8];
+int g_exitCount = 0;
+
+struct AtExit {
+    char tag;
+    explicit AtExit(char t) : tag(t) {}
+    ~AtExit()
+    {
+        g_exitOrder[g_exitCount++] = tag;
+        if (tag == 'a') std::printf("  destructors at exit: %s\n", g_exitOrder);   // the build script checks the order
+    }
+};
+
+AtExit g_first('a');
+AtExit g_second('b');
+
+}
+
+int exitOrder()                            // globals and static locals are destroyed after main, newest first
+{
+    static AtExit third('c');
+    return g_exitCount * 100 + third.tag;
+}
+
+// a variadic function finds its unnamed arguments in the home slots its prologue fills from rcx, rdx, r8 and r9
+// (a double travels in the integer register too) and on the caller's stack after them; also called by the driver
+double sumMixed(int n, ...)
+{
+    va_list ap;
+    va_start(ap, n);
+    double s = 0;
+    for (int i = 0; i < n; ++i) {
+        if (i % 2 == 0) s += va_arg(ap, double);
+        else s += va_arg(ap, int) * 100;
+    }
+    va_end(ap);
+    return s;
+}
+
+namespace {
+
+double scaled(double k, int n, ...)        // a named double: homed from xmm0, the integers follow it
+{
+    va_list ap;
+    va_start(ap, n);
+    int s = 0;
+    for (int i = 0; i < n; ++i) s += va_arg(ap, int);
+    va_end(ap);
+    return k * s;
+}
+
+int formatInto(char* buf, const char* fmt, ...)   // passes its list on to the C library
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = std::vsprintf(buf, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+}
+
+int varargs()
+{
+    double a = sumMixed(6, 1.5, 2, 2.25, 3, 4.0, 5);
+    char buf[64];
+    int n = formatInto(buf, "%d-%.2f-%s", 42, 2.5, "ok");
+    int r = static_cast<int>(a * 100) + static_cast<int>(scaled(0.5, 3, 10, 20, 30)) + n * 1000000;
+    return r + (std::strcmp(buf, "42-2.50-ok") == 0 ? 100000000 : 0);
+}
+
+inline int sharedCounter()                 // the driver defines it too: one variable for both compilers' copies
+{
+    static int n = 0;
+    return ++n;
+}
+
+int bumpShared() { return sharedCounter(); }
+
+// constant tables: static data that is valid before any initializer runs, whatever the link order (the driver's
+// own initializer reads them first); the const ones live in .rdata
+namespace {
+
+int g_tableA = 3;
+int g_tableB = 4;
+int twiceOf(int v) { return 2 * v; }
+int thriceOf(int v) { return 3 * v; }
+
+struct Entry { const char* name; int* value; int (*scale)(int); double weight; char tag; };
+
+static const char* const kTableNames[3] = { "alpha", "beta", "gamma" };
+int* const kValues[] = { &g_tableA, &g_tableB, 0 };
+const Entry kEntries[] = { { "a", &g_tableA, twiceOf, 0.5, 'x' }, { "bb", &g_tableB, thriceOf, 1.25, 'y' } };
+const char* g_greeting = "hello";
+int g_counts[4] = { 1, 2 };
+
+}
+
+int constantTables()
+{
+    int names = 0, values = 0, entries = 0;
+    for (int i = 0; i < 3; ++i) names = names * 10 + (kTableNames[i] ? static_cast<int>(std::strlen(kTableNames[i])) : 0);
+    for (int i = 0; kValues[i]; ++i) values = values * 10 + *kValues[i];
+    for (int i = 0; i < 2; ++i) {
+        const Entry& e = kEntries[i];
+        if (!e.name || !e.value || !e.scale) return -1;
+        int (*scale)(int) = e.scale;       // (a call through the member itself, e.scale(...), is not compiled yet)
+        entries += scale(*e.value) + static_cast<int>(std::strlen(e.name)) + static_cast<int>(e.weight * 4) + (e.tag == 'x' + i ? 10 : 0);
+    }
+    int rest = (g_greeting ? static_cast<int>(std::strlen(g_greeting)) : 0) * 10 + g_counts[0] + g_counts[1] + g_counts[2] + g_counts[3];
+    return names * 1000000 + values * 10000 + entries * 100 + rest;
 }

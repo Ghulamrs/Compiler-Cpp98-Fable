@@ -72,13 +72,13 @@ struct IrInst {
     std::vector<IrOperand> args;
     int                    line;
     long                   extra;  // offset / element size / vtable slot
-    bool                   isVolatile;   // a load or store of a volatile object: a side effect, never removed,
-                                         // merged with another access, forwarded or moved
+    bool                   nothrow;   // a call that cannot throw: a function with C linkage (cl /EHsc), a runtime entry
 
-    IrInst() : op(Nop), dst(-1), type(0), line(0), extra(0), isVolatile(false) {}
+    IrInst() : op(Nop), dst(-1), type(0), line(0), extra(0), nothrow(false) {}
     bool pure() const;             // result-only, no side effects, no memory read
     bool readsMemory() const;
     bool isTerminator() const { return op == Br || op == CondBr || op == Ret || op == Throw || op == Unreachable; }
+    bool mayThrow() const { return op == Throw || op == VCall || (op == Call && !nothrow); }
     std::string str() const;
 };
 
@@ -101,7 +101,8 @@ struct IrLocal {
     bool        isThis;
     bool        nonNull;     // a parameter that always holds a valid address: this, a reference, an object passed by
                              // address, the hidden result pointer (loads through it cannot fault)
-    IrLocal() : type(0), size(8), align(8), addressTaken(false), isParam(false), isThis(false), nonNull(false) {}
+    bool        ehFlag;      // a constructed flag: 1 while its object lives, read by the function's unwind handler
+    IrLocal() : type(0), size(8), align(8), addressTaken(false), isParam(false), isThis(false), nonNull(false), ehFlag(false) {}
 };
 
 struct IrFunction {

@@ -1,5 +1,5 @@
 // map - cppparse's C++98 library: an ordered map on the AVL tree of __tree. The value type is
-// pair<K, V> (the key is not const-qualified, so the pair stays assignable).
+// pair<const K, V> (23.3.1); the tree copy-constructs its nodes and never assigns them.
 #ifndef CPPPARSE_MAP
 #define CPPPARSE_MAP
 
@@ -11,7 +11,7 @@ namespace std {
 
 template <class K, class V>
 struct __first_of {
-    const K& operator()(const pair<K, V>& v) const { return v.first; }
+    const K& operator()(const pair<const K, V>& v) const { return v.first; }
 };
 
 template <class K, class V, class C = less<K> >
@@ -19,10 +19,10 @@ class map {
 public:
     typedef K                          key_type;
     typedef V                          mapped_type;
-    typedef pair<K, V>                 value_type;
+    typedef pair<const K, V>           value_type;
     typedef size_t                     size_type;
     typedef C                          key_compare;
-    typedef __tree<K, pair<K, V>, __first_of<K, V>, C> tree_type;
+    typedef __tree<K, pair<const K, V>, __first_of<K, V>, C> tree_type;
     typedef typename tree_type::iterator iterator;
     typedef typename tree_type::iterator const_iterator;
 

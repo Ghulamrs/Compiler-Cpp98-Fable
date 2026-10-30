@@ -67,12 +67,17 @@ using namespace cppparse;
 
 namespace {
 
+const char* const kUsageLine = "cppparse - C++98 project reader and report generator\n\nusage: cppparse [options] <input>...\n";
+
+// no input, or an unknown option: the usage line and where the options are, as cl and gcc answer; -h has the full text
+void shortUsage()
+{
+    std::cout << kUsageLine << "\n  cppparse --help lists the options\n";
+}
+
 void usage()
 {
-    std::cout <<
-        "cppparse - C++98 project reader and report generator\n"
-        "\n"
-        "usage: cppparse [options] <input>...\n"
+    std::cout << kUsageLine <<
         "\n"
         "  <input>          .sln | .vcxproj | .vcproj | folder | header/source files\n"
         "\n"
@@ -166,20 +171,21 @@ bool hasVirtualBase(const sema::Symbol* cls, int depth)
 const char* virtualBaseRefusal(const sema::Symbol* cls)
 {
     for (size_t t = 0; t < cls->vftables.size(); ++t)
-        if (cls->vftables[t].vtordispex) return "a virtual function overridden in another virtual base (cl's vtordispex thunk, which reads the vbtable)";
+        if (cls->vftables[t].vtordispex) return "a virtual function overridden in another virtual base that the class's vbtable does not index (cl's vtordispex thunk reads the entry)";
     return 0;
 }
 
 // a covariant override's slot (Sema::completeClass, VfTable::returnOf) that --compile6 cannot give cl's
-// return-adjusting thunk (S131): one whose return conversion goes through a virtual base (cl's thunk reads the
-// vbtable), one that also moves this (cl's $R thunks: a this and a return adjustment in one), or a variadic function
-// (the thunk cannot stage the unnamed arguments again); 0 when the slot is fine
+// return-adjusting thunk (S131): one in a vftable inside a virtual base whose overrider is held by another virtual
+// base (cl's vtordispex thunk would have to lead to the return thunk), or a variadic function (the thunk cannot stage
+// the unnamed arguments again); 0 when the slot is fine. A return conversion through a virtual base (the thunk reads
+// the vbtable), a slot that also moves this (an adjustor thunk to the return thunk) and a slot in a vftable inside a
+// virtual base (the return thunk, through cl's vtordisp thunk when the class has a vtordisp) are generated as cl's
+// (B11)
 const char* returnThunkRefusal(const sema::VfTable& t, size_t s)
 {
     if (s >= t.returnOf.size() || !t.returnOf[s]) return 0;
-    if (t.returnAdjust[s] < 0) return "its return conversion goes through a virtual base";
-    if (t.vbase) return "the overridden function's vftable lies in a virtual base";
-    if (t.thunks[s] != 0) return "the slot needs a this adjustment as well as the return adjustment";
+    if (t.vbase && s < t.vtordispexVbase.size() && t.vtordispexVbase[s]) return "the overrider is held by another virtual base of the class";
     const sema::Symbol* fn = t.fns[s];
     if (fn && fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic) return "it is variadic";
     return 0;
@@ -315,14 +321,14 @@ int cppparseMain(int argc, char* argv[])
         }
         else if (a.size() == 3 && a[0] == '-' && a[1] == 'O' && a[2] >= '0' && a[2] <= '3') copt.optLevel = a[2] - '0';
         else if (a == "-q") quiet = true;
-        else if (!a.empty() && a[0] == '-') { std::cerr << "unknown option: " << a << "\n"; usage(); return 2; }
+        else if (!a.empty() && a[0] == '-') { std::cerr << "unknown option: " << a << "\n"; shortUsage(); return 2; }
         else {
             std::vector<std::string> expanded;
             if (expandWildcards(a, expanded) == 0) { std::cerr << "error: no file matches " << a << "\n"; ok0 = false; }
             inputs.insert(inputs.end(), expanded.begin(), expanded.end());
         }
     }
-    if (inputs.empty()) { usage(); return 2; }
+    if (inputs.empty()) { shortUsage(); return 2; }
     const Target& target = ppOpt.target ? *ppOpt.target : defaultTarget();
     if (compile6 && !target.hasBackEnd) {
         std::cerr << "error: no back end for target " << target.name << " yet: -E, --parse6 and --sema6 work for it, --compile6 does not\n";
@@ -460,7 +466,8 @@ int cppparseMain(int argc, char* argv[])
                     for (size_t k = 0; k < inputs[i].size(); ++k) unitId = (unitId ^ static_cast<unsigned char>(inputs[i][k])) * 16777619UL;
                     setMangleUnitId(unitId & 0xFFFFFFFFUL);
                     gen.setNamedReturnElision(copt.optLevel >= 1);   // NRVO only when optimising, as cl (/Od: a copy)
-                    gen.registerMetadata(x86, copt.msvcNames);   // first: it queues the vtable members and the dynamic initialisers
+                    gen.setTableExceptions(copt.tableEh);            // a region per object with a destructor (cl's states) instead of flags
+                    gen.registerMetadata(x86, copt.msvcNames);   // first: it registers the globals and the dynamic initialisers
                     gen.generate(functions);
                     if (!gen.unsupported().empty()) {
                         // constructs with virtual bases that would compile to wrong code: nothing is written (S132)

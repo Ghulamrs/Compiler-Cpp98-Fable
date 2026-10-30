@@ -24,6 +24,7 @@ const int kIntRegCount = 7;          // callee-saved: indexes 0..6
 const int kVolatileRegBase = 7;      // volatile: indexes 7..10
 const int kVolatileRegCount = 4;
 const int kRcx = 11, kRdx = 12, kRax = 13;
+const int kArgReg[4] = { kRcx, kRdx, kVolatileRegBase, kVolatileRegBase + 1 };   // the first four integer arguments: rcx, rdx, r8, r9
 const int kFloatRegBase = 6;     // xmm6 .. xmm13
 const int kFloatRegCount = 8;
 const int kTryFrameSize = 272;   // sizeof(jmp_buf) on x64 (256) plus the frame link
@@ -177,11 +178,15 @@ public:
     std::string run();
 
 private:
-    // fixed: the register was settled by coalescing; a second allocation keeps it and works around it
-    struct Interval { int temp; int start, end; bool isFloat; int reg; int slot; bool fixed; Interval() : temp(-1), start(1 << 30), end(-1), isFloat(false), reg(-1), slot(0), fixed(false) {} };
+    // crosses: a call, throw or try operation destroys the volatile registers while the value is live; callResult: the
+    // call at start defines the value, after it read its arguments; liveOutEnd: live out of the block that ends at end
+    // (all three from computeIntervals). fixed: the register was settled by coalescing; a second allocation keeps it
+    // and works around it
+    struct Interval { int temp; int start, end; bool isFloat; int reg; int slot; bool crosses, callResult, liveOutEnd; bool fixed; Interval() : temp(-1), start(1 << 30), end(-1), isFloat(false), reg(-1), slot(0), crosses(false), callResult(false), liveOutEnd(false), fixed(false) {} };
     struct ByStart { bool operator()(const Interval* a, const Interval* b) const { return a->start != b->start ? a->start < b->start : a->temp < b->temp; } };
 
     void computeIntervals();
+    const IrInst& instAt(size_t pos) const { const std::pair<int, int>& l = m_linear[pos]; return m_f.blocks[static_cast<size_t>(l.first)].insts[static_cast<size_t>(l.second)]; }
     void allocate();
     void layoutFrame();
     void emitBody();
@@ -259,7 +264,14 @@ private:
     void coalesce();
     void reallocateAroundCoalesced();
     bool canStayInArgReg(int t, int p) const;
+    // after the allocation: a value whose last use is a call argument is computed in the argument's register when
+    // nothing before the call writes it, which saves the copy before the call
+    void hintArguments();
+    bool holdsArgReg(const Interval& iv, int k) const;
+    void resultsInRax();   // after it: a call's result read once, soon after the call, stays in rax
+    void countSavedRegisters();   // the callee-saved registers in use, from the intervals
     bool inRegister(const IrOperand& o) const;
+    std::string regName(const IrOperand& o) const;      // the integer register a temp lives in, "" when it is in memory or an xmm register
     bool writesArgReg(const IrInst& in, int p) const;   // may the code for 'in' overwrite parameter p's register?
     std::set<int>       m_returnDirect;   // temps computed straight into rax for the return that follows
     int                 m_firstSpills;    // spills counted by the first allocation (a second one replaces them)
@@ -341,7 +353,7 @@ void X86Function::computeEhEdges()
             const IrInst& in = m_f.blocks[b].insts[i];
             if (in.op == IrInst::TryBegin) { cur.push_back(in.extra); continue; }
             if (in.op == IrInst::TryEnd) { if (!cur.empty() && cur.back() == in.extra) cur.pop_back(); continue; }
-            if (in.op != IrInst::Call && in.op != IrInst::VCall && in.op != IrInst::Throw) continue;
+            if (!in.mayThrow()) continue;   // a call to a function with C linkage reaches no handler (cl /EHsc)
             // a clause that does not match rethrows from the landing pad to the regions around: all of them count
             for (size_t r = 0; r < cur.size(); ++r) {
                 const std::vector<int>& hs = handlersOf[cur[r]];
@@ -479,6 +491,26 @@ void X86Function::computeIntervals()
             }
         }
     }
+    // a clobber inside an interval (a call, a throw, a try operation: the code destroys the volatile registers)
+    // keeps the value out of them. A call that only reads the value (an argument at its last use) or only defines
+    // it (its result) does not: the value is not live while the call runs, and emitCall stages the arguments so
+    // that none is overwritten before it is read
+    std::vector<bool> isCall(m_linear.size(), false);
+    for (size_t c = 0; c < m_calls.size(); ++c) isCall[static_cast<size_t>(m_calls[c])] = true;
+    for (std::map<int, Interval>::iterator it = m_intervals.begin(); it != m_intervals.end(); ++it) {
+        Interval& iv = it->second;
+        iv.callResult = isCall[static_cast<size_t>(iv.start)] && instAt(static_cast<size_t>(iv.start)).dst == iv.temp;
+        const size_t endBlock = static_cast<size_t>(m_linear[static_cast<size_t>(iv.end)].first);
+        iv.liveOutEnd = iv.end == m_blockEnd[endBlock] && liveOut[endBlock].count(iv.temp) > 0;
+        for (size_t c = 0; c < m_clobbers.size() && !iv.crosses; ++c) {
+            const int pos = m_clobbers[c];
+            if (pos < iv.start || pos > iv.end) continue;
+            if (!isCall[static_cast<size_t>(pos)]) { iv.crosses = true; continue; }
+            const bool liveBefore = pos > iv.start || !iv.callResult;
+            const bool liveAfter = pos < iv.end || iv.liveOutEnd;
+            iv.crosses = liveBefore && liveAfter;
+        }
+    }
 }
 
 void X86Function::analyzeParams()
@@ -551,6 +583,13 @@ bool X86Function::inRegister(const IrOperand& o) const
     return it != m_intervals.end() && it->second.reg >= 0;
 }
 
+std::string X86Function::regName(const IrOperand& o) const
+{
+    if (o.kind != IrOperand::Temp) return std::string();
+    std::map<int, Interval>::const_iterator it = m_intervals.find(o.id);
+    return it != m_intervals.end() && it->second.reg >= 0 && !it->second.isFloat ? std::string(kIntRegs[it->second.reg]) : std::string();
+}
+
 // does the code emitted for 'in' write rcx (p = 0) or rdx (p = 1), the scratch registers of its sequences? The
 // rules follow emitInst: an operand not in a register is materialised in rdx (rcx for an index), division uses
 // both, a shift by a variable count uses cl, and calls, throws and try operations destroy every volatile register
@@ -593,7 +632,7 @@ bool X86Function::writesArgReg(const IrInst& in, int p) const
 // register, and no other value may hold it
 bool X86Function::canStayInArgReg(int t, int p) const
 {
-    static const int argIdx[4] = { kRcx, kRdx, kVolatileRegBase, kVolatileRegBase + 1 };
+    const int* const argIdx = kArgReg;
     std::map<int, Interval>::const_iterator it = m_intervals.find(t);
     if (it == m_intervals.end()) return false;
     const Interval& iv = it->second;
@@ -612,7 +651,7 @@ void X86Function::coalesce()
     m_returnDirect.clear();
     if (m_f.hasTry && !m_tableRegs) return;   // longjmp restores only the callee-saved registers
     // a parameter's value stays in its argument register (rcx, rdx, r8, r9) when nothing writes it meanwhile
-    static const int argIdx[4] = { kRcx, kRdx, kVolatileRegBase, kVolatileRegBase + 1 };
+    const int* const argIdx = kArgReg;
     for (int i = 0; i < m_prefixEnd; ++i) {
         const IrInst& in = m_f.blocks[0].insts[static_cast<size_t>(i)];
         const int p = in.args[0].id;
@@ -631,12 +670,15 @@ void X86Function::coalesce()
     for (size_t p = 1; p < m_linear.size(); ++p) {
         const IrInst& in = m_f.blocks[static_cast<size_t>(m_linear[p].first)].insts[static_cast<size_t>(m_linear[p].second)];
         if (in.op != IrInst::Ret || in.args.empty() || in.args[0].kind != IrOperand::Temp) continue;
-        if (m_linear[p - 1].first != m_linear[p].first) continue;          // defined in the same block, just before
+        // defined in the same block, just before (the nop a function's unwind region leaves before the return is no code)
+        size_t q = p - 1;
+        while (q > 0 && m_linear[q].first == m_linear[p].first && instAt(q).op == IrInst::Nop) --q;
+        if (m_linear[q].first != m_linear[p].first) continue;
         const int v = in.args[0].id;
         std::map<int, Interval>::iterator it = m_intervals.find(v);
         if (it == m_intervals.end() || it->second.isFloat || it->second.reg < 0 || uses[v] != 1) continue;
-        if (it->second.start != static_cast<int>(p) - 1 || it->second.end != static_cast<int>(p)) continue;
-        const IrInst& def = m_f.blocks[static_cast<size_t>(m_linear[p - 1].first)].insts[static_cast<size_t>(m_linear[p - 1].second)];
+        if (it->second.start != static_cast<int>(q) || it->second.end != static_cast<int>(p)) continue;
+        const IrInst& def = instAt(q);
         if (def.dst != v || def.op == IrInst::Phi) continue;
         it->second.reg = kRax;
         it->second.fixed = true;
@@ -671,7 +713,11 @@ void X86Function::reallocateAroundCoalesced()
         }
         if (!ok) { m_intervals = settled; m_stats.spills = spillsSettled; }
     }
-    // the callee-saved registers still in use are the ones saved
+    countSavedRegisters();
+}
+
+void X86Function::countSavedRegisters()
+{
     m_usedIntRegs.clear();
     m_usedFloatRegs.clear();
     for (std::map<int, Interval>::const_iterator it = m_intervals.begin(); it != m_intervals.end(); ++it) {
@@ -679,6 +725,101 @@ void X86Function::reallocateAroundCoalesced()
         if (it->second.isFloat) m_usedFloatRegs.insert(it->second.reg);
         else if (it->second.reg < kIntRegCount) m_usedIntRegs.insert(it->second.reg);
     }
+}
+
+// may iv, the k-th register argument of the call at its end, live in that argument register all its life? Nothing
+// before the call may write the register: for rcx and rdx the sequences writesArgReg knows, the instruction that
+// defines the value included (its own sequence may use them as scratch; a call defining it writes them before the
+// result exists); the parameters are read from the four registers at the start; and no other value may hold it
+bool X86Function::holdsArgReg(const Interval& iv, int k) const
+{
+    if (iv.start < m_lastParamLoad[k]) return false;
+    if (k < 2)
+        for (int q = iv.callResult ? iv.start + 1 : iv.start; q < iv.end; ++q)
+            if (writesArgReg(instAt(static_cast<size_t>(q)), k)) return false;
+    for (std::map<int, Interval>::const_iterator o = m_intervals.begin(); o != m_intervals.end(); ++o) {
+        const Interval& v = o->second;
+        if (&v == &iv || v.reg != kArgReg[k] || v.start > iv.end || v.end < iv.start) continue;
+        // a value whose last use is the call that defines the other is dead by then (allocate's rule)
+        if (v.end == iv.start && iv.callResult && !v.liveOutEnd) continue;
+        if (iv.end == v.start && v.callResult && !iv.liveOutEnd) continue;
+        return false;
+    }
+    return true;
+}
+
+// a call's result read once, by an instruction that follows the call before anything writes rax, stays in rax: the
+// instructions between may only be constants, addresses and loads of locals and globals into registers (their
+// sequences write their own register alone; spilled, they would go through rax) and nops, and the reader takes the
+// value before its own sequence writes rax: a store of the value, a conversion, a negation, a return, a branch, a
+// copy, a load through it, the first operand of an arithmetic or a comparison (the second is read after the first
+// was materialised in rax); not a call's argument (emitCall breaks a cycle through rax). After the last allocation:
+// what is spilled is settled by then
+void X86Function::resultsInRax()
+{
+    if (m_f.hasTry && !m_tableRegs) return;
+    std::map<int, int> uses;
+    for (size_t p = 0; p < m_linear.size(); ++p) {
+        const IrInst& in = instAt(p);
+        for (size_t a = 0; a < in.args.size(); ++a) if (in.args[a].kind == IrOperand::Temp) ++uses[in.args[a].id];
+    }
+    for (size_t c = 0; c < m_calls.size(); ++c) {
+        const size_t p = static_cast<size_t>(m_calls[c]);
+        const IrInst& call = instAt(p);
+        if (call.dst < 0) continue;
+        std::map<int, Interval>::iterator it = m_intervals.find(call.dst);
+        if (it == m_intervals.end() || it->second.isFloat || it->second.fixed || uses[call.dst] != 1) continue;
+        size_t q = p + 1;
+        bool clear = true;
+        for (; q < m_linear.size() && m_linear[q].first == m_linear[p].first && clear; ++q) {
+            const IrInst& in = instAt(q);
+            if (in.op == IrInst::Nop) continue;
+            if (in.op != IrInst::Const && in.op != IrInst::FConst && in.op != IrInst::StrConst && in.op != IrInst::AddrLocal && in.op != IrInst::AddrGlobal
+                && in.op != IrInst::LoadLocal && in.op != IrInst::LoadGlobal) break;
+            std::map<int, Interval>::const_iterator d = m_intervals.find(in.dst);
+            clear = d != m_intervals.end() && d->second.reg >= 0 && d->second.reg != kRax;
+        }
+        if (!clear || q >= m_linear.size() || m_linear[q].first != m_linear[p].first) continue;
+        if (it->second.start != static_cast<int>(p) || it->second.end != static_cast<int>(q)) continue;
+        const IrInst& user = instAt(q);
+        const bool first = !user.args.empty() && user.args[0].kind == IrOperand::Temp && user.args[0].id == call.dst;
+        const bool value = user.args.size() > 1 && user.args[1].kind == IrOperand::Temp && user.args[1].id == call.dst;
+        bool ok = false;
+        switch (user.op) {
+        case IrInst::StoreLocal: case IrInst::StoreGlobal: case IrInst::StoreMem: ok = value && !first; break;
+        case IrInst::Conv: case IrInst::Un: case IrInst::Ret: case IrInst::CondBr: case IrInst::Copy: case IrInst::LoadMem: ok = first; break;
+        case IrInst::Bin: case IrInst::Cmp: ok = first && !value; break;
+        default: break;
+        }
+        if (!ok) continue;
+        it->second.reg = kRax;
+        it->second.fixed = true;
+    }
+    countSavedRegisters();
+}
+
+void X86Function::hintArguments()
+{
+    if (m_f.hasTry && !m_tableRegs) return;   // as coalesce: longjmp restores only the callee-saved registers
+    for (size_t c = 0; c < m_calls.size(); ++c) {
+        const int pos = m_calls[c];
+        const IrInst& call = instAt(static_cast<size_t>(pos));
+        const size_t firstArg = call.sub == "(indirect)" && !call.args.empty() ? 1 : 0;
+        for (size_t a = firstArg; a < call.args.size() && a < firstArg + 4; ++a) {
+            const IrOperand& o = call.args[a];
+            if (o.kind != IrOperand::Temp || opIsFloat(o)) continue;
+            std::map<int, Interval>::iterator it = m_intervals.find(o.id);
+            if (it == m_intervals.end()) continue;
+            Interval& iv = it->second;
+            const int k = static_cast<int>(a - firstArg);
+            // (a value passed twice keeps the first position's register; the second is copied from it)
+            if (iv.fixed || iv.isFloat || iv.crosses || iv.end != pos || iv.liveOutEnd || iv.reg == kArgReg[k]) continue;
+            if (!holdsArgReg(iv, k)) continue;
+            iv.reg = kArgReg[k];
+            iv.fixed = true;
+        }
+    }
+    countSavedRegisters();
 }
 
 void X86Function::allocate()
@@ -698,7 +839,9 @@ void X86Function::allocate()
     for (size_t k = 0; k < order.size(); ++k) {
         Interval* iv = order[k];
         for (size_t a = 0; a < active.size();) {
-            if (active[a]->end < iv->start) {
+            // a value whose last use is the call that defines this one is dead by the time the result is written
+            const bool dead = active[a]->end < iv->start || (iv->callResult && active[a]->end == iv->start && !active[a]->liveOutEnd);
+            if (dead) {
                 if (active[a]->reg >= 0 && (active[a]->isFloat || active[a]->reg < kIntRegCount + kVolatileRegCount)) {
                     if (active[a]->isFloat) fltFree[active[a]->reg] = true; else intFree[active[a]->reg] = true;
                 }
@@ -710,9 +853,7 @@ void X86Function::allocate()
             if (iv->reg >= 0 && iv->reg < kIntRegCount + kVolatileRegCount) { intFree[iv->reg] = false; active.push_back(iv); }
             continue;
         }
-        bool clobbered = false;
-        for (size_t c = 0; c < m_clobbers.size() && !clobbered; ++c) clobbered = m_clobbers[c] >= iv->start && m_clobbers[c] <= iv->end;
-        const bool mayUseVolatile = volatileOk && !iv->isFloat && !clobbered;
+        const bool mayUseVolatile = volatileOk && !iv->isFloat && !iv->crosses;
         // r8 and r9 carry the third and fourth parameters until their last load at the start: a value defined
         // before that load must not overwrite them (the load itself may: "movsxd r8, r8d")
         const bool r8Busy = iv->start < m_lastParamLoad[2], r9Busy = iv->start < m_lastParamLoad[3];
@@ -788,12 +929,10 @@ std::string hex32(unsigned long v)
     return r;
 }
 
-// label for a double from its IEEE bits (two 32-bit halves: C++98 has no 64-bit integer).
-// unsigned int is 32 bits on every target of ours; unsigned long is 64 on LP64 hosts (macOS, Linux),
-// where sizeof half would be 16 and the copy would read past the double
+// label for a double from its IEEE bits (two 32-bit halves: C++98 has no 64-bit integer)
 std::string floatName(double v)
 {
-    unsigned int half[2];
+    unsigned long half[2];
     std::memcpy(half, &v, sizeof half);
     return "fconst_" + hex32(half[1]) + hex32(half[0]);
 }
@@ -903,19 +1042,9 @@ void X86Function::extend(const std::string& rd, const Type* t)
 
 void X86Function::emitCall(const IrInst& in)
 {
-    // evaluate every argument into its slot: first four into scratch homes, the rest onto the outgoing area
-    // (two phases so that materialising one argument cannot clobber another)
-    // every argument is staged in its outgoing slot [rsp+8a] (the first four slots are the
-    // shadow space), then the first four are loaded into their registers; stack arguments
-    // (a >= 4) are already in place
     static const char* const argRegs[] = { "rcx", "rdx", "r8", "r9" };
-    size_t firstArg = 0;
-    if (in.sub == "(indirect)" && !in.args.empty()) {
-        // args[0] is the function pointer: kept in r10 (volatile, not an argument register)
-        std::string fp = use(in.args[0], "r10");
-        if (fp != "r10") line("mov r10, " + fp);
-        firstArg = 1;
-    }
+    const bool indirect = in.sub == "(indirect)" && !in.args.empty();   // args[0] is the function pointer: called through r10
+    const size_t firstArg = indirect ? 1 : 0;
     // the fifth argument on go to the outgoing area [rsp+8a] (the first four slots are the shadow space)
     for (size_t a = firstArg + 4; a < in.args.size(); ++a) {
         const IrOperand& o = in.args[a];
@@ -923,11 +1052,40 @@ void X86Function::emitCall(const IrInst& in)
         if (opIsFloat(o)) { std::string r = use(o, "xmm4"); line("movsd real8 ptr [rsp+" + intToString(slot) + "], " + r); }
         else { std::string r = use(o, "rax"); line("mov qword ptr [rsp+" + intToString(slot) + "], " + r); }
     }
-    // the first four go straight into their registers. No source can be one of those registers: a value used
-    // by a call lives across it and so never gets a volatile register, and a constant, address or spilled
-    // value is materialised into the argument register itself; loading one argument cannot destroy another.
+    // the first four go into their registers, the function pointer into r10. A source may be a volatile register (a
+    // value whose last use is this call), one of those destinations among them: the moves between registers go in
+    // an order that reads every source before it is overwritten, a cycle through rax; the constants, addresses and
+    // spilled values are materialised straight into their registers after them (they read no register another
+    // argument writes)
+    std::vector<std::pair<std::string, std::string> > moves;   // destination, source
+    std::vector<size_t> later;                                 // the arguments materialised after the moves
+    if (indirect) { if (!regName(in.args[0]).empty()) moves.push_back(std::make_pair(std::string("r10"), regName(in.args[0]))); else later.push_back(0); }
     for (size_t a = firstArg; a < in.args.size() && a < firstArg + 4; ++a) {
         const IrOperand& o = in.args[a];
+        if (!opIsFloat(o) && !regName(o).empty()) moves.push_back(std::make_pair(std::string(argRegs[a - firstArg]), regName(o)));
+        else later.push_back(a);
+    }
+    while (!moves.empty()) {
+        size_t m = 0;
+        for (; m < moves.size(); ++m) {
+            bool read = false;   // is this destination still the source of another move?
+            for (size_t j = 0; j < moves.size() && !read; ++j) read = j != m && moves[j].second == moves[m].first;
+            if (!read) break;
+        }
+        if (m == moves.size()) {
+            // every destination is still to be read: a cycle; the first source goes through rax
+            line("mov rax, " + moves[0].second);
+            for (size_t j = 1; j < moves.size(); ++j) if (moves[j].second == moves[0].second) moves[j].second = "rax";
+            moves[0].second = "rax";
+            continue;
+        }
+        if (moves[m].first != moves[m].second) line("mov " + moves[m].first + ", " + moves[m].second);
+        moves.erase(moves.begin() + static_cast<long>(m));
+    }
+    for (size_t i = 0; i < later.size(); ++i) {
+        const size_t a = later[i];
+        const IrOperand& o = in.args[a];
+        if (indirect && a == 0) { std::string fp = use(o, "r10"); if (fp != "r10") line("mov r10, " + fp); continue; }
         const int k = static_cast<int>(a - firstArg);
         if (opIsFloat(o)) {
             const std::string x = "xmm" + intToString(k);
@@ -1557,6 +1715,8 @@ std::string X86Function::run()
     m_firstSpills = m_stats.spills - spillsBefore;
     coalesce();
     reallocateAroundCoalesced();
+    hintArguments();
+    resultsInRax();
     layoutFrame();
     decideFrame();
     if (m_frameless) { m_frameSize = 0; m_stats.frameSize = 0; }
@@ -1593,10 +1753,11 @@ void X86Module::addVcallThunk(const std::string& irName, int slotOffset)
     m_thunks.push_back(t);
 }
 
-void X86Module::addReturnThunk(const std::string& irName, const std::string& target, int thisAdjust, int returnAdjust, bool reference, int stackArgs)
+void X86Module::addReturnThunk(const std::string& irName, const std::string& target, int thisAdjust, int returnAdjust, bool reference, int stackArgs, int returnVbptr, int returnEntry)
 {
     if (!m_thunkNames.insert(irName).second) return;
     Thunk t; t.name = irName; t.target = target; t.adjust = thisAdjust; t.vcall = false; t.returning = true; t.returnAdjust = returnAdjust; t.reference = reference; t.stackArgs = stackArgs; t.vtordisp = false;
+    t.vbptrOffset = returnVbptr; t.entryOffset = returnEntry;
     m_thunks.push_back(t);
 }
 
@@ -1604,6 +1765,13 @@ void X86Module::addVtordispThunk(const std::string& irName, const std::string& t
 {
     if (!m_thunkNames.insert(irName).second) return;
     Thunk t; t.name = irName; t.target = target; t.adjust = adjust; t.vcall = false; t.returning = false; t.returnAdjust = 0; t.reference = false; t.stackArgs = 0; t.vtordisp = true;
+    m_thunks.push_back(t);
+}
+
+void X86Module::addVtordispexThunk(const std::string& irName, const std::string& target, int vbptrOffset, int entryOffset, int nonVirtual)
+{
+    if (!m_thunkNames.insert(irName).second) return;
+    Thunk t; t.name = irName; t.target = target; t.adjust = nonVirtual; t.vtordisp = true; t.vtordispex = true; t.vbptrOffset = vbptrOffset; t.entryOffset = entryOffset;
     m_thunks.push_back(t);
 }
 
@@ -1623,6 +1791,18 @@ void X86Module::emitVtables()
         }
         const std::string target = symbol(m_thunks[i].target);
         if (!m_defined.count(target)) m_externs.insert(target);
+        if (m_thunks[i].vtordispex) {
+            // this - vtordisp is the base where this class's layout has it; the vbptr lies vbptrOffset before it, and
+            // the overrider's base at its vbtable entry from the vbptr; then the overrider's own adjustor
+            const int vb = m_thunks[i].vbptrOffset;
+            const int rest = m_thunks[i].adjust - vb;
+            m_code += ";@comdat any\n" + sym + " PROC\n        ; " + m_thunks[i].name + "\n        movsxd rax, dword ptr [rcx-4]\n        sub rcx, rax\n" +
+                      "        mov rax, qword ptr [rcx" + (vb > 0 ? "-" + intToString(vb) : vb < 0 ? "+" + intToString(-vb) : std::string()) + "]\n" +
+                      "        movsxd rax, dword ptr [rax+" + intToString(m_thunks[i].entryOffset) + "]\n        add rcx, rax\n" +
+                      (rest > 0 ? "        add rcx, " + intToString(rest) + "\n" : rest < 0 ? "        sub rcx, " + intToString(-rest) + "\n" : std::string()) +
+                      "        jmp " + target + "\n" + sym + " ENDP\n\n";
+            continue;
+        }
         if (m_thunks[i].vtordisp) {
             m_code += ";@comdat any\n" + sym + " PROC\n        ; " + m_thunks[i].name + "\n        movsxd rax, dword ptr [rcx-4]\n        sub rcx, rax\n" +
                       (m_thunks[i].adjust ? "        sub rcx, " + intToString(m_thunks[i].adjust) + "\n" : std::string()) + "        jmp " + target + "\n" + sym + " ENDP\n\n";
@@ -1639,7 +1819,15 @@ void X86Module::emitVtables()
                 code += "        mov rax, qword ptr [rsp+" + intToString(frame + 40 + 8 * a) + "]\n        mov qword ptr [rsp+" + intToString(32 + 8 * a) + "], rax\n";
             if (t.adjust) code += "        sub rcx, " + intToString(t.adjust) + "\n";
             code += "        call " + target + "\n";
-            if (t.returnAdjust) {
+            if (t.vbptrOffset >= 0) {
+                // through a virtual base, as cl: the vbptr in the result, the base's entry of its vbtable, then the rest
+                const int vb = t.vbptrOffset;
+                if (!t.reference) code += "        test rax, rax\n        je " + sym + "_null\n";
+                code += "        mov rcx, qword ptr [rax" + (vb ? "+" + intToString(vb) : std::string()) + "]\n        movsxd rcx, dword ptr [rcx+" + intToString(t.entryOffset) + "]\n        add rax, rcx\n";
+                if (vb + t.returnAdjust) code += "        add rax, " + intToString(vb + t.returnAdjust) + "\n";
+                if (!t.reference) code += sym + "_null:\n";
+            }
+            else if (t.returnAdjust) {
                 if (!t.reference) code += "        test rax, rax\n        je " + sym + "_null\n";
                 code += "        add rax, " + intToString(t.returnAdjust) + "\n";
                 if (!t.reference) code += sym + "_null:\n";
@@ -1654,7 +1842,9 @@ void X86Module::emitVtables()
         const IrVtable& v = m_vtables[i];
         std::string tableSym = globalSymbol("vtable@" + v.className);
         m_dataSymbols.insert(tableSym);
-        std::string table = ";@comdat any\n";   // every translation unit that needs the table emits it
+        // every translation unit that needs the table emits it, read-only as cl's; the symbol stays static: the library's
+        // classes share their names with the MSVC runtime's (std::bad_cast), whose tables have other layouts
+        std::string table = ";@comdat any align 8\n";
         // cl's layout: the RTTI complete object locator in the 8 bytes before the table (the vptr points at slot 0;
         // vcruntime's __RTtypeid and __RTDynamicCast read it at vptr - 8)
         if (!v.locator.empty()) { table += "        DQ OFFSET " + globalSymbol(v.locator) + "\n"; useGlobal(v.locator); }
@@ -1665,7 +1855,7 @@ void X86Module::emitVtables()
             if (!sym.empty() && !m_defined.count(sym)) m_externs.insert(sym);
             table += "        DQ " + (sym.empty() ? std::string("0") : "OFFSET " + sym) + "        ; [" + intToString(static_cast<int>(k)) + "] " + v.entries[k] + "\n";
         }
-        m_data += table;
+        m_rdata += table;
     }
 }
 
@@ -1686,7 +1876,7 @@ void X86Module::emitGlobals()
                 const char* dir = it.size == 1 ? "DB" : it.size == 2 ? "DW" : it.size == 4 ? "DD" : "DQ";
                 def += "\n        ";
                 if (it.kind == IrDataItem::Zero) def += "DB " + intToString(it.size) + " DUP (0)";
-                else if (it.kind == IrDataItem::Int) def += std::string(dir) + " " + intToString(static_cast<int>(it.value));
+                else if (it.kind == IrDataItem::Int) def += std::string(dir) + " " + (it.size == 8 ? int64ToString(it.value) : intToString(static_cast<int>(it.value)));
                 else if (it.kind == IrDataItem::Float) def += std::string(it.size == 4 ? "REAL4 " : "REAL8 ") + it.text;
                 else if (it.kind == IrDataItem::String) def += "DQ OFFSET " + stringLabel(it.text);
                 else if (it.kind == IrDataItem::Bytes) {

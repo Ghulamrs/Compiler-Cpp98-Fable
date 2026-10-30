@@ -21,6 +21,7 @@ struct pair {
     pair() : first(), second() {}
     pair(const A& a, const B& b) : first(a), second(b) {}
     pair(const pair& o) : first(o.first), second(o.second) {}
+    template <class U, class W> pair(const pair<U, W>& o) : first(o.first), second(o.second) {}   // pair<K, V> to map's pair<const K, V> (20.2.2)
     pair& operator=(const pair& o) { first = o.first; second = o.second; return *this; }
 };
 

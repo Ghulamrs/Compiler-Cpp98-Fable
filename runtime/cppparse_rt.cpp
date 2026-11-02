@@ -421,6 +421,19 @@ void cppparse_rethrow(void)
     dispatch();
 }
 
+/* the landing pad of an object whose cleanup is one destructor call (--eh=table, IrGen::emitPads) makes the three
+   calls above one: the destructor runs while the exception is parked, as between cppparse_unwind_enter and leave
+   (std::uncaught_exception() is true in it, an exception it catches inside is fine, one that leaves it reaches this
+   frame in dispatch, which calls terminate), then the exception goes on to the next landing pad or to the caller.
+   It does not return */
+void cppparse_unwind_destroy(void* object, void (*dtor)(void*))
+{
+    cppparse_unwind_enter();
+    dtor(object);
+    cppparse_unwind_leave();
+    cppparse_rethrow();
+}
+
 /* atomic counters for code compiled by cppparse (MSVC's InterlockedIncrement is a compiler intrinsic); the library
    headers use them too (include\__locale: the locales' reference counts, the facet ids), whichever compiler builds them */
 long cppparse_interlocked_increment(long volatile* value) { return _InterlockedIncrement(value); }

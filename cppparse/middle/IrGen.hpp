@@ -208,6 +208,8 @@ private:
     // lifetimes
     int  registerCleanup(int slot, const sema::Type* t, bool viaPointer, int mode, int line);
     void runCleanup(const Cleanup& c, bool guarded, int line);
+    int  cleanupAddress(const Cleanup& c, int line);
+    sema::Symbol* plainDestructor(const Cleanup& c);
     void openScope();
     void closeScope(int line);
     void leaveScopes(size_t depth, int line);

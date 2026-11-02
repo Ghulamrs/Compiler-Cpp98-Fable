@@ -104,6 +104,7 @@ std::string IrInst::str() const
     }
     if (type && dst >= 0) s += "   : " + type->str();
     if (nothrow) s += "   nothrow";
+    if (variadic) s += "   variadic";
     return s;
 }
 

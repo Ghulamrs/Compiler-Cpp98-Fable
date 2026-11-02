@@ -314,7 +314,7 @@ struct Chunk {
 
 class Encoder {
 public:
-    explicit Encoder(Chunk& c) : m_c(c) {}
+    explicit Encoder(Chunk& c) : m_c(c), m_pendingLine(-1) {}
 
     bool codeLine(const std::string& text, int line);
     bool dataLine(const std::string& text, int line);
@@ -353,6 +353,7 @@ private:
 
     Chunk&      m_c;
     std::string m_line;   // the assembly line being encoded, quoted by the error messages
+    int         m_pendingLine;   // a statement's .line at the function's start, recorded after its first instruction (-1: none)
 };
 
 int Encoder::condCode(const std::string& cc)
@@ -515,6 +516,7 @@ bool Encoder::codeLine(const std::string& raw, int line)
     size_t before = m_c.bytes.size();
     if (!instruction(mn, ops, line)) { m_c.bytes.resize(before); return false; }
     ++m_c.instructions;
+    if (m_pendingLine >= 0) { m_c.lines.push_back(std::make_pair(pos(), m_pendingLine)); m_pendingLine = -1; }
     return true;
 }
 
@@ -529,11 +531,16 @@ bool Encoder::unwindDirective(const std::string& mn, const std::vector<std::stri
         return true;
     }
     if (mn == ".line") {
-        // a ;@line marker of the listing: the source line of the code from this offset on (the last one at an offset wins)
+        // a ;@line marker of the listing: the source line of the code from this offset on (the last one at an offset
+        // wins). The function's own line (the first marker, at offset 0) keeps the first instruction when no prologue
+        // separates it from the first statement's marker, as cl's tables start a function at its own line: that
+        // statement's line is recorded after the first instruction instead
         long n = 0;
         if (opText.size() != 1 || !parseLong(opText[0], n) || n < 0) return fail(".line needs a line number", line);
-        if (!m_c.lines.empty() && m_c.lines.back().first == pos()) m_c.lines.back().second = static_cast<int>(n);
-        else m_c.lines.push_back(std::make_pair(pos(), static_cast<int>(n)));
+        if (!m_c.lines.empty() && m_c.lines.back().first == pos()) {
+            if (m_c.lines.size() == 1 && pos() == 0) m_pendingLine = static_cast<int>(n); else m_c.lines.back().second = static_cast<int>(n);
+        }
+        else { m_c.lines.push_back(std::make_pair(pos(), static_cast<int>(n))); m_pendingLine = -1; }
         return true;
     }
     if (m_c.prologEnd >= 0) return fail(mn + " after .endprolog", line);

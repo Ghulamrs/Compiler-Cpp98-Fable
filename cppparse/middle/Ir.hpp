@@ -73,8 +73,10 @@ struct IrInst {
     int                    line;
     long                   extra;  // offset / element size / vtable slot
     bool                   nothrow;   // a call that cannot throw: a function with C linkage (cl /EHsc), a runtime entry
+    bool                   variadic;  // a call to a variadic function, or through a pointer of unknown type: a floating-point
+                                      // argument also goes to its integer register, where such a callee reads it
 
-    IrInst() : op(Nop), dst(-1), type(0), line(0), extra(0), nothrow(false) {}
+    IrInst() : op(Nop), dst(-1), type(0), line(0), extra(0), nothrow(false), variadic(false) {}
     bool pure() const;             // result-only, no side effects, no memory read
     bool readsMemory() const;
     bool isTerminator() const { return op == Br || op == CondBr || op == Ret || op == Throw || op == Unreachable; }

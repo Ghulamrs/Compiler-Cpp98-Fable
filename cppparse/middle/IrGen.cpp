@@ -858,6 +858,7 @@ int IrGen::memberPointerCall(cxx::Expr* e, cxx::Expr* callee, int sretAddr)
     const sema::Type* retReg = sret && mpKind(rt) == 3 ? regReturnType(0, rt) : 0;
     IrInst in = make(IrInst::Call, retReg ? retReg : sret ? m_semaTypes.basic(sema::Type::Void) : rt, line);
     in.sub = "(indirect)";
+    in.variadic = !ft || ft->kind != sema::Type::Function || ft->variadic;
     in.args.push_back(IrOperand::temp(code, oldType(m_semaTypes.pointer(ft))));
     in.args.push_back(IrOperand::temp(thisPtr, oldType(mc ? m_semaTypes.pointer(m_semaTypes.classType(mc)) : m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)))));
     int retSlot = -1;
@@ -1181,7 +1182,7 @@ int IrGen::newLocal(const std::string& name, const sema::Type* t, bool addressTa
     l.align = isReference(t) ? 8 : alignOf(t);
     if (l.size <= 0) l.size = 8;
     if (l.align <= 0) l.align = 8;
-    l.addressTaken = addressTaken;
+    l.addressTaken = addressTaken || (t && t->isVolatile);   // a volatile object is read and written every time, like one whose address is taken
     m_out->locals.push_back(l);
     return static_cast<int>(m_out->locals.size() - 1);
 }
@@ -1936,6 +1937,7 @@ int IrGen::emitCall(Symbol* fn, int thisPtr, int sretAddr, const std::vector<IrO
     if (fn->isConstructor && hasVbases(fn->ownerClass) && thisPtr >= 0 && !(ft && ft->variadic)) in.args.push_back(IrOperand::imm(vbFlag, oldType(m_semaTypes.basic(sema::Type::Int))));
     if (vcall) { in.op = IrInst::VCall; in.extra = fn->vtableSlot; }
     in.nothrow = fn->isExternC && !vcall;   // cl /EHsc: a function with C linkage does not throw
+    in.variadic = !ft || ft->variadic;
     if (isReference(rt)) in.type = oldType(m_semaTypes.pointer(rt->inner));
     int r = emit(in);
     if (retReg) { LValue m; m.kind = LValue::Mem; m.addr = sretAddr; m.type = retReg; store(m, r, retReg, line); }   // the result's bytes came in rax
@@ -2378,16 +2380,50 @@ void IrGen::openRegion(int k, int line)
     m_out->hasTry = true;
 }
 
+// the object of a cleanup: its slot holds it, or (viaPointer) its address
+int IrGen::cleanupAddress(const Cleanup& c, int line)
+{
+    if (c.viaPointer) { LValue pl; pl.kind = LValue::Local; pl.local = c.slot; pl.type = m_semaTypes.pointer(c.type); return load(pl, pl.type, line); }
+    LValue ol; ol.kind = LValue::Local; ol.local = c.slot; ol.type = c.type; return addressOf(ol, line);
+}
+
+// the destructor of a cleanup that is one direct call of it with the object's address (no flag to test, nothing to
+// free, no array remainder, no guard to reset, no this adjustment), as destroy would call it: 0 for any other
+Symbol* IrGen::plainDestructor(const Cleanup& c)
+{
+    if (c.flag >= 0 || c.freeKind || c.restIndex >= 0 || !c.abortGuard.empty()) return 0;
+    if (c.type->kind != sema::Type::Class || !c.type->decl || !needsDtor(c.type)) return 0;
+    Symbol* dtor = findSpecial(c.type->decl, '~');
+    if (!dtor) return 0;
+    if (!c.baseSubobject && hasVbases(c.type->decl)) return vbaseDestructor(c.type->decl);
+    return dtor->thisAdjust == 0 ? dtor : 0;
+}
+
 // the landing pads of the object regions: the object is destroyed (a flagged one when its flag is set) while the
-// exception stays in flight, between cppparse_unwind_enter and leave, then the exception goes on
+// exception stays in flight, between cppparse_unwind_enter and leave, then the exception goes on; a pad whose cleanup
+// is one destructor call makes the three calls one, cppparse_unwind_destroy(object, destructor), which does not return
 void IrGen::emitPads(int line)
 {
     for (size_t p = 0; p < m_pads.size(); ++p) {
-        const int k = m_pads[p].second;
+        const Cleanup c = m_flagged[static_cast<size_t>(m_pads[p].second)];
         m_block = m_pads[p].first;
+        if (Symbol* dtor = plainDestructor(c)) {
+            need(dtor);
+            const int addr = cleanupAddress(c, line);
+            IrInst fa = make(IrInst::AddrGlobal, 0, line);
+            fa.type = m_types.function(oldType(m_semaTypes.basic(sema::Type::Void)));
+            fa.args.push_back(IrOperand::global(irName(dtor), fa.type));
+            IrInst u = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line);
+            u.sub = "cppparse_unwind_destroy";
+            u.args.push_back(IrOperand::temp(addr, oldType(m_semaTypes.pointer(c.type))));
+            u.args.push_back(IrOperand::temp(emit(fa), fa.type));
+            emit(u);
+            emit(make(IrInst::Unreachable, 0, line));
+            continue;
+        }
         ++m_inPad;
         { IrInst u = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line); u.sub = "cppparse_unwind_enter"; emit(u); }
-        runCleanup(m_flagged[static_cast<size_t>(k)], m_flagged[static_cast<size_t>(k)].flag >= 0, line);
+        runCleanup(c, c.flag >= 0, line);
         { IrInst u = make(IrInst::Call, m_semaTypes.basic(sema::Type::Void), line); u.sub = "cppparse_unwind_leave"; emit(u); }
         --m_inPad;
         emit(make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), line));
@@ -2516,9 +2552,7 @@ void IrGen::runCleanup(const Cleanup& c, bool guarded, int line)
         if (guarded) { br(next, line); m_block = next; }
         return;
     }
-    int addr;
-    if (c.viaPointer) { LValue pl; pl.kind = LValue::Local; pl.local = c.slot; pl.type = m_semaTypes.pointer(c.type); addr = load(pl, pl.type, line); }
-    else { LValue ol; ol.kind = LValue::Local; ol.local = c.slot; ol.type = c.type; addr = addressOf(ol, line); }
+    const int addr = cleanupAddress(c, line);
     if (c.restIndex >= 0) {
         // the elements of an array built (or not yet destroyed) when an element's constructor (destructor) threw
         LValue il; il.kind = LValue::Local; il.local = c.restIndex; il.type = lng;
@@ -2535,9 +2569,14 @@ void IrGen::openScope()
 }
 
 // table model: the cleanups registered on one path only since m_flagged[from] (an arm of ?:, the virtual bases a
-// constructor builds when it is the most derived one) get their regions here, at the join, guarded by their flags
+// constructor builds when it is the most derived one) get their regions here, at the join, guarded by their flags.
+// Inside an arm of an outer conditional nothing opens: the outer join does, so that every path reaches a join with
+// the same regions open (a region opened at an inner join exists on that arm's path alone, and the tryends that
+// close it at the end of the full expression would then pop other regions on the other arm's path: such a function
+// kept the setjmp frames, X86 computeRegions)
 void IrGen::openDeferredRegions(size_t from, int line)
 {
+    if (m_deferRegions > 0) return;
     for (size_t k = from; k < m_flagged.size(); ++k)
         if (m_flagged[k].region == -1 && m_flagged[k].flag >= 0) openRegion(static_cast<int>(k), line);
 }
@@ -2971,6 +3010,7 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
             if (callee->kind == cxx::Expr::Member) { cxx::Expr* obj = callee->kids[0]; in.args.push_back(IrOperand::temp(callee->arrowMember ? value(obj) : addressOf(lvalue(obj), line), oldType(m_semaTypes.decay(exprType(obj))))); }
             in.sub = name + "?";
         }
+        in.variadic = !pft || pft->variadic;
         callArguments(0, pft, e->kids, 1, 2, line, argOps);
         for (size_t a = 0; a < argOps.size(); ++a) in.args.push_back(argOps[a]);
         if (!rt || rt->kind == sema::Type::Error || rt->kind == sema::Type::Dependent) in.type = m_types.builtin(Type::Long);

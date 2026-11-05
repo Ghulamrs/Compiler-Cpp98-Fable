@@ -35,6 +35,9 @@ int ehCatchVbase(int k);
 const char* ehFunctionTry(int k);
 int ehRtti(int k);
 int ehDeepHandlers(int n);
+int ehPadDtor(int k);
+int ehNestedCond(int k, const char** log);
+const char* ehCondTemps(int k);
 extern int g_destroyed;
 
 static int g_walked = -2;
@@ -119,6 +122,10 @@ int main()
     printf("\n");
     for (int k = 0; k <= 5; ++k) printf("ehFunctionTry(%d) = %s\n", k, ehFunctionTry(k));
     for (int k = 0; k <= 2; ++k) printf("ehRtti(%d) = %d\n", k, ehRtti(k));
+    for (int k = 0; k <= 4; ++k) printf("ehPadDtor(%d) = %d\n", k, ehPadDtor(k));
+    { static const int ks[] = { 0, 1, 2, 3, 5, 8, 9, 10, 13, 16, 18, 21, 24, 26, 29, 32, 40, 48, 56 };
+      for (size_t i = 0; i < sizeof ks / sizeof ks[0]; ++i) { const char* log = ""; const int r = ehNestedCond(ks[i], &log); printf("ehNestedCond(%d) = %d %s\n", ks[i], r, log); } }
+    for (int k = 0; k <= 4; ++k) printf("ehCondTemps(%d) = %s\n", k, ehCondTemps(k));
     printf("ehDeepHandlers(1) = %d, ehDeepHandlers(10) = %d\n", ehDeepHandlers(1), ehDeepHandlers(10));
     printf("destructors: %d\n", g_destroyed);
     check("try frames left", (unsigned long long)cppparse_frame_depth(), 0);

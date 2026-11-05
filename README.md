@@ -70,6 +70,7 @@ dashed box = base class not defined in the parsed files.
 --text-only      write only the .txt, health and symbol files
 --stdout         print the text report, write nothing
 --health         print the health report, write nothing
+--version        print the release (6.0) and exit
 --strict         exit code 3 when the health check finds errors (for build scripts)
 -O0 .. -O3       version 3 optimisation level (default -O0)
 --no-compile     skip version 3 and 4
@@ -363,6 +364,14 @@ newer Visual Studio retargets it on opening, and MSBuild builds it with
 ```
 msbuild cpp\cppparse.sln /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145
 ```
+
+**Releases.** `cppparse --version` prints the release. Release 6.0 (2026-11-04): the version 6 pipeline compiles
+cppparse's own sources and the self-built compiler builds an identical third generation (`selfhost.ps1`), exceptions
+use the table model throughout, and the code-size plan of `docs/next-targets.md` is complete. `crc32.txt` at the
+repository root lists the CRC32 (IEEE, as zip and PNG use) and size of every tracked file, a text file hashed with
+CR LF taken as LF so that a checkout with either line ending matches; `sandbox\scripts\crc32.ps1` verifies a
+checkout against it and exits 1 on any difference,
+`crc32.ps1 -Write` recomputes it, the last step before a release commit. The git tag `v6.0` marks the release.
 
 The scripts in `sandbox\scripts\` run the version 6 pipeline outside the
 test suite: `lib.ps1` and `life.ps1` (the library and lifetime samples

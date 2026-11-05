@@ -2242,6 +2242,78 @@ void show()
 }
 }
 
+namespace coal {   // B4: a value takes over the register of an operand whose last use defines it: the two-address forms
+                   // need no move, so sum3 copies no register to another but its result into rax at -O0 (every operand is
+                   // loaded, used once and dies); at -O2 a + b with a live on is one lea (D4), so only the result's copy
+int sum3(int a, int b, int c) { int t = a + b; t = t * c; t = t - a; return t ^ b; }
+void show() { std::printf("coal %d %d\n", sum3(3, 4, 5), sum3(-7, 2, 9)); }
+}
+
+namespace fvol {   // B6: a floating-point value that no call interrupts may live in xmm3 or xmm2, so blend saves and restores no
+                   // callee-saved xmm register (its two parameters' copies and its temporaries all fit the two, nothing is called)
+double blend(double x, double y) { double t = x * y; t = t + 1.0; return t * t - x; }
+void show() { std::printf("fvol %f %f\n", blend(1.5, 2.0), blend(-3.0, 0.5)); }
+}
+
+namespace lea4 {   // D4: a constant index is the instruction's offset (lea rd, [p+12]), and an add whose operands both live
+                   // on goes into another register with one lea (lea rd, [a+b]) instead of a copy and an add
+int* step(int* p) { return p + 3; }
+int sum(int a, int b) { int t = a + b; return t * a * b; }
+void show() { int v[8] = { 1, 2, 3, 4, 5, 6, 7, 8 }; std::printf("lea4 %d %d %d\n", *step(v), sum(3, 4), sum(-5, 2)); }
+}
+
+namespace hot5 {   // D5: the frame in order of use, so the loop's counter and sum sit within 128 bytes of rbp (a byte of
+                   // displacement) although the 160-byte array is declared before them
+int many(int n) { int a[40] = { 0 }; int s = 0; for (int i = 0; i < n; ++i) { a[i & 31] += i; s += a[(i * 7) & 31] + i; } return s; }
+void show() { std::printf("hot5 %d %d\n", many(10), many(100)); }
+}
+
+namespace fwd7 {   // D7: at -O0 a local assigned and read again in the same block keeps its register (the store stays,
+                   // the reload goes); a volatile local is reloaded after every store
+int chain(int a, int b) { int t = a + b; t = t * 3; t = t - a; return t ^ b; }
+int vol(int a) { volatile int v = a; v = v + 1; v = v * 2; return v - a; }
+void show() { std::printf("fwd7 %d %d %d\n", chain(3, 4), chain(-5, 2), vol(7)); }
+}
+
+namespace chain9 {   // D9: the blocks are laid out in chains, one target of every conditional branch right after it, so
+                     // the operands of && and || and the arms of an if need no second jump
+int both(int a, int b, int c) { if (a > 0 && b > 0) return c + 1; if (a < 0 || b < 0) return c - 1; return c; }
+void show() { std::printf("chain9 %d %d %d %d\n", both(1, 1, 10), both(1, -1, 10), both(0, 0, 10), both(-1, 1, 10)); }
+}
+
+namespace nest6 {   // A6: a ?: nested in an arm of another, with std::string temporaries in the arms: their regions open at
+                    // the outermost join, so the function keeps the table model (no setjmp frame)
+static std::string pick(int k, const std::string& s) { return k == 0 ? "~" + s : k == 1 ? std::string("operator=") : s + "!"; }
+void show() { std::string s("Name"); std::printf("nest6 %s %s %s\n", pick(0, s).c_str(), pick(1, s).c_str(), pick(2, s).c_str()); }
+}
+
+namespace cond7 {   // A7: the temporaries of a condition live to the end of its full expression: those of the condition of
+                    // ?: to the end of the enclosing one, those of the operands of && and || to the end of the condition,
+                    // destroyed newest first once the whole condition ran (test 17 compares the line with cl's)
+static char g_log[64];
+static int g_n = 0;
+static void note(char c) { if (g_n < 60) { g_log[g_n++] = c; g_log[g_n] = 0; } }
+struct T { char id; explicit T(char c) : id(c) { note(c); } ~T() { note(static_cast<char>(id - 'a' + 'A')); } };
+static bool use(const T& t) { return t.id != 'z'; }
+void show()
+{
+    note(use(T('m')) ? '.' : '-'); note('|');
+    note(use(T('m')) && use(T('n')) ? '.' : '-'); note('|');
+    if (use(T('a')) && use(T('b'))) note('.'); note('|');
+    if (use(T('z')) || use(T('b'))) note('.'); note('|');
+    const int v = use(T('m')) ? (use(T('n')) ? 1 : 2) : 3; note(static_cast<char>('0' + v));
+    std::printf("cond7 %s\n", g_log);
+}
+}
+
+namespace unread8 {   // D11: a value nothing reads (the address of a member, a load of a parameter, a constant) is not
+                      // emitted, nor is a block no branch reaches (the end of a switch every case returns from)
+struct P { int a, b; };
+int f(P* p, int k) { p->a; k; return p->b; }
+int g(int k) { switch (k) { case 1: return 10; case 2: return 20; default: return 30; } }
+void show() { P q = { 3, 4 }; std::printf("unread8 %d %d %d %d\n", f(&q, 5), g(1), g(2), g(7)); }
+}
+
 int main()
 {
     memInitOverloads();
@@ -2318,6 +2390,15 @@ int main()
     stdexc::show();
     inl::show();
     nothrowc::show();
+    coal::show();
+    fvol::show();
+    lea4::show();
+    hot5::show();
+    fwd7::show();
+    chain9::show();
+    nest6::show();
+    cond7::show();
+    unread8::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

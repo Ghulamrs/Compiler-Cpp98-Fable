@@ -596,6 +596,83 @@ const char* ehFunctionTry(int k)
     return g_ftLog;
 }
 
+// ---- the landing pad of a plain object (table model: one call of cppparse_unwind_destroy): its destructor runs while
+// the exception is in flight (std::uncaught_exception() is true in it), may throw and catch inside, then the exception
+// goes on to the next object's pad; a temporary bound to a reference, and one built in an arm of ?: (a flagged pad) ----
+#include <exception>
+static int g_padLog = 0;
+struct PadD {
+    int id;
+    explicit PadD(int i) : id(i) {}
+    ~PadD()
+    {
+        g_padLog = g_padLog * 10 + (std::uncaught_exception() ? 1 : 2);
+        try { throw id; } catch (int e) { g_padLog = g_padLog * 10 + e; }
+        g_padLog = g_padLog * 10 + (std::uncaught_exception() ? 1 : 2);
+    }
+};
+static int padThrow(int k) { if (k) throw k; return 0; }
+int ehPadDtor(int k)
+{
+    g_padLog = 0;
+    int r = 0;
+    try {
+        if (k <= 1) { PadD a(3); padThrow(k); }
+        else if (k == 2) { PadD a(3); PadD b(4); padThrow(k); }
+        else if (k == 3) { const PadD& t = PadD(5); padThrow(t.id - 2); }
+        else r = k == 4 ? padThrow(PadD(6).id) : 0;
+    } catch (int e) { r = e; }
+    return g_padLog * 10 + r;
+}
+
+// ---- temporaries of a ?: nested in an arm of another (table model: their regions open at the outermost join): built
+// and destroyed once each, in reverse order of construction, with a constructor that throws in either arm or a throw
+// after the join (the comma operator sequences the temporaries of one arm: the order of the operands of + is unspecified,
+// and cl takes the right one first) ----
+static char g_ncLog[96];
+static int g_ncLen = 0, g_ncThrow = -1;
+static void ncNote(int v) { if (g_ncLen < 90) { if (v < 0) { g_ncLog[g_ncLen++] = '~'; v = -v; } g_ncLog[g_ncLen++] = static_cast<char>('0' + v); g_ncLog[g_ncLen] = 0; } }
+struct NC { int id; explicit NC(int i) : id(i) { if (i == g_ncThrow) throw i; ncNote(i); } ~NC() { ncNote(-id); } };
+int ehNestedCond(int k, const char** log)
+{
+    g_ncLen = 0; g_ncLog[0] = 0; g_ncThrow = k & 7;   // the constructor of NC(k & 7) throws
+    int r = 0;
+    try {
+        const int a = (k & 8) ? NC(1).id : (k & 16) ? (NC(2).id, NC(5).id) : NC(3).id;
+        const int b = (k & 8) ? (((k & 16) ? NC(4).id : NC(6).id), NC(7).id) : (NC(8).id, ((k & 16) ? NC(1).id : NC(2).id));
+        r = a * 10 + b;
+        if (k & 32) throw 50;
+    } catch (int e) { r = -(r * 100 + e); }
+    ncNote(0);
+    *log = g_ncLog;
+    return r;
+}
+
+// ---- the temporaries of a condition live to the end of its full expression (12.2/3): of the condition of ?: to the
+// end of the enclosing one, of the operands of && and || in an if to the end of the condition, destroyed newest first
+// once the whole condition ran; with a throw from an operand after the first, from an arm and from the statement ----
+static char g_ctLog[64];
+static int g_ctLen = 0;
+static void ctNote(char c) { if (g_ctLen < 60) { g_ctLog[g_ctLen++] = c; g_ctLog[g_ctLen] = 0; } }
+struct CT { char id; explicit CT(char c) : id(c) { ctNote(c); } ~CT() { ctNote(static_cast<char>(id - 'a' + 'A')); } };
+static bool ctUse(const CT& t, int k) { if (k == 1) throw 1; return t.id != 'z'; }
+const char* ehCondTemps(int k)
+{
+    g_ctLen = 0; g_ctLog[0] = 0;
+    try {
+        ctNote(ctUse(CT('m'), 0) ? '.' : '-');
+        ctNote(ctUse(CT('m'), 0) && ctUse(CT('n'), k == 1) ? '.' : '-');
+        if (ctUse(CT('a'), 0) && ctUse(CT('b'), k == 2)) ctNote('.');
+        if (ctUse(CT('z'), 0) || ctUse(CT('b'), 0)) ctNote('.');
+        const int v = ctUse(CT('m'), 0) ? (ctUse(CT('n'), k == 3) ? 1 : 2) : 3;
+        ctNote(static_cast<char>('0' + v));
+        if (k == 4) throw 1;
+        ctNote(ctUse(CT('m'), 0) ? ctUse(CT('n'), 0) ? '.' : '-' : '-');
+    } catch (int) { ctNote('h'); }
+    ctNote('|');
+    return g_ctLog;
+}
+
 // ---- RTTI (C++98 5.2.7, 5.2.8): a failed dynamic_cast to a reference throws std::bad_cast, typeid of a null
 // dereference std::bad_typeid, both thrown by <typeinfo>'s helpers through cppparse's runtime ----
 #include <typeinfo>

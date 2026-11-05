@@ -446,7 +446,8 @@ try {
     foreach ($lvl in @(0, 3)) {
         $ua = Get-UnwindTable "out\x64\opt$lvl.obj"; $ub = Get-UnwindTable "out\x64\own$lvl.obj"
         $bad = @($ua.Keys | Where-Object { $ua[$_] -ne $ub[$_] }) + @($ub.Keys | Where-Object { -not $ua.ContainsKey($_) })
-        if ($ua.Count -gt 10 -and $bad.Count -eq 0) { Write-Host "  ok   unwind info of own$lvl.obj matches ml64's for all $($ua.Count) functions with a frame" }
+        # (at least 8 functions with a frame: the comparison saw something; -O3 has 10 since B6 left the float temporaries' functions frameless)
+        if ($ua.Count -ge 8 -and $bad.Count -eq 0) { Write-Host "  ok   unwind info of own$lvl.obj matches ml64's for all $($ua.Count) functions with a frame" }
         else { Write-Host "  FAIL unwind info differs from ml64's (ml64 $($ua.Count), own $($ub.Count) entries):"; $bad | Select-Object -First 4 | ForEach-Object { Write-Host "    $_`n      ml64: $($ua[$_])`n      own:  $($ub[$_])" }; $failed++ }
     }
     # the object map: real sizes, consistent with the sections and with dumpbin's symbol table
@@ -1010,6 +1011,133 @@ try {
     $m = [regex]::Match($asm2, "(?s)\?cppBetween@nothrowc@@\S* PROC.*?ENDP"); $eh["cppBetween2"] = if ($m.Success) { [int]($m.Value -match '(?m); (unwind|cleanup)\s*$') + [int]($m.Value -match ';@ehrange') } else { -1 }
     if ($eh["lenOf"] -eq 0 -and $eh["before"] -eq 0 -and $eh["cppBetween"] -eq 2 -and $eh["cppBetween2"] -eq 0) { Write-Host "  ok   front.cpp: nothrowc::lenOf and before have no unwind handler (C calls only while Buf lives), cppBetween has one at -O0 and none at -O2" }
     else { Write-Host "  FAIL front.cpp unwind handlers (handler + range found): lenOf $($eh['lenOf']), before $($eh['before']), cppBetween -O0 $($eh['cppBetween']), -O2 $($eh['cppBetween2']); expected 0, 0, 2, 0"; $failed++ }
+    # a value takes over the register of an operand whose last use defines it (B4): coal::sum3's two-address forms copy no
+    # register to another (every operand is loaded, used once and dies) but the result into eax at -O0 (one copy; the last
+    # operation is fixed to rax before the takeover runs); at -O2 a's copy for the later "- a" is a lea since D4, so one too
+    $m0 = [regex]::Match($asm0, "(?s)\?sum3@coal@@\S* PROC.*?ENDP"); $m2 = [regex]::Match($asm2, "(?s)\?sum3@coal@@\S* PROC.*?ENDP")
+    $moves0 = if ($m0.Success) { ([regex]::Matches($m0.Value, '(?m)^\s+mov (?!rbp, rsp)(r[a-z0-9]+|e[a-z][a-z]), (r[a-z0-9]+|e[a-z][a-z])$')).Count } else { -1 }
+    $moves2 = if ($m2.Success) { ([regex]::Matches($m2.Value, '(?m)^\s+mov (?!rbp, rsp)(r[a-z0-9]+|e[a-z][a-z]), (r[a-z0-9]+|e[a-z][a-z])$')).Count } else { -1 }
+    if ($moves0 -eq 1 -and $moves2 -eq 1) { Write-Host "  ok   front.cpp: coal::sum3 computes each result in the register of its dying operand (register copies: $moves0 at -O0, $moves2 at -O2)" }
+    else { Write-Host "  FAIL front.cpp register takeover: $moves0 register copies in coal::sum3 at -O0, $moves2 at -O2 (expected 1 and 1)"; $failed++ }
+    # a floating-point value that no call interrupts lives in xmm3 (B6): fvol::blend saves no callee-saved xmm register
+    $saves = @{}
+    foreach ($lvl in @(0, 2)) { $m = [regex]::Match((&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } }), "(?s)\?blend@fvol@@\S* PROC.*?ENDP"); $saves[$lvl] = if ($m.Success) { ([regex]::Matches($m.Value, '\.savexmm128')).Count } else { -1 } }
+    if ($saves[0] -eq 0 -and $saves[2] -eq 0) { Write-Host "  ok   front.cpp: fvol::blend keeps its temporaries in xmm3 and saves no xmm register" }
+    else { Write-Host "  FAIL front.cpp volatile xmm3: fvol::blend saves $($saves[0]) xmm registers at -O0, $($saves[2]) at -O2 (expected none)"; $failed++ }
+    # a 4-byte value lives in the low 32 bits of its register and is computed with the 32-bit forms (D1): coal::sum3 has no
+    # movsxd at all (the loads are mov r32, dword ptr; nothing extends a result)
+    $sx = @{}
+    foreach ($lvl in @(0, 2)) { $m = [regex]::Match((&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } }), "(?s)\?sum3@coal@@\S* PROC.*?ENDP"); $sx[$lvl] = if ($m.Success) { ([regex]::Matches($m.Value, '(?m)^\s+movsxd ')).Count } else { -1 } }
+    if ($sx[0] -eq 0 -and $sx[2] -eq 0) { Write-Host "  ok   front.cpp: coal::sum3 computes in 32 bits, no sign extension at -O0 or -O2" }
+    else { Write-Host "  FAIL front.cpp 32-bit widths: $($sx[0]) movsxd in coal::sum3 at -O0, $($sx[2]) at -O2 (expected none)"; $failed++ }
+    # at -O0 a constant read once is its reader's immediate (D2): coal::show keeps no const instruction, and sum3's six
+    # literal arguments are loaded straight into their registers
+    $m = [regex]::Match($asm0, "(?s)\?show@coal@@\S* PROC.*?ENDP")
+    $consts = if ($m.Success) { ([regex]::Matches($m.Value, '(?m)^\s+; t\d+ = const ')).Count } else { -1 }
+    $direct = if ($m.Success) { ([regex]::Matches($m.Value, '(?m)^\s+mov (ecx|edx|r8d), -?\d+\s*$')).Count } else { -1 }
+    if ($consts -eq 0 -and $direct -eq 6) { Write-Host "  ok   front.cpp: coal::show at -O0 keeps no const instruction, sum3's six literal arguments load straight into their registers" }
+    else { Write-Host "  FAIL front.cpp immediates at -O0: $consts const instructions in coal::show, $direct literal argument loads (expected 0 and 6)"; $failed++ }
+    # a floating-point argument is copied into its integer register only for a variadic callee (D3): fvol::show at -O0
+    # has printf's two movq and none for blend's four arguments
+    $m = [regex]::Match($asm0, "(?s)\?show@fvol@@\S* PROC.*?ENDP")
+    $movq = if ($m.Success) { ([regex]::Matches($m.Value, '(?m)^\s+movq r')).Count } else { -1 }
+    if ($movq -eq 2) { Write-Host "  ok   front.cpp: fvol::show at -O0 copies only printf's two double arguments to integer registers (movq), none of blend's" }
+    else { Write-Host "  FAIL front.cpp variadic-only movq: $movq movq in fvol::show at -O0 (expected 2)"; $failed++ }
+    # a constant index is the instruction's offset and an add whose operands live on goes into another register with one
+    # lea (D4): lea4::step is lea rax, [p+12] at both levels (no index register, no imul), lea4::sum at -O2 adds with a lea
+    $lea = @{}
+    foreach ($lvl in @(0, 2)) { $m = [regex]::Match((&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } }), "(?s)\?step@lea4@@\S* PROC.*?ENDP"); $lea[$lvl] = if ($m.Success) { [int]($m.Value -match '(?m)^\s+lea rax, \[r\w+\+12\]\s*$') - [int]($m.Value -match '(?m)^\s+(imul|movsxd|lea \w+, \[\w+\+\w+\*4\])') } else { -1 } }
+    $m = [regex]::Match($asm2, "(?s)\?sum@lea4@@\S* PROC.*?ENDP"); $lea["sum"] = if ($m.Success) { ([regex]::Matches($m.Value, '(?m)^\s+lea \w+, \[rcx\+rdx\]\s*$')).Count } else { -1 }
+    if ($lea[0] -eq 1 -and $lea[2] -eq 1 -and $lea["sum"] -eq 1) { Write-Host "  ok   front.cpp: lea4::step is lea rax, [p+12] at -O0 and -O2, lea4::sum adds into another register with a lea" }
+    else { Write-Host "  FAIL front.cpp lea forms: step -O0 $($lea[0]), -O2 $($lea[2]) (expected 1: the lea, no index register), sum lea [rcx+rdx] $($lea['sum']) (expected 1)"; $failed++ }
+    # the frame in order of use (D5): hot5::many's scalars (n, s, i: every dword access to the frame) lie within 128 bytes of
+    # rbp although its 160-byte array is declared first, so none of them takes a 4-byte displacement
+    $m = [regex]::Match($asm0, "(?s)\?many@hot5@@\S* PROC.*?ENDP")
+    $far = if ($m.Success) { ([regex]::Matches($m.Value, '(?m)dword ptr \[rbp-(\d+)\]') | Where-Object { [int]$_.Groups[1].Value -gt 128 }).Count } else { -1 }
+    $near = if ($m.Success) { ([regex]::Matches($m.Value, '(?m)dword ptr \[rbp-(\d+)\]') | Where-Object { [int]$_.Groups[1].Value -le 128 }).Count } else { -1 }
+    if ($far -eq 0 -and $near -ge 6) { Write-Host "  ok   front.cpp: hot5::many at -O0 keeps its scalars within 128 bytes of rbp ($near byte-displacement accesses, none with four bytes) although its array is declared first" }
+    else { Write-Host "  FAIL front.cpp frame order: hot5::many at -O0 has $far scalar accesses beyond rbp-128 and $near within (expected 0 and at least 6)"; $failed++ }
+    # +0.0 is made by clearing the register (D6): no load of the all-zero constant at either level, xorps instead
+    $zero0 = ([regex]::Matches($asm0, 'real8 ptr \[fconst_0000000000000000\]')).Count; $zero2 = ([regex]::Matches($asm2, 'real8 ptr \[fconst_0000000000000000\]')).Count
+    $xorps = ([regex]::Matches($asm2, '(?m)^\s+xorps (xmm\d+), \1\s*$')).Count
+    if ($zero0 -eq 0 -and $zero2 -eq 0 -and $xorps -ge 10) { Write-Host "  ok   front.cpp: +0.0 clears its register (xorps, $xorps at -O2), the zero constant is never loaded" }
+    else { Write-Host "  FAIL front.cpp zero constant: loads of fconst_0 $zero0 at -O0, $zero2 at -O2 (expected 0), xorps at -O2 $xorps (expected 10 or more)"; $failed++ }
+    # a local assigned and read again in the block keeps its register at -O0 (D7): fwd7::chain never reloads t (its slot
+    # from the frame comment), fwd7::vol reloads the volatile v after each of its three stores
+    $fw = @{}
+    foreach ($fn in @("chain", "vol")) {
+        $m = [regex]::Match($asm0, "(?s)\?$fn@fwd7@@\S* PROC.*?ENDP")
+        $var = if ($fn -eq "chain") { "t" } else { "v" }
+        $slot = if ($m.Success) { [regex]::Match($m.Value, "(?m)\b$var@\[(rbp-\d+)\]").Groups[1].Value } else { "" }
+        $fw[$fn] = if ($slot) { ([regex]::Matches($m.Value, '(?m)^\s+mov \w+, dword ptr \[' + [regex]::Escape($slot) + '\]')).Count } else { -1 }
+    }
+    if ($fw["chain"] -eq 0 -and $fw["vol"] -ge 3) { Write-Host "  ok   front.cpp: fwd7::chain at -O0 never reloads t after storing it, fwd7::vol reloads its volatile v $($fw['vol']) times" }
+    else { Write-Host "  FAIL front.cpp store forwarding at -O0: reloads of t in fwd7::chain $($fw['chain']) (expected 0), of volatile v in fwd7::vol $($fw['vol']) (expected 3 or more)"; $failed++ }
+    # the landing pads are laid out after the code of their region (D8): no jump hops over a cleanup pad to the block
+    # right after it, at either level
+    $lay = @{}
+    foreach ($lvl in @(0, 2)) {
+        $a = &{ if ($lvl -eq 0) { $asm0 } else { $asm2 } }
+        $lay["hop$lvl"] = ([regex]::Matches($a, '(?m)^\s+jmp (\S+)\s*\r?\n\S+_B\d+:\s*; cleanup\s*$(?:\r?\n(?!\S+_B\d+:).*)*\r?\n\1:')).Count
+        $lay["pads$lvl"] = ([regex]::Matches($a, '(?m)^\S+_B\d+:\s*; cleanup\s*$')).Count
+    }
+    if ($lay["hop0"] -eq 0 -and $lay["hop2"] -eq 0 -and $lay["pads0"] -gt 0) { Write-Host "  ok   front.cpp: no jump hops over a landing pad ($($lay['pads0']) pads at -O0, $($lay['pads2']) at -O2)" }
+    else { Write-Host "  FAIL front.cpp block layout: jumps hopping over a pad $($lay['hop0']) at -O0, $($lay['hop2']) at -O2 (expected 0); pads at -O0 $($lay['pads0'])"; $failed++ }
+    # the blocks in chains (D9): in chain9::both no conditional jump is followed by an unconditional one at either level
+    $ch = @{}
+    foreach ($lvl in @(0, 2)) {
+        $m = [regex]::Match((&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } }), "(?s)\?both@chain9@@\S* PROC.*?ENDP")
+        $ch["pair$lvl"] = if ($m.Success) { ([regex]::Matches($m.Value, '(?m)^\s+j(?!mp)[a-z]+ \S+\s*\r?\n\s+jmp ')).Count } else { -1 }
+        $ch["jcc$lvl"] = if ($m.Success) { ([regex]::Matches($m.Value, '(?m)^\s+j(?!mp)[a-z]+ ')).Count } else { -1 }
+    }
+    if ($ch["pair0"] -eq 0 -and $ch["pair2"] -eq 0 -and $ch["jcc0"] -ge 4) { Write-Host "  ok   front.cpp: chain9::both's conditional jumps ($($ch['jcc0']) at -O0, $($ch['jcc2']) at -O2) each fall through to one target, none is followed by a jmp" }
+    else { Write-Host "  FAIL front.cpp chain layout: conditional jumps followed by a jmp in chain9::both $($ch['pair0']) at -O0, $($ch['pair2']) at -O2 (expected 0); conditional jumps at -O0 $($ch['jcc0']) (expected 4 or more)"; $failed++ }
+    # the lean landing pad (A5): a plain object's pad is one call of cppparse_unwind_destroy (no enter, destructor, leave,
+    # rethrow), and the range table names such a pad itself: no dispatch stub that is a lone jump
+    $lp = @{}
+    foreach ($lvl in @(0, 2)) {
+        $a = (&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } })
+        $lp["destroy$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_unwind_destroy')).Count
+        $lp["enter$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_unwind_enter')).Count
+        $lp["stub$lvl"] = ([regex]::Matches($a, '(?m)^\S+_T\d+:[^\r\n]*\r?\n(?:\S+_R\d+[be]:\s*\r?\n)*\s+jmp ')).Count
+    }
+    if ($lp["destroy0"] -ge 100 -and $lp["destroy2"] -ge 50 -and $lp["stub0"] -eq 0 -and $lp["stub2"] -eq 0) { Write-Host "  ok   front.cpp: lean landing pads ($($lp['destroy0']) at -O0, $($lp['destroy2']) at -O2; $($lp['enter0']) pads with enter and leave at -O0), no dispatch stub that is one jump" }
+    else { Write-Host "  FAIL front.cpp landing pads: cppparse_unwind_destroy calls $($lp['destroy0']) at -O0 (expected 100 or more), $($lp['destroy2']) at -O2 (expected 50 or more); dispatch stubs that are one jump $($lp['stub0']) at -O0, $($lp['stub2']) at -O2 (expected 0)"; $failed++ }
+    # a byte that only steers the next branch (D10) is tested where it is: no call's bool result zero-extended and then
+    # tested as 32 bits, bytes compared in memory or tested in their byte register
+    $bt = @{}
+    foreach ($lvl in @(0, 2)) {
+        $a = (&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } })
+        $bt["ext$lvl"] = ([regex]::Matches($a, '(?m)^\s+call [^\r\n]*(?:\r?\n\s*;[^\r\n]*)*\r?\n\s+movzx eax, al\b[^\r\n]*(?:\r?\n\s*;[^\r\n]*)*\r?\n\s+test eax, eax')).Count
+        $bt["mem$lvl"] = ([regex]::Matches($a, '(?m)^\s+cmp byte ptr \[[^\]]+\], 0')).Count
+        $bt["reg$lvl"] = ([regex]::Matches($a, '(?m)^\s+test (al|bl|cl|dl|sil|dil|r\d+b), \1\b')).Count
+    }
+    if ($bt["ext0"] -eq 0 -and $bt["ext2"] -eq 0 -and $bt["mem0"] -ge 40 -and $bt["reg0"] -ge 5) { Write-Host "  ok   front.cpp: bytes that steer a branch are tested where they are ($($bt['mem0']) in memory and $($bt['reg0']) in a byte register at -O0, $($bt['mem2']) and $($bt['reg2']) at -O2; no call result zero-extended for a test)" }
+    else { Write-Host "  FAIL front.cpp byte tests: call results zero-extended and then tested $($bt['ext0']) at -O0, $($bt['ext2']) at -O2 (expected 0); bytes compared in memory at -O0 $($bt['mem0']) (expected 40 or more), tested in a byte register $($bt['reg0']) (expected 5 or more)"; $failed++ }
+    # every function keeps the table model (A6): no setjmp frame in front.cpp at either level, nest6::pick (a ?: nested in an
+    # arm of another, with std::string temporaries in the arms) included
+    $sj = @{}
+    foreach ($lvl in @(0, 2)) {
+        $a = (&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } })
+        $sj["frames$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_push_frame')).Count
+        $sj["pick$lvl"] = ([regex]::Matches($a, '(?m)^\?pick@nest6@@\S* PROC')).Count
+    }
+    if ($sj["frames0"] -eq 0 -and $sj["frames2"] -eq 0 -and $sj["pick0"] -eq 1) { Write-Host "  ok   front.cpp: no setjmp frame at either level (nest6::pick keeps the table model)" }
+    else { Write-Host "  FAIL front.cpp setjmp frames: $($sj['frames0']) at -O0, $($sj['frames2']) at -O2 (expected 0); nest6::pick found $($sj['pick0']) (expected 1)"; $failed++ }
+    # dead code (D11): a block no branch reaches is not emitted (no block labelled dead at either level, no switch.end in
+    # unread8::g, whose cases all return), nor is a value nothing reads (unread8::f never stores or loads its parameter k,
+    # which arrives in edx)
+    $dc = @{}
+    foreach ($lvl in @(0, 2)) {
+        $a = (&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } })
+        $dc["dead$lvl"] = ([regex]::Matches($a, '(?m)^\S+_B\d+:\s*; dead\s*$')).Count
+        $fm = [regex]::Match($a, "(?s)\?f@unread8@@\S* PROC.*?ENDP")
+        $dc["edx$lvl"] = if ($fm.Success) { ([regex]::Matches($fm.Value, '(?m)^\s+\w+ [^;\r\n]*\bedx\b')).Count } else { -1 }
+        $gm = [regex]::Match($a, "(?s)\?g@unread8@@\S* PROC.*?ENDP")
+        $dc["swend$lvl"] = if ($gm.Success) { ([regex]::Matches($gm.Value, '; switch\.end')).Count } else { -1 }
+    }
+    if ($dc["dead0"] -eq 0 -and $dc["dead2"] -eq 0 -and $dc["edx0"] -eq 0 -and $dc["edx2"] -eq 0 -and $dc["swend0"] -eq 0 -and $dc["swend2"] -eq 0) { Write-Host "  ok   front.cpp: no block nothing reaches is emitted and no value nothing reads (unread8::f leaves its parameter k alone, unread8::g has no switch.end)" }
+    else { Write-Host "  FAIL front.cpp dead code: blocks labelled dead $($dc['dead0']) at -O0, $($dc['dead2']) at -O2 (expected 0); instructions of unread8::f on edx $($dc['edx0']) / $($dc['edx2']) (expected 0); switch.end blocks in unread8::g $($dc['swend0']) / $($dc['swend2']) (expected 0)"; $failed++ }
     # copies.cpp: copies and temporaries, logged by the constructors and destructors. cl /Od copies a returned named
     # local and /O2 builds it in the result (NRVO): -O0 must print what cl /Od's build prints, -O2 what cl /O2's does
     foreach ($lvl in @(0, 2)) {
@@ -1089,6 +1217,31 @@ try {
         }
         if ($problems.Count -eq 0) { Write-Host "  ok   dbghelp maps $nm.exe's code to lines.cpp (-O$lvl): $((($got -split "`n") | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }) -join '; ')" }
         else { Write-Host "  FAIL dbghelp on $nm.exe (-O$lvl): $($problems -join '; ')"; Write-Host $got; $failed++ }
+        # every line record lies on an instruction start (the COFF writer moves the records with the code when it shortens
+        # a jump): dbgcheck -offsets gives each record's offset in its function, dumpbin /disasm the instructions
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $offs = & ".\out\x64\dbgcheck.exe" -offsets "out\x64\$nm.exe" twice main "Acc::add" 2>&1 | Out-String
+        $ErrorActionPreference = $eap
+        $dis = & $dumpbin /nologo /disasm "out\x64\$nm.exe" | Out-String
+        $labels = @{ twice = '\?twice@@YAHH@Z'; main = 'main'; "Acc::add" = '\?add@Acc@@QEAAXH@Z' }
+        $bad = @(); $records = 0
+        foreach ($fn in $labels.Keys) {
+            $m = [regex]::Match($offs, "(?m)^" + [regex]::Escape($fn) + ": size (\d+)((?: \d+:\d+)+)\s*$")
+            if (-not $m.Success) { $bad += "$fn has no records"; continue }
+            $body = [regex]::Match($dis, "(?ms)^" + $labels[$fn] + ":\r?\n(.*?)(?=^\S+:\r?$)")
+            if (-not $body.Success) { $bad += "$fn not in the disassembly"; continue }
+            $addrs = @([regex]::Matches($body.Groups[1].Value, '(?m)^  ([0-9A-F]{16}): ') | ForEach-Object { [Convert]::ToInt64($_.Groups[1].Value, 16) })
+            $starts = @{}; foreach ($ad in $addrs) { $starts[[int]($ad - $addrs[0])] = $true }
+            $prev = -1
+            foreach ($rec in ($m.Groups[2].Value.Trim() -split ' ')) {
+                $off = [int]($rec -split ':')[0]; $records++
+                if (-not $starts.ContainsKey($off)) { $bad += "$fn record at offset $off is inside an instruction" }
+                if ($off -le $prev) { $bad += "$fn records out of order at offset $off" }
+                $prev = $off
+            }
+        }
+        if ($bad.Count -eq 0) { Write-Host "  ok   $nm.exe (-O$lvl): all $records line records of twice, main and Acc::add lie on instruction starts" }
+        else { Write-Host "  FAIL $nm.exe (-O$lvl) line record offsets: $($bad -join '; ')"; Write-Host $offs; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed CodeView check(s) failed" }
 

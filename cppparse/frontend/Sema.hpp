@@ -221,10 +221,15 @@ struct Symbol {
     int           offset;                 // field offset within the class
     int           index;                  // parameter index / enumerator order
     bool          isMember, isParam, isLocal, isMutable;
+    bool          declaredArray;        // a parameter declared as an array ("int a[3]"): a pointer, which cl decorates as a const one (Q)
+    // a parameter: for the function types inside its type ("int (*cb)(int[3])"), whether each of their parameters was
+    // declared as an array, in the order the mangler meets them (a function type's result first, then each parameter and
+    // what is inside it): cl decorates those as const pointers too (P6AHQEAH@Z)
+    std::vector<char> nestedArrays;
     cxx::Expr*    init;
     Symbol*       initCtor;               // variable of class type: the constructor chosen for its initialisation
     bool          hasConstValue;
-    long long     constValue;             // the value in its type: the low 32 bits sign-extended for a type of 4 bytes or less, all 64 bits of a 64-bit type
+    int64         constValue;             // the value in its type: the low 32 bits sign-extended for a type of 4 bytes or less, all 64 bits of a 64-bit type
     int           declAlign;              // __declspec(align(N)) on a variable or field (0: none)
     int           bitWidth, bitOffset;    // bit-field: its width (-1: not a bit-field) and first bit in the unit at offset
     // a member of an anonymous union or struct, seen as a member of the enclosing class: the unnamed member
@@ -237,7 +242,7 @@ struct Symbol {
     std::map<std::string, Symbol*> instantiations;   // argument text -> instantiated class / function
     Symbol*       instantiatedFrom;
     std::vector<const Type*> templateArgs;           // for an instantiation: the type arguments (0 for non-type)
-    std::vector<long long>   templateIntArgs;
+    std::vector<int64>       templateIntArgs;
     std::vector<Symbol*>     templateSymArgs;        // for an instantiation: the member a pointer-to-member argument names (0 for the others; templateIntArgs holds a data member's offset)
     Symbol*       memberArg;              // a non-type template parameter bound in an instantiation to the pointer to member &C::m: m
     bool          isDependentContext;     // declared inside a template: not analysed until instantiated
@@ -247,6 +252,12 @@ struct Symbol {
                                           // it is never generated; a use of it is an error (14.7.1)
     bool          isExplicitInstantiation; // function named by an explicit instantiation definition (14.7.2): analysed and
                                           // generated as any function, so that the unit emits its COMDAT for the others
+    // 14.7.3/6: an explicit specialisation must be declared before the first use that would instantiate it (cl C2908)
+    bool          instantiationUsed;      // an implicit instantiation (class, function, member of a class template's
+                                          // instantiation) whose definition the declarations so far needed
+    int           specOrder;              // an explicit specialisation: its place among the unit's (1, 2...; 0: none)
+    cxx::Loc      specLoc;                // where it was declared first
+    std::vector<Symbol*>     needsOnUse;  // class instantiated when only named: what its members need once it is used
     std::vector<Symbol*>     partialSpecs;        // class template: its partial specialisations (ClassTemplate symbols)
     std::vector<cxx::TemplateArg> patternArgs;    // partial specialisation: the argument pattern
     bool          isImplicit;             // compiler-generated constructor / destructor / assignment
@@ -261,9 +272,19 @@ struct Symbol {
     // not be resolved (a template, a function of another scope): then nothing of the class is checked
     std::vector<Symbol*>     friends;
     std::vector<std::string> friendNames;   // "friend class List;" before List is declared: matched by name
+    // "template <class U> friend R f(U);", "friend R f<>(T);": the function templates of that name in that namespace
+    // (declared before or after the class; overloads of the name are not told apart), every specialisation a friend
+    std::vector<std::string> friendFunctionTemplates;
+    std::vector<Scope*>      friendFunctionScopes;
+    // class: the members of base classes a using-declaration names here, with the access of that declaration, which
+    // is their access as members of this class (7.3.3, 11.3)
+    std::vector<Symbol*>     usingMembers;
+    std::vector<cxx::Access> usingAccess;
     bool          friendsUnknown;
+    bool          nonPublicBases;         // class: a base class of it, direct or not, is protected or private (11.2)
     bool          isUsed;                 // variable, parameter: referred to by an expression (C4100, C4101, C4189)
     bool          isNoreturn;             // function: __declspec(noreturn)
+    bool          isReplaceable;          // function: __declspec(replaceable), its definition is a default another object's replaces
     std::string   deletedWhy;             // implicit copy assignment that cannot be generated (12.8/12): why
     std::string   mangled;                // filled by code generation
 
@@ -290,14 +311,14 @@ struct Scope {
 };
 
 // the value of an integer literal's digits modulo 2^64 (SemaExpr.cpp); *overflow when it needs more bits
-unsigned long long integerLiteralValue(const std::string& text, bool* overflow);
+uint64 integerLiteralValue(const std::string& text, bool* overflow);
 
 // folded integer constants (Expr::semaValue, Symbol::constValue, Symbol::templateIntArgs) hold their value in their
 // type, modulo 2^N: all 64 bits of a type of 8 bytes, the low 32 bits sign-extended for one of 4 bytes or less (an
 // unsigned int 0xFFFFFFFF is -1, as when semaValue was a 32-bit long), the value of a char or short.
 // foldedConstant: v as a value of type t; convertedConstant: a value of type from converted to type to (4.7)
-long long foldedConstant(const TypeTable& types, long long v, const Type* t);
-long long convertedConstant(const TypeTable& types, long long v, const Type* from, const Type* to);
+int64 foldedConstant(const TypeTable& types, int64 v, const Type* t);
+int64 convertedConstant(const TypeTable& types, int64 v, const Type* from, const Type* to);
 
 struct Diag {
     enum Severity { Error, Warning, Note };
@@ -355,7 +376,10 @@ public:
     // used by later stages
     Symbol* lookupQualified(const cxx::QualifiedName& n, Scope* from, bool typesOnly);
     const Type* typeOf(const cxx::DeclSpec& spec, Scope* in);
-    const Type* applyDeclarator(const Type* base, const cxx::Declarator& d, Scope* in, std::vector<Symbol*>* params);
+    const Type* applyDeclarator(const Type* base, const cxx::Declarator& d, Scope* in, std::vector<Symbol*>* params, std::vector<char>* nestedArrays = 0);
+    // the array list (Symbol::nestedArrays) of the typedef that spec names, appended to out: a declaration made with
+    // the typedef spells the function types inside it as the typedef's declaration did
+    void        specArrays(const cxx::DeclSpec& spec, Scope* in, std::vector<char>& out);
 
 private:
     // declarations
@@ -377,12 +401,14 @@ private:
     Symbol* findClassSymbolForQualifier(const cxx::QualifiedName& n, Scope* from);
     Scope* scopeForQualifier(const cxx::QualifiedName& n, Scope* from);
     Symbol* injectedTemplate(Symbol* s, const cxx::NameComponent& c) const;   // the template an injected name with arguments names
-    Symbol* explicitSpecialization(Symbol* primary, const std::string& key, const std::vector<const Type*>& types, const std::vector<long long>& ints, Scope* in);
+    Symbol* explicitSpecialization(Symbol* primary, const std::string& key, const std::vector<const Type*>& types, const std::vector<int64>& ints, Scope* in, const cxx::Loc& loc, bool& tookOver);
 
     // bodies
     // order: where the body stands among the class definitions of the unit (Symbol::defOrder), for cl's
     // member-pointer models (memberPointerSizeUse)
-    struct PendingBody { Symbol* fn; cxx::Decl* def; Scope* scope; int order; };
+    // specOrder: the explicit specialisations declared before the body (0x7FFFFFFF for an instantiation's, which
+    // is compiled after the unit)
+    struct PendingBody { Symbol* fn; cxx::Decl* def; Scope* scope; int order; int specOrder; };
     void   queueBody(PendingBody pb);
     void   memberPointerSizeUse(const Type* t);
     void   analyzeBodies();
@@ -391,9 +417,49 @@ private:
     // is reachable from code that is not itself tentative
     bool   isLazyMember(const Symbol* fn) const;
     void   noteUse(Symbol* used);           // m_currentFunction (0 at namespace scope) refers to used
+    // 14.7.3/6. specializationUse: s (a class, a function, a static data member) is needed defined here: in the
+    // declaration pass an implicit instantiation is marked used, so that an explicit specialisation declared
+    // later is refused (S110, cl C2908); in a body, an explicit specialisation declared after the body is. A
+    // class that only instantiating another one needs waits on that one (needsOnUse): cppparse instantiates a
+    // class when it is named, the standard when it is used. classNeeded: the same for the class of a type
+    void   specializationUse(Symbol* s);
+    void   classNeeded(const Type* t);
+    void   markInstantiationUsed(Symbol* s);
+    void   discardInstantiation(Symbol* cls);
+    void   declareStaticMemberSpecialization(cxx::Decl* d, cxx::Decl* inner, cxx::Declarator* dcl, Scope* in);
     // access control (clause 11) and the other checks of the 2026-10-15 review's M12
-    bool   accessible(Symbol* member, Scope* from);
-    void   accessCheck(Symbol* member, const cxx::Loc& loc, Scope* from);
+    bool   accessible(Symbol* member, Scope* from, Symbol* through);
+    // through: the class of the object expression ("b.x": B) or of the qualifier of a pointer to member ("&B::x"),
+    // the class itself where a complete object is created (11.5); 0 for the implicit this
+    void   accessCheck(Symbol* member, const cxx::Loc& loc, Scope* from, Symbol* through = 0);
+    // 11/4: a member type (a typedef, a nested class or enumeration, a member class template) named by a type
+    // specifier is a member like the others. Checked where the context is known: in bodies, in the member
+    // declarations of a class, and for a declaration at namespace scope once the function or member it declares is
+    // known (11/5: the names in a member's definition outside its class are checked as in the class; a friend's
+    // own declaration may name them): flushTypeAccess then checks what was held back since mark
+    void   memberTypeAccess(Symbol* s, const cxx::Loc& loc, Scope* in, Symbol* through = 0);   // through: the class of the qualifier that names s
+    // the member types among the components of n's qualifier are access-checked, each in the class before it
+    // ("A::Priv::Inner" names Priv in A); returns the class the qualifier denotes, 0 when it is none
+    Symbol* qualifierAccess(const cxx::QualifiedName& n, Scope* in, const cxx::Loc& loc);
+    void   flushTypeAccess(size_t mark, Symbol* fn, Symbol* cls);
+    void   destructorAccess(const Type* t, const cxx::Loc& loc, Scope* in);
+    // the destructor of a base or member that cls's implicit destructor cannot reach (12.4/5), 0 when it reaches all
+    Symbol* implicitDestructorBlocked(Symbol* cls, int depth);
+    std::map<Symbol*, Symbol*> m_implicitDtorBlocked;   // what implicitDestructorBlocked found, by class
+    // 11.2: a member named in class n, which derives from the member's class owner. accessIn: the member's access as
+    // a member of n (0 public, 1 protected, 2 private, 3 none), from its declared access and the base specifiers on
+    // the way, the most accessible path counting (11.7); member (0 for the invented public member that stands for a
+    // base class) is looked up among the using-declarations. accessibleNamedIn: the four rules of 11.2/4 for a
+    // reference made in contexts (the classes whose member the code is; friends count through isFriendOf)
+    int    accessIn(Symbol* n, Symbol* owner, cxx::Access declared, Symbol* member, int depth);
+    bool   accessibleNamedIn(Symbol* n, Symbol* owner, cxx::Access declared, Symbol* member, const std::vector<Symbol*>& contexts, int depth);
+    void   accessContexts(Scope* from, std::vector<Symbol*>& contexts);
+    // a conversion from a derived class to a base (a pointer, a reference, the object itself) needs the base to be
+    // accessible where it is made (11.2/4)
+    void   baseConversionAccess(const Type* from, const Type* to, const cxx::Loc& loc, Scope* in);
+    void   baseClassAccess(Symbol* derived, Symbol* base, const cxx::Loc& loc, Scope* in, bool isStaticCast);   // S150 when base is not an accessible base of derived at loc
+    void   deallocationAccess(const Type* t, bool isArray, const cxx::Loc& loc, Scope* in);   // the class's operator delete or delete[] a delete- or new-expression names
+    void   friendFunctionTemplate(Symbol* cls, const cxx::QualifiedName& n, Scope* in);
     bool   isFriendOf(Symbol* x, Symbol* cls);
     void   abstractCheck(const Type* t, const cxx::Loc& loc);
     bool   assignmentDeleted(Symbol* cls);
@@ -413,6 +479,8 @@ private:
     void   analyzeFunctionBody(Symbol* fn, cxx::Decl* def, Scope* enclosing);
     void   stmt(cxx::Stmt* s, Scope* in, Symbol* fn);
     void   localDecl(cxx::Decl* d, Scope* in, bool isHandler = false);
+    void   handlerOrder(cxx::Stmt* tryStmt);   // S161: a handler after catch (...); S162: a handler an earlier one hides
+    const Type* handlerType(const Type* t, const cxx::Loc& at);   // 15.3/2: an array or function is a pointer; S163: an incomplete type (15.3/1)
 
     // lookup
     Symbol*  lookupUnqualified(const std::string& name, Scope* from, bool typesOnly, std::vector<Symbol*>* all);
@@ -429,9 +497,14 @@ private:
     // types
     const Type* namedType(const cxx::QualifiedName& n, Scope* in, const std::string& elaborated, const cxx::Loc& loc);
     const Type* instantiateClassTemplate(Symbol* tmpl, const std::vector<cxx::TemplateArg>& args, Scope* from, const cxx::Loc& loc);
+    // the instantiation of tmpl for the arguments given; into: an instantiation made before, declared again in its
+    // symbol (reinstantiateDependents)
+    const Type* instantiateClassFor(Symbol* tmpl, const std::vector<const Type*>& types, const std::vector<int64>& ints, const std::vector<Symbol*>& syms, const std::string& key, const cxx::Loc& loc, Symbol* into);
+    void   dependentInstantiations(Symbol* cls, std::vector<Symbol*>& out);
+    void   reinstantiateDependents(Symbol* cls, int depth);
     // params: the template's parameters, whose types the value arguments are converted to (0: as written)
     // syms: the members pointer-to-member arguments name (&C::m; 0 for the other arguments)
-    bool   templateArgText(const std::vector<cxx::TemplateArg>& args, Scope* from, std::vector<const Type*>& types, std::vector<long long>& ints, std::string& text, const std::vector<Symbol*>* params = 0, std::vector<Symbol*>* syms = 0);
+    bool   templateArgText(const std::vector<cxx::TemplateArg>& args, Scope* from, std::vector<const Type*>& types, std::vector<int64>& ints, std::string& text, const std::vector<Symbol*>* params = 0, std::vector<Symbol*>* syms = 0);
     Symbol* memberPointerArg(cxx::Expr* x, const Symbol* param);   // &C::m as a template argument (14.3.2/1), 0 when it is not one
     void   bindMemberArg(Symbol* b, Symbol* m);
     static bool anyMemberArg(const std::vector<Symbol*>& syms);
@@ -445,7 +518,7 @@ private:
     const Type* exprCall(cxx::Expr* e, Scope* in);
     const Type* exprBinary(cxx::Expr* e, Scope* in);
     cxx::Expr*  boolContext(cxx::Expr* e, Scope* in);
-    cxx::Expr*  converted(cxx::Expr* e, const Conversion& c);
+    cxx::Expr*  converted(cxx::Expr* e, const Conversion& c, Scope* in);
     void        promoteVariadic(std::vector<cxx::Expr*>& args, size_t firstArg, const Type* ft);
     const Type* exprUnary(cxx::Expr* e, Scope* in);
     const Type* exprAssign(cxx::Expr* e, Scope* in);
@@ -465,10 +538,10 @@ private:
     void        braceDeclInit(Symbol* var, cxx::Initializer& init, Scope* in);
     const Type* completedArray(const Type* t, const cxx::Initializer& init);
     bool   completeForSizeof(const Type* t, Scope* in, const cxx::Loc& loc);   // false, with S113, for an incomplete type
-    bool   constantValue(cxx::Expr* e, long long& out);
-    long long fitConstant(long long v, const Type* t) const { return foldedConstant(m_types, v, t); }
-    long long constantIn(long long v, const Type* from, const Type* to) const { return convertedConstant(m_types, v, from, to); }
-    long long exprConstantIn(const cxx::Expr* e, const Type* to) const { return convertedConstant(m_types, e->semaValue, e->semaType, to); }
+    bool   constantValue(cxx::Expr* e, int64& out);
+    int64 fitConstant(int64 v, const Type* t) const { return foldedConstant(m_types, v, t); }
+    int64 constantIn(int64 v, const Type* from, const Type* to) const { return convertedConstant(m_types, v, from, to); }
+    int64 exprConstantIn(const cxx::Expr* e, const Type* to) const { return convertedConstant(m_types, e->semaValue, e->semaType, to); }
     void      foldBinary(cxx::Expr* e, const std::string& op, const Type* l, const Type* r, const Type* rt);
     // the type a non-type template parameter is bound with in an instantiation: its declared integral type, else int
     const Type* valueParamType(const Symbol* param) const { return param && param->type && param->type->isIntegral() ? m_types.unqualified(param->type) : m_types.basic(Type::Int); }
@@ -478,12 +551,15 @@ private:
     Conversion convert(cxx::Expr* from, const Type* to, Scope* in);
     Conversion convertType(const Type* from, bool lvalue, bool nullConstant, const Type* to, Scope* in, bool allowUser);
     Symbol* instantiateFunctionTemplate(Symbol* tmpl, const std::vector<cxx::Expr*>& args, size_t firstArg, Scope* in, const cxx::Loc& loc, const std::vector<cxx::TemplateArg>* explicitArgs = 0);
-    Symbol* instantiateBoundFunctionTemplate(Symbol* tmpl, std::map<std::string, const Type*>& bind, std::map<std::string, long long>& ints);
-    bool   matchFunctionTemplate(Symbol* tmpl, cxx::Declarator* dcl, const Type* ft, Scope* in, std::map<std::string, const Type*>& bind, std::map<std::string, long long>& ints);
+    Symbol* instantiateBoundFunctionTemplate(Symbol* tmpl, std::map<std::string, const Type*>& bind, std::map<std::string, int64>& ints);
+    bool   matchFunctionTemplate(Symbol* tmpl, cxx::Declarator* dcl, const Type* ft, Scope* in, std::map<std::string, const Type*>& bind, std::map<std::string, int64>& ints);
     bool   atLeastAsSpecialized(Symbol* a, Symbol* b);   // 14.5.5.2: b's parameters deduce from a's with a's parameters unique types
     static bool typeHasError(const Type* t);
     void   declareFunctionSpecialization(cxx::Decl* d, cxx::Decl* inner, cxx::Declarator* dcl, Scope* in, cxx::Access access);
-    bool   deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::map<std::string, const Type*>& bindings, std::map<std::string, long long>& ints);
+    bool   deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::map<std::string, const Type*>& bindings, std::map<std::string, int64>& ints);
+    // a template-id (Box<T, N>) against an instantiation: of tmpl when the name was qualified, else of the template
+    // of the component's name
+    bool   deduceTemplateId(const cxx::NameComponent& c, Symbol* tmpl, const Type* a, Scope* tscope, std::map<std::string, const Type*>& bindings, std::map<std::string, int64>& ints);
     const Type* resultOfCall(Symbol* fn);
 
     // diagnostics
@@ -499,12 +575,21 @@ private:
     std::vector<PendingBody>   m_pending;
     Symbol*                    m_currentFunction;
     Symbol*                    m_currentClass;
+    struct DelayedAccess { Symbol* member; cxx::Loc loc; Scope* from; Symbol* through; };
+    std::vector<std::pair<Symbol*, Symbol*> >* m_qualifierTrace;   // scopeForQualifier notes here each component found in a class, with that class
+    bool                       m_typeAccess;      // member types named now are access-checked (memberTypeAccess)
+    bool                       m_delayTypeAccess; // and held back until the declaration's function or member is known
+    std::vector<DelayedAccess> m_delayedAccess;
     int                        m_loopDepth, m_switchDepth, m_depth;
     std::vector<Symbol*>       m_locals;          // the scalar locals of the body being analysed (functionWarnings)
     std::set<Symbol*>          m_uninitCandidates;
     bool                       m_hasGoto;         // the body has a goto: no flow warnings
     int                        m_classOrder;      // class definitions begun so far in the declaration pass
     int                        m_bodyOrder;       // the order of the body being analysed (-1: declaration pass)
+    int                        m_specOrder;       // explicit specialisations declared so far
+    int                        m_bodySpecOrder;   // those declared before the body being analysed
+    std::vector<Symbol*>       m_instantiating;   // the class instantiations being declared, innermost last
+    std::set<Symbol*>          m_specReported;    // explicit specialisations reported as declared after a use
     int                        m_definingDepth;   // class definitions open
     std::set<std::string>      m_reportedUnknown;
     std::set<std::string>      m_fixedTemplateParams;   // the template parameters given explicitly on the call being deduced (not deduced, converted)

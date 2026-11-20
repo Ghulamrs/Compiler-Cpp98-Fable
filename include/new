@@ -1,9 +1,14 @@
-// new - cppparse's C++98 library: the global allocation functions, placement new, the nothrow forms and bad_alloc.
-// New- and delete-expressions call the global operators by their MSVC names without looking them up here;
-// libcpp/iostream.cpp defines them (malloc; bad_alloc thrown through cppparse's runtime when it fails), a program
-// that does not link it gets the C runtime's (whose failure is reported through MSVC's exception handling, which no
-// cppparse frame can catch), and a program may replace them in any of its units. The nothrow forms are inline here
-// (malloc: null when it fails).
+// new - cppparse's C++98 library: the global allocation functions, placement new, the nothrow forms, bad_alloc and
+// set_new_handler. New- and delete-expressions call the global operators by their MSVC names without looking them up
+// here; libcpp/iostream.cpp defines them (malloc; when it fails, the handler of set_new_handler is called and the
+// allocation tried again, and without a handler bad_alloc is thrown through cppparse's runtime; the nothrow forms
+// give null) and set_new_handler with them, so a program that calls set_new_handler links libcpp (LNK2019 otherwise).
+// A program that does not link libcpp gets the C runtime's operators (whose failure is reported through MSVC's
+// exception handling, which no cppparse frame can catch; its nothrow forms call its operator new). Either program may
+// replace any of the eight replaceable ones (18.4.1.1/2) in a unit of its own: libcpp's are defaults
+// (__declspec(replaceable)) that give way to the program's definitions when it is linked, and the ones it leaves call
+// the ones it defines (the array and nothrow forms call the plain ones), as the C runtime's do. The placement forms
+// are reserved (18.4.1.3) and inline.
 #ifndef CPPPARSE_NEW
 #define CPPPARSE_NEW
 
@@ -24,20 +29,21 @@ struct nothrow_t {};
 const nothrow_t nothrow = {};
 
 typedef void (*new_handler)();
+new_handler set_new_handler(new_handler new_p) throw();   // 18.4.2.3: returns the handler it replaces, null the first time
 
 }
 
-void* operator new(size_t);
-void* operator new[](size_t);
-void  operator delete(void*);
-void  operator delete[](void*);
-inline void* operator new(size_t, void* place) { return place; }
-inline void* operator new[](size_t, void* place) { return place; }
-inline void  operator delete(void*, void*) {}
-inline void  operator delete[](void*, void*) {}
-inline void* operator new(size_t n, const std::nothrow_t&) { return malloc(n ? n : 1); }
-inline void* operator new[](size_t n, const std::nothrow_t&) { return malloc(n ? n : 1); }
-inline void  operator delete(void* p, const std::nothrow_t&) { free(p); }
-inline void  operator delete[](void* p, const std::nothrow_t&) { free(p); }
+void* operator new(size_t) throw(std::bad_alloc);
+void* operator new[](size_t) throw(std::bad_alloc);
+void  operator delete(void*) throw();
+void  operator delete[](void*) throw();
+void* operator new(size_t, const std::nothrow_t&) throw();
+void* operator new[](size_t, const std::nothrow_t&) throw();
+void  operator delete(void*, const std::nothrow_t&) throw();
+void  operator delete[](void*, const std::nothrow_t&) throw();
+inline void* operator new(size_t, void* place) throw() { return place; }
+inline void* operator new[](size_t, void* place) throw() { return place; }
+inline void  operator delete(void*, void*) throw() {}
+inline void  operator delete[](void*, void*) throw() {}
 
 #endif

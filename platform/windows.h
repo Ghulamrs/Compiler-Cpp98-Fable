@@ -17,9 +17,9 @@ typedef long               LONG;
 typedef unsigned long      ULONG;
 typedef unsigned int       UINT;
 typedef int                INT;
-typedef long long          LONGLONG;
-typedef unsigned long long ULONGLONG;
-typedef unsigned long long SIZE_T;
+typedef __cppparse_int64   LONGLONG;
+typedef __cppparse_uint64  ULONGLONG;
+typedef __cppparse_uint64  SIZE_T;
 typedef void*              LPVOID;
 typedef const void*        LPCVOID;
 typedef void*              HANDLE;
@@ -30,9 +30,9 @@ typedef const char*        LPCSTR;
 typedef wchar_t*           LPWSTR;
 typedef const wchar_t*     LPCWSTR;
 typedef DWORD*             LPDWORD;
-typedef long long          LPARAM;
-typedef unsigned long long WPARAM;
-typedef long long          LRESULT;
+typedef __cppparse_int64   LPARAM;
+typedef __cppparse_uint64  WPARAM;
+typedef __cppparse_int64   LRESULT;
 typedef DWORD (*LPTHREAD_START_ROUTINE)(LPVOID parameter);
 
 struct SECURITY_ATTRIBUTES { DWORD nLength; LPVOID lpSecurityDescriptor; BOOL bInheritHandle; };
@@ -92,7 +92,7 @@ extern "C" {
 #define WAIT_OBJECT_0 0
 #define WAIT_TIMEOUT 258
 #define WAIT_FAILED 0xFFFFFFFF
-#define INVALID_HANDLE_VALUE ((HANDLE)(long long)-1)
+#define INVALID_HANDLE_VALUE ((HANDLE)(__cppparse_int64)-1)
 #define MAX_PATH 260
 #define GENERIC_READ 0x80000000
 #define GENERIC_WRITE 0x40000000

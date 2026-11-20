@@ -108,7 +108,7 @@ public:
     void pop_front() { erase(begin()); }
     iterator insert(iterator pos, const T& v)
     {
-        __list_node<T>* n = static_cast<__list_node<T>*>(malloc(sizeof(__list_node<T>)));
+        __list_node<T>* n = static_cast<__list_node<T>*>(::operator new(sizeof(__list_node<T>)));
         new (n) __list_node<T>(v);
         __list_node_base* at = pos.node();
         n->next = at; n->prev = at->prev;
@@ -124,7 +124,7 @@ public:
         __list_node_base* next = n->next;
         n->prev->next = n->next; n->next->prev = n->prev;
         static_cast<node_type*>(n)->~node_type();
-        free(n);
+        ::operator delete(n);
         --m_size;
         return iterator(next);
     }

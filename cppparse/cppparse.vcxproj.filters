@@ -16,6 +16,9 @@
     <Filter Include="backend">
       <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A05}</UniqueIdentifier>
     </Filter>
+    <Filter Include="eh">
+      <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A0D}</UniqueIdentifier>
+    </Filter>
     <Filter Include="analyzer">
       <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A06}</UniqueIdentifier>
     </Filter>
@@ -54,6 +57,9 @@
     <ClCompile Include="backend\*.cpp">
       <Filter>backend</Filter>
     </ClCompile>
+    <ClCompile Include="eh\*.cpp">
+      <Filter>eh</Filter>
+    </ClCompile>
     <ClCompile Include="analyzer\*.cpp">
       <Filter>analyzer</Filter>
     </ClCompile>
@@ -73,6 +79,9 @@
     </ClInclude>
     <ClInclude Include="backend\*.hpp">
       <Filter>backend</Filter>
+    </ClInclude>
+    <ClInclude Include="eh\*.hpp">
+      <Filter>eh</Filter>
     </ClInclude>
     <ClInclude Include="analyzer\*.hpp">
       <Filter>analyzer</Filter>

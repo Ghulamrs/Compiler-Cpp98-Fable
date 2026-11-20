@@ -1,8 +1,10 @@
 # eh.ps1 - unwind tables and exceptions of cppparse-compiled code (examples\sample-eh, driver and ml64 entry in
 # examples\sample-eh-driver).
 #   reference: probe.cpp and probe-mix.cpp compiled by cl /O2 /EHa (C++ exceptions of MSVC)
-#   then for each exception model (sjlj: setjmp frames, table: --eh=table, and both mixed: probe.cpp with one model,
-#   probe-mix.cpp with the other) and each of -O0..-O3, the two probe files compiled by cppparse --compile6 --obj
+#   then for each exception model (sjlj: setjmp frames, table: --eh=table, both mixed: probe.cpp with one model,
+#   probe-mix.cpp with the other, and cl: --eh=cl, cl's own model, in both files: its frames cannot be mixed with the
+#   other two models' where an exception crosses) and each of -O0..-O3, the two probe files compiled by cppparse
+#   --compile6 --obj
 # Each program must print ALL OK, and its output must equal the reference:
 #   unwind walk: from inside nested frames, RtlVirtualUnwind must find every frame and restore the callee-saved
 #   registers (rbx rbp rsi rdi r12-r15, xmm6-xmm15) that an ml64 function set before calling in
@@ -40,7 +42,7 @@ $reference = Normalize (& "$out\cl\eh.exe" 2>&1 | Out-String)
 Report "cl reference build runs, ALL OK" ($LASTEXITCODE -eq 0 -and $reference -match 'ALL OK') $reference
 
 # model of probe.cpp, model of probe-mix.cpp
-$models = [ordered]@{ "sjlj" = @("--eh=sjlj", "--eh=sjlj"); "table" = @("--eh=table", "--eh=table"); "table+sjlj" = @("--eh=table", "--eh=sjlj"); "sjlj+table" = @("--eh=sjlj", "--eh=table") }
+$models = [ordered]@{ "sjlj" = @("--eh=sjlj", "--eh=sjlj"); "table" = @("--eh=table", "--eh=table"); "table+sjlj" = @("--eh=table", "--eh=sjlj"); "sjlj+table" = @("--eh=sjlj", "--eh=table"); "cl" = @("--eh=cl", "--eh=cl") }
 foreach ($m in $models.Keys) {
     foreach ($lvl in 0, 1, 2, 3) {
         $dir = "$out\$($m -replace '\+', '-')-O$lvl"
@@ -80,7 +82,7 @@ foreach ($tn in "terminate", "terminate-catch", "terminate-handler", "purecall")
     if ($LASTEXITCODE -ne 0) { Report "${tn}: cl reference build" $false $msg; continue }
     $tref = Normalize (& "$tdir\cl\$tn.exe" 2>$null | Out-String)
     $tcode = $LASTEXITCODE
-    foreach ($m in "--eh=table", "--eh=sjlj") {
+    foreach ($m in "--eh=table", "--eh=sjlj", "--eh=cl") {
         foreach ($lvl in 0, 2) {
             $d = "$tdir\$($m.Substring(5))-O$lvl"
             New-Item -ItemType Directory -Force $d | Out-Null
@@ -93,6 +95,9 @@ foreach ($tn in "terminate", "terminate-catch", "terminate-handler", "purecall")
         }
     }
 }
+# exceptions across compilers (cppparse's models and cl's code in one program): its own script, its lines shown here
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot\ehx.ps1" -Compiler $Exe | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0) { $failed++ }
 if ($failed) { Write-Host "eh: $failed check(s) failed"; exit 1 }
 Write-Host "eh: all checks passed"
 exit 0

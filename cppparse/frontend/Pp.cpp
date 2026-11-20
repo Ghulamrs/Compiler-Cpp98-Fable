@@ -26,6 +26,32 @@ const char* const kPuncts[] = {
     "{", "}", "[", "]", "#", "(", ")", ";", ":", "?", ".", "+", "-", "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", ",", 0
 };
 
+// 2.3/1: the character a trigraph stands for, 0 when "??" plus c is none
+char trigraph(char c)
+{
+    switch (c) {
+    case '=': return '#';  case '/': return '\\'; case '\'': return '^';
+    case '(': return '[';  case ')': return ']';  case '!': return '|';
+    case '<': return '{';  case '>': return '}';  case '-': return '~';
+    default:  return 0;
+    }
+}
+
+// 2.5: the alternative tokens and the digraphs with their primary tokens. A token written either way is the primary
+// token with PpToken::alt set, so the parser sees one spelling and # and -E give back the one written (2.5/2)
+struct AltToken { const char* alt; const char* primary; };
+const AltToken kAltTokens[] = {
+    {"and", "&&"}, {"bitor", "|"}, {"or", "||"}, {"xor", "^"}, {"compl", "~"}, {"bitand", "&"},
+    {"and_eq", "&="}, {"or_eq", "|="}, {"xor_eq", "^="}, {"not", "!"}, {"not_eq", "!="},
+    {"<:", "["}, {":>", "]"}, {"<%", "{"}, {"%>", "}"}, {"%:", "#"}, {"%:%:", "##"}, {0, 0}
+};
+
+const char* primaryOf(const std::string& word)
+{
+    for (int k = 0; kAltTokens[k].alt; ++k) if (word == kAltTokens[k].alt) return kAltTokens[k].primary;
+    return 0;
+}
+
 PpToken makeTok(PpToken::Kind k, const std::string& text, int file, int line)
 {
     PpToken t; t.kind = k; t.text = text; t.file = file; t.line = line; return t;
@@ -36,7 +62,7 @@ PpToken makeTok(PpToken::Kind k, const std::string& text, int file, int line)
 
 void ppLex(const std::string& source, int fileIndex, std::vector<PpToken>& out)
 {
-    // phase 1/2: remove line splices, remembering the line of every remaining character
+    // phase 1/2: replace the trigraphs, remove line splices, remembering the line of every remaining character
     std::string src;
     std::vector<int> lineOf;
     src.reserve(source.size());
@@ -44,11 +70,18 @@ void ppLex(const std::string& source, int fileIndex, std::vector<PpToken>& out)
     int line = 1;
     for (size_t i = 0; i < source.size(); ++i) {
         char c = source[i];
-        if (c == '\\' && i + 1 < source.size() && (source[i + 1] == '\n' || (source[i + 1] == '\r' && i + 2 < source.size() && source[i + 2] == '\n'))) {
-            i += source[i + 1] == '\r' ? 2 : 1;
+        size_t len = 1;                                          // source characters c stands for
+        if (c == '?' && i + 2 < source.size() && source[i + 1] == '?') {
+            const char r = trigraph(source[i + 2]);
+            if (r) { c = r; len = 3; }
+        }
+        if (c == '\\' && i + len < source.size() && (source[i + len] == '\n' || (source[i + len] == '\r' && i + len + 1 < source.size() && source[i + len + 1] == '\n'))) {
+            const size_t newline = source[i + len] == '\r' ? 2 : 1;
+            i += len - 1 + newline;
             ++line;
             continue;
         }
+        i += len - 1;
         if (c == '\r') continue;
         src += c;
         lineOf.push_back(line);
@@ -78,11 +111,26 @@ void ppLex(const std::string& source, int fileIndex, std::vector<PpToken>& out)
         PpToken t;
         t.file = fileIndex; t.line = lineOf[pos]; t.space = space; t.bol = bol;
         size_t s = pos;
-        if (identStart(c)) {
-            while (pos < n && identChar(src[pos])) ++pos;
+        unsigned long ucnValue = 0;
+        size_t ucnLen = 0;
+        if (identStart(c) || (c == '\\' && universalCharacterName(src, pos, ucnValue, ucnLen))) {
+            // an identifier; a universal character name is one of its characters (2.10/1), kept as UTF-8 in the
+            // name and as written in ucn. Whether the character may stand there is checked by the preprocessor
+            // (checkUniversalNames), on the lines it does not skip
+            std::string name;
+            bool universal = false;
+            while (pos < n) {
+                if (identChar(src[pos])) { name += src[pos]; ++pos; }
+                else if (src[pos] == '\\' && universalCharacterName(src, pos, ucnValue, ucnLen)) { name += utf8Of(ucnValue); pos += ucnLen; universal = true; }
+                else break;
+            }
+            if (universal) { t.kind = PpToken::Ident; t.ucn = src.substr(s, pos - s); t.text = name; out.push_back(t); space = false; bol = false; continue; }
             t.kind = PpToken::Ident;
             // L"..." and L'...'
             if (pos - s == 1 && c == 'L' && pos < n && (src[pos] == '"' || src[pos] == '\'')) { c = src[pos]; goto literal; }
+            // and, or, not, bitand...: the primary token, spelled as written (2.5/2)
+            const char* primary = primaryOf(src.substr(s, pos - s));
+            if (primary) { t.kind = PpToken::Punct; t.alt = true; t.text = primary; out.push_back(t); space = false; bol = false; continue; }
         } else if (isdigit(static_cast<unsigned char>(c)) || (c == '.' && pos + 1 < n && isdigit(static_cast<unsigned char>(src[pos + 1])))) {
             ++pos;
             while (pos < n) {
@@ -100,6 +148,22 @@ void ppLex(const std::string& source, int fileIndex, std::vector<PpToken>& out)
             if (pos < n && src[pos] == q) ++pos;
             t.kind = q == '"' ? PpToken::String : PpToken::Char;
         } else {
+            // the digraphs <: :> <% %> %: %:%: (2.5/1). A "<::" followed by neither ':' nor '>' is "<" "::", the
+            // reading C++11 adopted: no valid C++98 program has "<:" ":" there
+            const char* primary = 0;
+            size_t dlen = 0;
+            const char c1 = pos + 1 < n ? src[pos + 1] : 0;
+            if (c == '<' && c1 == ':') {
+                const bool scope = pos + 2 < n && src[pos + 2] == ':' && !(pos + 3 < n && (src[pos + 3] == ':' || src[pos + 3] == '>'));
+                if (!scope) { primary = "["; dlen = 2; }
+            }
+            else if (c == '<' && c1 == '%') { primary = "{"; dlen = 2; }
+            else if (c == ':' && c1 == '>') { primary = "]"; dlen = 2; }
+            else if (c == '%' && c1 == '>') { primary = "}"; dlen = 2; }
+            else if (c == '%' && c1 == ':') {
+                if (pos + 3 < n && src[pos + 2] == '%' && src[pos + 3] == ':') { primary = "##"; dlen = 4; } else { primary = "#"; dlen = 2; }
+            }
+            if (primary) { pos += dlen; t.kind = PpToken::Punct; t.alt = true; t.text = primary; out.push_back(t); space = false; bol = false; continue; }
             bool found = false;
             for (int k = 0; kPuncts[k]; ++k) {
                 size_t len = std::string(kPuncts[k]).size();
@@ -116,10 +180,17 @@ void ppLex(const std::string& source, int fileIndex, std::vector<PpToken>& out)
 }
 
 
+std::string PpToken::spelling() const
+{
+    if (alt) for (int k = 0; kAltTokens[k].alt; ++k) if (text == kAltTokens[k].primary) return kAltTokens[k].alt;
+    if (!ucn.empty()) return ucn;
+    return text;
+}
+
 std::string PpMacro::bodyText() const
 {
     std::string s;
-    for (size_t i = 0; i < body.size(); ++i) { if (i && body[i].space) s += ' '; s += body[i].text; }
+    for (size_t i = 0; i < body.size(); ++i) { if (i && body[i].space) s += ' '; s += body[i].spelling(); }
     return s;
 }
 
@@ -160,6 +231,32 @@ void Preprocessor::diag(PpDiag::Severity s, int fileIndex, int line, const std::
     d.message = message;
     m_diags.push_back(d);
     if (s == PpDiag::Error) ++m_errors;
+}
+
+// 2.2/2 and Annex E on a token of a line that is not skipped: a universal character name must not designate a
+// control character or a member of the basic source character set, in an identifier it must be one of Annex E's
+// characters, and in a literal \u and \U need their four and eight digits
+void Preprocessor::checkUniversalNames(const PpToken& t, int fileIndex)
+{
+    const bool ident = t.kind == PpToken::Ident;
+    if (ident ? t.ucn.empty() : (t.kind != PpToken::String && t.kind != PpToken::Char) || t.text.find('\\') == std::string::npos) return;
+    const std::string& x = ident ? t.ucn : t.text;
+    for (size_t i = 0; i < x.size(); ) {
+        if (x[i] != '\\') { ++i; continue; }
+        if (i + 1 >= x.size() || (x[i + 1] != 'u' && x[i + 1] != 'U')) { i += 2; continue; }   // another escape sequence
+        unsigned long v = 0;
+        size_t len = 0;
+        if (!universalCharacterName(x, i, v, len)) {
+            diag(PpDiag::Error, fileIndex, t.line, std::string("incomplete universal-character-name: \\") + x[i + 1] + " takes " + (x[i + 1] == 'u' ? "four" : "eight") + " hexadecimal digits (C++98 2.2/2; cl C4429)");
+            i += 2;
+            continue;
+        }
+        const std::string name = x.substr(i, len);
+        const char* why = universalCharacterError(v);
+        if (why) diag(PpDiag::Error, fileIndex, t.line, "'" + name + "': " + why);
+        else if (ident && !identifierCharacter(v)) diag(PpDiag::Error, fileIndex, t.line, "'" + name + "': this character is not allowed in an identifier (C++98 Annex E; cl C3872)");
+        i += len;
+    }
 }
 
 int Preprocessor::addFile(const std::string& path)
@@ -208,6 +305,7 @@ void Preprocessor::processFile(int fileIndex, const std::string& source, int dep
         } else if (conditionsActive(conds)) {
             std::map<int, std::pair<int, int> >::const_iterator lm = m_lineMap.find(fileIndex);
             for (size_t k = i; k < e; ++k) {
+                checkUniversalNames(toks[k], fileIndex);
                 chunk.push_back(toks[k]);
                 if (lm != m_lineMap.end()) { chunk.back().line += lm->second.first; chunk.back().file = lm->second.second; }   // after #line
             }
@@ -305,6 +403,7 @@ void Preprocessor::defineDirective(std::vector<PpToken>& line, size_t at, int fi
 {
     int ln = line.empty() ? 0 : line[0].line;
     if (at >= line.size() || line[at].kind != PpToken::Ident) { diag(PpDiag::Error, fileIndex, ln, "#define needs a macro name"); return; }
+    for (size_t k = at; k < line.size(); ++k) checkUniversalNames(line[k], fileIndex);
     PpMacro m;
     m.name = line[at].text;
     m.file = fileIndex >= 0 ? m_files[static_cast<size_t>(fileIndex)] : "";
@@ -402,10 +501,10 @@ struct CondParser {
     // so, or the usual arithmetic conversions do; dead: the arm not taken of ?:, && and || is parsed, but its
     // division by zero is no error
     struct Val {
-        unsigned long long u; bool isUnsigned;
+        uint64 u; bool isUnsigned;
         Val() : u(0), isUnsigned(false) {}
-        Val(unsigned long long v, bool un) : u(v), isUnsigned(un) {}
-        long long s() const { return static_cast<long long>(u); }
+        Val(uint64 v, bool un) : u(v), isUnsigned(un) {}
+        int64 s() const { return static_cast<int64>(u); }
         bool truth() const { return u != 0; }
     };
     const std::vector<PpToken>& t;
@@ -418,7 +517,7 @@ struct CondParser {
     Val charValue(const std::string& lit)
     {
         int count = 0;
-        return Val(static_cast<unsigned long long>(static_cast<long long>(charLiteralValue(lit, count))), false);
+        return Val(static_cast<uint64>(static_cast<int64>(charLiteralValue(lit, count, true))), false);
     }
     Val number(const std::string& s)
     {
@@ -429,21 +528,21 @@ struct CondParser {
             if (c == 'u') un = true; else if (c != 'l') break;
             digits.erase(digits.size() - 1);
         }
-        unsigned long long v = 0;
+        uint64 v = 0;
         bool big = false;
         size_t k = 0;
-        unsigned long long base = 10;
+        uint64 base = 10;
         if (digits.size() > 1 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) { base = 16; k = 2; }
         else if (digits.size() > 1 && digits[0] == '0') { base = 8; k = 1; }
         for (; k < digits.size(); ++k) {
             char c = static_cast<char>(tolower(static_cast<unsigned char>(digits[k])));
-            unsigned long long d = c >= '0' && c <= '9' ? static_cast<unsigned long long>(c - '0') : c >= 'a' && c <= 'f' ? static_cast<unsigned long long>(c - 'a' + 10) : 99;
+            uint64 d = c >= '0' && c <= '9' ? static_cast<uint64>(c - '0') : c >= 'a' && c <= 'f' ? static_cast<uint64>(c - 'a' + 10) : 99;
             if (d >= base) { bad = true; break; }
-            if (v > (~0ULL - d) / base) big = true;
+            if (v > (uint64Max - d) / base) big = true;
             v = v * base + d;
         }
-        if (big) v = ~0ULL;
-        if (v > 0x7fffffffffffffffULL) un = true;
+        if (big) v = uint64Max;
+        if (v > static_cast<uint64>(int64Max)) un = true;
         return Val(v, un);
     }
     Val primary()
@@ -497,10 +596,10 @@ struct CondParser {
             else if (op == "<") v = Val(un ? v.u < r.u : v.s() < r.s(), false); else if (op == "<=") v = Val(un ? v.u <= r.u : v.s() <= r.s(), false);
             else if (op == ">") v = Val(un ? v.u > r.u : v.s() > r.s(), false); else if (op == ">=") v = Val(un ? v.u >= r.u : v.s() >= r.s(), false);
             else if (op == "<<") v = Val(r.u >= 64 ? 0 : v.u << r.u, un);
-            else if (op == ">>") v = Val(r.u >= 64 ? (un || v.s() >= 0 ? 0 : ~0ULL) : (un ? v.u >> r.u : static_cast<unsigned long long>(v.s() >> r.u)), un);
+            else if (op == ">>") v = Val(r.u >= 64 ? (un || v.s() >= 0 ? 0 : uint64Max) : (un ? v.u >> r.u : static_cast<uint64>(v.s() >> r.u)), un);
             else if (op == "+") v = Val(v.u + r.u, un); else if (op == "-") v = Val(v.u - r.u, un); else if (op == "*") v = Val(v.u * r.u, un);
-            else if (op == "/") { if (r.u == 0) { if (dead == 0) bad = true; v = Val(); } else v = Val(un ? v.u / r.u : static_cast<unsigned long long>(v.s() / r.s()), un); }
-            else if (op == "%") { if (r.u == 0) { if (dead == 0) bad = true; v = Val(); } else v = Val(un ? v.u % r.u : static_cast<unsigned long long>(v.s() % r.s()), un); }
+            else if (op == "/") { if (r.u == 0) { if (dead == 0) bad = true; v = Val(); } else v = Val(un ? v.u / r.u : static_cast<uint64>(v.s() / r.s()), un); }
+            else if (op == "%") { if (r.u == 0) { if (dead == 0) bad = true; v = Val(); } else v = Val(un ? v.u % r.u : static_cast<uint64>(v.s() % r.s()), un); }
         }
     }
     Val ternary()
@@ -712,7 +811,7 @@ void Preprocessor::stringize(const std::vector<PpToken>& toks, PpToken& out) con
     std::string s;
     for (size_t i = 0; i < toks.size(); ++i) {
         if (i && toks[i].space) s += ' ';
-        const std::string& x = toks[i].text;
+        const std::string x = toks[i].spelling();     // "<:" and "and" as written (2.5/2)
         if (toks[i].kind == PpToken::String || toks[i].kind == PpToken::Char) {
             for (size_t c = 0; c < x.size(); ++c) { if (x[c] == '"' || x[c] == '\\') s += '\\'; s += x[c]; }
         } else s += x;
@@ -724,7 +823,7 @@ void Preprocessor::stringize(const std::vector<PpToken>& toks, PpToken& out) con
 bool Preprocessor::paste(const PpToken& a, const PpToken& b, PpToken& out) const
 {
     std::vector<PpToken> toks;
-    ppLex(a.text + b.text, a.file, toks);
+    ppLex((a.ucn.empty() ? a.text : a.ucn) + (b.ucn.empty() ? b.text : b.ucn), a.file, toks);   // caf ## é is café
     size_t count = 0;
     for (size_t i = 0; i < toks.size(); ++i) if (toks[i].kind != PpToken::Newline) { if (count++ == 0) out = toks[i]; }
     if (count != 1) return false;
@@ -815,7 +914,7 @@ std::string Preprocessor::text() const
             newline = true;
         }
         if (!newline && t.space && !s.empty() && s[s.size() - 1] != '\n') s += ' ';
-        s += t.text;
+        s += t.spelling();
     }
     if (!s.empty() && s[s.size() - 1] != '\n') s += '\n';
     return s;

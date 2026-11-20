@@ -1,5 +1,6 @@
 // IrGen.cpp - version 6 stage 4: IR generation from the analysed syntax tree. See IrGen.hpp.
 #include "IrGen.hpp"
+#include "EhClThrowInfo.hpp"
 #include "Literal.hpp"
 #include "Mangle.hpp"
 #include "Optimizer.hpp"
@@ -18,7 +19,7 @@ using sema::Scope;
 
 namespace {
 
-std::string numText(long long v) { return int64ToString(v); }
+std::string numText(int64 v) { return int64ToString(v); }
 
 bool isReference(const sema::Type* t) { return t && t->kind == sema::Type::Reference; }
 
@@ -40,12 +41,22 @@ bool hasInternalLinkage(const sema::Symbol* s)
     if (!s) return false;
     if (s->isStatic && !s->ownerClass && !s->isLocal) return true;
     if (s->kind == sema::Symbol::Variable && !s->isMember && !s->isLocal && !s->isParam && !s->isExtern && s->type && s->type->kind != sema::Type::Reference && s->type->isConst && !s->type->isVolatile) return true;
-    // a local class and its members have no linkage (9.8): internal, as cl emits them
+    // a local class and its members have no linkage (9.8): internal, as cl emits them, when the function around the
+    // class is an ordinary one, defined in one unit. In an inline function or an instantiation of a template, whose
+    // body every unit that uses it compiles (and may inline), cl emits the class's member functions and their static
+    // locals as COMDATs under their decorated names, so that all the copies of the body use one of each: the same
+    // here, or a static local of a member would be counted once for each unit
     bool local = s->kind == sema::Symbol::Class;
     for (const sema::Scope* sc = s->scope; sc; sc = sc->parent) {
         if (sc->kind == sema::Scope::Namespace && sc->owner && sc->owner->name.empty()) return true;
         if (sc->kind == sema::Scope::Class) local = true;
-        if ((sc->kind == sema::Scope::Function || sc->kind == sema::Scope::Block) && local && !s->isLocal) return true;
+        if (sc->kind == sema::Scope::Function && local && !s->isLocal) {
+            const sema::Symbol* f = sc->owner;
+            const bool shared = f && f->kind == sema::Symbol::Function
+                && (f->isInline || f->instantiatedFrom != 0 || (f->ownerClass && f->ownerClass->instantiatedFrom != 0));
+            if (!shared) return true;
+            return hasInternalLinkage(f) || (f->ownerClass && hasInternalLinkage(f->ownerClass));
+        }
     }
     return false;
 }
@@ -85,7 +96,7 @@ static Symbol* namedLocal(cxx::Expr* e);
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
     : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_nrvoEnabled(false), m_nrvo(0), m_scopeSerial(0), m_tryCount(0),
-      m_initSymbol(0), m_exitThunksDone(0), m_x86(0), m_msvcNames(false), m_deletingDone(0), m_vtablesDone(0), m_ctorFlag(1), m_vbFlagSlot(-1),m_staticCount(0), m_guardCount(0), m_inPad(0), m_unwindId(-1), m_bodyBlock(-1), m_tableEh(false), m_deferRegions(0),
+      m_initSymbol(0), m_exitThunksDone(0), m_returnClonesDone(0), m_x86(0), m_msvcNames(false), m_clEh(false), m_deletingDone(0), m_vtablesDone(0), m_ctorFlag(1), m_vbFlagSlot(-1),m_staticCount(0), m_guardCount(0), m_inPad(0), m_unwindId(-1), m_bodyBlock(-1), m_tableEh(false), m_deferRegions(0),
       m_functionTryDef(0), m_rawTemp(-1), m_rawFunction(0), m_rawBlock(-1), m_rawEnd(0), m_raw(0), m_thisSlot(0) {}
 
 IrGen::~IrGen()
@@ -216,14 +227,6 @@ void IrGen::unsupported(int line, const std::string& what)
 {
     const std::string m = "line " + numText(static_cast<long>(line)) + ": " + what;
     if (std::find(m_unsupported.begin(), m_unsupported.end(), m) == m_unsupported.end()) m_unsupported.push_back(m);   // once per line
-}
-
-// the labels defined inside statement s
-void IrGen::collectLabels(const cxx::Stmt* s, std::set<std::string>& out)
-{
-    if (!s) return;
-    if (s->kind == cxx::Stmt::Label) out.insert(s->label);
-    for (size_t i = 0; i < s->kids.size(); ++i) collectLabels(s->kids[i], out);
 }
 
 // MSVC's conversion to a virtual base: the vbptr's table holds the base's distance from the vbptr
@@ -460,7 +463,7 @@ int IrGen::mpConvert(int v, const sema::Type* from, const sema::Type* to, int li
         const int at = lf.function ? lf.adjAt : 0;
         if (lf.function) { const sema::Type* pf = m_semaTypes.pointer(fu->inner); mpStore(r, 0, mpLoad(v, 0, pf, line), pf, line); }
         mpStore(r, lt.function ? lt.adjAt : 0, binary("+", mpLoad(v, at, it, line), it, load(sl, it, line), it, it, line), it, line);
-        mpStore(r, lt.vbptrAt, constant(derived->vbptrOffset, it, line), it, line);
+        mpStore(r, lt.vbptrAt, constant(derived->vbptrOffset < 0 ? 0 : derived->vbptrOffset, it, line), it, line);   // (no vbptr: 0, as cl)
         mpStore(r, lt.vbindexAt, vbi, it, line);
         if (jb >= 0) { br(jb, line); m_block = jb; }
         return r;
@@ -468,7 +471,8 @@ int IrGen::mpConvert(int v, const sema::Type* from, const sema::Type* to, int li
     if (lt.unspecified) {
         // into the unspecified model (cl's general one): the offset from the object, or the offset in the virtual
         // base with the vbptr's offset and the base's vbtable entry; a null data member pointer stays null
-        if (lf.unspecified || !up) { unsupported(line, what + ", whose inheritance model is unspecified, is not supported yet by --compile6"); return v; }
+        if (!index && (!up || lf.virt)) return mpConvertPath(v, fu, tu, fc, tc, up, off, line);
+        if (lf.unspecified || !up) { unsupported(line, what + ", whose inheritance model is unspecified, through a virtual base (ill-formed in C++98, 4.11/2; cl's extension) is not supported by --compile6"); return v; }
         const int r = mpTemp(tu, line);
         const int delta = index ? rest : off;
         int nb = -1, jb = -1;
@@ -498,7 +502,8 @@ int IrGen::mpConvert(int v, const sema::Type* from, const sema::Type* to, int li
     }
     if (lf.unspecified) {
         // out of the unspecified model, from a class without virtual bases (its vbtable field is 0, or -1 for null)
-        if (!up || hasVbases(fc) || (lt.virt && !lf.function)) { unsupported(line, what + ", whose inheritance model is unspecified, is not supported yet by --compile6"); return v; }
+        if (!index && (!up || hasVbases(fc) || lt.virt)) return mpConvertPath(v, fu, tu, fc, tc, up, off, line);
+        if (!up || hasVbases(fc) || lt.virt) { unsupported(line, what + ", whose inheritance model is unspecified, through a virtual base (ill-formed in C++98, 4.11/2; cl's extension) is not supported by --compile6"); return v; }
         if (!lf.function) {
             const int slot = newLocal("tmp.mp", it, false);
             LValue sl; sl.kind = LValue::Local; sl.local = slot; sl.type = it;
@@ -569,17 +574,18 @@ int IrGen::mpConvert(int v, const sema::Type* from, const sema::Type* to, int li
             m_block = jb;
             return load(sl, it, line);
         }
-        unsupported(line, what + " is not supported yet by --compile6");
+        if (!index) return mpConvertPath(v, fu, tu, fc, tc, up, off, line);
+        unsupported(line, what + " through a virtual base (ill-formed in C++98, 4.11/2; cl's extension) is not supported by --compile6");
         return v;
     }
     const sema::Type* pf = m_semaTypes.pointer(fu->inner);
     const int ptr = kf == 2 ? v : mpLoad(v, 0, pf, line);
     if (kt == 2) return ptr;   // down to a single-inheritance class: the adjustment is dropped, as cl
-    if (!up) { unsupported(line, what + " is not supported yet by --compile6"); return v; }
+    if (!up) return mpConvertPath(v, fu, tu, fc, tc, up, off, line);
     if (kf == 3 && lf.virt && lt.virt) {
         if (!index && tc->vbptrOffset == off + fc->vbptrOffset) return v;
         if (!index) return mpRemap(v, fu, tu, fc, tc, off, line);
-        unsupported(line, what + " is not supported yet by --compile6");
+        unsupported(line, what + " through a virtual base (ill-formed in C++98, 4.11/2; cl's extension) is not supported by --compile6");
         return v;
     }
     const int r = mpTemp(tu, line);
@@ -591,6 +597,100 @@ int IrGen::mpConvert(int v, const sema::Type* from, const sema::Type* to, int li
     mpStore(r, lt.adjAt, adj, it, line);
     if (lt.vbindexAt >= 0 && index) mpStore(r, lt.vbindexAt, constant(4 * index, it, line), it, line);
     return r;
+}
+
+// the vbtable entry idx (4 * position, 0: none) of class fc's own vbtable as the entry of the same virtual base in
+// class tc's, tc a base or a derived class of fc: itself when the two tables list the bases alike, as they do when
+// one class shares the other's vbptr; else read from a table of fc's entries (a base tc does not have maps to 0:
+// the member is not one of tc's, 5.2.9/9)
+int IrGen::mpMapEntry(int idx, Symbol* fc, Symbol* tc, int line)
+{
+    const sema::Type* it = m_semaTypes.basic(sema::Type::Int);
+    const sema::VbTable* ft = 0;
+    const sema::VbTable* tt = 0;
+    for (size_t k = 0; k < fc->vbtables.size(); ++k) if (fc->vbtables[k].offset == fc->vbptrOffset) ft = &fc->vbtables[k];
+    for (size_t k = 0; k < tc->vbtables.size(); ++k) if (tc->vbtables[k].offset == tc->vbptrOffset) tt = &tc->vbtables[k];
+    if (!ft || !tt) return idx;
+    std::vector<IrDataItem> map;
+    bool identity = true;
+    IrDataItem zero; zero.kind = IrDataItem::Int; zero.size = 4; zero.value = 0;
+    map.push_back(zero);
+    for (size_t k = 0; k < ft->order.size(); ++k) {
+        size_t j = 0;
+        while (j < tt->order.size() && tt->order[j] != ft->order[k]) ++j;
+        IrDataItem d; d.kind = IrDataItem::Int; d.size = 4; d.value = j < tt->order.size() ? 4 * static_cast<long>(j + 1) : 0;
+        map.push_back(d);
+        if (j != k && j < tt->order.size()) identity = false;
+    }
+    if (identity) return idx;
+    const std::string name = "vbentrymap@" + fc->qualifiedName() + "@" + tc->qualifiedName();
+    rttiGlobal(name, std::string(), map, true);
+    const sema::Type* cp = m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Char));
+    const sema::Type* ip = m_semaTypes.pointer(it);
+    IrInst ga = make(IrInst::AddrGlobal, cp, line);
+    ga.args.push_back(IrOperand::global(name, oldType(it)));
+    const int base = emit(ga);
+    IrInst ix = make(IrInst::AddrIndex, ip, line);
+    ix.extra = 1;
+    ix.args.push_back(IrOperand::temp(base, oldType(cp)));
+    // (a null member function pointer of the unspecified model has the entry -1: read as 0)
+    const sema::Type* bt = m_semaTypes.basic(sema::Type::Bool);
+    const int valid = convert(binary(">", idx, it, constant(0, it, line), it, bt, line), bt, it, line);
+    const int at = binary("*", idx, it, valid, it, it, line);
+    ix.args.push_back(IrOperand::temp(convert(at, it, m_semaTypes.sizeType(), line), oldType(m_semaTypes.sizeType())));
+    LValue el; el.kind = LValue::Mem; el.addr = emit(ix); el.type = it;
+    return load(el, it, line);
+}
+
+// a pointer to member converted along a non-virtual path between any two models, up (off: the base fc's offset in
+// tc) or down (static_cast, 5.2.9/9: tc's offset in fc), where the cases above do not apply; measured on cl's values
+// (front2.cpp mpdown::). A member outside the virtual bases (vbtable entry 0, or a model without one) moves by the
+// base's offset; its field counts from the object in the plain and the unspecified models and from the subobject
+// that introduced the vbptr (vbptrOrigin) in the virtual one. A member of a virtual base keeps its offset in that
+// base and gets the base's entry in the target's vbtable (mpMapEntry). The unspecified model's vbptr field is the
+// target's vbptr offset. A null data member pointer becomes the target's null; a function's keeps its null code
+int IrGen::mpConvertPath(int v, const sema::Type* fu, const sema::Type* tu, Symbol* fc, Symbol* tc, bool up, int off, int line)
+{
+    const MpLayout lf = mpLayout(fu), lt = mpLayout(tu);
+    const int kf = mpKind(fu), kt = mpKind(tu);
+    const sema::Type* it = m_semaTypes.basic(sema::Type::Int);
+    const sema::Type* bt = m_semaTypes.basic(sema::Type::Bool);
+    const sema::Type* pf = lf.function ? m_semaTypes.pointer(fu->inner) : 0;
+    const int code = !lf.function ? -1 : kf == 2 ? v : mpLoad(v, 0, pf, line);
+    if (lf.function && kt == 2) return code;
+    const int field = lf.function ? (lf.adjAt >= 0 ? mpLoad(v, lf.adjAt, it, line) : constant(0, it, line)) : (kf == 1 ? v : mpLoad(v, 0, it, line));
+    const int vbi = lf.vbindexAt >= 0 ? mpLoad(v, lf.vbindexAt, it, line) : -1;
+    const int delta = (lf.virt && !lf.unspecified ? vbptrOrigin(fc) : 0) + (up ? off : -off) - (lt.virt && !lt.unspecified ? vbptrOrigin(tc) : 0);
+    // the result: an int in a local (kt 1), or an aggregate
+    int slot = -1, r = -1;
+    LValue sl;
+    if (kt == 1) { slot = newLocal("tmp.mp", it, false); sl.kind = LValue::Local; sl.local = slot; sl.type = it; store(sl, constant(-1, it, line), it, line); }
+    else r = mpTemp(tu, line);
+    int jb = -1;
+    if (!lf.function) {
+        const int nl = m_out->newBlock("mp.null"), nb = m_out->newBlock("mp.nonnull");
+        jb = m_out->newBlock("mp.end");
+        condbr(binary("!=", kf == 1 ? field : vbi, it, constant(-1, it, line), it, bt, line), nb, nl, line);
+        m_block = nl;
+        if (kt != 1) mpStore(r, lt.vbindexAt, constant(-1, it, line), it, line);
+        br(jb, line);
+        m_block = nb;
+    }
+    int moved = field;
+    if (delta && vbi < 0) moved = binary("+", field, it, constant(delta, it, line), it, it, line);
+    else if (delta) {
+        const int outside = convert(binary("==", vbi, it, constant(0, it, line), it, bt, line), bt, it, line);
+        moved = binary("+", field, it, binary("*", outside, it, constant(delta, it, line), it, it, line), it, it, line);
+    }
+    if (kt == 1) store(sl, moved, it, line);
+    else {
+        if (lt.function) mpStore(r, 0, code, pf, line);
+        mpStore(r, lt.function ? lt.adjAt : 0, moved, it, line);
+        if (lt.vbptrAt >= 0 && hasVbases(tc)) mpStore(r, lt.vbptrAt, constant(tc->vbptrOffset, it, line), it, line);
+        if (lt.vbindexAt >= 0 && vbi >= 0) mpStore(r, lt.vbindexAt, hasVbases(fc) && hasVbases(tc) ? mpMapEntry(vbi, fc, tc, line) : vbi, it, line);
+    }
+    if (jb >= 0) { br(jb, line); m_block = jb; }
+    return kt == 1 ? load(sl, it, line) : r;
 }
 
 // a pointer to member of a class with virtual bases converted into a class derived from it (off bytes in) that does
@@ -615,7 +715,7 @@ int IrGen::mpRemap(int v, const sema::Type* fu, const sema::Type* tu, Symbol* fc
     for (size_t k = 0; ft && tt && k < ft->order.size(); ++k) {
         size_t j = 0;
         while (j < tt->order.size() && tt->order[j] != ft->order[k]) ++j;
-        IrDataItem d; d.kind = IrDataItem::Int; d.size = 4; d.value = 4 * static_cast<long long>(j + 1);
+        IrDataItem d; d.kind = IrDataItem::Int; d.size = 4; d.value = 4 * static_cast<int64>(j + 1);
         map.push_back(d);
         if (j != k) identity = false;
     }
@@ -1148,7 +1248,7 @@ void IrGen::condbr(int cond, int t, int f, int line)
     emit(in);
 }
 
-int IrGen::constant(long long v, const sema::Type* t, int line)
+int IrGen::constant(int64 v, const sema::Type* t, int line)
 {
     if (t && t->isFloating()) {
         IrInst fin = make(IrInst::FConst, t, line);
@@ -1156,9 +1256,9 @@ int IrGen::constant(long long v, const sema::Type* t, int line)
         return emit(fin);
     }
     // the IR's immediates are 32 bits, sign-extended: a 64-bit constant beyond them is put together from pieces
-    if (v < -2147483647LL - 1 || v > 2147483647LL) {
-        if (t && sizeOf(t) == 8) return bitConstant(static_cast<unsigned long long>(v), t, line);
-        v = static_cast<long long>(static_cast<int>(static_cast<unsigned int>(static_cast<unsigned long long>(v) & 0xFFFFFFFFULL)));
+    if (v < -2147483647 - 1 || v > 2147483647) {
+        if (t && sizeOf(t) == 8) return bitConstant(static_cast<uint64>(v), t, line);
+        v = static_cast<int64>(static_cast<int>(static_cast<unsigned int>(static_cast<uint64>(v) & 0xFFFFFFFFu)));
     }
     IrInst in = make(IrInst::Const, t, line);
     in.args.push_back(IrOperand::imm(static_cast<long>(v), in.type));
@@ -1246,12 +1346,12 @@ void IrGen::bitField(LValue& lv, const Symbol* field) const
 
 // a constant of the 32- or 64-bit unsigned type t; IR immediates are 32-bit and sign-extended, so a 64-bit
 // value outside that range is put together from pieces
-int IrGen::bitConstant(unsigned long long v, const sema::Type* t, int line)
+int IrGen::bitConstant(uint64 v, const sema::Type* t, int line)
 {
     if (sizeOf(t) < 8) return constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(v))), t, line);
-    const long long sv = static_cast<long long>(v);
-    if (sv >= -2147483647LL - 1 && sv <= 2147483647LL) return constant(static_cast<long>(sv), t, line);
-    const unsigned long lo = static_cast<unsigned long>(v & 0xFFFFFFFFULL);
+    const int64 sv = static_cast<int64>(v);
+    if (sv >= -2147483647 - 1 && sv <= 2147483647) return constant(static_cast<long>(sv), t, line);
+    const unsigned long lo = static_cast<unsigned long>(v & 0xFFFFFFFFu);
     // one constant per statement: the order of a call's arguments is unspecified (cl and cppparse differ)
     const int top = constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(v >> 32))), t, line);
     const int by32 = constant(32, t, line);
@@ -1290,7 +1390,7 @@ int IrGen::loadBits(const LValue& lv, const sema::Type* t, int line)
         return convert(x, ws, u, line);
     }
     if (lv.bitOffset > 0) x = binary(">>", x, wu, constant(lv.bitOffset, wu, line), wu, wu, line);
-    if (lv.bitWidth < bits) x = binary("&", x, wu, bitConstant((1ULL << lv.bitWidth) - 1, wu, line), wu, wu, line);
+    if (lv.bitWidth < bits) x = binary("&", x, wu, bitConstant((static_cast<uint64>(1) << lv.bitWidth) - 1, wu, line), wu, wu, line);
     return convert(x, wu, u, line);
 }
 
@@ -1300,8 +1400,8 @@ void IrGen::storeBits(const LValue& lv, int temp, const sema::Type* t, int line)
     const sema::Type* unit = m_semaTypes.basic(unitKind(sizeOf(u)));
     const int bits = sizeOf(u) == 8 ? 64 : 32;
     const sema::Type* wu = m_semaTypes.basic(bits == 64 ? sema::Type::ULongLong : sema::Type::UInt);
-    const unsigned long long all = bits == 64 ? ~0ULL : 0xFFFFFFFFULL;
-    const unsigned long long field = (lv.bitWidth >= 64 ? all : ((1ULL << lv.bitWidth) - 1) << lv.bitOffset) & all;
+    const uint64 all = bits == 64 ? uint64Max : 0xFFFFFFFFu;
+    const uint64 field = (lv.bitWidth >= 64 ? all : ((static_cast<uint64>(1) << lv.bitWidth) - 1) << lv.bitOffset) & all;
     const sema::Type* pu = m_semaTypes.pointer(unit);
     IrInst ld = make(IrInst::LoadMem, unit, line);
     ld.args.push_back(IrOperand::temp(lv.addr, oldType(pu)));
@@ -1407,11 +1507,11 @@ int IrGen::convert(int temp, const sema::Type* from, const sema::Type* to, int l
         // a floating constant converted to an integer is folded as cl folds it, modulo 2^N ((int)3e9 is
         // B2D05E00h, where the instruction gives 80000000h)
         const IrBlock& b = m_out->blocks[static_cast<size_t>(m_block)];
-        unsigned long long bits = 0;
+        uint64 bits = 0;
         double raw = 0;
         if (!b.insts.empty() && b.insts.back().op == IrInst::FConst && b.insts.back().dst == temp && b.insts.back().args.size() == 1
             && foldFloatToInteger(b.insts.back().args[0].fval, sizeOf(to) * 8, unsignedInt(to), bits, raw)) {
-            const int r = sizeOf(to) == 8 ? bitConstant(bits, to, line) : constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(bits & 0xFFFFFFFFULL))), to, line);
+            const int r = sizeOf(to) == 8 ? bitConstant(bits, to, line) : constant(static_cast<long>(static_cast<int>(static_cast<unsigned int>(bits & 0xFFFFFFFFu))), to, line);
             m_rawTemp = r;
             m_rawFunction = m_out;
             m_rawBlock = m_block;
@@ -1549,6 +1649,16 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
     switch (e->kind) {
     case cxx::Expr::Name: {
         Symbol* s = e->semaSym;
+        // a function is an lvalue (3.10/2), and its address is the function's: a reference to a function binds to it
+        // ("int (&r)(int) = twice;", a function passed for a parameter "int (&f)(int)")
+        if (s && s->kind == Symbol::Function && !(s->ownerClass && !s->isStatic)) {
+            need(s);
+            IrInst fa = make(IrInst::AddrGlobal, 0, line);
+            fa.type = m_types.function(oldType(s->type ? s->type->inner : 0));
+            fa.args.push_back(IrOperand::global(irName(s), fa.type));
+            lv.kind = LValue::Mem; lv.addr = emit(fa); lv.type = s->type;
+            return lv;
+        }
         if (!s || s->kind != Symbol::Variable) break;
         std::map<Symbol*, int>::iterator it = m_slots.find(s);
         if (it != m_slots.end()) {
@@ -2463,6 +2573,20 @@ void IrGen::emitPads(int line)
         const Cleanup c = m_flagged[static_cast<size_t>(m_pads[p].entry)];
         const bool guarded = m_pads[p].guarded;
         m_block = m_pads[p].block;
+        if (m_clEh) {
+            // cl's model: the pad is a cleanup funclet, which the runtime calls while it unwinds this frame's states.
+            // It destroys what the table model's pad destroys and returns (the "@cleanupret" throw is the funclet's
+            // return to the code generator). The runtime keeps the exception in flight meanwhile and calls terminate
+            // when a destructor lets an exception out, so nothing of that is done here
+            ++m_inPad;
+            for (size_t i = c.newer.size(); i > 0; --i) runCleanup(m_flagged[static_cast<size_t>(c.newer[i - 1])], true, line);
+            runCleanup(c, guarded, line);
+            --m_inPad;
+            IrInst done = make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), line);
+            done.sub = "@cleanupret";
+            emit(done);
+            continue;
+        }
         if (Symbol* dtor = plainDestructor(c, guarded)) {
             need(dtor);
             // a flagged object (its region opened at creation, so the pad needs no test): the flag goes to 0 first, as
@@ -2761,6 +2885,9 @@ void IrGen::handlerCleanups(size_t mark, int line)
 // of a landing pad, the copy of a by-value catch parameter); 'term' receives its handler block
 int IrGen::beginTerminateRegion(int& term, int line)
 {
+    // cl's model has none: a destructor that throws during unwinding and a throwing copy into a handler's variable are
+    // the runtime's own cases
+    if (m_clEh) unsupported(line, "internal: a terminate region in --eh=cl");
     const int tid = m_tryCount++;
     term = m_out->newBlock("unwind.terminate");
     const int body = m_out->newBlock("unwind.cleanups");
@@ -2821,6 +2948,7 @@ Symbol* IrGen::matchingPlacementDelete(Symbol* opNew) const
 {
     const sema::Type* nt = opNew ? opNew->type : 0;
     if (!nt || nt->kind != sema::Type::Function) return 0;
+    const char* const delName = opNew->name == "operator new[]" ? "operator delete[]" : "operator delete";
     std::vector<Symbol*> cands;
     if (opNew->ownerClass) {
         // the first class up the hierarchy that declares the name, as lookup finds it
@@ -2828,12 +2956,12 @@ Symbol* IrGen::matchingPlacementDelete(Symbol* opNew) const
         for (size_t i = 0; i < todo.size() && cands.empty() && i < 64; ++i) {
             Symbol* c = todo[i];
             if (!c || !c->members) continue;
-            const std::vector<Symbol*>* v = c->members->find("operator delete");
+            const std::vector<Symbol*>* v = c->members->find(delName);
             if (v && !v->empty()) { cands = *v; break; }
             for (size_t b = 0; b < c->bases.size(); ++b) todo.push_back(c->bases[b].cls);
         }
     } else {
-        const std::vector<Symbol*>* v = m_prog.global->find("operator delete");
+        const std::vector<Symbol*>* v = m_prog.global->find(delName);
         if (v) cands = *v;
     }
     for (size_t i = 0; i < cands.size(); ++i) {
@@ -2850,8 +2978,11 @@ Symbol* IrGen::matchingPlacementDelete(Symbol* opNew) const
 // a placement new whose operator new sema resolved into a call (new (arena) T with operator new(size_t, Arena&), new
 // (std::nothrow) T): the call, with its arguments evaluated once into locals so that the matching placement operator
 // delete gets the same ones when the constructor throws (5.3.4/17-19), as cl calls it; the address converted to the
-// object's pointer type. With no matching delete, or an argument that is a class by value, the call as it is
-int IrGen::placementNew(cxx::Expr* callE, const sema::Type* pt, bool wantFree, int& freeK, int line)
+// object's pointer type. With no matching delete, or an argument that is a class by value, the call as it is. An
+// array's operator new[] gets sizeTemp, the size computed here, for the placeholder sema passed first. A null result is
+// the new-expression's and nothing is built (5.3.4/13; cl tests every operator new's): the address is kept in
+// resultSlot, the code that builds follows in a block of its own, and the caller joins at endBlock and reloads it
+int IrGen::placementNew(cxx::Expr* callE, const sema::Type* pt, bool wantFree, int& freeK, int line, int& resultSlot, int& endBlock, int sizeTemp)
 {
     Symbol* opNew = callE->semaSym;
     const sema::Type* ft = opNew->type;
@@ -2859,11 +2990,13 @@ int IrGen::placementNew(cxx::Expr* callE, const sema::Type* pt, bool wantFree, i
     Symbol* opDel = wantFree ? matchingPlacementDelete(opNew) : 0;
     bool saveable = opDel != 0 && ft && ft->kind == sema::Type::Function && callE->kids.size() == ft->params.size() + 1;
     for (size_t k = 1; ft && k < ft->params.size() && saveable; ++k) if (!isReference(ft->params[k]) && (isClassType(ft->params[k]) || mpKind(ft->params[k]) == 3)) saveable = false;
-    if (!saveable) return convert(value(callE), m_semaTypes.decay(exprType(callE)), pt, line);
+    int p = -1;
+    std::vector<int> slots; std::vector<const sema::Type*> types;
+    if (!saveable && sizeTemp < 0) p = convert(value(callE), m_semaTypes.decay(exprType(callE)), vp, line);
+    else {
     need(opNew);
     IrInst n = make(IrInst::Call, vp, line);
     n.sub = irName(opNew);
-    std::vector<int> slots; std::vector<const sema::Type*> types;
     // kids[0] is the callee; kids[1] the size, then the placement arguments, evaluated as a call's (cl, row A5)
     std::vector<IrOperand> ops;
     callArguments(opNew, ft, callE->kids, 1, 1, line, ops);
@@ -2871,9 +3004,9 @@ int IrGen::placementNew(cxx::Expr* callE, const sema::Type* pt, bool wantFree, i
     for (size_t a = 1; a < callE->kids.size(); ++a) {
         const size_t pi = a - 1;
         const sema::Type* ptype = ft->params[pi];
-        const int v = ops[pi].id;
+        const int v = pi == 0 && sizeTemp >= 0 ? sizeTemp : ops[pi].id;
         const sema::Type* ot = argOperandType(ptype, callE->kids[a]);
-        if (pi > 0) {
+        if (pi > 0 && saveable) {
             const int slot = newLocal("tmp.place", ot, false);
             LValue sl; sl.kind = LValue::Local; sl.local = slot; sl.type = ot;
             store(sl, v, ot, line);
@@ -2881,12 +3014,22 @@ int IrGen::placementNew(cxx::Expr* callE, const sema::Type* pt, bool wantFree, i
         }
         n.args.push_back(IrOperand::temp(v, oldType(ot)));
     }
-    const int p = emit(n);
+    p = emit(n);
+    }
+    const int typed = convert(p, vp, pt, line);
+    resultSlot = newLocal("tmp.newp", pt, false);
+    LValue rl; rl.kind = LValue::Local; rl.local = resultSlot; rl.type = pt;
+    store(rl, typed, pt, line);
+    const int build = m_out->newBlock("new.build");
+    endBlock = m_out->newBlock("new.end");
+    condbr(toBool(typed, pt, line), build, endBlock, line);
+    m_block = build;
+    if (!saveable) return typed;
     freeK = registerFree(p, 0, false, -1, 1, line);
     Cleanup& c = m_flagged[static_cast<size_t>(freeK)];
     c.freeKind = 3; c.freeCls = opDel; c.argSlots = slots; c.argTypes = types;
     need(opDel);
-    return convert(p, vp, pt, line);
+    return typed;
 }
 
 void IrGen::clearFlag(int index, int line)
@@ -2919,6 +3062,14 @@ void IrGen::returnSequence(int line)
 void IrGen::finishFunction(int line)
 {
     if (m_tableEh) emitPads(line);
+    if (!m_emptyRegions.empty()) {
+        for (size_t b = 0; b < m_out->blocks.size(); ++b)
+            for (size_t k = 0; k < m_out->blocks[b].insts.size(); ++k) {
+                IrInst& in = m_out->blocks[b].insts[k];
+                if ((in.op == IrInst::TryBegin || in.op == IrInst::TryEnd) && m_emptyRegions.count(in.extra)) { in.op = IrInst::Nop; in.args.clear(); in.extra = 0; }
+            }
+        m_emptyRegions.clear();
+    }
     m_block = 0;
     const sema::Type* b = m_semaTypes.basic(sema::Type::Bool);
     bool anyFlag = false;
@@ -2936,11 +3087,22 @@ void IrGen::finishFunction(int line)
         emit(tb);
         br(m_bodyBlock, line);
         m_block = handler;
-        IrInst cp = make(IrInst::CatchParam, m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)), line);
-        cp.sub = "...";
-        emit(cp);
-        handlerCleanups(0, line);
-        emit(make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), line));
+        if (m_clEh) {
+            // cl's model: the function's unwind region is a state like any other, its pad a cleanup funclet that
+            // destroys the flagged objects still alive and returns to the runtime
+            ++m_inPad;
+            for (size_t i = m_flagged.size(); i > 0; --i) if (m_flagged[i - 1].flag >= 0) runCleanup(m_flagged[i - 1], true, line);
+            --m_inPad;
+            IrInst done = make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), line);
+            done.sub = "@cleanupret";
+            emit(done);
+        } else {
+            IrInst cp = make(IrInst::CatchParam, m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)), line);
+            cp.sub = "...";
+            emit(cp);
+            handlerCleanups(0, line);
+            emit(make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), line));
+        }
         m_out->hasTry = true;
     } else {
         br(m_bodyBlock, line);
@@ -3071,14 +3233,21 @@ int IrGen::call(cxx::Expr* e, int sretAddr)
             ct = m_semaTypes.unref(exprType(callee));
         }
         if (ct->kind == sema::Type::Function && callee->semaSym && callee->semaSym->kind == Symbol::Function) ct = m_semaTypes.pointer(ct);   // "(*f)(x)", f a function
-        const sema::Type* pft = ct->kind == sema::Type::Pointer && ct->inner->kind == sema::Type::Function ? ct->inner : 0;
+        // a reference to a function ("int (&f)(int)"): the address the reference holds is called
+        const bool viaReference = ct->kind == sema::Type::Function && callee->kind == cxx::Expr::Name && callee->semaSym && callee->semaSym->kind == Symbol::Variable && isReference(callee->semaSym->type);
+        const sema::Type* pft = viaReference ? ct : ct->kind == sema::Type::Pointer && ct->inner->kind == sema::Type::Function ? ct->inner : 0;
         // the arguments as a direct call's (a parameter of the pointer's function type converts the argument: a reference
         // to a base binds the base part, a class is copied, a scalar converted; the variadic rest as is), those that call
         // first, then the function pointer, then those that only read (cl, row A5: getFp(1)(n(41), n(42), n(43)) is 43 42
         // 41, then getFp)
         std::vector<IrOperand> argOps;
         callArguments(0, pft, e->kids, 1, 1, line, argOps);
-        if (ct->kind == sema::Type::Pointer && ct->inner->kind == sema::Type::Function) {
+        if (viaReference) {
+            const sema::Type* pt = m_semaTypes.pointer(ct);
+            int fp = addressOf(lvalue(callee), line);
+            in.args.push_back(IrOperand::temp(fp, oldType(pt)));
+            in.sub = "(indirect)";
+        } else if (ct->kind == sema::Type::Pointer && ct->inner->kind == sema::Type::Function) {
             int fp = value(callee);
             in.args.push_back(IrOperand::temp(fp, oldType(ct)));
             in.sub = "(indirect)";
@@ -3392,49 +3561,59 @@ int IrGen::value(cxx::Expr* e)
         const sema::Type* pt = exprType(e);
         const sema::Type* elem = pt->kind == sema::Type::Pointer ? pt->inner : pt;
         bool isArray = e->type && e->type->decl && !e->type->decl->parts.empty() && e->type->decl->parts.back().kind == cxx::DeclaratorPart::Array;
+        // a multidimensional array is one array of its innermost elements, as cl allocates it: their number in the
+        // cookie, the class's own operator new[], one loop of constructors
+        long perElement = 1;
+        // (new A3 with typedef T A3[3] is new T[3]: sema left the array type in semaOperand)
+        const long typedefBound = !isArray && e->semaOperand && e->semaOperand->kind == sema::Type::Array && e->semaOperand->arraySize > 0 ? e->semaOperand->arraySize : 0;
+        if (typedefBound) isArray = true;
+        if (isArray) while (m_semaTypes.unqualified(elem)->kind == sema::Type::Array && m_semaTypes.unqualified(elem)->arraySize > 0) {
+            perElement *= m_semaTypes.unqualified(elem)->arraySize;
+            elem = m_semaTypes.unqualified(elem)->inner;
+        }
+        const sema::Type* ept = m_semaTypes.pointer(elem);
         IrInst n = make(IrInst::Call, pt, line);
         // the class's own operator new / new[] (its own or inherited, as lookup finds it), unless ::new
         Symbol* classNew = !e->globalScope && e->placement.empty() && isClassType(elem) && elem->decl
             ? classOperatorDelete(elem->decl, 0, isArray ? "operator new[]" : "operator new", 1) : 0;
         if (classNew) need(classNew);
-        {
-            // not generated as cl does yet: refused (S132) rather than calling the wrong allocator
-            const sema::Type* inner = m_semaTypes.unqualified(elem);
-            while (inner->kind == sema::Type::Array) inner = m_semaTypes.unqualified(inner->inner);
-            // (sema turned a placement new with arguments other than one address into a call of the operator new
-            // it resolved, the class's own included: that call is the address)
-            const bool resolvedCall = e->placement.size() == 1 && e->placement[0]->kind == cxx::Expr::Call && e->placement[0]->semaSym && e->placement[0]->semaSym->name == "operator new";
-            if (!resolvedCall && !e->globalScope && !e->placement.empty() && isClassType(elem) && elem->decl && classOperatorDelete(elem->decl, 0, isArray ? "operator new[]" : "operator new", 16))
-                unsupported(line, "a placement new-expression of '" + elem->decl->qualifiedName() + "', a class with its own operator new, is not supported yet by --compile6");
-            if (!e->globalScope && elem->kind == sema::Type::Array && isClassType(inner) && inner->decl
-                && (classOperatorDelete(inner->decl, 0, "operator new[]", 16) || classOperatorDelete(inner->decl, 0, "operator delete[]", 16)))
-                unsupported(line, "new of a multidimensional array of '" + inner->decl->qualifiedName() + "', a class with its own operator new[] or delete[], is not supported yet by --compile6");
-        }
+        // (sema turned a placement new into a call of the operator new or new[] it resolved, the class's own included,
+        // unless it is the reserved form of one address: that call is the address)
+        const bool resolvedCall = e->placement.size() == 1 && e->placement[0]->kind == cxx::Expr::Call && e->placement[0]->semaSym
+            && (e->placement[0]->semaSym->name == "operator new" || e->placement[0]->semaSym->name == "operator new[]");
         if (isArray) {
-            cxx::Expr* countExpr = e->type->decl->parts.back().arraySize;
+            cxx::Expr* countExpr = typedefBound ? 0 : e->type->decl->parts.back().arraySize;
             const sema::Type* lng = m_semaTypes.basic(sema::Type::LongLong);
-            int count = countExpr ? convert(value(countExpr), exprType(countExpr), lng, line) : constant(1, lng, line);
+            int count = countExpr ? convert(value(countExpr), exprType(countExpr), lng, line) : constant(typedefBound ? typedefBound : 1, lng, line);
+            if (perElement != 1) count = binary("*", count, lng, constant(perElement, lng, line), lng, lng, line);
             // placement new of an array ("new (buf) T[n]"): the elements at the given address, no cookie (as cl: such an
             // array is destroyed by hand, never by delete[]); the standard placement delete[] frees nothing when an
             // element's constructor throws
-            const bool placed = !e->placement.empty();
+            // an operator new[] with placement arguments (new (arena) T[n], new (std::nothrow) T[n]) allocates like the
+            // plain one, cookie included; its null result is the new-expression's and nothing is built (5.3.4/13)
+            const bool placed = !e->placement.empty() && !resolvedCall;
             bool header = needsDtor(elem) && !placed;   // the element count is kept in front of the elements for delete[]
             int p;
+            int placedFree = -1, resultSlot = -1, endBlock = -1;
             if (placed) {
-                p = convert(value(e->placement[0]), m_semaTypes.decay(exprType(e->placement[0])), pt, line);
+                p = convert(value(e->placement[0]), m_semaTypes.decay(exprType(e->placement[0])), ept, line);
                 for (size_t k = 1; k < e->placement.size(); ++k) value(e->placement[k]);
             } else {
                 int bytes = binary("*", count, lng, constant(sizeOf(elem) > 0 ? sizeOf(elem) : 1, lng, line), lng, lng, line);
                 if (header) bytes = binary("+", bytes, lng, constant(8, lng, line), lng, lng, line);   // an 8-byte cookie, as MSVC
-                n.sub = classNew ? irName(classNew) : std::string("__new_array");
-                n.args.push_back(IrOperand::temp(bytes, oldType(lng)));
-                p = emit(n);
+                if (resolvedCall) p = placementNew(e->placement[0], ept, needsDefaultCtor(elem), placedFree, line, resultSlot, endBlock, convert(bytes, lng, m_semaTypes.sizeType(), line));
+                else {
+                    n.sub = classNew ? irName(classNew) : std::string("__new_array");
+                    n.args.push_back(IrOperand::temp(bytes, oldType(lng)));
+                    p = emit(n);
+                }
             }
             if (header) {
                 LValue hl; hl.kind = LValue::Mem; hl.addr = p; hl.type = lng;
                 store(hl, count, lng, line);
-                IrInst adv = make(IrInst::AddrField, pt, line); adv.sub = "elements"; adv.extra = 8; adv.args.push_back(IrOperand::temp(p, oldType(pt)));
+                IrInst adv = make(IrInst::AddrField, ept, line); adv.sub = "elements"; adv.extra = 8; adv.args.push_back(IrOperand::temp(p, oldType(ept)));
                 p = emit(adv);
+                if (resultSlot >= 0) { LValue rl; rl.kind = LValue::Local; rl.local = resultSlot; rl.type = ept; store(rl, p, ept, line); }
             }
             if (e->hasInit) {
                 // new T[n](): every element value-initialised (valueInit): zeroed unless a user-declared constructor
@@ -3450,29 +3629,37 @@ int IrGen::value(cxx::Expr* e)
                     emit(z);
                 }
             }
-            if (needsDefaultCtor(elem) && placed) forEachElement(elem, p, count, true, line);
-            else if (needsDefaultCtor(elem)) {
+            if (needsDefaultCtor(elem) && (placed || resolvedCall)) {
+                // (a resolved operator new[]: the matching placement operator delete[] frees when a constructor throws)
+                forEachElement(elem, p, count, true, line);
+                if (placedFree >= 0) clearFlag(placedFree, line);
+            } else if (needsDefaultCtor(elem)) {
                 // an element's constructor that throws: the elements built are destroyed (forEachElement), then
                 // the memory is freed through the matching operator delete[] (C++98 5.3.4/17), as cl does
                 Symbol* fc = !e->globalScope && isClassType(elem) && elem->decl ? elem->decl : 0;
                 // without a cookie (no destructor) a sized operator delete[] is given count * size, as cl
-                IrInst raw = make(IrInst::AddrIndex, pt, line); raw.extra = 1;
-                raw.args.push_back(IrOperand::temp(p, oldType(pt))); raw.args.push_back(IrOperand::imm(header ? -8 : 0, oldType(lng)));
+                IrInst raw = make(IrInst::AddrIndex, ept, line); raw.extra = 1;
+                raw.args.push_back(IrOperand::temp(p, oldType(ept))); raw.args.push_back(IrOperand::imm(header ? -8 : 0, oldType(lng)));
                 const int k = registerFree(emit(raw), fc, true, count, sizeOf(elem), line);
                 m_flagged[static_cast<size_t>(k)].noCookie = !header;
                 forEachElement(elem, p, count, true, line);
                 clearFlag(k, line);
             }
-            return p;
+            if (resultSlot >= 0) {
+                br(endBlock, line);
+                m_block = endBlock;
+                LValue rl; rl.kind = LValue::Local; rl.local = resultSlot; rl.type = ept;
+                p = load(rl, ept, line);
+            }
+            return convert(p, ept, pt, line);
         }
         int p;
         // a constructor (or initializer) that throws: the memory is freed through the matching operator delete
         // (C++98 5.3.4/17), as cl does; the standard placement new's (one address) matching operator delete frees
         // nothing, the placement operator new sema resolved (new (arena) T, new (std::nothrow) T) has its own
         const bool wantFree = (e->semaSym && e->semaSym->isConstructor) || !e->kids.empty() || (isClassType(elem) && needsDefaultCtor(elem));
-        int freeK = -1;
-        const bool resolvedCall = e->placement.size() == 1 && e->placement[0]->kind == cxx::Expr::Call && e->placement[0]->semaSym && e->placement[0]->semaSym->name == "operator new";
-        if (resolvedCall) p = placementNew(e->placement[0], pt, wantFree, freeK, line);
+        int freeK = -1, resultSlot = -1, endBlock = -1;
+        if (resolvedCall) p = placementNew(e->placement[0], pt, wantFree, freeK, line, resultSlot, endBlock);
         else if (!e->placement.empty()) {
             // placement new: the object is built at the given address
             p = convert(value(e->placement[0]), m_semaTypes.decay(exprType(e->placement[0])), pt, line);
@@ -3489,16 +3676,24 @@ int IrGen::value(cxx::Expr* e)
         else if (e->hasInit && !isClassType(elem)) { LValue lv; lv.kind = LValue::Mem; lv.addr = p; lv.type = elem; store(lv, constant(0, elem, line), elem, line); }   // new T(): value-initialised
         else if (isClassType(elem)) constructDefault(elem, p, line);
         if (freeK >= 0) clearFlag(freeK, line);
+        if (resultSlot >= 0) {
+            br(endBlock, line);
+            m_block = endBlock;
+            LValue rl; rl.kind = LValue::Local; rl.local = resultSlot; rl.type = pt;
+            p = load(rl, pt, line);
+        }
         return p;
     }
     case cxx::Expr::Delete: {
         int p = value(e->kids[0]);
         const sema::Type* pt = m_semaTypes.decay(exprType(e->kids[0]));
-        if (e->arrayDelete && !e->globalScope && pt->kind == sema::Type::Pointer && m_semaTypes.unqualified(pt->inner)->kind == sema::Type::Array) {
+        if (e->arrayDelete && pt->kind == sema::Type::Pointer && m_semaTypes.unqualified(pt->inner)->kind == sema::Type::Array) {
+            // a multidimensional array is deleted as the one array of its innermost elements new made it (as cl)
             const sema::Type* inner = m_semaTypes.unqualified(pt->inner);
             while (inner->kind == sema::Type::Array) inner = m_semaTypes.unqualified(inner->inner);
-            if (isClassType(inner) && inner->decl && (classOperatorDelete(inner->decl, 0, "operator new[]", 16) || classOperatorDelete(inner->decl, 0, "operator delete[]", 16)))
-                unsupported(line, "delete[] of a multidimensional array of '" + inner->decl->qualifiedName() + "', a class with its own operator new[] or delete[], is not supported yet by --compile6");
+            const sema::Type* flat = m_semaTypes.pointer(inner);
+            p = convert(p, pt, flat, line);
+            pt = flat;
         }
         bool dtors = pt->kind == sema::Type::Pointer && (needsDtor(pt->inner) || (!e->arrayDelete && isClassType(pt->inner) && pt->inner->decl && pt->inner->decl->isPolymorphic));
         int xb = -1;
@@ -3575,7 +3770,27 @@ int IrGen::value(cxx::Expr* e)
     }
     case cxx::Expr::Throw: {
         IrInst in = make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), line);
-        if (!e->kids.empty()) {
+        if (!e->kids.empty() && m_clEh) {
+            // cl's model: the exception object is a temporary of this frame (the handlers run before the stack is cut
+            // back), built in place; _CxxThrowException gets its address and the type's ThrowInfo. Every throw
+            // expression has a temporary of its own, a scalar's too: the object lives until its last handler ends, and
+            // a second throw of this frame may come before that. No cleanup is registered for it: the runtime destroys
+            // the object, through the ThrowInfo
+            const sema::Type* tt = m_semaTypes.unqualified(m_semaTypes.decay(exprType(e->kids[0])));
+            const int slot = newLocal("throw.object", tt, true);
+            LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = tt;
+            if (isClassType(tt) && tt->decl) materialize(e->kids[0], tt, addressOf(lv, line), line);
+            else store(lv, value(e->kids[0]), tt, line);
+            endFullExpr(line);
+            in.args.push_back(IrOperand::temp(addressOf(lv, line), oldType(m_semaTypes.pointer(tt))));
+            const sema::Type* desc = tt;
+            cxx::Expr* operand = e->kids[0];
+            while (operand && operand->kind == cxx::Expr::Paren && !operand->kids.empty()) operand = operand->kids[0];
+            // cl throws a string literal as a pointer to non-const characters: catch (char*) takes it
+            if (operand && operand->kind == cxx::Expr::StringLit && tt->kind == sema::Type::Pointer) desc = m_semaTypes.pointer(m_semaTypes.unqualified(tt->inner));
+            in.sub = throwInfoFor(desc, line);
+            in.extra = sizeOf(tt);
+        } else if (!e->kids.empty()) {
             const sema::Type* tt = m_semaTypes.unqualified(m_semaTypes.decay(exprType(e->kids[0])));
             if (isClassType(tt) && tt->decl) {
                 // the exception object: copy-constructed into heap storage the runtime takes over and
@@ -3818,12 +4033,18 @@ void IrGen::localDecl(cxx::Decl* d)
         if (var->isStatic) {
             // a static local is a global of this module; an initializer that is not a constant runs on the first pass
             const int line = id.decl->loc.line;
+            // the body compiled a second time as a variadic override's return thunk (genReturnClone, which runs after
+            // the function itself in the same unit): its statics are the first body's objects, with the same guard,
+            // so the function has one of each, built by whichever body runs first
+            std::map<Symbol*, std::string>::const_iterator first = m_staticNames.find(var);
+            const bool shared = !m_cloneName.empty() && first != m_staticNames.end();
+            if (!m_cloneName.empty() && !shared) unsupported(line, "a static local in '" + m_fn->qualifiedName() + "', a variadic function that overrides with a covariant return type, whose second body is compiled before the first (internal order)");
             // named after the function and numbered within it, so every unit that compiles an inline function
             // emits the same symbol (the global is then a COMDAT like the function)
-            std::string gname = m_out->name + "::" + var->name + "#" + numText(m_staticCount++);
+            std::string gname = shared ? first->second : m_out->name + "::" + var->name + "#" + numText(m_staticCount++);
             m_staticNames[var] = gname;
             long block = 2;
-            if (m_msvcNames && m_x86) {
+            if (m_msvcNames && m_x86 && !shared) {
                 // cl numbers the blocks of a function; the body is 2 (numberStaticBlocks). Without that number
                 // (no body walked): 2 plus the block's position among the function's blocks, unique only
                 std::map<Symbol*, long>::const_iterator nb = m_staticBlocks.find(var);
@@ -3861,7 +4082,7 @@ void IrGen::localDecl(cxx::Decl* d)
                 std::vector<IrDataItem> items;
                 if (nullMemberPointerData(vt, items, true)) g.data = items;
             }
-            if (m_x86) m_x86->addGlobal(g);
+            if (m_x86 && !shared) m_x86->addGlobal(g);
             const bool destroyed = !isReference(var->type) && needsDtor(vt);   // registered with atexit once built
             bool needsCode = !scalarConstant && (id.init.kind != cxx::Initializer::None || needsDefaultCtor(vt) || destroyed);
             if (needsCode) {
@@ -3881,7 +4102,7 @@ void IrGen::localDecl(cxx::Decl* d)
                 guard.isFloat = false;
                 guard.linkOnce = m_out->linkOnce;
                 guard.internal = !guard.linkOnce;
-                if (m_x86) {
+                if (m_x86 && !shared) {
                     if (m_msvcNames) m_x86->registerGlobalName(guard.name, msvcMangleStaticGuard(*m_fn, block, m_guardCount));
                     m_x86->addGlobal(guard);
                 }
@@ -4200,8 +4421,6 @@ void IrGen::stmt(cxx::Stmt* s)
         return;
     }
     case cxx::Stmt::Goto: {
-        if (!m_handlerLabels.empty() && !m_handlerLabels.back().count(s->label))
-            unsupported(line, "a goto out of a catch handler ('" + s->label + "') is not supported yet by --compile6");
         std::map<std::string, JumpState>::const_iterator lab = m_labelStates.find(s->label);
         if (lab != m_labelStates.end()) { gotoExit(jumpState(m_block, line), lab->second, s->label); return; }
         // forward: the scopes left are known at the label; this block leaves them then
@@ -4233,6 +4452,7 @@ void IrGen::stmt(cxx::Stmt* s)
         return;
     }
     case cxx::Stmt::Try: {
+        if (m_clEh) { tryStatementCl(s, line); return; }
         m_out->hasTry = true;
         int id = m_tryCount++;
         std::vector<int> handlers;
@@ -4320,14 +4540,9 @@ void IrGen::stmt(cxx::Stmt* s)
                     IrInst st = make(IrInst::StoreLocal, refT, h->loc.line); st.args.push_back(IrOperand::local(slot, oldType(refT))); st.args.push_back(IrOperand::temp(ev, oldType(m_semaTypes.pointer(ct)))); emit(st);
                 }
             }
-            {
-                // a goto out of a handler would skip the release of its exception: refused (S132)
-                std::set<std::string> labels;
-                collectLabels(h->kids[0], labels);
-                m_handlerLabels.push_back(labels);
-            }
+            // a goto out of the handler leaves its marker with a catchend and destroys its objects (gotoExit), as a
+            // return or a break does
             stmt(h->kids[0]);
-            m_handlerLabels.pop_back();
             // 15.3/16: reaching the end of a handler of a constructor's or destructor's function-try-block
             // rethrows (as a "throw;" there: the handler's objects are destroyed by its landing pad)
             if (functionTry && !terminated()) emit(make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), h->loc.line));
@@ -4360,6 +4575,145 @@ void IrGen::stmt(cxx::Stmt* s)
     }
     case cxx::Stmt::Handler: return;
     }
+}
+
+// A try statement in cl's exception model. The regions are the table model's; what differs is who does the work:
+//   the handlers are funclets the runtime calls, each with a catchparam that carries its HandlerType: the adjectives
+//   (1 const, 2 volatile, 8 reference; for a pointer the pointee's qualifiers; 40h catch (...)), the type descriptor
+//   (of the pointer to the unqualified pointee) and the handler's variable, a frame local the runtime builds: a class
+//   caught by value is copy-constructed into it, a scalar or pointer stored, a reference set to the object's address.
+//   A handler without a variable name gets none: the runtime copies nothing, as with cl;
+//   the handler's code is a region without a pad (the handler's own state), opened right after the catchparam, so
+//   that every address of the funclet has a state inside its try's handler range;
+//   the objects of the body that are built on one path only (the flagged ones) and alive without a region of their
+//   own are destroyed by the pad of one region around the whole body, which the runtime runs while it unwinds to the
+//   try, whether a handler here takes the exception or not (the table model's handlers destroy them at their entry);
+//   an exception that leaves a handler ends the one it handled in the runtime, and a throwing copy into a handler's
+//   variable is the runtime's terminate: no region for either.
+void IrGen::tryStatementCl(cxx::Stmt* s, int line)
+{
+    m_out->hasTry = true;
+    const int id = m_tryCount++;
+    std::vector<int> handlers;
+    for (size_t i = 1; i < s->kids.size(); ++i) handlers.push_back(m_out->newBlock("catch"));
+    const int join = m_out->newBlock("try.end");
+    const int body = m_out->newBlock("try.body");
+    {
+        IrInst tb = make(IrInst::TryBegin, 0, line);
+        tb.extra = id;
+        for (size_t i = 0; i < handlers.size(); ++i) tb.args.push_back(IrOperand::block(handlers[i]));
+        emit(tb);
+    }
+    br(body, line);
+    m_block = body;
+    const size_t mark = m_flagged.size();
+    const size_t tryDepth = m_tryStack.size();
+    m_tryStack.push_back(id);
+    const int flaggedId = m_tryCount++;
+    const int flaggedPad = m_out->newBlock("try.flagged");
+    const int flaggedBody = m_out->newBlock("try.body");
+    {
+        IrInst tb = make(IrInst::TryBegin, 0, line);
+        tb.extra = flaggedId;
+        tb.args.push_back(IrOperand::block(flaggedPad));
+        emit(tb);
+    }
+    br(flaggedBody, line);
+    m_block = flaggedBody;
+    m_tryStack.push_back(flaggedId);
+    // a constructor's or destructor's function-try-block: the bases and members are built (or registered for
+    // destruction) inside the region, so their pads destroy the ones built so far (15.3/10-11)
+    const bool functionTry = m_functionTryDef && s == m_functionTryDef->body;
+    if (functionTry) { if (m_fn->isConstructor) constructorInit(m_fn, m_functionTryDef); else destructorParts(m_fn); }
+    stmt(s->kids[0]);
+    popTo(tryDepth + 2, line);   // the regions of a function-try-block's parts end inside the try
+    m_tryStack.pop_back();
+    if (!terminated()) { IrInst te = make(IrInst::TryEnd, 0, line); te.extra = flaggedId; emit(te); }
+    m_tryStack.pop_back();
+    if (!terminated()) { IrInst te = make(IrInst::TryEnd, 0, line); te.extra = id; emit(te); }
+    br(join, line);
+    // the pad of the flagged objects; without any, the region around the body goes again
+    {
+        size_t count = 0;
+        for (size_t i = mark; i < m_flagged.size(); ++i) if (m_flagged[i].flag >= 0) ++count;
+        m_block = flaggedPad;
+        if (count > 0) {
+            ++m_inPad;
+            for (size_t i = m_flagged.size(); i > mark; --i) if (m_flagged[i - 1].flag >= 0) runCleanup(m_flagged[i - 1], true, line);
+            --m_inPad;
+        }
+        IrInst done = make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), line);
+        done.sub = "@cleanupret";
+        emit(done);
+        // (taken out once the function is complete: a goto into code after the try, resolved at its label, still
+        // writes this region's tryend)
+        if (count == 0) m_emptyRegions.insert(flaggedId);
+    }
+    for (size_t i = 1; i < s->kids.size(); ++i) {
+        cxx::Stmt* h = s->kids[i];
+        const int hline = h->loc.line;
+        m_block = handlers[i - 1];
+        Symbol* var = 0;
+        if (h->decl && !h->decl->declarators.empty() && h->decl->declarators[0].decl) var = h->decl->declarators[0].decl->semaSym;
+        IrInst cp = make(IrInst::CatchParam, m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)), hline);
+        const sema::Type* ct = 0;
+        int slot = -1;
+        long adjectives = 0x40;
+        std::string descriptor;
+        if (h->catchAll || !var) cp.sub = "...";
+        else {
+            const bool reference = isReference(var->type);
+            const sema::Type* object = m_semaTypes.unref(var->type);
+            ct = m_semaTypes.unqualified(object);
+            cp.sub = ct->kind == sema::Type::Class && ct->decl ? ct->decl->qualifiedName() : ct->text();
+            adjectives = reference ? 8 : 0;
+            const sema::Type* described = ct;
+            if (ct->kind == sema::Type::Pointer) {
+                if (ct->inner->isConst) adjectives |= 1;
+                if (ct->inner->isVolatile) adjectives |= 2;
+                described = m_semaTypes.pointer(m_semaTypes.unqualified(ct->inner));
+            } else {
+                if (object->isConst) adjectives |= 1;
+                if (object->isVolatile) adjectives |= 2;
+            }
+            descriptor = typeDescriptor(described);
+            // the variable: with a name, the runtime builds it (a reference: the object's address in it)
+            if (!var->name.empty()) {
+                const sema::Type* stored = reference ? m_semaTypes.reference(ct) : var->type;
+                slot = newLocal(var->name, stored, true);
+                m_slots[var] = slot;
+                if (reference) var->type = stored;
+            }
+        }
+        cp.args.push_back(IrOperand::imm(adjectives, m_types.intType()));
+        if (!descriptor.empty()) cp.args.push_back(IrOperand::global(descriptor, 0)); else cp.args.push_back(IrOperand());
+        if (slot >= 0) cp.args.push_back(IrOperand::local(slot, oldType(m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)))));
+        emit(cp);
+        // the handler's own state: a region without a pad around everything the funclet does
+        const int hid = m_tryCount++;
+        const int hbody = m_out->newBlock("catch.body");
+        { IrInst htb = make(IrInst::TryBegin, 0, hline); htb.extra = hid; emit(htb); }
+        br(hbody, hline);
+        m_block = hbody;
+        m_tryStack.push_back(-1);
+        m_tryStack.push_back(hid);
+        openScope();   // the handler's object of class type: destroyed when the handler ends
+        if (slot >= 0 && ct && ct->kind == sema::Type::Class && ct->decl && !isReference(var->type) && needsDtor(ct)) registerCleanup(slot, ct, false, 0, hline);
+        stmt(h->kids[0]);
+        // 15.3/16: reaching the end of a handler of a constructor's or destructor's function-try-block rethrows
+        if (functionTry && !terminated()) emit(make(IrInst::Throw, m_semaTypes.basic(sema::Type::Void), hline));
+        closeScope(hline);
+        m_tryStack.pop_back();
+        m_tryStack.pop_back();
+        if (!terminated()) {
+            IrInst hte = make(IrInst::TryEnd, 0, hline);
+            hte.extra = hid;
+            emit(hte);
+            emit(make(IrInst::CatchEnd, 0, hline));
+        }
+        br(join, hline);
+    }
+    m_block = join;
 }
 
 // ---- functions -----------------------------------------------------------------------------------------------
@@ -4400,11 +4754,14 @@ IrDataItem dataAddress(const std::string& name) { IrDataItem it; it.kind = IrDat
 IrDataItem dataBytes(const std::string& bytes) { IrDataItem it; it.kind = IrDataItem::Bytes; it.size = static_cast<int>(bytes.size()); it.text = bytes; return it; }
 IrDataItem dataZero(int n) { IrDataItem it; it.kind = IrDataItem::Zero; it.size = n; return it; }
 
-// an IR global name from a decorated or qualified name: letters, digits and underscores only
+// a letter or digit of a name, or a byte of an extended character (UTF-8, from a universal character name)
+bool nameByte(char c) { return isalnum(static_cast<unsigned char>(c)) || static_cast<unsigned char>(c) >= 0x80; }
+
+// an IR global name from a decorated or qualified name: letters, digits, extended characters and underscores only
 std::string rttiKey(const std::string& s)
 {
     std::string out;
-    for (size_t i = 0; i < s.size(); ++i) out += isalnum(static_cast<unsigned char>(s[i])) ? s[i] : '_';
+    for (size_t i = 0; i < s.size(); ++i) out += nameByte(s[i]) ? s[i] : '_';
     return out;
 }
 
@@ -4511,6 +4868,68 @@ std::string IrGen::classHierarchy(sema::Symbol* cls)
     m_rttiDone.erase(name);
     rttiGlobal(name, msvcMangleClassHierarchy(*cls), chd, true);
     return name;
+}
+
+// cl's exception model: the ThrowInfo of a thrown type. The description (EhThrown) is throwDescriptorFor's list in
+// another form: the type, then the accessible unambiguous bases (for a pointer the pointers to them, then void*), each
+// with its place in the thrown object, its size and its copy constructor; EhClThrowInfo lays the tables out and names
+// them. The special members a table names are needed in this unit (the runtime calls them through the table)
+std::string IrGen::throwInfoFor(const sema::Type* t, int line)
+{
+    t = m_semaTypes.unqualified(m_semaTypes.unref(t));
+    const sema::Type* pointee = t->kind == sema::Type::Pointer ? t->inner : 0;
+    EhThrown thrown;
+    if (pointee) {
+        thrown.isConst = pointee->isConst;
+        thrown.isVolatile = pointee->isVolatile;
+        t = m_semaTypes.pointer(m_semaTypes.unqualified(pointee));
+        pointee = t->inner;
+    }
+    thrown.typeName = msvcRttiTypeName(t).substr(1);   // without the leading '.'
+    Symbol* top = t->kind == sema::Type::Class ? t->decl : pointee && pointee->kind == sema::Type::Class ? pointee->decl : 0;
+    std::vector<const sema::Type*> types;
+    { EhCatchable self; thrown.catchables.push_back(self); types.push_back(t); }
+    if (top) {
+        std::vector<Symbol*> bases;
+        std::vector<int> offsets;
+        catchableBases(top, bases, offsets);
+        for (size_t k = 0; k < bases.size(); ++k) {
+            EhCatchable c;
+            c.mdisp = offsets[k];
+            int off = 0, index = 0, rest = 0;
+            // a thrown pointer may point to an object of a derived class: a virtual base of the pointee lies where the
+            // object's vbtable says (a thrown object is complete, its virtual bases at the class's own offsets)
+            if (pointee && !baseOffset(top, bases[k], off) && virtualBasePath(top, bases[k], index, rest)) { c.mdisp = rest; c.pdisp = static_cast<long>(top->vbptrOffset); c.vdisp = 4L * index; }
+            thrown.catchables.push_back(c);
+            types.push_back(pointee ? m_semaTypes.pointer(bases[k]->type) : bases[k]->type);
+        }
+    }
+    if (pointee && pointee->kind != sema::Type::Function && pointee->kind != sema::Type::Void) {
+        EhCatchable c;
+        thrown.catchables.push_back(c);
+        types.push_back(m_semaTypes.pointer(m_semaTypes.basic(sema::Type::Void)));
+    }
+    for (size_t k = 0; k < types.size(); ++k) {
+        EhCatchable& c = thrown.catchables[k];
+        const bool cls = types[k]->kind == sema::Type::Class && types[k]->decl;
+        c.typeName = msvcRttiTypeName(types[k]).substr(1);
+        c.descriptor = typeDescriptor(types[k]);
+        c.size = sizeOf(types[k]);
+        c.scalar = !cls;
+        c.virtualBases = cls && hasVbases(types[k]->decl);
+        Symbol* copy = cls && needsCopyCtor(types[k]) ? findSpecial(types[k]->decl, 'c') : 0;
+        if (copy) {
+            if (copy->params.size() != 1) unsupported(line, "a thrown class whose copy constructor has default arguments (--eh=cl)");
+            need(copy);
+            c.copyFunction = irName(copy);
+        }
+    }
+    Symbol* dtor = t->kind == sema::Type::Class && t->decl && needsDtor(t) ? (hasVbases(t->decl) ? vbaseDestructor(t->decl) : findSpecial(t->decl, '~')) : 0;   // a complete object: ??_D with virtual bases
+    if (dtor) { need(dtor); thrown.destructor = irName(dtor); }
+    std::vector<EhThrowTable> tables;
+    EhClThrowInfo::build(thrown, tables);
+    for (size_t k = 0; k < tables.size(); ++k) rttiGlobal(tables[k].name, tables[k].decorated, tables[k].items, true);
+    return EhClThrowInfo::name(thrown);
 }
 
 // std::__cppparse_throw_bad_cast and the like, defined by <typeinfo> (0 without it)
@@ -4857,7 +5276,7 @@ void IrGen::setFiles(const std::vector<std::string>& files)
 void IrGen::prologue(Symbol* fn)
 {
     m_nrvo = 0;
-    m_out->name = irName(fn);
+    m_out->name = m_cloneName.empty() ? irName(fn) : m_cloneName;
     m_out->fn = 0;
     // the source file and line of the definition (of the declaration for an implicit member), for the line table
     const cxx::Loc& where = fn->definition ? fn->definition->loc : fn->loc;
@@ -4867,6 +5286,7 @@ void IrGen::prologue(Symbol* fn)
     m_out->linkOnce = fn->isInline || fn->isImplicit || fn->instantiatedFrom != 0 || (fn->ownerClass && fn->ownerClass->instantiatedFrom != 0);
     m_out->internal = hasInternalLinkage(fn) || (fn->ownerClass && hasInternalLinkage(fn->ownerClass));
     if (m_out->internal) m_out->linkOnce = false;   // every unit keeps its own copy
+    m_out->replaceable = fn->isReplaceable && !m_out->internal && !m_out->linkOnce;
     const sema::Type* rt = fn->type && fn->type->kind == sema::Type::Function ? fn->type->inner : m_semaTypes.basic(sema::Type::Void);
     const bool mpResult = mpKind(rt) == 3 && !isReference(rt);
     bool sret = (isClassType(rt) || mpResult) && !isReference(rt);
@@ -4939,7 +5359,7 @@ void IrGen::prologue(Symbol* fn)
     m_unwindId = m_tryCount++;
     m_tryStack.push_back(m_unwindId);
     m_scopeTry.clear(); m_deferRegions = 0; m_pads.clear();
-    m_cleanups.clear(); m_scopes.clear(); m_scopeIds.clear(); m_temps.clear(); m_flagged.clear(); m_dtorParts.clear(); m_labels.clear(); m_handlerLabels.clear(); m_labelStates.clear(); m_pendingGotos.clear(); m_staticCount = 0; m_guardCount = 0;
+    m_cleanups.clear(); m_scopes.clear(); m_scopeIds.clear(); m_temps.clear(); m_flagged.clear(); m_dtorParts.clear(); m_labels.clear(); m_labelStates.clear(); m_pendingGotos.clear(); m_staticCount = 0; m_guardCount = 0;
     if (m_out->hasThis && fn->thisAdjust != 0) {
         // called with the address of the vfptr whose table first holds it (MSVC's this adjustor): back to the object
         const sema::Type* tp = m_semaTypes.pointer(m_semaTypes.classType(fn->ownerClass));
@@ -5346,6 +5766,19 @@ Symbol* IrGen::namedResult(Symbol* fn, cxx::Stmt* body)
     return 0;
 }
 
+// the body of a variadic function once more as its return thunk: the same function with the overridden function's
+// return type, so every return statement converts to that type (the thunk's adjustment, null kept), under the thunk's
+// name. Its static locals are the first body's (localDecl), which drainQueue generates before this one
+void IrGen::genReturnClone(const ReturnClone& c)
+{
+    if (!c.fn->definition || !c.fn->definition->body || !c.fn->type || !c.root->type) return;
+    Symbol copy = *c.fn;
+    copy.type = m_semaTypes.function(c.root->type->inner, c.fn->type->params, c.fn->type->variadic, c.fn->type->constMethod);
+    m_cloneName = c.name;
+    genFunction(&copy);
+    m_cloneName.clear();
+}
+
 void IrGen::genFunction(Symbol* fn)
 {
     cxx::Decl* def = fn->definition;
@@ -5415,6 +5848,11 @@ void IrGen::drainQueue()
             m_done.insert(fn);
             if (fn->isImplicit) genImplicit(fn);
             else genFunction(fn);
+        }
+        if (m_returnClonesDone < m_returnClones.size()) {
+            // (after the functions themselves; what the copies need is generated by the next round)
+            while (m_returnClonesDone < m_returnClones.size()) { const ReturnClone rc = m_returnClones[m_returnClonesDone++]; genReturnClone(rc); }
+            continue;
         }
         if (m_vtablesDone == m_vtableOrder.size() && m_deletingDone == m_deletingOrder.size()) return;
         while (m_vtablesDone < m_vtableOrder.size()) emitVtables(m_vtableOrder[m_vtablesDone++]);
@@ -5650,9 +6088,32 @@ void IrGen::emitVtables(Symbol* s)
                 }
                 // the return thunk takes this as the function does; a slot that also moves this holds cl's
                 // adjustor thunk to it (?g@D@@WBA@EAAPEAUX@@XZ: this -= 16, then the return thunk)
+                if (m->type->variadic) {
+                    // no thunk can pass the unnamed arguments on and adjust the result afterwards (cl refuses the
+                    // override, C2688): the body again, under the thunk's name, returning the overridden type
+                    bool asked = false;
+                    for (size_t q = 0; q < m_returnClones.size(); ++q) if (m_returnClones[q].name == thunk) asked = true;
+                    if (!asked) { ReturnClone rc; rc.fn = m; rc.root = root; rc.name = thunk; m_returnClones.push_back(rc); }
+                } else
                 x86.addReturnThunk(thunk, irName(m), 0, moveBy, root->type->inner->kind == sema::Type::Reference, params > 4 ? params - 4 : 0, vbptr, entry);
                 if (msvc) x86.registerSymbolName(thunk, msvcMangleReturnThunk(*m, *root));
-                if (viaVtordisp) {
+                Symbol* xbr = viaVtordisp && k < s->vftables[t].vtordispexVbase.size() ? s->vftables[t].vtordispexVbase[k] : 0;
+                if (xbr) {
+                    // the overrider is held by another virtual base: the vtordispex thunk (see below) to the return
+                    // thunk, named as cl's $R4 thunk with the slot's return type (?get@VL@@$R4BA@7PPPPPPPM@CI@EAAPEAUX@@XZ).
+                    // cl 19.50 itself puts its vtordispex thunk to the function there and returns the pointer
+                    // unadjusted (measured: covariant-vbase.cpp prints garbage with cl); 10.3/5 wants the conversion
+                    const int vbptrOff = s->vftables[t].offset - s->vbptrOffset;
+                    int entryOff = 0;
+                    for (size_t q = 0; q < s->vbtables.size(); ++q)
+                        if (s->vbtables[q].offset == s->vbptrOffset)
+                            for (size_t o = 0; o < s->vbtables[q].order.size(); ++o) if (s->vbtables[q].order[o] == xbr) entryOff = 4 * static_cast<int>(o + 1);
+                    const int nonVirtual = m->thisAdjust;
+                    const std::string vx = thunk + " vtordispex{" + numText(vbptrOff) + "," + numText(entryOff) + "," + numText(nonVirtual) + "}";
+                    x86.addVtordispexThunk(vx, thunk, vbptrOff, entryOff, nonVirtual);
+                    if (msvc) x86.registerSymbolName(vx, msvcMangleReturnVtordispexThunk(*m, *root, vbptrOff, entryOff, nonVirtual));
+                    v.entries.push_back(vx);
+                } else if (viaVtordisp) {
                     // in a table inside a virtual base: cl's $4 thunk to the return thunk, named with the slot's
                     // return type (?get@CV@@$4PPPPPPPM@A@EAAPEAUX@@XZ: this -= vtordisp, then the return thunk)
                     const std::string vt = thunk + " vtordisp{" + numText(adjust) + "}";
@@ -5753,7 +6214,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             g.internal = hasInternalLinkage(s);
             // a static data member of a class template instantiation: one object for the program (14.7.1), a
             // COMDAT every unit that instantiates it defines, as cl emits it
-            g.linkOnce = s->isMember && s->isStatic && s->ownerClass && s->ownerClass->isImplicitInstantiation && !g.internal;
+            g.linkOnce = s->isMember && s->isStatic && s->ownerClass && s->ownerClass->isImplicitInstantiation && s->specOrder == 0 && !g.internal;   // its explicit specialisation: one definition, as cl
             g.align = isReference(s->type) ? 8 : alignOf(s->type);
             if (s->declAlign > g.align) g.align = s->declAlign;
             bool dynamic = false;
@@ -5781,7 +6242,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
     if (!m_dynamicGlobals.empty()) {
         // the module's initialiser, named after its first global so that modules do not clash
         std::string base = m_dynamicGlobals[0]->qualifiedName();
-        for (size_t i = 0; i < base.size(); ++i) if (!isalnum(static_cast<unsigned char>(base[i]))) base[i] = '_';
+        for (size_t i = 0; i < base.size(); ++i) if (!nameByte(base[i])) base[i] = '_';
         m_initSymbol = m_prog.newSymbol(Symbol::Function, "__cppparse_init_" + base, m_prog.global);
         m_initSymbol->type = m_semaTypes.function(m_semaTypes.basic(sema::Type::Void), std::vector<const sema::Type*>(), false, false);
         m_initSymbol->isExternC = true;
@@ -5794,7 +6255,7 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
         // COMDAT too; an inline function with a C++ name (its IR name has a parameter list), so that it is a COMDAT
         Symbol* g = m_comdatGlobals[i];
         std::string base = g->qualifiedName();
-        for (size_t k = 0; k < base.size(); ++k) if (!isalnum(static_cast<unsigned char>(base[k]))) base[k] = '_';
+        for (size_t k = 0; k < base.size(); ++k) if (!nameByte(base[k])) base[k] = '_';
         Symbol* f = m_prog.newSymbol(Symbol::Function, "cppparse_init_" + base, m_prog.global);
         f->type = m_semaTypes.function(m_semaTypes.basic(sema::Type::Void), std::vector<const sema::Type*>(), false, false);
         f->isInline = true;
@@ -5974,13 +6435,13 @@ bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataIt
     }
     if (!u->isIntegral()) return false;
     const sema::Type* xt = x->semaType ? m_semaTypes.unqualified(m_semaTypes.unref(x->semaType)) : 0;
-    long long v = 0;
+    int64 v = 0;
     if (x->semaConst && xt && xt->isIntegral()) v = sema::convertedConstant(m_semaTypes, x->semaValue, xt, u);   // in the element's type
     else {
         // "int()", "(int)2.75", "bool b = 0.5;", "(long long)-9.3e18": an arithmetic constant converted
-        unsigned long long bits = 0;
+        uint64 bits = 0;
         if (!foldInteger(x, u, bits, 0)) return false;
-        v = sema::foldedConstant(m_semaTypes, static_cast<long long>(bits), u);
+        v = sema::foldedConstant(m_semaTypes, static_cast<int64>(bits), u);
     }
     if (u->kind == sema::Type::Bool) v = v != 0;
     else if (size == 1) v &= 0xFF;
@@ -6005,7 +6466,7 @@ bool IrGen::foldArith(cxx::Expr* x, double& v, int depth)
     if (t->isIntegral() && x->semaConst && !floatingCast(x)) {
         // semaValue holds the value in its type (all 64 bits of a 64-bit one, see sema::foldedConstant)
         const bool isUnsigned = t->kind == sema::Type::UChar || t->kind == sema::Type::UShort || t->kind == sema::Type::WChar || t->kind == sema::Type::UInt || t->kind == sema::Type::ULong || t->kind == sema::Type::ULongLong;
-        if (isUnsigned && sizeOf(t) == 8) v = static_cast<double>(static_cast<unsigned long long>(x->semaValue));
+        if (isUnsigned && sizeOf(t) == 8) v = static_cast<double>(static_cast<uint64>(x->semaValue));
         else v = static_cast<double>(x->semaValue);
         if (isUnsigned && v < 0) v += 4294967296.0;
         return true;
@@ -6104,7 +6565,7 @@ bool IrGen::foldToFloating(cxx::Expr* x, double& v, int depth)
     const sema::Type* ct = cast && cast->semaType ? m_semaTypes.unqualified(m_semaTypes.unref(cast->semaType)) : 0;
     if (ct && ct->isIntegral() && ct->kind != sema::Type::Bool) {
         double d = 0;
-        unsigned long long bits = 0;
+        uint64 bits = 0;
         return foldArith(cast->kids[0], d, depth + 1) && foldFloatToInteger(d, sizeOf(ct) * 8, unsignedInt(ct), bits, v);
     }
     return foldArith(x, v, depth);
@@ -6112,7 +6573,7 @@ bool IrGen::foldToFloating(cxx::Expr* x, double& v, int depth)
 
 // the arithmetic constant x converted to the integral type to, exactly (64-bit values too): a floating value
 // modulo 2^N as cl folds it, an integer from its own type's bits
-bool IrGen::foldInteger(cxx::Expr* x, const sema::Type* to, unsigned long long& bits, int depth)
+bool IrGen::foldInteger(cxx::Expr* x, const sema::Type* to, uint64& bits, int depth)
 {
     if (!x || depth > 64) return false;
     while (x->kind == cxx::Expr::Paren && x->kids.size() == 1) x = x->kids[0];
@@ -6125,11 +6586,11 @@ bool IrGen::foldInteger(cxx::Expr* x, const sema::Type* to, unsigned long long& 
         if (to->kind == sema::Type::Bool) { bits = d != 0 ? 1 : 0; return d == d; }
         return foldFloatToInteger(d, sizeOf(to) * 8, unsignedInt(to), bits, raw);
     }
-    unsigned long long v = 0;
+    uint64 v = 0;
     if (x->semaConst) {
         // semaValue holds the value in its type (sema::foldedConstant): an unsigned one of 4 bytes sign-extended
-        v = static_cast<unsigned long long>(static_cast<long long>(x->semaValue));
-        if (sizeOf(xt) <= 4 && unsignedInt(xt)) v &= 0xFFFFFFFFULL;
+        v = static_cast<uint64>(static_cast<int64>(x->semaValue));
+        if (sizeOf(xt) <= 4 && unsignedInt(xt)) v &= 0xFFFFFFFFu;
     } else if (x->kind == cxx::Expr::FunctionalCast && x->kids.empty()) v = 0;   // "int()"
     else if ((x->kind == cxx::Expr::Cast || (x->kind == cxx::Expr::NamedCast && x->text == "static_cast") || x->kind == cxx::Expr::FunctionalCast) && x->kids.size() == 1 && !x->semaSym) {
         if (!foldInteger(x->kids[0], xt, v, depth + 1)) return false;
@@ -6138,7 +6599,7 @@ bool IrGen::foldInteger(cxx::Expr* x, const sema::Type* to, unsigned long long& 
     const int n = sizeOf(to) * 8;
     if (n <= 0 || n > 64) return false;
     if (n < 64) {
-        const unsigned long long mask = (1ULL << n) - 1;
+        const uint64 mask = (static_cast<uint64>(1) << n) - 1;
         v &= mask;
         if (!unsignedInt(to) && (v >> (n - 1)) != 0) v |= ~mask;
     }
@@ -6155,10 +6616,10 @@ bool IrGen::convertFolded(const sema::Type* t, double& v) const
     if (t->kind == sema::Type::Double || t->kind == sema::Type::LongDouble) return true;
     if (t->kind == sema::Type::Bool) { v = v != 0 ? 1 : 0; return true; }
     if (!t->isIntegral() || t->kind == sema::Type::Enum) return false;
-    unsigned long long bits = 0;
+    uint64 bits = 0;
     double raw = 0;
     if (!foldFloatToInteger(v, sizeOf(t) * 8, unsignedInt(t), bits, raw)) return false;
-    v = unsignedInt(t) ? static_cast<double>(bits) : static_cast<double>(static_cast<long long>(bits));
+    v = unsignedInt(t) ? static_cast<double>(bits) : static_cast<double>(static_cast<int64>(bits));
     return true;
 }
 

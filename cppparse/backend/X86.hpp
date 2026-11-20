@@ -12,6 +12,8 @@
 #ifndef CPPPARSE_X86_HPP
 #define CPPPARSE_X86_HPP
 
+#include "EhModel.hpp"
+#include "Int64.hpp"
 #include "Ir.hpp"
 #include "Lower.hpp"
 #include "Parallel.hpp"
@@ -35,7 +37,7 @@ struct IrDataItem {
     enum Kind { Zero, Int, Float, String, Address, Bytes, Rva };
     Kind        kind;
     int         size;        // bytes; Zero: the length of the run; Bytes: the number of them
-    long long   value;       // Int (all 64 bits of a DQ item)
+    int64       value;       // Int (all 64 bits of a DQ item)
     std::string text;        // Float: the literal; String: the literal with its quotes; Address, Rva: the IR name; Bytes: the bytes themselves
     IrDataItem() : kind(Zero), size(0), value(0) {}
 };
@@ -56,9 +58,12 @@ struct IrGlobal {
 class X86Module {
 public:
     explicit X86Module(bool msvcNames = false);
-    // try regions as range tables with landing pads (--eh=table) instead of setjmp frames
-    void        setTableExceptions(bool on) { m_tableEh = on; }
-    bool        tableExceptions() const { return m_tableEh; }
+    // the exception handling model (cppparse/eh): try regions as range tables with landing pads (--eh=table) or as
+    // setjmp frames
+    void        setEhModel(EhModel model) { m_eh = model; }
+    EhModel     ehModel() const { return m_eh; }
+    bool        tableExceptions() const { return m_eh != EhModelSjlj; }
+    bool        clExceptions() const { return m_eh == EhModelCl; }   // cl's model: on top of the table model's regions
     void        addVtable(const IrVtable& v) { m_vtables.push_back(v); }
     // an adjustor thunk a vtable slot names: "sub rcx, adjust; jmp target" (COMDAT, as cl emits it); once per name
     void        addThunk(const std::string& irName, const std::string& target, int adjust);
@@ -87,6 +92,7 @@ public:
     std::string globalSymbol(const std::string& irName);    // symbol of a variable, vtable or function address
     void        addFunction(const IrFunction& f, LowerStats& stats);     // codeFor + appendCode
     std::string codeFor(const IrFunction& f, LowerStats& stats);         // safe to call from several threads
+    std::string definitionLabel(const IrFunction& f);                    // the label of f's code: its symbol, "<symbol>$default" for a replaceable function
     void        appendCode(const std::string& code);
     std::string finish();                       // the complete .asm text
     // symbol -> readable name ("geom::Circle::area() const", "geom::Shape::`vftable'", "string literal ..."),
@@ -104,11 +110,12 @@ private:
     std::map<std::string, double>      m_floats;    // that the output is the same whatever the thread timing
     std::set<std::string>    m_externs;
     std::set<std::string>    m_defined;         // PUBLIC symbols defined in this module
+    std::map<std::string, std::string> m_weak;   // a replaceable function's name -> the label of its default definition
     std::set<std::string>    m_internal;        // defined here with internal linkage: never PUBLIC
     std::set<std::string>    m_globalsUsed;     // mangled global names referenced
     Mutex                    m_mutex;           // guards the pools above while functions are generated in parallel
     bool                               m_msvc;
-    bool                               m_tableEh;
+    EhModel                            m_eh;
     std::map<std::string, std::string> m_functionNames;   // IR function name -> decorated name (read-only while generating)
     std::map<std::string, std::string> m_globalNames;     // qualified variable name -> decorated name
     std::set<std::string>              m_cFunctions;      // IR names of functions without a parameter list (registerCFunction)

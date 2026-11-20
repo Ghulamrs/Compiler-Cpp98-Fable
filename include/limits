@@ -5,6 +5,7 @@
 
 #include <cfloat>
 #include <climits>
+#include <__config>
 
 namespace std {
 
@@ -93,8 +94,8 @@ CPPPARSE_INTEGER_LIMITS(int, INT_MIN, INT_MAX, 31, 9, true)
 CPPPARSE_INTEGER_LIMITS(unsigned int, 0, UINT_MAX, 32, 9, false)
 CPPPARSE_INTEGER_LIMITS(long, LONG_MIN, LONG_MAX, 31, 9, true)
 CPPPARSE_INTEGER_LIMITS(unsigned long, 0, ULONG_MAX, 32, 9, false)
-CPPPARSE_INTEGER_LIMITS(long long, LLONG_MIN, LLONG_MAX, 63, 18, true)
-CPPPARSE_INTEGER_LIMITS(unsigned long long, 0, ULLONG_MAX, 64, 19, false)
+CPPPARSE_INTEGER_LIMITS(__cppparse_int64, __CPPPARSE_INT64_MIN, __CPPPARSE_INT64_MAX, 63, 18, true)
+CPPPARSE_INTEGER_LIMITS(__cppparse_uint64, 0, __CPPPARSE_UINT64_MAX, 64, 19, false)
 #undef CPPPARSE_INTEGER_LIMITS
 
 // the floating types (IEEE 754): the infinities and NaNs are folded constants (an overflowing product, inf - inf),

@@ -95,19 +95,19 @@ struct __decimal_digits {
 
     explicit __decimal_digits(double v) : intCount(0), used(0), bits(0)
     {
-        unsigned long long raw;
+        __cppparse_uint64 raw;
         memcpy(&raw, &v, sizeof raw);
-        const unsigned long long one = 1;
+        const __cppparse_uint64 one = 1;
         int biased = static_cast<int>((raw >> 52) & 0x7FF);
-        unsigned long long mant = raw & ((one << 52) - 1);
+        __cppparse_uint64 mant = raw & ((one << 52) - 1);
         if (biased != 0) mant |= one << 52;
         int e = biased != 0 ? biased - 1075 : -1074;
         for (int i = 0; i < 36; ++i) num[i] = 0;
         if (mant == 0) return;
         if (e >= 0) { shiftedWhole(mant, e); return; }
         bits = -e;
-        unsigned long long whole = bits < 64 ? mant >> bits : 0;
-        unsigned long long frac = bits < 64 ? mant & ((one << bits) - 1) : mant;
+        __cppparse_uint64 whole = bits < 64 ? mant >> bits : 0;
+        __cppparse_uint64 frac = bits < 64 ? mant & ((one << bits) - 1) : mant;
         num[0] = static_cast<unsigned int>(frac);
         num[1] = static_cast<unsigned int>(frac >> 32);
         char tmp[24];
@@ -116,7 +116,7 @@ struct __decimal_digits {
         while (k > 0) intDigits[intCount++] = tmp[--k];
     }
     // mant * 2^e in base 10^9 limbs, then printed
-    void shiftedWhole(unsigned long long mant, int e)
+    void shiftedWhole(__cppparse_uint64 mant, int e)
     {
         unsigned int limb[40];
         int n = 0;
@@ -141,9 +141,9 @@ struct __decimal_digits {
     {
         if (bits == 0) return 0;
         const int limb = bits / 32, shift = bits % 32;
-        unsigned long long carry = 0;
-        for (int i = 0; i <= limb + 1; ++i) { unsigned long long t = static_cast<unsigned long long>(num[i]) * 10 + carry; num[i] = static_cast<unsigned int>(t); carry = t >> 32; }
-        unsigned long long high = num[limb] | (static_cast<unsigned long long>(num[limb + 1]) << 32);
+        __cppparse_uint64 carry = 0;
+        for (int i = 0; i <= limb + 1; ++i) { __cppparse_uint64 t = static_cast<__cppparse_uint64>(num[i]) * 10 + carry; num[i] = static_cast<unsigned int>(t); carry = t >> 32; }
+        __cppparse_uint64 high = num[limb] | (static_cast<__cppparse_uint64>(num[limb + 1]) << 32);
         int d = static_cast<int>((high >> shift) & 15);
         num[limb] &= shift ? (static_cast<unsigned int>(1) << shift) - 1 : 0;
         num[limb + 1] = 0;
@@ -172,15 +172,15 @@ struct __number_text {
     // character, and their count in n (72 characters is the most). As printf: '+' (showpos) only for a signed
     // conversion, the 0x of showbase not for zero. A value of 32 bits is divided by ten as a multiplication by its
     // reciprocal, and no pointers are subtracted: -O0 code makes a division instruction of both
-    static char* integer(unsigned long long u, bool negative, bool isSigned, ios_base::fmtflags f, char* end, size_t& n)
+    static char* integer(__cppparse_uint64 u, bool negative, bool isSigned, ios_base::fmtflags f, char* end, size_t& n)
     {
         char* p = end;
         size_t k = 0;
         if (!(f & (ios_base::hex | ios_base::oct))) {
-            if (u <= 0xFFFFFFFFULL) {
-                unsigned long long v = u;
+            if (u <= 0xFFFFFFFFu) {
+                __cppparse_uint64 v = u;
                 do {
-                    const unsigned long long q = (v * 0xCCCCCCCDULL) >> 35;   // v / 10 for every v below 2^32
+                    const __cppparse_uint64 q = (v * static_cast<__cppparse_uint64>(0xCCCCCCCDu)) >> 35;   // v / 10 for every v below 2^32
                     *--p = static_cast<char>('0' + (v - q * 10));
                     v = q;
                     ++k;
@@ -206,7 +206,7 @@ struct __number_text {
         if (negative) { *--p = '-'; ++k; }
         n = k;
         return p;
-    }    static void digits(unsigned long long u, char* out, size_t& n)
+    }    static void digits(__cppparse_uint64 u, char* out, size_t& n)
     {
         char tmp[24];
         size_t k = 0;
@@ -263,7 +263,7 @@ struct __number_text {
         out[n++] = e < 0 ? '-' : '+';
         if (e < 0) e = -e;
         if (e < 10) out[n++] = '0';
-        digits(static_cast<unsigned long long>(e), out, n);
+        digits(static_cast<__cppparse_uint64>(e), out, n);
         return exponent;
     }
     static void stripZeros(char* out, size_t& n, size_t from)
@@ -307,7 +307,7 @@ struct __number_text {
     }
     static char* pointer(const void* v, char* end)
     {
-        unsigned long long u = reinterpret_cast<unsigned long long>(v);
+        __cppparse_uint64 u = reinterpret_cast<__cppparse_uint64>(v);
         char* p = end;
         for (int i = 0; i < 16; ++i) { int d = static_cast<int>(u & 15); *--p = static_cast<char>(d < 10 ? '0' + d : 'A' + d - 10); u >>= 4; }
         return p;
@@ -372,8 +372,8 @@ public:
     iter_type put(iter_type s, ios_base& f, char_type fill, bool v) const { return do_put(s, f, fill, v); }
     iter_type put(iter_type s, ios_base& f, char_type fill, long v) const { return do_put(s, f, fill, v); }
     iter_type put(iter_type s, ios_base& f, char_type fill, unsigned long v) const { return do_put(s, f, fill, v); }
-    iter_type put(iter_type s, ios_base& f, char_type fill, long long v) const { return do_put(s, f, fill, v); }
-    iter_type put(iter_type s, ios_base& f, char_type fill, unsigned long long v) const { return do_put(s, f, fill, v); }
+    iter_type put(iter_type s, ios_base& f, char_type fill, __cppparse_int64 v) const { return do_put(s, f, fill, v); }
+    iter_type put(iter_type s, ios_base& f, char_type fill, __cppparse_uint64 v) const { return do_put(s, f, fill, v); }
     iter_type put(iter_type s, ios_base& f, char_type fill, double v) const { return do_put(s, f, fill, v); }
     iter_type put(iter_type s, ios_base& f, char_type fill, long double v) const { return do_put(s, f, fill, v); }
     iter_type put(iter_type s, ios_base& f, char_type fill, const void* v) const { return do_put(s, f, fill, v); }
@@ -390,8 +390,8 @@ protected:
     }
     virtual iter_type do_put(iter_type s, ios_base& f, char_type fill, long v) const { return __put_signed(s, f, fill, v); }
     virtual iter_type do_put(iter_type s, ios_base& f, char_type fill, unsigned long v) const { return __put_unsigned(s, f, fill, v); }
-    virtual iter_type do_put(iter_type s, ios_base& f, char_type fill, long long v) const { return __put_signed(s, f, fill, v); }
-    virtual iter_type do_put(iter_type s, ios_base& f, char_type fill, unsigned long long v) const { return __put_unsigned(s, f, fill, v); }
+    virtual iter_type do_put(iter_type s, ios_base& f, char_type fill, __cppparse_int64 v) const { return __put_signed(s, f, fill, v); }
+    virtual iter_type do_put(iter_type s, ios_base& f, char_type fill, __cppparse_uint64 v) const { return __put_unsigned(s, f, fill, v); }
     virtual iter_type do_put(iter_type s, ios_base& f, char_type fill, double v) const
     {
         char buf[400];
@@ -407,17 +407,17 @@ protected:
     }
 private:
     // a signed value: in hexadecimal and octal its bits, as printf's %lx and %lo
-    iter_type __put_signed(iter_type s, ios_base& f, char_type fill, long long v) const
+    iter_type __put_signed(iter_type s, ios_base& f, char_type fill, __cppparse_int64 v) const
     {
         char buf[72];
         const char* p;
         size_t n = 0;
-        if (f.flags() & (ios_base::hex | ios_base::oct)) p = __number_text::integer(static_cast<unsigned long long>(v), false, false, f.flags(), buf + 72, n);
-        else if (v < 0) p = __number_text::integer(static_cast<unsigned long long>(-(v + 1)) + 1, true, true, f.flags(), buf + 72, n);
-        else p = __number_text::integer(static_cast<unsigned long long>(v), false, true, f.flags(), buf + 72, n);
+        if (f.flags() & (ios_base::hex | ios_base::oct)) p = __number_text::integer(static_cast<__cppparse_uint64>(v), false, false, f.flags(), buf + 72, n);
+        else if (v < 0) p = __number_text::integer(static_cast<__cppparse_uint64>(-(v + 1)) + 1, true, true, f.flags(), buf + 72, n);
+        else p = __number_text::integer(static_cast<__cppparse_uint64>(v), false, true, f.flags(), buf + 72, n);
         return __text(s, f, fill, p, n, true);
     }
-    iter_type __put_unsigned(iter_type s, ios_base& f, char_type fill, unsigned long long v) const
+    iter_type __put_unsigned(iter_type s, ios_base& f, char_type fill, __cppparse_uint64 v) const
     {
         char buf[72];
         size_t n = 0;
@@ -467,8 +467,8 @@ public:
     iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, unsigned short& v) const { return do_get(in, end, f, err, v); }
     iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, unsigned int& v) const { return do_get(in, end, f, err, v); }
     iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, unsigned long& v) const { return do_get(in, end, f, err, v); }
-    iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, long long& v) const { return do_get(in, end, f, err, v); }
-    iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, unsigned long long& v) const { return do_get(in, end, f, err, v); }
+    iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, __cppparse_int64& v) const { return do_get(in, end, f, err, v); }
+    iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, __cppparse_uint64& v) const { return do_get(in, end, f, err, v); }
     iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, float& v) const { return do_get(in, end, f, err, v); }
     iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, double& v) const { return do_get(in, end, f, err, v); }
     iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, long double& v) const { return do_get(in, end, f, err, v); }
@@ -481,7 +481,7 @@ protected:
     virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, bool& v) const
     {
         if (!(f.flags() & ios_base::boolalpha)) {
-            unsigned long long u = 0;
+            __cppparse_uint64 u = 0;
             bool negative = false, badGrouping = false;
             in = __integer(in, end, f, err, u, negative, badGrouping);
             if (err & ios_base::failbit) return in;
@@ -511,39 +511,39 @@ protected:
     }
     virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, long& v) const
     {
-        long long t = 0;
+        __cppparse_int64 t = 0;
         in = __put_signed(in, end, f, err, t, LONG_MIN, LONG_MAX);
         v = static_cast<long>(t);
         return in;
     }
     virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, unsigned short& v) const
     {
-        unsigned long long t = 0;
+        __cppparse_uint64 t = 0;
         in = __put_unsigned(in, end, f, err, t, USHRT_MAX);
         v = static_cast<unsigned short>(t);
         return in;
     }
     virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, unsigned int& v) const
     {
-        unsigned long long t = 0;
+        __cppparse_uint64 t = 0;
         in = __put_unsigned(in, end, f, err, t, UINT_MAX);
         v = static_cast<unsigned int>(t);
         return in;
     }
     virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, unsigned long& v) const
     {
-        unsigned long long t = 0;
+        __cppparse_uint64 t = 0;
         in = __put_unsigned(in, end, f, err, t, ULONG_MAX);
         v = static_cast<unsigned long>(t);
         return in;
     }
-    virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, long long& v) const
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, __cppparse_int64& v) const
     {
-        return __put_signed(in, end, f, err, v, LLONG_MIN, LLONG_MAX);
+        return __put_signed(in, end, f, err, v, __CPPPARSE_INT64_MIN, __CPPPARSE_INT64_MAX);
     }
-    virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, unsigned long long& v) const
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, __cppparse_uint64& v) const
     {
-        return __put_unsigned(in, end, f, err, v, ULLONG_MAX);
+        return __put_unsigned(in, end, f, err, v, __CPPPARSE_UINT64_MAX);
     }
     virtual iter_type do_get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, float& v) const
     {
@@ -575,8 +575,8 @@ protected:
     {
         const ios_base::fmtflags saved = f.flags();
         f.setf(ios_base::hex, ios_base::basefield);
-        unsigned long long u = 0;
-        in = __put_unsigned(in, end, f, err, u, ULLONG_MAX);
+        __cppparse_uint64 u = 0;
+        in = __put_unsigned(in, end, f, err, u, __CPPPARSE_UINT64_MAX);
         f.flags(saved);
         if (!(err & ios_base::failbit)) v = reinterpret_cast<void*>(u);
         return in;
@@ -592,7 +592,7 @@ private:
     }
     // stage 2 and the conversion of an integer: the magnitude in u (saturated, failbit when it overflowed 64 bits)
     // and the sign; the base from basefield (none: from the prefix, as %i)
-    iter_type __integer(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, unsigned long long& u, bool& negative, bool& badGrouping) const
+    iter_type __integer(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, __cppparse_uint64& u, bool& negative, bool& badGrouping) const
     {
         const locale loc = f.getloc();
         const ctype<charT>& ct = use_facet<ctype<charT> >(loc);
@@ -636,8 +636,8 @@ private:
             else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
             else break;
             if (d >= base) break;
-            if (u > (ULLONG_MAX - static_cast<unsigned long long>(d)) / static_cast<unsigned long long>(base)) overflow = true;
-            else u = u * static_cast<unsigned long long>(base) + static_cast<unsigned long long>(d);
+            if (u > (__CPPPARSE_UINT64_MAX - static_cast<__cppparse_uint64>(d)) / static_cast<__cppparse_uint64>(base)) overflow = true;
+            else u = u * static_cast<__cppparse_uint64>(base) + static_cast<__cppparse_uint64>(d);
             any = true;
             ++inGroup;
         }
@@ -655,31 +655,31 @@ private:
                 if (gi + 1 < grouping.size()) ++gi;
             }
         }
-        if (overflow) { err |= ios_base::failbit; u = ULLONG_MAX; }
+        if (overflow) { err |= ios_base::failbit; u = __CPPPARSE_UINT64_MAX; }
         badGrouping = badGroup;   // the value stands, failbit is set after it is stored (22.2.2.1.2/3)
         return in;
     }
     template <class T>
-    iter_type __put_signed(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, T& v, long long low, long long high) const
+    iter_type __put_signed(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, T& v, __cppparse_int64 low, __cppparse_int64 high) const
     {
-        unsigned long long u = 0;
+        __cppparse_uint64 u = 0;
         bool negative = false, badGrouping = false;
         in = __integer(in, end, f, err, u, negative, badGrouping);
-        if (err & ios_base::failbit) { v = u == ULLONG_MAX ? static_cast<T>(negative ? low : high) : 0; return in; }
-        const unsigned long long limit = negative ? static_cast<unsigned long long>(-(low + 1)) + 1 : static_cast<unsigned long long>(high);
+        if (err & ios_base::failbit) { v = u == __CPPPARSE_UINT64_MAX ? static_cast<T>(negative ? low : high) : 0; return in; }
+        const __cppparse_uint64 limit = negative ? static_cast<__cppparse_uint64>(-(low + 1)) + 1 : static_cast<__cppparse_uint64>(high);
         if (u > limit) { err |= ios_base::failbit; v = static_cast<T>(negative ? low : high); return in; }
-        v = negative ? static_cast<T>(-static_cast<long long>(u - 1) - 1) : static_cast<T>(u);
+        v = negative ? static_cast<T>(-static_cast<__cppparse_int64>(u - 1) - 1) : static_cast<T>(u);
         if (badGrouping) err |= ios_base::failbit;
         return in;
     }
     // a minus sign negates the magnitude in the type, as strtoul does
     template <class T>
-    iter_type __put_unsigned(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, T& v, unsigned long long high) const
+    iter_type __put_unsigned(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, T& v, __cppparse_uint64 high) const
     {
-        unsigned long long u = 0;
+        __cppparse_uint64 u = 0;
         bool negative = false, badGrouping = false;
         in = __integer(in, end, f, err, u, negative, badGrouping);
-        if (err & ios_base::failbit) { v = u == ULLONG_MAX ? static_cast<T>(high) : 0; return in; }
+        if (err & ios_base::failbit) { v = u == __CPPPARSE_UINT64_MAX ? static_cast<T>(high) : 0; return in; }
         if (u > high) { err |= ios_base::failbit; v = static_cast<T>(high); return in; }
         v = negative ? static_cast<T>((high - u + 1) & high) : static_cast<T>(u);
         if (badGrouping) err |= ios_base::failbit;

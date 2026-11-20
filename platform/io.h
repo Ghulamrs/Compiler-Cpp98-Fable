@@ -19,9 +19,9 @@ struct _finddata_t {
 };
 
 extern "C" {
-    long long _findfirst64i32(const char* pattern, struct _finddata_t* data);
-    int       _findnext64i32(long long handle, struct _finddata_t* data);
-    int       _findclose(long long handle);
+    __cppparse_int64 _findfirst64i32(const char* pattern, struct _finddata_t* data);
+    int       _findnext64i32(__cppparse_int64 handle, struct _finddata_t* data);
+    int       _findclose(__cppparse_int64 handle);
     int       _access(const char* path, int mode);
     int       _unlink(const char* path);
 }

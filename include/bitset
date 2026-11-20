@@ -61,11 +61,11 @@ public:
     bitset operator>>(size_t n) const { bitset r(*this); r >>= n; return r; }
     bitset operator~() const { bitset r(*this); r.flip(); return r; }
 
-    bitset& set() { for (size_t w = 0; w < WORDS; ++w) m_w[w] = ~0ULL; trim(); return *this; }
+    bitset& set() { for (size_t w = 0; w < WORDS; ++w) m_w[w] = __CPPPARSE_UINT64_MAX; trim(); return *this; }
     bitset& set(size_t pos, bool v = true)
     {
         if (pos >= N) throw out_of_range("bitset: position past the end");
-        if (v) m_w[pos / 64] |= 1ULL << (pos % 64); else m_w[pos / 64] &= ~(1ULL << (pos % 64));
+        if (v) m_w[pos / 64] |= static_cast<__cppparse_uint64>(1) << (pos % 64); else m_w[pos / 64] &= ~(static_cast<__cppparse_uint64>(1) << (pos % 64));
         return *this;
     }
     bitset& reset() { for (size_t w = 0; w < WORDS; ++w) m_w[w] = 0; return *this; }
@@ -83,7 +83,7 @@ public:
     size_t count() const
     {
         size_t n = 0;
-        for (size_t w = 0; w < WORDS; ++w) { unsigned long long v = m_w[w]; while (v) { v &= v - 1; ++n; } }
+        for (size_t w = 0; w < WORDS; ++w) { __cppparse_uint64 v = m_w[w]; while (v) { v &= v - 1; ++n; } }
         return n;
     }
     size_t size() const { return N; }
@@ -106,8 +106,8 @@ public:
 
 private:
     enum { WORDS = (N + 63) / 64 };
-    void trim() { if (N % 64 && WORDS) m_w[WORDS - 1] &= (1ULL << (N % 64)) - 1; }
-    unsigned long long m_w[(N + 127) / 64];   // WORDS, or one word for N = 0
+    void trim() { if (N % 64 && WORDS) m_w[WORDS - 1] &= (static_cast<__cppparse_uint64>(1) << (N % 64)) - 1; }
+    __cppparse_uint64 m_w[(N + 127) / 64];   // WORDS, or one word for N = 0
 };
 
 template <size_t N> bitset<N> operator&(const bitset<N>& a, const bitset<N>& b) { bitset<N> r(a); r &= b; return r; }

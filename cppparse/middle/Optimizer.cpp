@@ -68,18 +68,18 @@ bool isPow2(long v) { return v > 0 && (v & (v - 1)) == 0; }
 // a floating value converted to the integer type t as cl's code converts it at run time (X86.cpp): signed and
 // narrow targets through a 32-bit cvttsd2si, unsigned int through a 64-bit one, unsigned long long by ranges;
 // an out-of-range result is the "integer indefinite" 80000000h / 8000000000000000h
-long long cvtt64(double x) { return x >= -9223372036854775808.0 && x < 9223372036854775808.0 ? static_cast<long long>(x) : (-9223372036854775807LL - 1); }
-long long cvtt32(double x) { return x > -2147483649.0 && x < 2147483648.0 ? static_cast<long long>(x) : -2147483648LL; }
-long long floatToInt(double x, int size, bool isUnsigned)
+int64 cvtt64(double x) { return x >= -9223372036854775808.0 && x < 9223372036854775808.0 ? static_cast<int64>(x) : int64Min; }
+int64 cvtt32(double x) { return x > -2147483649.0 && x < 2147483648.0 ? static_cast<int64>(x) : (-2147483647 - 1); }
+int64 floatToInt(double x, int size, bool isUnsigned)
 {
     if (size == 8 && isUnsigned) {
         if (!(x >= 9223372036854775808.0)) return cvtt64(x);
         const double y = x - 9223372036854775808.0;
-        return y >= 9223372036854775808.0 ? cvtt64(y) : static_cast<long long>(static_cast<unsigned long long>(cvtt64(y)) + 9223372036854775808ULL);
+        return y >= 9223372036854775808.0 ? cvtt64(y) : static_cast<int64>(static_cast<uint64>(cvtt64(y)) + (static_cast<uint64>(1) << 63));
     }
     if (size == 8) return cvtt64(x);
-    if (size == 4 && isUnsigned) return static_cast<long long>(static_cast<unsigned long long>(cvtt64(x)) & 0xFFFFFFFFULL);
-    const long long v = cvtt32(x);
+    if (size == 4 && isUnsigned) return static_cast<int64>(static_cast<uint64>(cvtt64(x)) & 0xFFFFFFFFu);
+    const int64 v = cvtt32(x);
     if (size == 2) return isUnsigned ? (v & 0xFFFF) : static_cast<short>(v & 0xFFFF);
     if (size == 1) return isUnsigned ? (v & 0xFF) : static_cast<signed char>(v & 0xFF);
     return v;
@@ -129,24 +129,24 @@ long foldInt(const std::string& sub, long x, long y, bool& ok)
 // stays in that range (1 << 40 used to fold to 0)
 bool foldWideInt(const std::string& sub, long a, long b, long& out)
 {
-    const long long x = a, y = b;
-    const unsigned long long ux = static_cast<unsigned long long>(x), uy = static_cast<unsigned long long>(y);
-    unsigned long long r;
+    const int64 x = a, y = b;
+    const uint64 ux = static_cast<uint64>(x), uy = static_cast<uint64>(y);
+    uint64 r;
     if (sub == "add") r = ux + uy;
     else if (sub == "sub") r = ux - uy;
     else if (sub == "mul") r = ux * uy;
-    else if (sub == "sdiv" || sub == "srem") { if (y == 0 || y == -1) return false; r = static_cast<unsigned long long>(sub == "sdiv" ? x / y : x % y); }
+    else if (sub == "sdiv" || sub == "srem") { if (y == 0 || y == -1) return false; r = static_cast<uint64>(sub == "sdiv" ? x / y : x % y); }
     else if (sub == "udiv" || sub == "urem") { if (y == 0) return false; r = sub == "udiv" ? ux / uy : ux % uy; }
     else if (sub == "shl" || sub == "ashr" || sub == "lshr") {
         if (y < 0 || y > 63) return false;
-        r = sub == "shl" ? ux << y : sub == "lshr" ? ux >> y : static_cast<unsigned long long>(x >> y);
+        r = sub == "shl" ? ux << y : sub == "lshr" ? ux >> y : static_cast<uint64>(x >> y);
     }
     else if (sub == "and") r = ux & uy;
     else if (sub == "or") r = ux | uy;
     else if (sub == "xor") r = ux ^ uy;
     else return false;
-    const long long s = static_cast<long long>(r);
-    if (static_cast<long long>(static_cast<long>(s)) != s) return false;
+    const int64 s = static_cast<int64>(r);
+    if (static_cast<int64>(static_cast<long>(s)) != s) return false;
     out = static_cast<long>(s);
     return true;
 }
@@ -374,9 +374,9 @@ int Optimizer::constantFold(IrFunction& f)
                         // the IR's immediates are 32-bit, sign-extended to 64 bits (zero-extended for unsigned int):
                         // a result outside that range stays a run-time conversion
                         const int size = in.type->builtinSize();
-                        const long long r = floatToInt(o.fval, size, in.type->isUnsigned);
-                        if (size == 8 && (r < -2147483647LL - 1 || r > 2147483647LL)) continue;
-                        v = static_cast<long>(static_cast<int>(static_cast<unsigned int>(static_cast<unsigned long long>(r) & 0xFFFFFFFFULL)));
+                        const int64 r = floatToInt(o.fval, size, in.type->isUnsigned);
+                        if (size == 8 && (r < -2147483647 - 1 || r > 2147483647)) continue;
+                        v = static_cast<long>(static_cast<int>(static_cast<unsigned int>(static_cast<uint64>(r) & 0xFFFFFFFFu)));
                     }
                     // a negative 32-bit pattern zero-extended needs a 64-bit constant, which the IR does not have
                     if (in.sub == "zext" && v < 0 && in.type->builtinSize() > 4) continue;
@@ -1049,6 +1049,7 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts, int maxInstsInLoop)
             std::map<std::string, IrFunction*>::const_iterator it = m_functions.find(call.sub);
             if (it == m_functions.end()) continue;
             const IrFunction& g = *it->second;
+            if (g.replaceable) continue;   // the program may define the function that is called: this body is only the default
             const bool hot = b < inLoop.size() && inLoop[b];
             if (&g == &f || g.name == f.name || g.hasTry || loweredSize(g) > (hot ? maxInstsInLoop : maxInsts)) continue;
             if (changes >= maxPerCaller || f.instCount() + g.instCount() > growthLimit) continue;

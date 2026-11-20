@@ -1,5 +1,7 @@
 // __allocator - cppparse's C++98 library: std::allocator (20.4.1), the default allocator of the containers and of
 // basic_string, on its own so that <string> has it without <memory> (whose <iterator> includes the streams).
+// allocate and deallocate call ::operator new and ::operator delete (20.4.1.1/5, /7), so a program's replacement of
+// those sees what the strings and containers allocate, and a failed allocation is a bad_alloc.
 #ifndef CPPPARSE_ALLOCATOR
 #define CPPPARSE_ALLOCATOR
 
@@ -26,8 +28,8 @@ public:
     template <class U> allocator(const allocator<U>&) {}
     pointer       address(reference r) const { return &r; }
     const_pointer address(const_reference r) const { return &r; }
-    pointer   allocate(size_type n, const void* = 0) { return static_cast<pointer>(malloc(n * sizeof(T))); }
-    void      deallocate(pointer p, size_type) { free(p); }
+    pointer   allocate(size_type n, const void* = 0) { return static_cast<pointer>(::operator new(n * sizeof(T))); }
+    void      deallocate(pointer p, size_type) { ::operator delete(p); }
     size_type max_size() const { return ~static_cast<size_t>(0) / sizeof(T); }
     void      construct(pointer p, const T& v) { new (p) T(v); }
     void      destroy(pointer p) { p->~T(); }

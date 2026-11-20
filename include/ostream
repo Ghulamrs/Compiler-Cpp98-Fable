@@ -93,12 +93,12 @@ public:
         return (this->m_flags & (ios_base::hex | ios_base::oct)) ? __put_unsigned(static_cast<unsigned long>(v)) : __put_signed(v);
     }
     basic_ostream& operator<<(unsigned long v) { return this->m_numput ? __facet_put(v) : __put_unsigned(v); }
-    basic_ostream& operator<<(long long v)
+    basic_ostream& operator<<(__cppparse_int64 v)
     {
         if (this->m_numput) return __facet_put(v);
-        return (this->m_flags & (ios_base::hex | ios_base::oct)) ? __put_unsigned(static_cast<unsigned long long>(v)) : __put_signed(v);
+        return (this->m_flags & (ios_base::hex | ios_base::oct)) ? __put_unsigned(static_cast<__cppparse_uint64>(v)) : __put_signed(v);
     }
-    basic_ostream& operator<<(unsigned long long v) { return this->m_numput ? __facet_put(v) : __put_unsigned(v); }
+    basic_ostream& operator<<(__cppparse_uint64 v) { return this->m_numput ? __facet_put(v) : __put_unsigned(v); }
     basic_ostream& operator<<(float v) { return this->m_numput ? __facet_put(static_cast<double>(v)) : __floating(v); }
     basic_ostream& operator<<(double v) { return this->m_numput ? __facet_put(v) : __floating(v); }
     basic_ostream& operator<<(long double v) { return this->m_numput ? __facet_put(v) : __floating(static_cast<double>(v)); }
@@ -266,15 +266,15 @@ private:
         if (this->m_state == 0 && !this->m_tie && this->m_width == 0 && !(this->m_flags & ios_base::unitbuf)) { __out(buf, k); return *this; }
         return padded(buf, k, split);
     }
-    basic_ostream& __put_signed(long long v)
+    basic_ostream& __put_signed(__cppparse_int64 v)
     {
         char buf[72];
         size_t n = 0;
-        const char* p = v < 0 ? __number_text::integer(static_cast<unsigned long long>(-(v + 1)) + 1, true, true, this->m_flags, buf + 72, n)
-                              : __number_text::integer(static_cast<unsigned long long>(v), false, true, this->m_flags, buf + 72, n);
+        const char* p = v < 0 ? __number_text::integer(static_cast<__cppparse_uint64>(-(v + 1)) + 1, true, true, this->m_flags, buf + 72, n)
+                              : __number_text::integer(static_cast<__cppparse_uint64>(v), false, true, this->m_flags, buf + 72, n);
         return __number(p, n, true);
     }
-    basic_ostream& __put_unsigned(unsigned long long u)
+    basic_ostream& __put_unsigned(__cppparse_uint64 u)
     {
         char buf[72];
         size_t n = 0;
@@ -306,16 +306,16 @@ template <class charT, class traits> basic_ostream<charT, traits>& flush(basic_o
 bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, bool v);
 bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, long v);
 bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, unsigned long v);
-bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, long long v);
-bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, unsigned long long v);
+bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, __cppparse_int64 v);
+bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, __cppparse_uint64 v);
 bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, double v);
 bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, long double v);
 bool __num_put_out(basic_ostream<char, char_traits<char> >& os, const locale::facet* f, char fill, const void* v);
 bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, bool v);
 bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, long v);
 bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, unsigned long v);
-bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, long long v);
-bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, unsigned long long v);
+bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, __cppparse_int64 v);
+bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, __cppparse_uint64 v);
 bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, double v);
 bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, long double v);
 bool __num_put_out(basic_ostream<wchar_t, char_traits<wchar_t> >& os, const locale::facet* f, wchar_t fill, const void* v);

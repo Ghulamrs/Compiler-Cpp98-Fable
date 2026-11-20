@@ -1,0 +1,30 @@
+// __config - cppparse's C++98 library: what the headers need beyond C++98, in one place. The 64-bit integer types;
+// __cppparse_noreturn, which marks a function that does not return (abort, exit, terminate, unexpected and the
+// exception runtime's two), and __cppparse_align(n), which raises a type's alignment (jmp_buf), defined for each
+// compiler that reads the headers: cppparse (which defines _WIN32 for its Windows target, not _MSC_VER) and cl
+// read __declspec; gcc and clang outside MSVC compatibility read their attributes, which -pedantic accepts in
+// C++98; any other compiler gets nothing, and the declarations stay valid C++98 without the hint.
+#ifndef CPPPARSE_CONFIG
+#define CPPPARSE_CONFIG
+
+// long long, the one extension of C++98 the headers rely on (C99 and C++11 have it): 64-bit Windows needs it for
+// size_t, where long has 32 bits. The headers name it through this pair alone (and climits' LLONG_MIN, LLONG_MAX and
+// ULLONG_MAX, the C99 names, which must work in #if); a 64-bit constant is written from these types
+typedef long long          __cppparse_int64;
+typedef unsigned long long __cppparse_uint64;
+#define __CPPPARSE_UINT64_MAX (~static_cast<__cppparse_uint64>(0))
+#define __CPPPARSE_INT64_MAX  (static_cast<__cppparse_int64>(__CPPPARSE_UINT64_MAX >> 1))
+#define __CPPPARSE_INT64_MIN  (-__CPPPARSE_INT64_MAX - 1)
+
+#if defined(__GNUC__)
+#define __cppparse_noreturn __attribute__((__noreturn__))
+#define __cppparse_align(n) __attribute__((__aligned__(n)))
+#elif defined(_MSC_VER) || defined(_WIN32)
+#define __cppparse_noreturn __declspec(noreturn)
+#define __cppparse_align(n) __declspec(align(n))
+#else
+#define __cppparse_noreturn
+#define __cppparse_align(n)
+#endif
+
+#endif

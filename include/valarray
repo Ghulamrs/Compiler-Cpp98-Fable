@@ -1,6 +1,6 @@
 // valarray - cppparse's C++98 library: numeric arrays (26.3): valarray, slice and gslice, and the views slice_array,
 // gslice_array, mask_array and indirect_array; the element-wise operators and the math functions. The elements live
-// in malloc storage built with placement new; every operation makes its result at once (no expression templates).
+// in storage from operator new built with placement new; every operation makes its result at once (no expression templates).
 #ifndef CPPPARSE_VALARRAY
 #define CPPPARSE_VALARRAY
 
@@ -99,8 +99,8 @@ public:
     {
         valarray r(m_size);
         for (size_t i = 0; i < m_size; ++i) {
-            long long j = static_cast<long long>(i) + n;
-            if (j >= 0 && j < static_cast<long long>(m_size)) r.m_data[i] = m_data[j];
+            __cppparse_int64 j = static_cast<__cppparse_int64>(i) + n;
+            if (j >= 0 && j < static_cast<__cppparse_int64>(m_size)) r.m_data[i] = m_data[j];
         }
         return r;
     }
@@ -109,8 +109,8 @@ public:
     {
         valarray r(m_size);
         if (m_size == 0) return r;
-        long long k = n % static_cast<long long>(m_size);
-        if (k < 0) k += static_cast<long long>(m_size);
+        __cppparse_int64 k = n % static_cast<__cppparse_int64>(m_size);
+        if (k < 0) k += static_cast<__cppparse_int64>(m_size);
         for (size_t i = 0; i < m_size; ++i) r.m_data[i] = m_data[(i + static_cast<size_t>(k)) % m_size];
         return r;
     }
@@ -125,8 +125,8 @@ public:
 private:
     T*     m_data;
     size_t m_size;
-    void make(size_t n) { m_data = n ? static_cast<T*>(malloc(n * sizeof(T))) : 0; m_size = n; }
-    void destroy() { for (size_t i = 0; i < m_size; ++i) m_data[i].~T(); free(m_data); m_data = 0; m_size = 0; }
+    void make(size_t n) { m_data = n ? static_cast<T*>(::operator new(n * sizeof(T))) : 0; m_size = n; }
+    void destroy() { for (size_t i = 0; i < m_size; ++i) m_data[i].~T(); ::operator delete(m_data); m_data = 0; m_size = 0; }
 };
 
 // 26.3.4 slice: start, size and stride

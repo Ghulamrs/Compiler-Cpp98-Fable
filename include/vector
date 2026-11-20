@@ -1,6 +1,12 @@
 // vector - cppparse's C++98 library: a contiguous array with pointer iterators. Elements live
-// in malloc storage and are built with placement new and destroyed explicitly. The range
-// constructor and insert take pointer ranges (the iterators of string and vector).
+// in storage from ::operator new (bad_alloc when there is none) and are built with placement new
+// and destroyed explicitly. The range constructor and insert take pointer ranges (the iterators of
+// string and vector).
+// Elements are copy-constructed into a new buffer and the old ones destroyed; insert and erase assign over the
+// elements they keep and destroy what is left over (23.2.4.3, 23.2.4.4). Only the types of __is_bytewise (the
+// arithmetic types and the pointers) are moved with memcpy and memmove instead.
+// Exceptions: an operation that reallocates builds the new buffer before it touches the old one and has no effect
+// if a copy throws (push_back among them, 23.1/10); one that works in place leaves a vector of valid elements.
 #ifndef CPPPARSE_VECTOR
 #define CPPPARSE_VECTOR
 
@@ -28,13 +34,20 @@ public:
     typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
 
     vector() : m_data(0), m_size(0), m_cap(0) {}
-    explicit vector(size_t n) : m_data(0), m_size(0), m_cap(0) { resize(n); }
-    vector(size_t n, const T& v) : m_data(0), m_size(0), m_cap(0) { assign(n, v); }
-    vector(const T* first, const T* last) : m_data(0), m_size(0), m_cap(0) { assign(first, last); }
+    // a constructor that throws has no destructor to clean up after it: rebuild leaves nothing behind
+    explicit vector(size_t n) : m_data(0), m_size(0), m_cap(0)
+    {
+        try { resize(n); } catch (...) { destroyAll(); ::operator delete(m_data); throw; }
+    }
+    vector(size_t n, const T& v) : m_data(0), m_size(0), m_cap(0) { if (n) rebuild(n, 0, n, &v, 0, Bytewise()); }
+    vector(const T* first, const T* last) : m_data(0), m_size(0), m_cap(0)
+    {
+        if (first != last) rebuild(static_cast<size_t>(last - first), 0, static_cast<size_t>(last - first), first, 1, Bytewise());
+    }
     // any other iterator pair, or "n copies of v" when both arguments are integers
     template <class It> vector(It first, It last) : m_data(0), m_size(0), m_cap(0) { initRange(first, last, typename __is_integer<It>::type()); }
-    vector(const vector& o) : m_data(0), m_size(0), m_cap(0) { assign(o.m_data, o.m_data + o.m_size); }
-    ~vector() { destroyAll(); free(m_data); }
+    vector(const vector& o) : m_data(0), m_size(0), m_cap(0) { if (o.m_size) rebuild(o.m_size, 0, o.m_size, o.m_data, 1, Bytewise()); }
+    ~vector() { destroyAll(); ::operator delete(m_data); }
 
     vector& operator=(const vector& o)
     {
@@ -56,7 +69,7 @@ public:
     }
     void resize(size_t n, const T& v)
     {
-        if (n > m_cap) grow(n);
+        if (n > m_cap) { rebuild(n, m_size, n - m_size, &v, 0, Bytewise()); return; }   // v may be an element
         while (m_size > n) { --m_size; m_data[m_size].~T(); }
         while (m_size < n) { new (m_data + m_size) T(v); ++m_size; }
     }
@@ -82,12 +95,9 @@ public:
 
     void push_back(const T& v)
     {
-        if (m_size == m_cap) {
-            T copy(v);                 // v may live inside the array that is about to move
-            grow(m_cap ? m_cap * 2 : 4);
-            new (m_data + m_size) T(copy);
-        } else new (m_data + m_size) T(v);
-        ++m_size;
+        // v may be an element: rebuild copies it while the old buffer stands
+        if (m_size == m_cap) rebuild(m_cap ? m_cap * 2 : 4, m_size, 1, &v, 0, Bytewise());
+        else { new (m_data + m_size) T(v); ++m_size; }
     }
     void pop_back() { --m_size; m_data[m_size].~T(); }
 
@@ -95,66 +105,50 @@ public:
     {
         destroyAll();
         if (n > m_cap) grow(n);
-        for (size_t i = 0; i < n; ++i) new (m_data + i) T(v);
-        m_size = n;
+        while (m_size < n) { new (m_data + m_size) T(v); ++m_size; }
     }
     void assign(const T* first, const T* last)
     {
         size_t n = static_cast<size_t>(last - first);
         destroyAll();
         if (n > m_cap) grow(n);
-        for (size_t i = 0; i < n; ++i) new (m_data + i) T(first[i]);
-        m_size = n;
+        while (m_size < n) { new (m_data + m_size) T(first[m_size]); ++m_size; }
     }
 
+    // the inserted value is copied first where the elements it may be one of are assigned over
     iterator insert(iterator pos, const T& v)
     {
         size_t at = static_cast<size_t>(pos - m_data);
-        T copy(v);
-        if (m_size == m_cap) grow(m_cap ? m_cap * 2 : 4);
-        shiftUp(at, 1);
-        new (m_data + at) T(copy);
-        ++m_size;
+        if (m_size == m_cap) rebuild(m_cap ? m_cap * 2 : 4, at, 1, &v, 0, Bytewise());
+        else if (at == m_size) { new (m_data + m_size) T(v); ++m_size; }
+        else { T copy(v); spread(at, 1, &copy, 0, Bytewise()); }
         return m_data + at;
     }
     void insert(iterator pos, size_t n, const T& v)
     {
         size_t at = static_cast<size_t>(pos - m_data);
-        T copy(v);
-        if (m_size + n > m_cap) grow(m_size + n);
-        shiftUp(at, n);
-        for (size_t i = 0; i < n; ++i) new (m_data + at + i) T(copy);
-        m_size += n;
+        if (n == 0) return;
+        if (m_size + n > m_cap) rebuild(m_size + n, at, n, &v, 0, Bytewise());
+        else if (n == 1 && at == m_size) { new (m_data + m_size) T(v); ++m_size; }
+        else { T copy(v); spread(at, n, &copy, 0, Bytewise()); }
     }
     void insert(iterator pos, const T* first, const T* last)
     {
         size_t at = static_cast<size_t>(pos - m_data);
         size_t n = static_cast<size_t>(last - first);
-        if (first >= m_data && first < m_data + m_size) {
+        if (n == 0) return;
+        if (m_size + n > m_cap) rebuild(m_size + n, at, n, first, 1, Bytewise());
+        else if (first >= m_data && first < m_data + m_size) {
             vector copy(first, last);
-            insert(pos, copy.begin(), copy.end());
-            return;
-        }
-        if (m_size + n > m_cap) grow(m_size + n);
-        shiftUp(at, n);
-        for (size_t i = 0; i < n; ++i) new (m_data + at + i) T(first[i]);
-        m_size += n;
+            spread(at, n, copy.m_data, 1, Bytewise());
+        } else spread(at, n, first, 1, Bytewise());
     }
-    iterator erase(iterator pos)
-    {
-        size_t at = static_cast<size_t>(pos - m_data);
-        m_data[at].~T();
-        memmove(m_data + at, m_data + at + 1, (m_size - at - 1) * sizeof(T));
-        --m_size;
-        return m_data + at;
-    }
+    iterator erase(iterator pos) { return erase(pos, pos + 1); }
     iterator erase(iterator first, iterator last)
     {
         size_t at = static_cast<size_t>(first - m_data);
         size_t n = static_cast<size_t>(last - first);
-        for (size_t i = 0; i < n; ++i) m_data[at + i].~T();
-        memmove(m_data + at, m_data + at + n, (m_size - at - n) * sizeof(T));
-        m_size -= n;
+        if (n != 0) close(at, n, Bytewise());
         return m_data + at;
     }
     void swap(vector& o)
@@ -165,25 +159,91 @@ public:
     }
 
 private:
+    typedef typename __is_bytewise<T>::type Bytewise;
+
     T*     m_data;
     size_t m_size;
     size_t m_cap;
 
-    template <class It> void initRange(It first, It last, __false_type) { for (; first != last; ++first) push_back(*first); }
-    template <class N> void initRange(N n, N v, __true_type) { assign(static_cast<size_t>(n), static_cast<T>(v)); }
-
-    // elements are moved bytewise between buffers: every type stored here must tolerate that
-    void grow(size_t n)
+    template <class It> void initRange(It first, It last, __false_type)
     {
-        T* d = static_cast<T*>(malloc(n * sizeof(T)));
-        if (m_size) memcpy(d, m_data, m_size * sizeof(T));
-        free(m_data);
-        m_data = d;
-        m_cap = n;
+        try { for (; first != last; ++first) push_back(*first); } catch (...) { destroyAll(); ::operator delete(m_data); throw; }
     }
-    void shiftUp(size_t at, size_t n)
+    template <class N> void initRange(N n, N v, __true_type)
+    {
+        T x = static_cast<T>(v);
+        if (n) rebuild(static_cast<size_t>(n), 0, static_cast<size_t>(n), &x, 0, Bytewise());
+    }
+
+    static T* allocate(size_t n) { return static_cast<T*>(::operator new(n * sizeof(T))); }
+    void grow(size_t n) { rebuild(n, m_size, 0, 0, 0, Bytewise()); }
+
+    // The three moves of elements, each for the general type and for the bytewise ones. The new elements are
+    // copies of src[0], src[step], ...: step 0 for n copies of one value, step 1 for a range.
+
+    // a new buffer of cap elements: the elements before at, n new ones, the elements from at. The old buffer
+    // stands until the new one is complete, so src may point into it and a throwing copy changes nothing
+    void rebuild(size_t cap, size_t at, size_t n, const T* src, size_t step, __false_type)
+    {
+        T* d = allocate(cap);
+        size_t k = 0;
+        try {
+            for (; k < at; ++k) new (d + k) T(m_data[k]);
+            for (; k < at + n; ++k, src += step) new (d + k) T(*src);
+            for (; k < m_size + n; ++k) new (d + k) T(m_data[k - n]);
+        } catch (...) {
+            while (k > 0) { --k; d[k].~T(); }
+            ::operator delete(d);
+            throw;
+        }
+        for (k = m_size; k > 0; ) { --k; m_data[k].~T(); }
+        ::operator delete(m_data);
+        m_data = d;
+        m_size += n;
+        m_cap = cap;
+    }
+    void rebuild(size_t cap, size_t at, size_t n, const T* src, size_t step, __true_type)
+    {
+        T* d = allocate(cap);
+        if (at) memcpy(d, m_data, at * sizeof(T));
+        for (size_t i = 0; i < n; ++i, src += step) d[at + i] = *src;
+        if (at < m_size) memcpy(d + at + n, m_data + at, (m_size - at) * sizeof(T));
+        ::operator delete(m_data);
+        m_data = d;
+        m_size += n;
+        m_cap = cap;
+    }
+    // in place, the capacity sufficing and src outside the elements: n new elements before at. What lands past
+    // the old end is copy-constructed, the rest assigned; m_size follows each construction
+    void spread(size_t at, size_t n, const T* src, size_t step, __false_type)
+    {
+        size_t old = m_size, tail = old - at, i;
+        if (n > tail) {
+            for (i = tail; i < n; ++i) { new (m_data + m_size) T(src[i * step]); ++m_size; }
+            for (i = at; i < old; ++i) { new (m_data + m_size) T(m_data[i]); ++m_size; }
+            for (i = 0; i < tail; ++i) m_data[at + i] = src[i * step];
+        } else {
+            for (i = old - n; i < old; ++i) { new (m_data + m_size) T(m_data[i]); ++m_size; }
+            for (i = old - n; i > at; --i) m_data[i + n - 1] = m_data[i - 1];
+            for (i = 0; i < n; ++i) m_data[at + i] = src[i * step];
+        }
+    }
+    void spread(size_t at, size_t n, const T* src, size_t step, __true_type)
     {
         if (at < m_size) memmove(m_data + at + n, m_data + at, (m_size - at) * sizeof(T));
+        for (size_t i = 0; i < n; ++i) m_data[at + i] = src[i * step];
+        m_size += n;
+    }
+    // erases the n elements from at: the later ones are assigned down, the last n destroyed (23.2.4.3)
+    void close(size_t at, size_t n, __false_type)
+    {
+        for (size_t i = at + n; i < m_size; ++i) m_data[i - n] = m_data[i];
+        for (; n > 0; --n) { --m_size; m_data[m_size].~T(); }
+    }
+    void close(size_t at, size_t n, __true_type)
+    {
+        if (at + n < m_size) memmove(m_data + at, m_data + at + n, (m_size - at - n) * sizeof(T));
+        m_size -= n;
     }
     void destroyAll()
     {

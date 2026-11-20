@@ -79,7 +79,7 @@ public:
             else if (m_cmp(m_keyOf(parent->value), k)) link = &parent->right;
             else return pair<iterator, bool>(iterator(parent, this), false);
         }
-        node* n = static_cast<node*>(malloc(sizeof(node)));
+        node* n = static_cast<node*>(::operator new(sizeof(node)));
         new (n) node(v);
         n->parent = parent;
         *link = n;
@@ -94,7 +94,7 @@ public:
         if (!z) return;
         unlink(z);
         z->~node();
-        free(z);
+        ::operator delete(z);
         --m_size;
     }
     size_t erase(const Key& k)
@@ -149,7 +149,7 @@ private:
         destroy(n->left);
         destroy(n->right);
         n->~node();
-        free(n);
+        ::operator delete(n);
     }
     static int heightOf(node* n) { return n ? n->height : 0; }
     static int balance(node* n) { return heightOf(n->left) - heightOf(n->right); }

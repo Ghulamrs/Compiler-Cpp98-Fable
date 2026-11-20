@@ -67,6 +67,7 @@ std::string msvcMangleVtordispThunk(const sema::Symbol& fn, long adjust);
 // slot's return type: ?get@CV@@$4PPPPPPPM@A@EAAPEAUX@@XZ
 std::string msvcMangleReturnVtordispThunk(const sema::Symbol& fn, const sema::Symbol& root, long adjust);
 std::string msvcMangleVtordispexThunk(const sema::Symbol& fn, long vbptrOffset, long entryOffset, long nonVirtual);   // cl's ?f@VL@@$R4BI@7PPPPPPPM@BI@EBAHXZ
+std::string msvcMangleReturnVtordispexThunk(const sema::Symbol& fn, const sema::Symbol& root, long vbptrOffset, long entryOffset, long nonVirtual);   // the same to a return thunk, named with the slot's return type
 // cl's thread-safe-static guard of a function's index-th guarded static local: "?$TSS0@?1??f@@YAAEAUCnt@@XZ@4HA"
 std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index);
 // cl's RTTI: the name a type descriptor holds (".?AUD@@", ".H"), the type descriptor (??_R0?AUD@@@8), a class's

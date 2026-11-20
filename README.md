@@ -5,7 +5,14 @@ the files, every preprocessor directive, all classes with their inheritance,
 methods, fields and nested types, the functions with their parameters and
 local variables, globals, macros, exception handling, and a class diagram.
 
-Written in strict C++98 with no dependencies beyond the standard library.
+Written in strict C++98 with no dependencies beyond the standard library and, for what C++98 cannot do (list a
+directory, run threads), the host's own functions: the MSVC runtime's and Windows' on Windows, POSIX's elsewhere.
+One extension of C++98 is used: `long long` (C99, C++11), which 64-bit constants and Win64's `size_t` need. The
+sources name it only through `int64` and `uint64` (`cppparse/common/Int64.hpp`), the library headers only through
+`__cppparse_int64` and `__cppparse_uint64` (`include/__config`; `<climits>` keeps the C99 names `LLONG_MIN`,
+`LLONG_MAX` and `ULLONG_MAX` with their `LL` literals, usable in `#if`), and no `LL` literal is written elsewhere.
+`sandbox\scripts\strict98.ps1` checks it: clang's C++98 front end with `-pedantic` over the 39 own units against
+`include/` and `platform/` reports no diagnostic but `long long` at those two typedef pairs.
 
 ## Input
 
@@ -18,7 +25,7 @@ cppparse [options] <input>...
 | `Project.sln`           | every C++ project in the solution is read                         |
 | `Project.vcxproj`       | Visual Studio 2010 and later: file list, include dirs, defines   |
 | `Project.vcproj`        | Visual Studio 2005/2008                                           |
-| a folder                | scanned recursively for `.h .hpp .hxx .hh .inl` and `.cpp .cxx .cc .c` |
+| a folder                | scanned recursively for `.h .hpp .hxx .hh .inl` and `.cpp .cxx .cc .c`; folders named `.*` and those given with `--exclude` are skipped |
 | `a.h b.cpp ...`         | the files given                                                   |
 
 Files reached through `#include "..."` that are not part of the input are
@@ -64,6 +71,8 @@ dashed box = base class not defined in the parsed files.
 ```
 -o <dir>         output directory
 -n <name>        base name of the output files
+--exclude <dir>  a folder input's scan skips this folder and everything under it (may be repeated;
+                 relative to the current directory; its files can still be reached through #include)
 --no-follow      do not parse #include'd files outside the input
 --no-directives  omit the per-file preprocessor listing
 --no-locals      omit local variables
@@ -289,6 +298,37 @@ its own: an exception that leaves it has the runtime release the exception the h
 (`cppparse_catch_unwind`), unless it is that same exception (`throw;`). The design and its steps are in
 [docs/design-table-exceptions.md](docs/design-table-exceptions.md).
 
+**Exceptions and cl-compiled frames (row M7).** Neither model can unwind a frame cl compiled, nor cl's
+runtime one of theirs: an exception of one side that reaches a frame of the other with objects to destroy or
+handlers to try used to pass it by, and the program went on. The runtime now stops there with a message
+(`cppparse_rt.cpp` `crossingStop`: the walk reads the frame's state from cl's `__CxxFrameHandler3` or
+`__CxxFrameHandler4` tables; `cppparse_eh_handler` sees a cl exception inside a table-model range; a setjmp frame
+has no handler, so a cl exception passing one is not seen). `examples/sample-ehx/` with `scripts/ehx.ps1`, run by
+`eh.ps1`, checks the seven paths between two sides. The way to make such programs work is cl's own model as a
+third one, `--eh=cl`: [docs/design-cl-exceptions.md](docs/design-cl-exceptions.md).
+With `--eh=cl` a throw is cl's (`_CxxThrowException` with a ThrowInfo per thrown type, `eh/EhClThrowInfo`), a
+frame's cleanups and handlers are funclets and states of a FuncInfo (`eh/EhClFunclets`, `eh/EhClFuncInfo`), and
+cl's runtime does the rest: a cl `throw` is caught by a cppparse handler and unwinds cppparse's frames, and the
+other way round, with one exception object and cl's counts of copies and destructions. `eh.ps1` runs its probe in
+this model too (cl's 106 lines at `-O0`..`-O3`), `ehx.ps1` the cross-compiler sample with side A, side B or both from
+cppparse against the all-cl build, and the compiler builds itself in the model (`harness.ps1 -Eh cl` runs every
+check with it: the compiler reads its default model from the environment variable `CPPPARSE_EH`). The model needs
+`--obj` (ml64 cannot write its tables, `--assemble` is refused) and `--compile6`. Objects of this model and objects
+of the table or setjmp model do not go into one program: every object names its family in a `.drectve`
+`/FAILIFMISMATCH`, and link stops with LNK2038. `std::terminate`, `std::set_terminate` and
+`std::uncaught_exception` are the C runtime's in every model, so a program of both compilers has one of each.
+`scripts/failnew.ps1` (about ten minutes, not in the harness) builds the compiler with itself in the table and the
+cl model, lets its operator new fail at chosen allocations and expects "cppparse: out of memory" (exit code 4)
+from every run. The default model stays `table`: measured against it, cl's model has the same code size (within
+1 %) and run time, but more unwind data: the objects' sections sum to 6.2 % more for the matrix sample and 7.5 %
+(`-O0`) and 2.5 % (`-O2`) more for the compiler's own sources. A throw costs no more in the table model since rows
+G24 and G30 (2026-11-20: 5.54 microseconds through ten frames in the table model, 6.01 in cl's, 6.22 in cl's own code;
+out of a frame with 1,000 objects alive 0.013 ms, 0.103 ms and 0.063 ms: the table model took 7.1 microseconds and 3.0 ms
+before, a dispatch and a search of the whole range table for every object of a frame; a frame's landing pads now
+follow one another by a jump of the generated code, after `cppparse_unwind_destroy_next` of `cppparse_rt.cpp` has
+returned, and the runtime writes no return address). Use `--eh=cl` for a program that has cl-compiled C++ code in
+it.
+
 Checks: test 8 compares every table with the one ml64 builds from the same assembly text, byte for byte.
 `eh.ps1` goes further. An ml64 function sets every callee-saved register (rbx rbp rsi rdi r12-r15, xmm6-xmm15) to
 a pattern and calls cppparse code that recurses with values of its own in those registers, through a frame of
@@ -305,7 +345,14 @@ must find every cppparse frame, and the registers it restores in the ml64 frame 
 - `catch (T x)` by value: the handler's copy is copy-constructed and destroyed (ehCatchValue);
 - a thrown pointer caught as a pointer to a base (adjusted, also a null one and a rethrown one), with more
   cv-qualifiers, as `void*`, and not as a private or ambiguous base (ehCatchPointer);
-- a constructor that throws in a new-expression frees through the replaced global operators (ehGlobalFree).
+- a constructor that throws in a new-expression frees through the replaced global operators (ehGlobalFree);
+- a frame with many objects alive, whose landing pads follow one another without a new walk of the stack: the
+  order of the destructors, one that throws and catches on its own in between, an inner block (ehManyObjects).
+- a handler declared as an array or as a function is the pointer: it takes a thrown `int*`, a thrown pointer to
+  function and a function thrown by name (ehAdjustedHandlers).
+- the pads of a frame going on at one another by the generated code: chains that end in `catch (...)` and in
+  clauses of which none matches, with an array and a temporary built under a condition among them, in the turns of
+  a loop (ehPadChain).
 
 These run in four models (setjmp, table, and each mixed with the other in `probe-mix.cpp`) at `-O0` to `-O3`.
 Each output must equal the cl build's. That reference is built with `/EHa`, because cl 19.52 (preview)
@@ -337,18 +384,28 @@ records, column numbers.
 powershell -ExecutionPolicy Bypass -File cpp\sandbox\build-cppparse.ps1 [-Config Release|Debug] [-NoTests]
 ```
 
-Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend`, `analyzer` and `analyzer/report` with MSVC at
+Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend`, `eh`, `analyzer` and `analyzer/report` with MSVC at
 `/W4 /permissive-` (warnings fail the build). `-Config Release` (default)
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
-`obj/debug`. `-NoTests` stops after the build. The test groups (17 as of
-version 6) run against whichever configuration was built. Test 17 holds the
+`obj/debug`. `-NoTests` stops after the build. The test groups (19) run
+against whichever configuration was built. Test 17 holds the
 front-end regressions of `examples/sample-front/`: units that must be
 rejected with their diagnostics and no object, and programs whose output
-must equal that of cl's build (`front.cpp`; `copies.cpp`, which logs every
+must equal that of cl's build (`front.cpp` and `front2.cpp`; `copies.cpp`, which logs every
 construction, copy and destruction of its classes and temporaries, against
-cl `/Od` at `-O0` and cl `/O2` at `-O2`).
+cl `/Od` at `-O0` and cl `/O2` at `-O2`; `alttok.cpp`, the alternative
+tokens, digraphs and trigraphs of C++98, against cl `/permissive-
+/Zc:trigraphs`; `ucn.cpp`, universal character names in identifiers,
+linked with cl's object of its other half, and in literals). Test 19 is the self-compile in the suite: the compiler under
+test compiles cppparse's own sources and `libcpp/iostream.cpp` with
+`--compile6 -O0` (one process per unit, as many at a time as there are
+processors) into `sandbox/out/self6`, the objects are linked with the
+exception runtime, and the program must compile `sample-opt` to the object
+and listings the compiler under test writes; so a change to the front end,
+the back end or a header that breaks the self-host fails the suite.
+`selfhost.ps1` stays the full check (any level, generation two).
 
 A Visual Studio 2022 solution does the same build inside the IDE:
 `cpp\cppparse.sln` with the project `cppparse\cppparse.vcxproj` (x64,
@@ -373,6 +430,21 @@ CR LF taken as LF so that a checkout with either line ending matches; `sandbox\s
 checkout against it and exits 1 on any difference,
 `crc32.ps1 -Write` recomputes it, the last step before a release commit. The git tag `v6.0` marks the release.
 
+**Release gate.** `sandbox\scripts\harness.ps1` runs the release checks in order, each in its own PowerShell
+process, prints one `PASS` or `FAIL` line per check with its time (a failure also prints the end of its log; the
+logs are in `sandbox/out/harness/`) and exits 0 only when every check passed: the suite (`build-cppparse.ps1`),
+`selfhost.ps1 -Lvl 0` and `-Lvl 2`, the suite under the `-O2` self-built compiler (`build-cppparse.ps1 -Exe
+out\selfhost\cppparse-self.exe`), `mix.ps1`, `maps.ps1`, `cprog.ps1`, `matrix.ps1`, `strict98.ps1`, `lib.ps1` and `life.ps1` at
+`-Lvl 0` and `-Lvl 2`, `eh.ps1`, `mapcompare.ps1` and `crc32.ps1`. When the suite or a self-host check fails, the
+checks after it are reported as not run. `-Quick` runs the suite and `selfhost.ps1 -Lvl 0` only (about 9
+minutes on 12 threads; the whole harness about 21). `sandbox\scripts\gate.ps1` is the gate before a release commit or tag:
+the worktree must be clean (`git status --porcelain` empty) before and after the harness, and the harness must
+pass; it exits 0 only then (`-Quick` is passed on).
+
+```
+powershell -ExecutionPolicy Bypass -File cpp\sandbox\scripts\gate.ps1 [-Quick]
+```
+
 The scripts in `sandbox\scripts\` run the version 6 pipeline outside the
 test suite: `lib.ps1` and `life.ps1` (the library and lifetime samples
 with their native drivers), `selfhost.ps1` (compiles cppparse's own
@@ -396,7 +468,7 @@ unwind tables, `examples/sample-eh/` with its driver and an ml64 entry function,
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken
 folder `examples/sample-bad/`, which must produce every health code. Any C++98 compiler works for the sources themselves, e.g.
-`g++ -std=c++98 -pedantic -Wall -Icppparse/driver -Icppparse/common -Icppparse/frontend -Icppparse/middle -Icppparse/backend -Icppparse/analyzer -Icppparse/analyzer/report -o cppparse cppparse/{driver,common,frontend,middle,backend,analyzer,analyzer/report}/*.cpp` (on a host without Windows the worker pool runs the jobs one after another).
+`g++ -std=c++98 -pedantic -Wall -Icppparse/driver -Icppparse/common -Icppparse/frontend -Icppparse/middle -Icppparse/backend -Icppparse/eh -Icppparse/analyzer -Icppparse/analyzer/report -o cppparse cppparse/{driver,common,frontend,middle,backend,eh,analyzer,analyzer/report}/*.cpp` (on a host without Windows the worker pool runs the jobs one after another).
 
 ## How it works
 
@@ -629,6 +701,16 @@ compiler they belong to; every folder is an include directory of the build (`bui
 - `middle/`: `IrGen` (IR from the analysed tree), `Ir` (the intermediate representation), `Optimizer`, `Ssa`.
 - `backend/`: `BackEnd` (the shared driver of the phases below), `Lower` (VM64), `X86` (x86-64 assembly),
   `Coff` (the object writer), `Mangle`/`MangleSema` (MSVC name decoration, part of the target's ABI).
+- `eh/`: exception handling, as classes the code generator and the object writer call: `EhModel` (the models of
+  `--eh=`), `EhRegions` (the stack of try and cleanup regions at each block, the exception edges), `EhEmitter`
+  (the interface the models write assembly through; `X86`'s function emitter implements it), `EhSjlj` (the setjmp
+  model's frames), `EhTable` (`EhRanges`, the table model's code ranges, and `EhPads`, the dispatch stubs and a
+  handler's begin and end), `EhThrow` (a throw's call of the runtime), `EhUnwindInfo` (the UNWIND_INFO bytes of a
+  prologue and `EhRangeTable`, the table model's range table), `EhClThrowInfo` (cl's model: the ThrowInfo and
+  CatchableTypes of a thrown type), `EhClFunclets` (cl's model for one function: funclets, states, block order)
+  and `EhClFuncInfo` (the FuncInfo tables as bytes, with `EhClCheck`, the check of what cl's runtime takes for
+  granted). The regions themselves and what a landing pad
+  destroys are the language's semantics and stay in `IrGen`.
 - `analyzer/`: the version 1 to 5 pipeline: project reading and the old compile path kept until the version 6
   pipeline replaces it: `Lexer`, `Parser`, `Model`, `CodeBase`, `ProjectReader`, `Ast`, `BodyParser`, `TypeCheck`,
   `Types`, `Instantiate`, `IrBuilder` (old IR generation and class layouts) and `Compiler` (the old driver).
@@ -638,9 +720,14 @@ compiler they belong to; every folder is an include directory of the build (`bui
 
 Everything that is not compiler source sits next to `cppparse/` in the `cpp` folder:
 
-- `include/`: cppparse's C++98 library headers (`<string>`, `<vector>`, `<map>`, `<iostream>`...) and the C
-  headers C++98 defines (`stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `math.h`, `stddef.h`). Only standard
-  headers live here.
+- `include/`: cppparse's C++98 library headers (`<string>`, `<vector>`, `<map>`, `<iostream>`...) and the 18 C
+  headers of Annex D.5 (`assert.h`, `ctype.h`, `errno.h`, `float.h`, `iso646.h`, `limits.h`, `locale.h`, `math.h`,
+  `setjmp.h`, `signal.h`, `stdarg.h`, `stddef.h`, `stdio.h`, `stdlib.h`, `string.h`, `time.h`, `wchar.h`,
+  `wctype.h`, each the `<cxxx>` header's names in the global namespace). Only standard
+  headers live here, and the internal ones they share, named with two underscores (`__traits`, `__tree`,
+  `__num_facets`...). What the headers need beyond C++98 is in one of these, `<__config>`: `__cppparse_noreturn`
+  (abort, exit, terminate, unexpected) and `__cppparse_align(n)` (jmp_buf) are `__declspec` for cppparse and cl,
+  the GNU attributes for gcc and clang outside MSVC compatibility, and empty for any other compiler.
 - `platform/`: the minimal Windows declarations cppparse's own sources use (`windows.h` for the worker pool,
   `io.h`, `direct.h`, `sys/stat.h`, `sys/types.h` for the file helpers). They are not a Windows SDK: only the
   self-build passes `-I platform` (`sandbox/scripts/toolset.ps1`), and each stops with `#error` when
@@ -668,10 +755,13 @@ against undeclared names (the analysis modes only warn). A unit with syntax or s
 either, as with cl: the errors are listed, the exit code is 1, and no object, `.asm` or map is written (one left
 by an earlier run is removed; test 17 checks this on `examples/sample-front/errors.cpp`).
 
-The host is a different matter from the target: cppparse's own sources are strict C++98, and every call outside
-the standard library sits behind `#ifdef _WIN32` with a standard fallback. `common/Parallel.cpp` uses Windows
-threads there and runs the jobs one after another elsewhere (C++98 has no threads); `common/PathUtil.cpp` uses
-the MSVC directory functions there and POSIX `opendir`/`getcwd` elsewhere; the debug-build assertion hook of
+The host is a different matter from the target: cppparse's own sources are strict C++98 (with `long long`, see the
+top of this file), and every call outside
+the standard library sits behind `#ifdef _WIN32` with a fallback for other hosts: standard C++ where C++98 has the
+means, POSIX where it has none. `common/Parallel.cpp` uses Windows threads there and runs the jobs one after another
+elsewhere (C++98 has no threads); `common/PathUtil.cpp` uses the MSVC directory functions there and POSIX
+`opendir`/`getcwd`/`stat` elsewhere (C++98 has no directory listing, so the fallback is POSIX; each branch includes
+its own system headers); the debug-build assertion hook of
 `driver/main.cpp` is under `_MSC_VER`. When cppparse compiles itself for the Windows target it defines `_WIN32`
 and takes the Windows branches, with the declarations of `platform/`.
 
@@ -753,8 +843,15 @@ the syntax errors and writes `<name>-ast6.txt`. Test 11 parses
 `sample-opt`, the VS2010 sample and all 30 of cppparse's own sources
 with zero syntax errors, and checks error recovery on `sample-bad`.
 
-**Preprocessor** (`Pp.cpp`, `-E`, `-I`, `-D`, `-U`): line splices,
-comments, pp-tokens, `#include` (quoted form searched next to the
+**Preprocessor** (`Pp.cpp`, `-E`, `-I`, `-D`, `-U`): trigraphs, line splices,
+comments, pp-tokens (the digraphs `<:` `:>` `<%` `%>` `%:` `%:%:` and the
+alternative tokens `and`, `or`, `not`, `bitand`... are their primary tokens;
+`#` and `-E` keep the spelling written, 2.5/2; a universal character name
+`\uXXXX` or `\UXXXXXXXX` is a character of an identifier, one of Annex E's,
+kept as written by `#` and `-E` and as UTF-8 in the name, the form cl
+decorates; 2.2/2 is checked in identifiers and literals on the lines that
+are not skipped; in a narrow literal it is its byte in code page 1252, `?`
+for a character the page lacks, in a wide one UTF-16, as cl), `#include` (quoted form searched next to the
 including file, then `-I` directories; `#pragma once`; a macro as the
 file name), `#define` of object-like and function-like macros with `#`
 and `##`, argument prescan, rescanning and hide sets (a macro never
@@ -857,12 +954,24 @@ global ones. The global ones are called by cl's names: `??2@YAPEAX_K@Z`
 and `??_U@YAPEAX_K@Z`, the sized `??3@YAXPEAX_K@Z` for every `delete`
 (also in the deleting destructors), the sized `??_V@YAXPEAX_K@Z` for
 `delete[]` with a cookie and where a constructor throws, and
-`??_V@YAXPEAX@Z` without a cookie. The C++ library defines them (its sized
-forms call the unsized ones), so a replacement defined in any unit, by
-either compiler, is the one called. The library's `operator new` reports
+`??_V@YAXPEAX@Z` without a cookie. The C runtime's library defines them (its sized
+forms call the unsized ones), so in a program that does not link
+`libcpp/iostream.cpp` a replacement defined in any unit, by
+either compiler, is the one called. That library's `operator new` reports
 failure by throwing `std::bad_alloc` through cl's exception handling,
 which does not pass through cppparse's frames: a failed allocation ends
-the program. A
+the program. A program that links libcpp gets libcpp's unsized operators
+instead: they call the handler of `std::set_new_handler` for as long as
+there is one and throw `std::bad_alloc` through cppparse's runtime
+(`sample-lib/newhandler.cpp`). Such a program replaces them too: libcpp
+defines its eight with `__declspec(replaceable)`, cppparse's attribute for
+a function whose definition is a default. The code is defined as
+`<name>$default` and the name as a weak external that stands for it
+(`IMAGE_WEAK_EXTERN_SEARCH_ALIAS`), which the linker gives to a definition
+in any other object, and otherwise to the default before it searches the C
+runtime's libraries. The ones the program leaves call the ones it defines
+(`sample-lib/replacenew.cpp`, `replacepart.cpp`, `replacearray.cpp`; row
+G17). A
 destructor stores its own class's vptrs on entry, as a constructor does
 after its bases, so a virtual call made while a base part is built or
 destroyed reaches that base's function. Virtual base classes are laid out
@@ -957,11 +1066,13 @@ arrays of classes stay zero), value-initialisation zeroes as cl does, and
 a brace list's omitted pointers to members are null. The mangling is cl's
 (`PEQP@@H`, `P8P@@EAAHXZ`, `?pm@@3PEQP@@HEQ1@`). Test 17 compares every
 word of the representations with cl's (front.cpp `memptr::`) and test 13
-passes them between the compilers (sample-layout MP, MQ, MH, VL). Still
-refused with S132 (`memptr-refused.cpp`): a member function's pointer converted
-down to a base of multiple inheritance, and a conversion between two classes of
-the unspecified model through a virtual base; the other conversions are cl's
-(row B11 of `docs/next-targets.md`), and a pointer to member is a template
+passes them between the compilers (sample-layout MP, MQ, MH, VL). Along
+non-virtual bases every conversion, up and down, between any two models is
+cl's (IrGen::mpConvertPath, rows B11 and G2 of `docs/next-targets.md`;
+front2.cpp `mpdown::`). Still refused with S132 (`memptr-refused.cpp`):
+conversions through a virtual base between two classes with virtual bases
+or two of the unspecified model, which C++98 makes ill-formed (4.11/2) and
+cl accepts as an extension; a pointer to member is a template
 argument as cl spells it (row B10). A direct base that is also a
 base of another direct base is diagnosed as cl does (Sema::declareClass;
 `ambiguous-base.cpp`): S141, an error, where cl gives C2584
@@ -985,11 +1096,17 @@ again, the call, and a non-null pointer (a reference always) moved by
 the base's offset; a further overrider gets thunks in every slot, also
 where the move is 0, and a new slot again; an override whose moves are
 all 0 stays in place. front.cpp `covariant::` and sample-layout RB/RC
-check it against cl, through every base and across the compilers. S131
-still refuses a slot inside a virtual base whose overrider is held by another
-virtual base, and a variadic covariant function (`covariant-refused.cpp`); a
-return conversion through a virtual base, a slot that also moves this and a slot
-of a virtual base's vftable get cl's thunks (row B11).
+check it against cl, through every base and across the compilers. A
+variadic covariant function, which cl refuses (C2688) and no thunk can
+serve, gets a second copy of its body that returns the overridden type
+(row G7, `covariant-variadic.cpp`; the two bodies share the function's
+static locals, row G9); a return conversion through a virtual
+base, a slot that also moves this and a slot of a virtual base's vftable get
+cl's thunks (row B11), and a slot there whose overrider is held by another
+virtual base gets a vtordispex thunk to the return thunk, where cl's own
+code leaves the result unadjusted (row G3, `covariant-vbase.cpp`, checked
+against the lines the standard requires and against the build of Visual
+Studio's clang-cl, which prints them).
 Test 13 links
 `examples/sample-align/` with a cl-compiled driver that compares every
 size and offset with cl's and checks the globals' values and alignment;
@@ -1011,7 +1128,16 @@ at `-O0` and `-O2` (test 17). Diagnostics carry
 S codes (S100 unknown type, S101 undeclared identifier, S102 no such
 member, S103 undeclared function, S104 const assignment, S105
 conversion, S106 ambiguity, S107 no matching function, S113 incomplete
-type, ...). `sizeof` follows 5.3.3: `sizeof(T&)` is `sizeof(T)`, and a
+type, ...). The handlers of a try block are checked in their order
+(row G23): one after `catch (...)` is the error S161, and one that an
+earlier handler hides, which C++98 allows and never enters, is the
+warning S162 with cl's wording (`'D&': is caught by base class ('B&') on
+line 28`; cl's C4286, and its errors C2312, C2313 and C2315 for a second
+handler of the same type). An array or a function in a handler is the
+pointer to it (15.3/2: `catch (int a[3])` takes a thrown `int*`), and a
+handler for an incomplete type, or for a pointer or a reference to one
+other than `void*`, is the error S163 (15.3/1, row G29; cl takes the
+pointer). `sizeof` follows 5.3.3: `sizeof(T&)` is `sizeof(T)`, and a
 class that is only declared, a class inside its own member declarations,
 `void` and function types are rejected with S113 as cl rejects them
 (C2027, C2070) instead of measuring 8 bytes. The
@@ -1084,7 +1210,15 @@ terminate (each landing pad's destructors are a region whose handler is
 `cppparse_terminate`). A new-expression whose constructor (an element's,
 for `new T[n]`, after destroying the elements built) throws frees the
 memory through the matching operator delete, the class's or the global
-one; a placement new frees nothing. `catch (T x)` copy-constructs the
+one; a placement new frees nothing. A multidimensional array (`new T[n][3]`)
+is one array of its innermost elements, as cl allocates it: their number in
+the cookie, the class's own `operator new[]` and `operator delete[]`. A
+placement new calls the `operator new` or `operator new[]` that lookup and
+overload resolution find, the class's own first; only the reserved form of
+one address is the address itself. An array's placement `operator new[]`
+gets the cookie's 8 bytes as the plain one does, a null result builds
+nothing, and the matching placement operator delete frees when a
+constructor throws (front2.cpp `newarr::`). `catch (T x)` copy-constructs the
 handler's object from the thrown one and destroys it when the handler
 ends (a copy constructor that throws there calls terminate); an
 exception leaving the handler destroys its objects before the handled
@@ -1113,8 +1247,10 @@ compilation. `cstddef`, `cstdlib`, `cstdio`, `cstring`, `cctype`,
 ranges: `sort`, `stable_sort`, `reverse`, `find`, `lower_bound`, ...)
 are implemented in place; `string` and `wstring` are `basic_string<charT,
 traits, Allocator>` (with `char_traits<char>` and `<wchar_t>`, named as cl
-names them), zero-terminated, up to 15 chars in the object and longer ones on the heap (MSVC's layout); `vector` keeps its elements in malloc storage built with
-placement new and destroyed explicitly; `map` and `set` share the AVL
+names them), zero-terminated, up to 15 chars in the object and longer ones on the heap (MSVC's layout); `vector` keeps its elements in storage from `::operator new`, built with
+placement new and destroyed explicitly; it copy-constructs them into a new buffer and destroys the old ones, and
+`insert` and `erase` assign and destroy as 23.2.4 says (only arithmetic types and pointers are moved with `memcpy`
+and `memmove`; `sample-lib/vector.cpp` compares the counts of copies, assignments and destructions with cl's library); `map` and `set` share the AVL
 tree of `__tree` (parent links, erase unlinks nodes so other iterators
 stay valid); the streams of `ios`, `streambuf`, `ostream`, `istream`,
 `sstream`, `fstream` and `iostream` are the templates of clause 27
@@ -1124,7 +1260,8 @@ ctype, numpunct, collate; `<__num_facets>`: num_put and num_get, through
 which the streams write and read numbers); they format and parse without the C library's
 variadic functions, and `std::cout`, `cerr`, `cin`, `wcout` and the
 others are objects defined in `libcpp/iostream.cpp`, which cppparse
-compiles and the program links; `complex`, `valarray`, `strstream` and
+compiles and the program links (the global allocation functions and
+`std::set_new_handler` are defined there too); `complex`, `valarray`, `strstream` and
 `locale` complete the C++98 headers (what they leave out is in
 `docs/next-targets.md`, row C3).
 To make that work across translation units, every inline function,

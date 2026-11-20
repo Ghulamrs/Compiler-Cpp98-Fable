@@ -20,6 +20,9 @@ public:
 
     void setFollowIncludes(bool follow) { m_followIncludes = follow; }
     void setThreads(int threads) { m_threads = threads < 1 ? 1 : threads; }
+    // --exclude: folders a folder scan skips, with everything under them (relative paths are taken from the
+    // current directory); files in them can still be reached through #include
+    void excludeFolder(const std::string& path);
     int  threads() const { return m_threads; }
     long parseMilliseconds() const { return m_parseMs; }   // time spent reading, lexing and parsing
 
@@ -77,6 +80,7 @@ private:
     int                                 m_threads;
     long                                m_parseMs;
     std::vector<std::string>            m_inputs;
+    std::vector<std::string>            m_excluded;   // --exclude, absolute
     std::vector<SourceFile*>            m_files;
     std::vector<ProjectInfo>            m_projects;
     std::vector<SolutionInfo>           m_solutions;

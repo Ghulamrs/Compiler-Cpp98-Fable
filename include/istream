@@ -76,8 +76,8 @@ public:
     basic_istream& operator>>(unsigned& v) { return __get(v); }
     basic_istream& operator>>(long& v) { return __get(v); }
     basic_istream& operator>>(unsigned long& v) { return __get(v); }
-    basic_istream& operator>>(long long& v) { return __get(v); }
-    basic_istream& operator>>(unsigned long long& v) { return __get(v); }
+    basic_istream& operator>>(__cppparse_int64& v) { return __get(v); }
+    basic_istream& operator>>(__cppparse_uint64& v) { return __get(v); }
     basic_istream& operator>>(float& v) { return __get(v); }
     basic_istream& operator>>(double& v) { return __get(v); }
     basic_istream& operator>>(long double& v) { return __get(v); }
@@ -265,7 +265,7 @@ public:
         sentry ok(*this, true);
         if (!ok) return *this;
         basic_streambuf<charT, traits>* sb = this->rdbuf();
-        while (n == 0x7fffffffffffffffLL || m_count < n) {
+        while (n == __CPPPARSE_INT64_MAX || m_count < n) {
             int_type c = sb->sbumpc();
             if (traits::eq_int_type(c, traits::eof())) { this->setstate(ios_base::eofbit); break; }
             ++m_count;
@@ -346,7 +346,7 @@ private:
     {
         sentry ok(*this);
         if (!ok) { *s = charT(); return; }
-        streamsize n = this->width() > 0 ? this->width() - 1 : 0x7fffffffffffffffLL;
+        streamsize n = this->width() > 0 ? this->width() - 1 : __CPPPARSE_INT64_MAX;
         this->width(0);
         basic_streambuf<charT, traits>* sb = this->rdbuf();
         const ctype<charT>& ct = this->__ctype();
@@ -442,8 +442,8 @@ void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate
 void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, unsigned short& v);
 void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, unsigned int& v);
 void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, unsigned long& v);
-void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, long long& v);
-void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, unsigned long long& v);
+void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, __cppparse_int64& v);
+void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, __cppparse_uint64& v);
 void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, float& v);
 void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, double& v);
 void __num_get_in(basic_istream<char, char_traits<char> >& is, ios_base::iostate& err, long double& v);
@@ -453,8 +453,8 @@ void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::i
 void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, unsigned short& v);
 void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, unsigned int& v);
 void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, unsigned long& v);
-void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, long long& v);
-void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, unsigned long long& v);
+void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, __cppparse_int64& v);
+void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, __cppparse_uint64& v);
 void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, float& v);
 void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, double& v);
 void __num_get_in(basic_istream<wchar_t, char_traits<wchar_t> >& is, ios_base::iostate& err, long double& v);

@@ -60,6 +60,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -86,6 +87,8 @@ void usage()
         "  --version        print the release (6.0) and exit\n"
         "  -o <dir>         output directory (default: next to the first input)\n"
         "  -n <name>        base name of the output files (default: input name)\n"
+        "  --exclude <dir>  a folder input's scan skips this folder and everything under it (may be repeated;\n"
+        "                   relative to the current directory; its files can still be reached through #include)\n"
         "  --no-follow      do not parse #include'd files that are not part of the input\n"
         "  --no-directives  omit the per-file preprocessor listing from the reports\n"
         "  --no-locals      omit local variables from the reports\n"
@@ -99,8 +102,11 @@ void usage()
         "  --assemble       version 4: run \"ml64 /c\" on <name>.asm to produce <name>.obj (ml64 must be on PATH)\n"
         "  --obj            version 5: write <name>.obj with cppparse's own COFF writer (no ml64 needed)\n"
         "  --msvc-mangling  version 5: MSVC-compatible decorated names (?square@@YAHH@Z) so MSVC code links with plain C++ declarations\n"
-        "  --eh=table|sjlj  try regions as unwind range tables with landing pads, no code on the normal path (the\n"
-        "                   default), or as setjmp frames (version 5's model)\n"
+        "  --eh=table|sjlj|cl  try regions as unwind range tables with landing pads, no code on the normal path\n"
+        "                   (the default), as setjmp frames (version 5's model), or in cl's own model (its tables,\n"
+        "                   funclets and _CxxThrowException: exceptions then cross cl-compiled frames; --obj only).\n"
+        "                   The environment variable CPPPARSE_EH (sjlj, table or cl) sets the model for a run without\n"
+        "                   the option\n"
         "  -j <n>           worker threads (default: one per processor for parsing, at most 4 for compiling;\n"
         "                   never more than the number of files read)\n"
         "  -E              version 6: preprocess the input files only and print the result (like cl /EP)\n"
@@ -177,19 +183,14 @@ const char* virtualBaseRefusal(const sema::Symbol* cls)
     return 0;
 }
 
-// a covariant override's slot (Sema::completeClass, VfTable::returnOf) that --compile6 cannot give cl's
-// return-adjusting thunk (S131): one in a vftable inside a virtual base whose overrider is held by another virtual
-// base (cl's vtordispex thunk would have to lead to the return thunk), or a variadic function (the thunk cannot stage
-// the unnamed arguments again); 0 when the slot is fine. A return conversion through a virtual base (the thunk reads
-// the vbtable), a slot that also moves this (an adjustor thunk to the return thunk) and a slot in a vftable inside a
-// virtual base (the return thunk, through cl's vtordisp thunk when the class has a vtordisp) are generated as cl's
-// (B11)
+// a covariant override's slot (Sema::completeClass, VfTable::returnOf) that --compile6 cannot give a return-adjusting
+// thunk (S131): none is left; 0 when the slot is fine. A return conversion through a virtual base (the thunk reads
+// the vbtable), a slot that also moves this (an adjustor thunk to the return thunk), a slot in a vftable inside a
+// virtual base (through cl's vtordisp thunk, or a vtordispex thunk when another virtual base holds the overrider)
+// and a variadic function (its body compiled again with the slot's return type) are generated (B11, G3, G7)
 const char* returnThunkRefusal(const sema::VfTable& t, size_t s)
 {
     if (s >= t.returnOf.size() || !t.returnOf[s]) return 0;
-    if (t.vbase && s < t.vtordispexVbase.size() && t.vtordispexVbase[s]) return "the overrider is held by another virtual base of the class";
-    const sema::Symbol* fn = t.fns[s];
-    if (fn && fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic) return "it is variadic";
     return 0;
 }
 
@@ -260,7 +261,7 @@ int cppparseMain(int argc, char* argv[])
     SetThreadStackGuarantee(&guarantee);
     AddVectoredExceptionHandler(1, stackOverflowToStderr);
 #endif
-    std::vector<std::string> inputs;
+    std::vector<std::string> inputs, excluded;
     std::string outDir, outName;
     bool follow = true, textOnly = false, toStdout = false, quiet = false, healthOnly = false, strict = false, compile = true, assemble = false, obj = false;
     int threads = hardwareThreads();
@@ -271,6 +272,24 @@ int cppparseMain(int argc, char* argv[])
     CompileOptions copt;
     ReportOptions opt;
 
+    bool ehClAsked = false;   // --eh=cl on the command line
+    // the exception model when no --eh= is given: the environment's CPPPARSE_EH, else the built-in default (so that
+    // the test scripts can run as they are in another model: harness.ps1 -Eh)
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)      // MSVC deprecates getenv for its _dupenv_s, which is not C++98
+#endif
+    const char* const ehFromEnvironment = std::getenv("CPPPARSE_EH");
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    if (const char* model = ehFromEnvironment) {
+        const std::string m = model;
+        if (m == "sjlj") copt.eh = EhModelSjlj;
+        else if (m == "table") copt.eh = EhModelTable;
+        else if (m == "cl") copt.eh = EhModelCl;
+        else if (!m.empty()) { std::cerr << "error: CPPPARSE_EH=" << m << ": the exception model is sjlj, table or cl\n"; return 2; }
+    }
     // response files (@list.txt) are expanded into the argument list first
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
@@ -289,6 +308,7 @@ int cppparseMain(int argc, char* argv[])
         else if (a.size() > 2 && a[0] == '-' && a[1] == 'j' && isdigit(static_cast<unsigned char>(a[2]))) { threads = atoi(a.c_str() + 2); threadsGiven = true; }
         else if (a == "-o" && i + 1 < args.size()) outDir = args[++i];
         else if (a == "-n" && i + 1 < args.size()) outName = args[++i];
+        else if (a == "--exclude" && i + 1 < args.size()) excluded.push_back(args[++i]);
         else if (a == "--no-follow") follow = false;
         else if (a == "--no-directives") opt.directives = false;
         else if (a == "--no-locals") opt.locals = false;
@@ -301,8 +321,9 @@ int cppparseMain(int argc, char* argv[])
         else if (a == "--assemble") assemble = true;
         else if (a == "--obj") obj = true;
         else if (a == "--msvc-mangling") copt.msvcNames = true;
-        else if (a == "--eh=table") copt.tableEh = true;
-        else if (a == "--eh=sjlj") copt.tableEh = false;
+        else if (a == "--eh=table") copt.eh = EhModelTable;
+        else if (a == "--eh=sjlj") copt.eh = EhModelSjlj;
+        else if (a == "--eh=cl") { copt.eh = EhModelCl; ehClAsked = true; }
         else if (a == "-E" || a == "--preprocess") preprocessOnly = true;
         else if (a == "--parse6") parse6 = true;
         else if (a == "--sema6") { parse6 = true; sema6 = true; }
@@ -332,6 +353,15 @@ int cppparseMain(int argc, char* argv[])
         }
     }
     if (inputs.empty()) { shortUsage(); return 2; }
+    if (assemble && copt.eh == EhModelCl && (compile6 || ehClAsked)) {
+        std::cerr << "error: --eh=cl needs cppparse's own object writer (--obj): ml64 (--assemble) cannot write the exception tables\n";
+        return 2;
+    }
+    // cl's model is the version 6 pipeline's (--compile6); the older pipeline has the table and setjmp models
+    if (!compile6 && copt.eh == EhModelCl) {
+        if (ehClAsked) { std::cerr << "error: --eh=cl needs --compile6\n"; return 2; }
+        copt.eh = EhModelTable;   // asked for by the environment (CPPPARSE_EH), for the runs that can have it
+    }
     const Target& target = ppOpt.target ? *ppOpt.target : defaultTarget();
     if (compile6 && !target.hasBackEnd) {
         std::cerr << "error: no back end for target " << target.name << " yet: -E, --parse6 and --sema6 work for it, --compile6 does not\n";
@@ -464,12 +494,12 @@ int cppparseMain(int argc, char* argv[])
                     gen.setFiles(pp.files());   // the functions' source files, for the CodeView line tables
                     std::vector<IrFunction*> functions;
                     X86Module x86(copt.msvcNames);
-                    x86.setTableExceptions(copt.tableEh);
+                    x86.setEhModel(copt.eh);
                     unsigned long unitId = 2166136261UL;   // FNV-1a of the input path: this unit's anonymous namespace id
                     for (size_t k = 0; k < inputs[i].size(); ++k) unitId = (unitId ^ static_cast<unsigned char>(inputs[i][k])) * 16777619UL;
                     setMangleUnitId(unitId & 0xFFFFFFFFUL);
                     gen.setNamedReturnElision(copt.optLevel >= 1);   // NRVO only when optimising, as cl (/Od: a copy)
-                    gen.setTableExceptions(copt.tableEh);            // a region per object with a destructor (cl's states) instead of flags
+                    gen.setEhModel(copt.eh);                         // table model: a region per object with a destructor (cl's states) instead of flags
                     gen.registerMetadata(x86, copt.msvcNames);   // first: it registers the globals and the dynamic initialisers
                     gen.generate(functions);
                     if (!gen.unsupported().empty()) {
@@ -551,6 +581,7 @@ int cppparseMain(int argc, char* argv[])
 
     CodeBase cb;
     cb.setFollowIncludes(follow);
+    for (size_t i = 0; i < excluded.size(); ++i) cb.excludeFolder(excluded[i]);
     if (threads < 1) threads = 1;
     cb.setThreads(threads);
     // the per-function compile phases allocate heavily and share one heap: beyond four threads
@@ -671,13 +702,21 @@ int cppparseMain(int argc, char* argv[])
     return ok ? 0 : 1;
 }
 
+// storage ran out somewhere below: the objects on the way are destroyed (the files being written are closed) and the
+// run ends with a message and exit code 4. (A worker thread's failure does not come by here: -j 1 has none)
+static int cppparseGuarded(int argc, char* argv[])
+{
+    try { return cppparseMain(argc, argv); }
+    catch (const std::bad_alloc&) { std::fputs("cppparse: out of memory\n", stderr); return 4; }
+}
+
 #ifdef _WIN32
 #ifndef STACK_SIZE_PARAM_IS_A_RESERVATION
 #define STACK_SIZE_PARAM_IS_A_RESERVATION 0x00010000
 #endif
 namespace {
 struct MainArgs { int argc; char** argv; int result; };
-DWORD WINAPI cppparseMainThread(LPVOID p) { MainArgs* a = static_cast<MainArgs*>(p); a->result = cppparseMain(a->argc, a->argv); return 0; }
+DWORD WINAPI cppparseMainThread(LPVOID p) { MainArgs* a = static_cast<MainArgs*>(p); a->result = cppparseGuarded(a->argc, a->argv); return 0; }
 }
 #endif
 
@@ -690,5 +729,5 @@ int main(int argc, char* argv[])
     HANDLE h = CreateThread(0, 512u * 1024u * 1024u, cppparseMainThread, &a, STACK_SIZE_PARAM_IS_A_RESERVATION, 0);
     if (h) { WaitForSingleObject(h, INFINITE); CloseHandle(h); return a.result; }
 #endif
-    return cppparseMain(argc, argv);
+    return cppparseGuarded(argc, argv);
 }

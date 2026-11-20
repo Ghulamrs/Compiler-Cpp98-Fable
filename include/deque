@@ -1,4 +1,4 @@
-// deque - cppparse's C++98 library: a double-ended queue (23.2.1) kept contiguous in a malloc block with room
+// deque - cppparse's C++98 library: a double-ended queue (23.2.1) kept contiguous in a block from operator new with room
 // at both ends, so that its iterators are pointers; growing at an end that is full reallocates (unlike the
 // standard's deque, push_front and push_back invalidate the iterators and references then).
 #ifndef CPPPARSE_DEQUE
@@ -31,7 +31,7 @@ public:
     deque(size_t n, const T& v) : m_block(0), m_first(0), m_last(0), m_cap(0) { assign(n, v); }
     template <class It> deque(It first, It last) : m_block(0), m_first(0), m_last(0), m_cap(0) { initRange(first, last, typename __is_integer<It>::type()); }
     deque(const deque& o) : m_block(0), m_first(0), m_last(0), m_cap(0) { assign(o.begin(), o.end()); }
-    ~deque() { clear(); free(m_block); }
+    ~deque() { clear(); ::operator delete(m_block); }
     deque& operator=(const deque& o) { if (this != &o) assign(o.begin(), o.end()); return *this; }
 
     iterator begin() { return m_block + m_first; }
@@ -106,12 +106,12 @@ private:
     {
         size_t n = size();
         size_t cap = m_cap ? m_cap * 2 + extra : 8 + extra;
-        T* block = static_cast<T*>(malloc(cap * sizeof(T)));
+        T* block = static_cast<T*>(::operator new(cap * sizeof(T)));
         size_t first = (cap - n) / 2;
         if (atFront && first == 0) first = 1;
         if (!atFront && first + n == cap) first = cap - n - 1;
         for (size_t i = 0; i < n; ++i) { new (block + first + i) T(m_block[m_first + i]); m_block[m_first + i].~T(); }
-        free(m_block);
+        ::operator delete(m_block);
         m_block = block; m_first = first; m_last = first + n; m_cap = cap;
     }
     T*     m_block;

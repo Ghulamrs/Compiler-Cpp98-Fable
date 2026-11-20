@@ -12,6 +12,7 @@ namespace {
 
 class SemaMangler {
 public:
+    SemaMangler() : m_nested(0), m_nestedNext(0) {}
     // vtordispex: cl's vtordispex thunk's vbptr distance, vbtable entry offset and adjustor ($R4), with vtordisp
     // adjustorToReturn: the adjustor thunk to a return thunk (cl: W, the result override, ?g@D@@WBA@EAAPEAUX@@XZ)
     std::string function(const sema::Symbol& f, long thunk = 0, const sema::Type* resultOverride = 0, bool vtordisp = false, const long* vtordispex = 0, bool adjustorToReturn = false);
@@ -25,6 +26,7 @@ public:
     std::string vcallThunk(const sema::Symbol& c, long slotOffset);
     // RTTI: the name a type descriptor holds (".?AUD@@", ".H") and the descriptors' symbols
     std::string rttiTypeName(const sema::Type* t);
+    std::string arrayCode(const sema::Type* t);
     std::string typeDescriptor(const sema::Type* t) { return "??_R0" + rttiTypeName(t).substr(1) + "@8"; }
     std::string classHierarchy(const sema::Symbol& c) { return "??_R3" + classScoped(c) + "8"; }
     std::string baseClassArray(const sema::Symbol& c) { return "??_R2" + classScoped(c) + "8"; }
@@ -35,7 +37,7 @@ private:
     std::string storageType(const sema::Type* t);
     std::string memberPointerType(const sema::Type* t);
     std::string memberClass(const sema::Type* t);
-    std::string number(long long v);
+    std::string number(int64 v);
     std::string name(const std::string& component);
     std::string symbolName(const sema::Symbol* s);
     std::string templateName(const sema::Symbol* inst, const std::string& base, bool baseIsOperatorCode, bool isFunction);
@@ -44,12 +46,31 @@ private:
     std::string resultType(const sema::Type* t);
     std::string templateArgType(const sema::Type* t);
     std::string paramType(const sema::Type* t);
-    std::string paramList(const sema::Type* fn);
+    std::string paramList(const sema::Type* fn, const sema::Symbol* decl = 0);
     std::string classType(const sema::Type* t);
     std::string operatorCode(const std::string& fname, bool& ok);
     std::vector<std::string> m_names;
     std::vector<std::string> m_argTypes;   // keyed by the encoding without back-references: one entry per distinct type
+    // the function types inside the declared function's parameter that is being encoded ("int (*cb)(int[3])"): whether
+    // each of their parameters was written as an array (sema::Symbol::nestedArrays), and how many have been met
+    const std::vector<char>* m_nested;
+    size_t                   m_nestedNext;
 };
+
+// how many parameters the function types inside t have, counted as type() meets them
+size_t nestedParams(const sema::Type* t, int depth)
+{
+    if (!t || depth > 32) return 0;
+    switch (t->kind) {
+    case sema::Type::Pointer: case sema::Type::Array: case sema::Type::Reference: return nestedParams(t->inner, depth + 1);
+    case sema::Type::Function: {
+        size_t n = nestedParams(t->inner, depth + 1);
+        for (size_t i = 0; i < t->params.size(); ++i) n += 1 + nestedParams(t->params[i], depth + 1);
+        return n;
+    }
+    default: return 0;
+    }
+}
 
 std::string cvCode(const sema::Type* t)
 {
@@ -62,11 +83,11 @@ bool isPointerLike(const sema::Type* t)
     return t && (t->kind == sema::Type::Pointer || t->kind == sema::Type::Reference || t->kind == sema::Type::MemberPointer || t->kind == sema::Type::NullPtr);
 }
 
-std::string SemaMangler::number(long long v)
+std::string SemaMangler::number(int64 v)
 {
     std::string out;
-    unsigned long long u = static_cast<unsigned long long>(v);
-    if (v < 0) { out += '?'; u = 0ULL - u; }   // the magnitude (of the most negative value too)
+    uint64 u = static_cast<uint64>(v);
+    if (v < 0) { out += '?'; u = static_cast<uint64>(0) - u; }   // the magnitude (of the most negative value too)
     if (u == 0) return out + "A@";
     if (u <= 10) { out += static_cast<char>('0' + static_cast<int>(u - 1)); return out; }
     std::string hex;
@@ -106,10 +127,10 @@ std::string SemaMangler::templateName(const sema::Symbol* inst, const std::strin
             const bool unspecified = !member->ownerClass->isDefinition || member->ownerClass->memberPointerUnspecified;
             int off = 0, adj = 0, vbptr = 0, vbindex = 0;
             sema::TypeTable::memberPointerValue(member, off, adj, vbptr, vbindex);
-            const std::string nOff = number(static_cast<long long>(static_cast<unsigned int>(off)));
-            const std::string nAdj = number(static_cast<long long>(static_cast<unsigned int>(adj)));
-            const std::string nVbptr = number(static_cast<long long>(static_cast<unsigned int>(vbptr)));
-            const std::string nIndex = number(static_cast<long long>(static_cast<unsigned int>(vbindex)));
+            const std::string nOff = number(static_cast<int64>(static_cast<unsigned int>(off)));
+            const std::string nAdj = number(static_cast<int64>(static_cast<unsigned int>(adj)));
+            const std::string nVbptr = number(static_cast<int64>(static_cast<unsigned int>(vbptr)));
+            const std::string nIndex = number(static_cast<int64>(static_cast<unsigned int>(vbindex)));
             if (member->kind == sema::Symbol::Function) {
                 SemaMangler nested;
                 const std::string fn = member->isVirtual ? nested.vcallThunk(*member->ownerClass, 8L * (member->vtableSlot < 0 ? 0 : member->vtableSlot)) : nested.function(*member);
@@ -122,10 +143,10 @@ std::string SemaMangler::templateName(const sema::Symbol* inst, const std::strin
         else {
             // the value as a signed 64-bit number: an unsigned parameter of 4 bytes (held sign-extended, see
             // sema::foldedConstant) widens with zeros (X<0xFFFFFFFFu> is $0PPPPPPPP@), a 64-bit one keeps its bits
-            long long v = i < inst->templateIntArgs.size() ? inst->templateIntArgs[i] : 0;
+            int64 v = i < inst->templateIntArgs.size() ? inst->templateIntArgs[i] : 0;
             const sema::Symbol* from = inst->instantiatedFrom;
             const sema::Type* pt = from && i < from->templateParams.size() && from->templateParams[i] ? from->templateParams[i]->type : 0;
-            if (pt && (pt->kind == sema::Type::UInt || pt->kind == sema::Type::ULong)) v = static_cast<long long>(static_cast<unsigned long long>(v) & 0xFFFFFFFFULL);
+            if (pt && (pt->kind == sema::Type::UInt || pt->kind == sema::Type::ULong)) v = static_cast<int64>(static_cast<uint64>(v) & 0xFFFFFFFFu);
             enc += "$0" + number(v);
         }
     }
@@ -210,6 +231,7 @@ std::string SemaMangler::type(const sema::Type* t)
     case sema::Type::Pointer: case sema::Type::Array: {
         const sema::Type* in = t->inner;
         const char* ptr = t->isConst ? (t->isVolatile ? "S" : "Q") : (t->isVolatile ? "R" : "P");
+        if (t->kind == sema::Type::Pointer && in && in->kind == sema::Type::Array) return std::string(ptr) + "EA" + arrayCode(in);   // "int (*)[3]": PEAY02H
         if (t->kind == sema::Type::Array) ptr = "Q";   // an array parameter is a const pointer
         if (in && in->kind == sema::Type::Function) {
             std::string s = std::string(ptr) + "6A";
@@ -218,7 +240,10 @@ std::string SemaMangler::type(const sema::Type* t)
         }
         return std::string(ptr) + "E" + cvCode(in) + type(in);
     }
-    case sema::Type::Reference: return "AE" + cvCode(t->inner) + type(t->inner);
+    case sema::Type::Reference:
+        if (t->inner && t->inner->kind == sema::Type::Array) return "AEA" + arrayCode(t->inner);   // "int (&)[3]": AEAY02H
+        if (t->inner && t->inner->kind == sema::Type::Function) return "A6A" + resultType(t->inner->inner) + paramList(t->inner) + "Z";   // "int (&)(int)": A6AHH@Z, as the pointer's P6AHH@Z
+        return "AE" + cvCode(t->inner) + type(t->inner);
     case sema::Type::Class: return classType(t);
     case sema::Type::Enum: {
         if (!t->decl) return "W4enum@@";
@@ -282,20 +307,44 @@ std::string SemaMangler::templateArgType(const sema::Type* t)
 // plus the top-level qualifiers, which the encoding drops but which still make "const string" a type of its own
 std::string SemaMangler::paramType(const sema::Type* t)
 {
+    // (the key spells the function types inside t plainly: cl takes "int (*)(int[3])" and "int (*)(int*)" for one
+    // type, written as its first use was, so the second is a back-reference: ?two@@YAHP6AHQEAH@Z1@Z)
     SemaMangler plain;
     std::string key = cvCode(t) + plain.type(t);
     for (size_t i = 0; i < m_argTypes.size(); ++i)
-        if (m_argTypes[i] == key) return std::string(1, static_cast<char>('0' + i));
+        if (m_argTypes[i] == key) { if (m_nested) m_nestedNext += nestedParams(t, 0); return std::string(1, static_cast<char>('0' + i)); }
     std::string enc = type(t);
     if (enc.size() > 1 && m_argTypes.size() < 10) m_argTypes.push_back(key);
     return enc;
 }
 
-std::string SemaMangler::paramList(const sema::Type* fn)
+// decl: the function declared, whose parameters written as arrays ("int a[3]", "char* argv[]") cl decorates as const
+// pointers (?f@@YAXQEAH@Z), back-references included
+std::string SemaMangler::paramList(const sema::Type* fn, const sema::Symbol* decl)
 {
     if (fn->params.empty()) return fn->variadic ? "Z" : "X";
     std::string s;
-    for (size_t i = 0; i < fn->params.size(); ++i) s += paramType(fn->params[i]);
+    for (size_t i = 0; i < fn->params.size(); ++i) {
+        const sema::Type* pt = fn->params[i];
+        bool asArray = false;
+        if (decl) {
+            const sema::Symbol* ps = i < decl->params.size() ? decl->params[i] : 0;
+            asArray = ps && ps->declaredArray;
+            // the function types inside this parameter's type: which of their parameters were written as arrays
+            m_nested = ps && !ps->nestedArrays.empty() ? &ps->nestedArrays : 0;
+            m_nestedNext = 0;
+        } else if (m_nested) {
+            // a parameter of a function type inside the declared function's parameter ("int (*cb)(int[3])")
+            asArray = m_nestedNext < m_nested->size() && (*m_nested)[m_nestedNext] != 0;
+            ++m_nestedNext;
+        }
+        if (asArray && pt && pt->kind == sema::Type::Pointer && !pt->isConst) {
+            sema::Type asConst = *pt;
+            asConst.isConst = true;
+            s += paramType(&asConst);
+        } else s += paramType(pt);
+        if (decl) m_nested = 0;
+    }
     return s + (fn->variadic ? "Z" : "@");
 }
 
@@ -349,16 +398,17 @@ std::string SemaMangler::function(const sema::Symbol& f, long thunk, const sema:
         char acc = access == cxx::AccessPrivate ? 'A' : access == cxx::AccessProtected ? 'I' : 'Q';
         if (f.isVirtual && (!resultOverride || adjustorToReturn)) acc = static_cast<char>(acc + 4);
         if (thunk) acc = static_cast<char>(acc + 2);   // an adjustor thunk (G, O, W) and its adjustment
-        // cl spells a vtordisp thunk's numbers as unsigned 32-bit values ($4PPPPPPPM@PPPPPPMI@: -4, -56)
+        // cl spells a thunk's numbers as unsigned 32-bit values ($4PPPPPPPM@PPPPPPMI@: -4, -56), an adjustor's too: one
+        // that moves this forward, in a virtual base's vftable, is WPPPPPPMI@ (-56), not W?DI@
         if (vtordispex) {
             out += "$R4";
-            out += number(static_cast<long long>(static_cast<unsigned int>(vtordispex[0])));
-            out += number(static_cast<long long>(static_cast<unsigned int>(vtordispex[1])));
+            out += number(static_cast<int64>(static_cast<unsigned int>(vtordispex[0])));
+            out += number(static_cast<int64>(static_cast<unsigned int>(vtordispex[1])));
             out += "PPPPPPPM@";
-            out += number(static_cast<long long>(static_cast<unsigned int>(vtordispex[2])));
+            out += number(static_cast<int64>(static_cast<unsigned int>(vtordispex[2])));
         }
-        else if (vtordisp) { out += "$4PPPPPPPM@"; out += number(static_cast<long long>(static_cast<unsigned int>(thunk))); }
-        else { out += acc; if (thunk) out += number(thunk); }
+        else if (vtordisp) { out += "$4PPPPPPPM@"; out += number(static_cast<int64>(static_cast<unsigned int>(thunk))); }
+        else { out += acc; if (thunk) out += number(static_cast<int64>(static_cast<unsigned int>(thunk))); }
         out += "E";
         out += ft && ft->constMethod ? "B" : "A";
         out += "A";
@@ -367,8 +417,14 @@ std::string SemaMangler::function(const sema::Symbol& f, long thunk, const sema:
         out += "A";
     } else out += "YA";
     if (ctor || f.isDestructor) out += "@";
-    else out += resultType(resultOverride ? resultOverride : ft ? ft->inner : 0);
-    out += ft ? paramList(ft) : std::string("X");
+    else {
+        // the function types in the result type: which of their parameters the declaration wrote as arrays
+        m_nested = !resultOverride && !f.nestedArrays.empty() ? &f.nestedArrays : 0;
+        m_nestedNext = 0;
+        out += resultType(resultOverride ? resultOverride : ft ? ft->inner : 0);
+        m_nested = 0;
+    }
+    out += ft ? paramList(ft, &f) : std::string("X");
     return out + "Z";
 }
 
@@ -382,7 +438,11 @@ std::string SemaMangler::variable(const sema::Symbol& v)
     out += "@";
     if (v.isMember) out += v.access == cxx::AccessPrivate ? "0" : v.access == cxx::AccessProtected ? "1" : "2";
     else out += "3";
+    // the function types in the variable's type: which of their parameters the declaration wrote as arrays
+    m_nested = !v.nestedArrays.empty() ? &v.nestedArrays : 0;
+    m_nestedNext = 0;
     out += storageType(v.type);
+    m_nested = 0;
     return out;
 }
 
@@ -497,17 +557,29 @@ std::string SemaMangler::rttiTypeName(const sema::Type* t)
 {
     if (t && t->kind == sema::Type::Reference) t = t->inner;
     if (t && (t->kind == sema::Type::Class || t->kind == sema::Type::Enum)) return ".?A" + type(t);
-    if (t && t->kind == sema::Type::Array) {
-        // an array type as cl's descriptor spells it: "$$BY" + the rank + each dimension + the element (".$$BY02H" for
-        // int[3], ".$$BY113US@@" for S[2][4]), which undecorates to "int [3]"; a parameter's array would be a pointer
-        std::vector<long> dims;
-        const sema::Type* e = t;
-        while (e && e->kind == sema::Type::Array) { dims.push_back(e->arraySize > 0 ? e->arraySize : 0); e = e->inner; }
-        std::string s = ".$$BY" + number(static_cast<long>(dims.size()));
-        for (size_t i = 0; i < dims.size(); ++i) s += number(dims[i]);
-        return s + type(e);
-    }
+    // an array type as cl's descriptor spells it (".$$BY02H" for int[3]), which undecorates to "int [3]"; a
+    // parameter's array would be a pointer
+    if (t && t->kind == sema::Type::Array) return ".$$B" + arrayCode(t);
     return "." + type(t);
+}
+
+// an array type where it is not a parameter (a type descriptor, the pointee of "T (*)[n]", the referent of
+// "T (&)[n]"): "Y" + the rank + each dimension + the element, a const or volatile element (that is no pointer,
+// whose own letter says it) behind "$$CB", "$$CC" or "$$CD": "Y02H" for int[3], "Y113US@@" for S[2][4],
+// "Y01$$CBH" for const int[2]
+std::string SemaMangler::arrayCode(const sema::Type* t)
+{
+    std::vector<long> dims;
+    const sema::Type* e = t;
+    bool c = false, v = false;
+    while (e && e->kind == sema::Type::Array) { dims.push_back(e->arraySize > 0 ? e->arraySize : 0); c = c || e->isConst; v = v || e->isVolatile; e = e->inner; }
+    std::string s = "Y" + number(static_cast<long>(dims.size()));
+    for (size_t i = 0; i < dims.size(); ++i) s += number(dims[i]);
+    if (e && e->kind != sema::Type::Pointer && e->kind != sema::Type::MemberPointer) {
+        c = c || e->isConst; v = v || e->isVolatile;
+        if (c || v) s += c ? (v ? "$$CD" : "$$CB") : "$$CC";
+    }
+    return s + type(e);
 }
 
 // cl's base class descriptor: ??_R1<mdisp><pdisp><vdisp><attributes><class>@8, "D::`RTTI Base Class Descriptor at
@@ -588,6 +660,7 @@ std::string msvcMangleReturnAdjustorThunk(const sema::Symbol& fn, const sema::Sy
 std::string msvcMangleVtordispThunk(const sema::Symbol& fn, long adjust) { SemaMangler m; return m.function(fn, adjust, 0, true); }
 std::string msvcMangleReturnVtordispThunk(const sema::Symbol& fn, const sema::Symbol& root, long adjust) { SemaMangler m; return m.function(fn, adjust, root.type && root.type->kind == sema::Type::Function ? root.type->inner : 0, true); }
 std::string msvcMangleVtordispexThunk(const sema::Symbol& fn, long vbptrOffset, long entryOffset, long nonVirtual) { SemaMangler m; const long x[3] = { vbptrOffset, entryOffset, nonVirtual }; return m.function(fn, 0, 0, true, x); }
+std::string msvcMangleReturnVtordispexThunk(const sema::Symbol& fn, const sema::Symbol& root, long vbptrOffset, long entryOffset, long nonVirtual) { SemaMangler m; const long x[3] = { vbptrOffset, entryOffset, nonVirtual }; return m.function(fn, 0, root.type && root.type->kind == sema::Type::Function ? root.type->inner : 0, true, x); }
 std::string msvcMangleStaticGuard(const sema::Symbol& fn, long discriminator, int index) { SemaMangler m; return m.staticGuard(fn, discriminator, index); }
 
 } // namespace cppparse

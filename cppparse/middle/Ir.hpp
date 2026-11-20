@@ -119,13 +119,15 @@ struct IrFunction {
     bool                     hasTry;
     bool                     linkOnce;   // inline, template instantiation or implicit member: one copy survives linking (COMDAT)
     bool                     internal;   // internal linkage (a static function, a member of an anonymous namespace): not PUBLIC
+    bool                     replaceable; // __declspec(replaceable): a default that another object's definition of the name
+                                         // replaces when the program is linked, so calls of the name are never inlined
     bool                     variadic;   // ends in "...": the parameters live in their home slots, where va_start finds them
     std::vector<std::string> notes;      // constructs that were approximated
     std::map<int, const Type*> tempTypes;
     std::string              sourceFile; // the definition's source file (an absolute Windows path) and line, for the
     int                      sourceLine; // CodeView line table; empty / 0 when unknown (the version 3 pipeline)
 
-    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false), internal(false), variadic(false), sourceLine(0) {}
+    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false), internal(false), replaceable(false), variadic(false), sourceLine(0) {}
     int  newTemp(const Type* t) { tempTypes[nextTemp] = t; return nextTemp++; }
     int  newBlock(const std::string& label);
     void computeCfg();

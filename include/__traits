@@ -1,7 +1,10 @@
 // __traits - cppparse's C++98 library: the integer test the containers use to tell "n copies of v"
-// from "the range [first, last)" in their templated constructors.
+// from "the range [first, last)" in their templated constructors, and the test for the types <vector> may move
+// bytewise.
 #ifndef CPPPARSE_TRAITS
 #define CPPPARSE_TRAITS
+
+#include <__config>
 
 namespace std {
 
@@ -19,8 +22,18 @@ template <> struct __is_integer<int> { typedef __true_type type; };
 template <> struct __is_integer<unsigned int> { typedef __true_type type; };
 template <> struct __is_integer<long> { typedef __true_type type; };
 template <> struct __is_integer<unsigned long> { typedef __true_type type; };
-template <> struct __is_integer<long long> { typedef __true_type type; };
-template <> struct __is_integer<unsigned long long> { typedef __true_type type; };
+template <> struct __is_integer<__cppparse_int64> { typedef __true_type type; };
+template <> struct __is_integer<__cppparse_uint64> { typedef __true_type type; };
+
+// the types whose copy, assignment and destruction cannot be observed, so that memcpy and memmove may stand for
+// them: the arithmetic types and the pointers. An enumeration cannot be told from a class in C++98 and counts as
+// one, as a pointer to member does.
+template <class T> struct __is_bytewise { typedef typename __is_integer<T>::type type; };
+template <> struct __is_bytewise<wchar_t> { typedef __true_type type; };
+template <> struct __is_bytewise<float> { typedef __true_type type; };
+template <> struct __is_bytewise<double> { typedef __true_type type; };
+template <> struct __is_bytewise<long double> { typedef __true_type type; };
+template <class T> struct __is_bytewise<T*> { typedef __true_type type; };
 
 }
 

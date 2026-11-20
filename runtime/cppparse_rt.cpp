@@ -27,6 +27,12 @@
 // "throw" walks the stack with the Windows unwind tables (dispatch below) and enters the first
 // landing pad whose range holds a frame's call site. Both models can be mixed in one program.
 //
+// These two models and cl's own (cl's code, cppparse --eh=cl) cannot unwind each other's frames. When an exception of
+// one reaches a frame of the other that has objects to destroy or handlers to try, the runtime stops with a message
+// (crossingStop below) instead of passing the frame by: the walk of dispatch for a frame with cl's tables, and
+// cppparse_eh_handler for a cl exception that passes a table-model frame inside a region. A setjmp frame has no
+// unwind handler, so a cl exception that passes one is not seen.
+//
 // Build: cl /c /EHsc cppparse_rt.cpp, then link the object with the cppparse-generated .obj.
 // Strict C++98 (C subset).
 #ifndef _WIN32
@@ -34,6 +40,7 @@
 #endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <eh.h>
 #include <intrin.h>
 #include <setjmp.h>
 #include <stdio.h>
@@ -70,7 +77,11 @@ static void dropException(struct cppparse_exception* e)
 }
 /* std::set_terminate / set_unexpected: the handlers the library installs; the defaults abort and (unexpected)
    terminate, as C++98 18.6 says; an unhandled exception and an exception leaving a destructor during unwinding
-   call terminate */
+   call terminate. The terminate handler is the C runtime's own (set_terminate, terminate: kept per thread there),
+   so that a program with cl's code or cppparse --eh=cl has one: cl's runtime calls it for its own cases (an
+   exception no handler takes, one that leaves a destructor during unwinding, a throwing copy into a handler's
+   variable). g_terminateHandler only remembers that the program installed one (the messages below are for a
+   program that did not) */
 static void (*g_terminateHandler)(void) = 0;
 static void (*g_unexpectedHandler)(void) = 0;
 void cppparse_terminate(void);
@@ -104,16 +115,131 @@ void cppparse_pop_frame(struct cppparse_frame* f)
     g_top = f->prev;
 }
 
+#define CPPPARSE_EH_MAGIC 0x58505043UL   /* "CPPX", the first word of the range table */
+#define CPPPARSE_CL_EXCEPTION 0xE06D7363UL   /* the code of a C++ exception of cl's model (_CxxThrowException) */
+
+/* the landing pad's number (0: none) of the range table 't' for an address in the function that begins at fnBase (both
+   offsets in the image): the table is the entry count, the pad count, then the entries sorted by code offset, one word
+   each: the offset in the function (20 bits) and the pad's number in the pad table that follows (12 bits, 0: none); an
+   entry holds from its offset to the next one's, a pad of 0 marks code outside every region, the last entry is such
+   an end. A binary search for the last entry at or before the address: the landing pads lie behind the function's
+   body, so a search from the front read the whole table for every pad that sent the exception on (row G24) */
+static unsigned long rangePad(const unsigned long* t, DWORD64 fnBase, DWORD64 at)
+{
+    unsigned long lo = 0, hi = t[1];
+    while (lo < hi) {
+        const unsigned long mid = lo + (hi - lo) / 2;
+        if (at >= fnBase + (t[3 + mid] >> 12)) lo = mid + 1; else hi = mid;
+    }
+    return lo ? t[3 + lo - 1] & 0xFFF : 0;
+}
+
+
+/* An exception cannot cross between the two families of exception models: cppparse's own (--eh=table, --eh=sjlj: the
+   walk of dispatch below) and cl's (cl's code and cppparse --eh=cl: Windows' dispatch and __CxxFrameHandler3 / 4). The
+   frames of the other family would be passed with their destructors and handlers left out, and the program would go
+   on. Where the runtime sees that happen it stops with this message instead (docs/design-cl-exceptions.md, stage 0b) */
+static void crossingStop(const char* thrown, const char* frames, DWORD64 address)
+{
+    fprintf(stderr, "cppparse runtime: an exception thrown by %s code reached a frame of %s code that has objects to destroy or handlers to try (address %p). "
+                    "The two exception models cannot unwind each other's frames: compile both sides for one model (cppparse --eh=cl is cl's)\n",
+            thrown, frames, (void*)address);
+    fflush(stderr);
+    abort();
+}
+
 /* the handler named in the unwind info of a function with table-based try regions (--eh=table). Windows calls it
    only when its own SEH dispatch passes such a frame (an access violation, a cl throw); cppparse's exceptions do not
-   go through SEH, so it always lets the search go on. Its range table follows it in the unwind info */
+   go through SEH, so it lets the search go on. A C++ exception of cl's model that passes a frame inside one of its
+   regions would skip that region's landing pad: stopped (above). Its range table follows it in the unwind info */
 EXCEPTION_DISPOSITION cppparse_eh_handler(struct _EXCEPTION_RECORD* record, void* frame, struct _CONTEXT* context, void* dispatcher)
 {
-    (void)record; (void)frame; (void)context; (void)dispatcher;
+    const DISPATCHER_CONTEXT* dc = (const DISPATCHER_CONTEXT*)dispatcher;
+    (void)frame; (void)context;
+    if (record && record->ExceptionCode == CPPPARSE_CL_EXCEPTION && dc && dc->HandlerData && dc->FunctionEntry) {
+        const unsigned long* t = (const unsigned long*)dc->HandlerData;
+        /* the frame's call site: the return address less one, inside the call instruction, as dispatch below takes it */
+        if (t[0] == CPPPARSE_EH_MAGIC && rangePad(t, (DWORD64)dc->FunctionEntry->BeginAddress, dc->ControlPc - dc->ImageBase - 1) != 0)
+            crossingStop("cl's or --eh=cl", "--eh=table", dc->ControlPc);
+    }
     return ExceptionContinueSearch;
 }
 
-#define CPPPARSE_EH_MAGIC 0x58505043UL   /* "CPPX", the first word of the range table */
+/* ---- a frame of cl's model met by the walk of dispatch: has it a state to unwind or a try to search? ----------- */
+
+extern EXCEPTION_DISPOSITION __CxxFrameHandler3(struct _EXCEPTION_RECORD*, void*, struct _CONTEXT*, void*);
+extern EXCEPTION_DISPOSITION __CxxFrameHandler4(struct _EXCEPTION_RECORD*, void*, struct _CONTEXT*, void*);
+extern EXCEPTION_DISPOSITION __GSHandlerCheck_EH(struct _EXCEPTION_RECORD*, void*, struct _CONTEXT*, void*);
+extern EXCEPTION_DISPOSITION __GSHandlerCheck_EH4(struct _EXCEPTION_RECORD*, void*, struct _CONTEXT*, void*);
+
+/* the code an address leads to: through the jumps of an incremental link's thunk (E9 rel32) and of an import thunk
+   (FF 25 disp32), so that a handler named through a thunk compares equal to the function */
+static const unsigned char* codeBehind(const void* p)
+{
+    const unsigned char* c = (const unsigned char*)p;
+    int hops;
+    for (hops = 0; c && hops < 4; ++hops) {
+        if (c[0] == 0xE9) { int rel; memcpy(&rel, c + 1, sizeof rel); c = c + 5 + rel; }
+        else if (c[0] == 0xFF && c[1] == 0x25) { int rel; memcpy(&rel, c + 2, sizeof rel); c = *(const unsigned char* const*)(c + 6 + rel); }
+        else break;
+    }
+    return c;
+}
+
+/* a number of cl's compressed tables (__CxxFrameHandler4, ehdata4_export.h ReadUnsigned): the low bits of the first
+   byte give the length, 1 to 5 bytes */
+static unsigned long readCompressed(const unsigned char** p)
+{
+    static const signed char length[16] = { 1, 2, 1, 3, 1, 2, 1, 4, 1, 2, 1, 3, 1, 2, 1, 5 };
+    static const unsigned char shift[16] = { 25, 18, 25, 11, 25, 18, 25, 4, 25, 18, 25, 11, 25, 18, 25, 0 };
+    const unsigned bits = **p & 0x0F;
+    unsigned long v;
+    memcpy(&v, *p + length[bits] - 4, 4);
+    *p += length[bits];
+    return v >> shift[bits];
+}
+
+/* 1 when the frame (its function entry, its handler and handler data as RtlVirtualUnwind gave them, the return
+   address into it) is one of cl's C++ model with a state other than "nothing to do" at that address: an object to
+   destroy or a try block around the call. 0 for any other frame, and for one of cl's whose tables say state -1 */
+static int clFrameHasState(PEXCEPTION_ROUTINE handler, const void* data, PRUNTIME_FUNCTION rf, DWORD64 base, DWORD64 returnAddress)
+{
+    const unsigned char* h = codeBehind((const void*)handler);
+    const int fh3 = h == codeBehind((const void*)&__CxxFrameHandler3) || h == codeBehind((const void*)&__GSHandlerCheck_EH);
+    const int fh4 = h == codeBehind((const void*)&__CxxFrameHandler4) || h == codeBehind((const void*)&__GSHandlerCheck_EH4);
+    long state = -1;
+    if (!data || (!fh3 && !fh4)) return 0;
+    if (fh3) {
+        /* FuncInfo: magic, states, RVA UnwindMap, tries, RVA TryBlockMap, IP entries, RVA IpToStateMap { RVA, state } */
+        const int* info = (const int*)(base + *(const unsigned long*)data);
+        const int* map = (const int*)(base + (unsigned long)info[6]);
+        int k;
+        if (info[5] <= 0 || info[6] == 0) return 0;
+        for (k = 0; k < info[5] && returnAddress >= base + (unsigned long)map[2 * k]; ++k) state = map[2 * k + 1];
+    } else {
+        /* FuncInfo4: a header byte (1: a catch funclet, 2: separated code, 4: BBT flags follow, 8: an UnwindMap RVA,
+           10h: a TryBlockMap RVA), the RVAs present, the RVA of the IP map; the map: a count, then per entry the
+           address as a difference from the entry before (from the function's start) and the state plus one */
+        const unsigned char* p = (const unsigned char*)(base + *(const unsigned long*)data);
+        const unsigned header = *p++;
+        int mapRva;
+        unsigned long count, k, ip = 0;
+        if (header & 2) return 1;                     /* separated code (PGO): its segment tables are not read here */
+        if (header & 4) (void)readCompressed(&p);
+        if (header & 8) p += 4;
+        if (header & 0x10) p += 4;
+        memcpy(&mapRva, p, 4);
+        if (mapRva == 0) return 0;
+        p = (const unsigned char*)(base + (unsigned long)mapRva);
+        count = readCompressed(&p);
+        for (k = 0; k < count; ++k) {
+            ip += readCompressed(&p);
+            if (returnAddress < base + rf->BeginAddress + ip) break;
+            state = (long)readCompressed(&p) - 1;
+        }
+    }
+    return state != -1;
+}
 
 /* the destructors the landing pads run while an exception unwinds (cppparse_unwind_enter / leave below), and the
    stack pointer of the frame whose pad runs the innermost one */
@@ -125,12 +251,13 @@ static __declspec(thread) DWORD64 g_unwindFrame[CPPPARSE_UNWIND_DEPTH];
    tables: a table landing pad (the range of the frame's call site, --eh=table) is entered with RtlRestoreContext,
    which gives the frame back its callee-saved registers as they were at that call; a setjmp frame (the default
    model) is entered with longjmp once the walk has passed the stack frame that holds it. With neither, the
-   exception is unhandled: nothing has been unwound, the program stops */
-static void dispatch(void)
+   exception is unhandled: nothing has been unwound, the program stops. The walk starts in the runtime function that
+   was called by the generated code (DISPATCH below captures its context there), so it passes one frame of the
+   runtime, not three (row G24) */
+static void dispatch(CONTEXT* from)
 {
-    CONTEXT ctx;
+#define ctx (*from)
     int i;
-    RtlCaptureContext(&ctx);
     for (i = 0; i < 100000 && ctx.Rip; ++i) {
         DWORD64 base = 0;
         /* the walk has reached the frame whose landing pad is running a destructor: the exception left that
@@ -142,30 +269,28 @@ static void dispatch(void)
             CONTEXT frame = ctx;                                       /* this function, at its call site */
             void* data = 0;
             DWORD64 establisher = 0;
-            PEXCEPTION_ROUTINE handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, base, ctx.Rip, rf, &ctx, &data, &establisher, 0);
+            PEXCEPTION_ROUTINE handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER, base, ctx.Rip, rf, &ctx, &data, &establisher, 0);
             if (handler && data && ((const unsigned long*)data)[0] == CPPPARSE_EH_MAGIC) {
-                /* the table: the entry count, the pad count, then the entries sorted by code offset, one word each:
-                   the offset in the function (20 bits) and the pad's number in the pad table that follows (12 bits,
-                   0: none); an entry holds from its offset to the next one's, a pad of 0 marks code outside every
-                   region, the last entry is such an end */
-                const unsigned long* t = (const unsigned long*)data;   /* t[0] magic, t[1] entries, t[2] pads */
+                /* the range table (rangePad): t[0] magic, t[1] entries, t[2] pads, the entries, the pads */
+                const unsigned long* t = (const unsigned long*)data;
                 const unsigned long* pads = t + 3 + t[1];
-                const DWORD64 at = frame.Rip - base - 1;               /* inside the call instruction */
-                const DWORD64 fnBase = (DWORD64)rf->BeginAddress;
-                unsigned long k, pad = 0;
-                for (k = 0; k < t[1] && at >= fnBase + (t[3 + k] >> 12); ++k) pad = t[3 + k] & 0xFFF;
+                const unsigned long pad = rangePad(t, (DWORD64)rf->BeginAddress, frame.Rip - base - 1);   /* inside the call instruction */
                 if (pad != 0) {
                     frame.Rip = base + pads[pad - 1];
                     RtlRestoreContext(&frame, 0);
                 }
             }
+            /* a frame of cl's model with something to destroy or a handler to try: this walk cannot run either */
+            else if (handler && clFrameHasState(handler, data, rf, base, frame.Rip)) crossingStop("--eh=table or --eh=sjlj", "cl's or --eh=cl", frame.Rip);
         }
         /* the walk has left the stack frame that holds the innermost setjmp frame */
         if (g_top && (DWORD64)g_top < ctx.Rsp) longjmp(g_top->buf, 1);
     }
     if (!g_terminateHandler) fprintf(stderr, "cppparse runtime: unhandled exception of type %s\n", g_inflight.type ? g_inflight.type : "?");
     cppparse_terminate();   /* the handler std::set_terminate installed, else abort */
+#undef ctx
 }
+#define DISPATCH() do { CONTEXT here; RtlCaptureContext(&here); dispatch(&here); } while (0)
 
 void cppparse_throw(const void* object, const char* type, unsigned long size)
 {
@@ -177,7 +302,7 @@ void cppparse_throw(const void* object, const char* type, unsigned long size)
     g_inflight.size = size;
     g_inflight.dtor = 0;
     g_inflight.slot = (void**)((char*)copy + at);
-    dispatch();
+    DISPATCH();
 }
 
 /* a class object already copy-constructed into malloc storage by the generated code; the runtime
@@ -189,7 +314,7 @@ void cppparse_throw_owned(void* object, const char* type, unsigned long size, vo
     g_inflight.size = size;
     g_inflight.dtor = dtor;
     g_inflight.slot = 0;
-    dispatch();
+    DISPATCH();
 }
 
 /* "const Failure &" -> "Failure", "char const *" -> "char*" */
@@ -375,7 +500,7 @@ void cppparse_catch_unwind(void* handled)
 
 /* an exception left a destructor that the stack unwinding called (the landing pad's own region): C++98 15.5.1 calls
    terminate, whose default handler is abort, as cl's code does */
-void (*cppparse_set_terminate(void (*f)(void)))(void) { void (*old)(void) = g_terminateHandler; g_terminateHandler = f; return old; }
+void (*cppparse_set_terminate(void (*f)(void)))(void) { g_terminateHandler = f; return set_terminate(f); }
 void (*cppparse_set_unexpected(void (*f)(void)))(void) { void (*old)(void) = g_unexpectedHandler; g_unexpectedHandler = f; return old; }
 /* the landing pads count the destructors they run while an exception is unwinding (a catch handler's pad has taken
    the exception with cppparse_catch_begin by then; an object's own cleanup pad, --eh=table, leaves it in flight):
@@ -397,19 +522,20 @@ void cppparse_unwind_leave(void)
     --g_unwinding;
     if (g_unwinding >= 0 && g_unwinding < CPPPARSE_UNWIND_DEPTH) g_inflight = g_parked[g_unwinding];   /* in flight again: the pad's rethrow sends it on */
 }
-int cppparse_uncaught_exception(void) { return g_inflight.object != 0 || g_unwinding > 0; }
+/* (the C runtime's own answer counts as well: an exception of cl's model, thrown by cl's code or by cppparse --eh=cl,
+   is in flight in vcruntime, not here; one of the table and setjmp models never passes through vcruntime, so its
+   answer alone would be false during their unwinding) */
+int cppparse_uncaught_exception(void) { return g_inflight.object != 0 || g_unwinding > 0 || __uncaught_exception(); }
 void cppparse_unexpected(void)
 {
     if (g_unexpectedHandler) g_unexpectedHandler();
-    if (g_terminateHandler) g_terminateHandler();
-    abort();
+    terminate();
 }
 
 void cppparse_terminate(void)
 {
-    if (g_terminateHandler) { g_terminateHandler(); abort(); }
-    fprintf(stderr, "cppparse runtime: terminate: an exception left a destructor during stack unwinding\n");
-    abort();
+    if (!g_terminateHandler) fprintf(stderr, "cppparse runtime: terminate: an exception left a destructor during stack unwinding\n");
+    terminate();   /* the C runtime's: the handler set_terminate installed, else abort */
 }
 
 void cppparse_rethrow(void)
@@ -418,20 +544,37 @@ void cppparse_rethrow(void)
         if (g_caughtCount == 0) { fprintf(stderr, "cppparse runtime: throw; with no active exception\n"); abort(); }
         g_inflight = g_caught[--g_caughtCount];
     }
-    dispatch();
+    DISPATCH();
 }
 
 /* the landing pad of an object whose cleanup is one destructor call (--eh=table, IrGen::emitPads) makes the three
    calls above one: the destructor runs while the exception is parked, as between cppparse_unwind_enter and leave
    (std::uncaught_exception() is true in it, an exception it catches inside is fine, one that leaves it reaches this
    frame in dispatch, which calls terminate), then the exception goes on to the next landing pad or to the caller.
-   It does not return */
+   It does not return: this is the entry of a pad in no region of its function, where the exception leaves the frame
+   (and of every such pad in objects compiled before row G30: dispatch finds the frame's next pad for them) */
 void cppparse_unwind_destroy(void* object, void (*dtor)(void*))
 {
     cppparse_unwind_enter();
     dtor(object);
     cppparse_unwind_leave();
+    if (g_inflight.type) DISPATCH();
     cppparse_rethrow();
+}
+
+/* the same for a pad whose own code lies in a region of its function (an object built before this one is alive, a
+   try block is around it): the exception goes on at that region's landing pad, in the same frame, and the code
+   generator knows which pad that is. It calls this entry, which returns, and jumps to the pad (EhPads::next,
+   X86Function::nextPad). The pad finds what dispatch would hand it after a capture of the context, a walk through the
+   runtime's frames and RtlRestoreContext: its frame, and the callee-saved registers as they are at this call. A
+   frame with 1,000 objects alive took 3.0 ms to leave by a dispatch per object (row G24). Every return of this file
+   goes to the instruction after its call: no return address is written (row G30; the first form of row G24 returned
+   into the next pad through this function's own return address, which a shadow stack, CET, does not allow) */
+void cppparse_unwind_destroy_next(void* object, void (*dtor)(void*))
+{
+    cppparse_unwind_enter();
+    dtor(object);
+    cppparse_unwind_leave();
 }
 
 /* atomic counters for code compiled by cppparse (MSVC's InterlockedIncrement is a compiler intrinsic); the library

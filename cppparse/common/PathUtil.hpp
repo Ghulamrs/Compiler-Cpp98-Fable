@@ -3,6 +3,8 @@
 #ifndef CPPPARSE_PATHUTIL_HPP
 #define CPPPARSE_PATHUTIL_HPP
 
+#include "Int64.hpp"
+
 #include <string>
 #include <vector>
 
@@ -16,7 +18,7 @@ bool        endsWith(const std::string& s, const std::string& suffix);
 bool        iequals(const std::string& a, const std::string& b);
 void        split(const std::string& s, char sep, std::vector<std::string>& out, bool keepEmpty = false);
 std::string intToString(int v);
-std::string int64ToString(long long v);
+std::string int64ToString(int64 v);
 std::string replaceAll(const std::string& s, const std::string& from, const std::string& to);
 std::string padRight(const std::string& s, size_t width);
 bool        contains(const std::vector<std::string>& v, const std::string& s);
@@ -64,9 +66,12 @@ int  expandWildcards(const std::string& pattern, std::vector<std::string>& out);
 bool readResponseFile(const std::string& path, std::vector<std::string>& args);
 // recursively collects header and source files under 'dir' (folders whose
 // name starts with '.' are skipped); 'dirsWithHeaders' receives every folder
-// that contains at least one header, for use as include directories
+// that contains at least one header, for use as include directories.
+// 'excluded' (absolute paths, --exclude): folders below 'dir' that are skipped
+// with everything under them; each one met is added to 'skipped'
 void findSourceFiles(const std::string& dir, std::vector<std::string>& headers, std::vector<std::string>& sources,
-                     std::vector<std::string>& dirsWithHeaders, int depth = 0);
+                     std::vector<std::string>& dirsWithHeaders, int depth = 0,
+                     const std::vector<std::string>* excluded = 0, std::vector<std::string>* skipped = 0);
 bool readFile(const std::string& p, std::string& out);
 bool writeFile(const std::string& p, const std::string& content);
 

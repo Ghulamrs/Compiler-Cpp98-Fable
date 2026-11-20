@@ -9,8 +9,8 @@
 
 namespace std {
 
-typedef long long streamoff;
-typedef long long streamsize;
+typedef __cppparse_int64 streamoff;
+typedef __cppparse_int64 streamsize;
 
 // a stream position: an offset and a conversion state. It converts to and from streamoff, so positions are compared,
 // subtracted and moved by an offset through the built-in operators on streamoff (27.4.3.2)

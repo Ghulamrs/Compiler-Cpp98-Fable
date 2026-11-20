@@ -5,14 +5,16 @@
 #include <fstream>
 #include <sstream>
 
-#include <sys/stat.h>
-#include <sys/types.h>
-
+// C++98 has no directory functions: the MSVC runtime's on Windows, POSIX's elsewhere (stat in isDirectory is in
+// both; MSVC documents <sys/types.h> before <sys/stat.h>, POSIX needs <sys/stat.h> alone)
 #ifdef _WIN32
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <direct.h>
 #include <io.h>
 #define CPPPARSE_GETCWD _getcwd
 #else
+#include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
 #define CPPPARSE_GETCWD getcwd
@@ -77,7 +79,7 @@ std::string intToString(int v)
     return oss.str();
 }
 
-std::string int64ToString(long long v)
+std::string int64ToString(int64 v)
 {
     std::ostringstream oss;
     oss << v;
@@ -502,7 +504,8 @@ bool readResponseFile(const std::string& path, std::vector<std::string>& args)
 }
 
 void findSourceFiles(const std::string& dir, std::vector<std::string>& headers, std::vector<std::string>& sources,
-                     std::vector<std::string>& dirsWithHeaders, int depth)
+                     std::vector<std::string>& dirsWithHeaders, int depth,
+                     const std::vector<std::string>* excluded, std::vector<std::string>* skipped)
 {
     if (depth > 32) return;
     std::string base = normalizePath(dir);
@@ -514,7 +517,11 @@ void findSourceFiles(const std::string& dir, std::vector<std::string>& headers, 
         if (name.empty() || name[0] == '.') continue;
         std::string full = base + "/" + name;
         if (isDirectory(full)) {
-            findSourceFiles(full, headers, sources, dirsWithHeaders, depth + 1);
+            bool skip = false;
+            if (excluded)
+                for (size_t k = 0; k < excluded->size() && !skip; ++k) skip = samePath((*excluded)[k], full);
+            if (skip) { if (skipped) skipped->push_back(full); continue; }
+            findSourceFiles(full, headers, sources, dirsWithHeaders, depth + 1, excluded, skipped);
             continue;
         }
         std::string ext = extension(name);

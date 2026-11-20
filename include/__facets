@@ -1,0 +1,608 @@
+// __facets - cppparse's C++98 library: the facets of 22.2 that the streams do not use themselves, for <locale>:
+// codecvt (22.2.1.5), time_get and time_put (22.2.5), moneypunct, money_put and money_get (22.2.6), messages
+// (22.2.7) and their _byname forms. They are those of the classic "C" locale: a char converts to a wchar_t and back by
+// its value, dates are month/day/year and times strftime's, money has no currency symbol, no fraction and "-" for
+// the negative sign, and there are no message catalogues. Every locale has them without holding them (__default_facet
+// gives use_facet and has_facet one, made once), until the program installs a facet of its own.
+#ifndef CPPPARSE_FACETS
+#define CPPPARSE_FACETS
+
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <cwchar>
+#include <string>
+#include <__locale>
+#include <__num_facets>
+
+namespace std {
+
+inline void __check_locale_name(const char* name)
+{
+    if (!name || (strcmp(name, "C") != 0 && name[0] != 0)) throw runtime_error("bad locale name");
+}
+
+// 22.2.1.5 codecvt: the conversion between the characters of a program (internT) and those of a file (externT). For
+// one size of the two nothing is converted (codecvt<char, char, mbstate_t>: noconv, as 22.2.1.5.2/1 says); otherwise
+// each character converts to one of the other type with the same value, and one whose value the other type cannot
+// hold is an error (codecvt<wchar_t, char, mbstate_t> in the "C" locale)
+class codecvt_base {
+public:
+    enum result { ok, partial, error, noconv };
+};
+
+template <class internT, class externT, class stateT>
+class codecvt : public locale::facet, public codecvt_base {
+public:
+    typedef internT intern_type;
+    typedef externT extern_type;
+    typedef stateT  state_type;
+    explicit codecvt(size_t refs = 0) : locale::facet(refs) {}
+    result out(stateT& state, const internT* from, const internT* from_end, const internT*& from_next, externT* to, externT* to_limit, externT*& to_next) const
+    { return do_out(state, from, from_end, from_next, to, to_limit, to_next); }
+    result unshift(stateT& state, externT* to, externT* to_limit, externT*& to_next) const { return do_unshift(state, to, to_limit, to_next); }
+    result in(stateT& state, const externT* from, const externT* from_end, const externT*& from_next, internT* to, internT* to_limit, internT*& to_next) const
+    { return do_in(state, from, from_end, from_next, to, to_limit, to_next); }
+    int  encoding() const throw() { return do_encoding(); }
+    bool always_noconv() const throw() { return do_always_noconv(); }
+    int  length(const stateT& state, const externT* from, const externT* end, size_t max) const { return do_length(state, from, end, max); }
+    int  max_length() const throw() { return do_max_length(); }
+    static locale::id id;
+protected:
+    virtual ~codecvt() {}
+    virtual result do_out(stateT&, const internT* from, const internT* from_end, const internT*& from_next, externT* to, externT* to_limit, externT*& to_next) const
+    {
+        from_next = from; to_next = to;
+        if (sizeof(internT) == sizeof(externT)) return noconv;
+        for (; from_next != from_end; ++from_next, ++to_next) {
+            if (to_next == to_limit) return partial;
+            const externT e = static_cast<externT>(*from_next);
+            if (static_cast<internT>(static_cast<unsigned char>(e)) != *from_next) return error;   // no such character outside
+            *to_next = e;
+        }
+        return ok;
+    }
+    virtual result do_in(stateT&, const externT* from, const externT* from_end, const externT*& from_next, internT* to, internT* to_limit, internT*& to_next) const
+    {
+        from_next = from; to_next = to;
+        if (sizeof(internT) == sizeof(externT)) return noconv;
+        for (; from_next != from_end; ++from_next, ++to_next) {
+            if (to_next == to_limit) return partial;
+            *to_next = static_cast<internT>(static_cast<unsigned char>(*from_next));
+        }
+        return ok;
+    }
+    virtual result do_unshift(stateT&, externT* to, externT*, externT*& to_next) const { to_next = to; return sizeof(internT) == sizeof(externT) ? noconv : ok; }
+    virtual int  do_encoding() const throw() { return 1; }                     // one external character for each internal one
+    virtual bool do_always_noconv() const throw() { return sizeof(internT) == sizeof(externT); }
+    virtual int  do_length(const stateT&, const externT* from, const externT* end, size_t max) const
+    { return static_cast<int>(static_cast<size_t>(end - from) < max ? static_cast<size_t>(end - from) : max); }
+    virtual int  do_max_length() const throw() { return 1; }
+};
+template <class internT, class externT, class stateT> locale::id codecvt<internT, externT, stateT>::id;
+
+template <class internT, class externT, class stateT>
+class codecvt_byname : public codecvt<internT, externT, stateT> {
+public:
+    explicit codecvt_byname(const char* name, size_t refs = 0) : codecvt<internT, externT, stateT>(refs) { __check_locale_name(name); }
+protected:
+    virtual ~codecvt_byname() {}
+};
+
+// 22.2.7 messages: the catalogues of translated messages. There are none: open gives a negative catalogue and get the
+// default it was handed
+class messages_base {
+public:
+    typedef int catalog;
+};
+
+template <class charT>
+class messages : public locale::facet, public messages_base {
+public:
+    typedef charT               char_type;
+    typedef basic_string<charT> string_type;
+    explicit messages(size_t refs = 0) : locale::facet(refs) {}
+    catalog     open(const basic_string<char>& name, const locale& loc) const { return do_open(name, loc); }
+    string_type get(catalog c, int set, int msgid, const string_type& dfault) const { return do_get(c, set, msgid, dfault); }
+    void        close(catalog c) const { do_close(c); }
+    static locale::id id;
+protected:
+    virtual ~messages() {}
+    virtual catalog     do_open(const basic_string<char>&, const locale&) const { return -1; }
+    virtual string_type do_get(catalog, int, int, const string_type& dfault) const { return dfault; }
+    virtual void        do_close(catalog) const {}
+};
+template <class charT> locale::id messages<charT>::id;
+
+template <class charT>
+class messages_byname : public messages<charT> {
+public:
+    typedef messages_base::catalog catalog;
+    typedef basic_string<charT>    string_type;
+    explicit messages_byname(const char* name, size_t refs = 0) : messages<charT>(refs) { __check_locale_name(name); }
+protected:
+    virtual ~messages_byname() {}
+};
+
+// 22.2.5 the time facets
+class time_base {
+public:
+    enum dateorder { no_order, dmy, mdy, ymd, ydm };
+};
+
+// the names of the "C" locale: weekdays from Sunday, months from January; the abbreviations are the first three letters
+inline const char* __weekday_name(int i)
+{
+    static const char* const names[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    return names[i];
+}
+inline const char* __month_name(int i)
+{
+    static const char* const names[12] = { "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+    return names[i];
+}
+
+// 22.2.5.1 time_get: reads the parts of a date and a time as the "C" locale writes them: hh:mm:ss, mm/dd/yy, the
+// name of a weekday or a month in full or as its first three letters, in either case, and a year of two or four digits
+template <class charT, class InputIterator = istreambuf_iterator<charT> >
+class time_get : public locale::facet, public time_base {
+public:
+    typedef charT         char_type;
+    typedef InputIterator iter_type;
+    explicit time_get(size_t refs = 0) : locale::facet(refs) {}
+    dateorder date_order() const { return do_date_order(); }
+    iter_type get_time(iter_type s, iter_type end, ios_base& f, ios_base::iostate& err, tm* t) const { return do_get_time(s, end, f, err, t); }
+    iter_type get_date(iter_type s, iter_type end, ios_base& f, ios_base::iostate& err, tm* t) const { return do_get_date(s, end, f, err, t); }
+    iter_type get_weekday(iter_type s, iter_type end, ios_base& f, ios_base::iostate& err, tm* t) const { return do_get_weekday(s, end, f, err, t); }
+    iter_type get_monthname(iter_type s, iter_type end, ios_base& f, ios_base::iostate& err, tm* t) const { return do_get_monthname(s, end, f, err, t); }
+    iter_type get_year(iter_type s, iter_type end, ios_base& f, ios_base::iostate& err, tm* t) const { return do_get_year(s, end, f, err, t); }
+    static locale::id id;
+protected:
+    virtual ~time_get() {}
+    virtual dateorder do_date_order() const { return mdy; }
+    virtual iter_type do_get_time(iter_type s, iter_type end, ios_base&, ios_base::iostate& err, tm* t) const
+    {
+        int h = 0, m = 0, sec = 0;
+        bool good = __number(s, end, 2, h) && h < 24 && __literal(s, end, ':') && __number(s, end, 2, m) && m < 60 && __literal(s, end, ':') && __number(s, end, 2, sec) && sec < 62;
+        if (good) { t->tm_hour = h; t->tm_min = m; t->tm_sec = sec; } else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+    virtual iter_type do_get_date(iter_type s, iter_type end, ios_base&, ios_base::iostate& err, tm* t) const
+    {
+        int mon = 0, day = 0, year = 0, digits = 0;
+        bool good = __number(s, end, 2, mon) && mon >= 1 && mon <= 12 && __literal(s, end, '/') && __number(s, end, 2, day) && day >= 1 && day <= 31 && __literal(s, end, '/')
+                    && __number(s, end, 4, year, &digits);
+        if (good) { t->tm_mon = mon - 1; t->tm_mday = day; t->tm_year = __year(year, digits); } else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+    virtual iter_type do_get_weekday(iter_type s, iter_type end, ios_base&, ios_base::iostate& err, tm* t) const
+    {
+        const int i = __name(s, end, 7, false);
+        if (i >= 0) t->tm_wday = i; else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+    virtual iter_type do_get_monthname(iter_type s, iter_type end, ios_base&, ios_base::iostate& err, tm* t) const
+    {
+        const int i = __name(s, end, 12, true);
+        if (i >= 0) t->tm_mon = i; else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+    virtual iter_type do_get_year(iter_type s, iter_type end, ios_base&, ios_base::iostate& err, tm* t) const
+    {
+        int year = 0, digits = 0;
+        if (__number(s, end, 4, year, &digits)) t->tm_year = __year(year, digits); else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+private:
+    // up to maxDigits decimal digits, at least one
+    static bool __number(iter_type& s, iter_type end, int maxDigits, int& value, int* count = 0)
+    {
+        int n = 0;
+        value = 0;
+        for (; n < maxDigits && s != end; ++s, ++n) {
+            const charT c = *s;
+            if (c < static_cast<charT>('0') || c > static_cast<charT>('9')) break;
+            value = value * 10 + static_cast<int>(c - static_cast<charT>('0'));
+        }
+        if (count) *count = n;
+        return n > 0;
+    }
+    static bool __literal(iter_type& s, iter_type end, char c)
+    {
+        if (s == end || *s != static_cast<charT>(c)) return false;
+        ++s;
+        return true;
+    }
+    // tm_year of a year read with that many digits: years since 1900; two digits below 69 are of this century
+    static int __year(int year, int digits) { return digits > 2 ? year - 1900 : year < 69 ? year + 100 : year; }
+    // the letters at s as one of count names, in full or its first three letters, in either case: its index, -1 for none
+    static int __name(iter_type& s, iter_type end, int count, bool months)
+    {
+        char word[16];
+        int n = 0;
+        for (; s != end && n < 15; ++s) {
+            const charT c = *s;
+            const bool upper = c >= static_cast<charT>('A') && c <= static_cast<charT>('Z');
+            const bool lower = c >= static_cast<charT>('a') && c <= static_cast<charT>('z');
+            if (!upper && !lower) break;
+            word[n++] = static_cast<char>(upper ? c - static_cast<charT>('A') + static_cast<charT>('a') : c);
+        }
+        word[n] = 0;
+        for (int i = 0; i < count; ++i) {
+            const char* name = months ? __month_name(i) : __weekday_name(i);
+            const int len = static_cast<int>(strlen(name));
+            if (n != 3 && n != len) continue;
+            bool same = true;
+            for (int k = 0; k < n && same; ++k) same = word[k] == (name[k] >= 'A' && name[k] <= 'Z' ? name[k] - 'A' + 'a' : name[k]);
+            if (same) return i;
+        }
+        return -1;
+    }
+};
+template <class charT, class InputIterator> locale::id time_get<charT, InputIterator>::id;
+
+template <class charT, class InputIterator = istreambuf_iterator<charT> >
+class time_get_byname : public time_get<charT, InputIterator> {
+public:
+    typedef time_base::dateorder dateorder;
+    typedef InputIterator        iter_type;
+    explicit time_get_byname(const char* name, size_t refs = 0) : time_get<charT, InputIterator>(refs) { __check_locale_name(name); }
+protected:
+    virtual ~time_get_byname() {}
+};
+
+// 22.2.5.3 time_put: each conversion of the pattern is strftime's, the other characters are copied
+template <class charT, class OutputIterator = ostreambuf_iterator<charT> >
+class time_put : public locale::facet {
+public:
+    typedef charT          char_type;
+    typedef OutputIterator iter_type;
+    explicit time_put(size_t refs = 0) : locale::facet(refs) {}
+    iter_type put(iter_type s, ios_base& f, char_type fill, const tm* t, const charT* pattern, const charT* pat_end) const
+    {
+        for (; pattern != pat_end; ++pattern) {
+            if (*pattern != static_cast<charT>('%') || pattern + 1 == pat_end) { *s = *pattern; ++s; continue; }
+            char format = static_cast<char>(*++pattern);
+            char modifier = 0;
+            if ((format == 'E' || format == 'O' || format == '#') && pattern + 1 != pat_end) { modifier = format; format = static_cast<char>(*++pattern); }
+            s = do_put(s, f, fill, t, format, modifier);
+        }
+        return s;
+    }
+    iter_type put(iter_type s, ios_base& f, char_type fill, const tm* t, char format, char modifier = 0) const { return do_put(s, f, fill, t, format, modifier); }
+    static locale::id id;
+protected:
+    virtual ~time_put() {}
+    virtual iter_type do_put(iter_type s, ios_base&, char_type, const tm* t, char format, char modifier) const
+    {
+        // (%c is the date and the time as %x and %X write them, as in cl's library; the C runtime's own %c is ctime's)
+        char pattern[8];
+        int n = 0;
+        pattern[n++] = '%';
+        if (modifier == '#') pattern[n++] = modifier;   // (the C runtime knows no E or O)
+        pattern[n++] = format;
+        pattern[n] = 0;
+        if (format == 'c' && modifier != '#') strcpy(pattern, "%x %X");
+        char text[128];
+        const size_t len = strftime(text, sizeof(text), pattern, t);
+        for (size_t i = 0; i < len; ++i) { *s = static_cast<charT>(static_cast<unsigned char>(text[i])); ++s; }
+        return s;
+    }
+};
+template <class charT, class OutputIterator> locale::id time_put<charT, OutputIterator>::id;
+
+template <class charT, class OutputIterator = ostreambuf_iterator<charT> >
+class time_put_byname : public time_put<charT, OutputIterator> {
+public:
+    typedef charT          char_type;
+    typedef OutputIterator iter_type;
+    explicit time_put_byname(const char* name, size_t refs = 0) : time_put<charT, OutputIterator>(refs) { __check_locale_name(name); }
+protected:
+    virtual ~time_put_byname() {}
+};
+
+// 22.2.6 the monetary facets
+class money_base {
+public:
+    enum part { none, space, symbol, sign, value };
+    struct pattern { char field[4]; };
+};
+
+// 22.2.6.3 moneypunct: how an amount is written. The "C" locale's: no decimal point, separator or grouping, no
+// currency symbol, no fraction digits, "" and "-" for the signs, and symbol, sign, none, value for both formats
+template <class charT, bool International = false>
+class moneypunct : public locale::facet, public money_base {
+public:
+    typedef charT               char_type;
+    typedef basic_string<charT> string_type;
+    explicit moneypunct(size_t refs = 0) : locale::facet(refs) {}
+    charT       decimal_point() const { return do_decimal_point(); }
+    charT       thousands_sep() const { return do_thousands_sep(); }
+    string      grouping() const { return do_grouping(); }
+    string_type curr_symbol() const { return do_curr_symbol(); }
+    string_type positive_sign() const { return do_positive_sign(); }
+    string_type negative_sign() const { return do_negative_sign(); }
+    int         frac_digits() const { return do_frac_digits(); }
+    pattern     pos_format() const { return do_pos_format(); }
+    pattern     neg_format() const { return do_neg_format(); }
+    static locale::id id;
+    static const bool intl = International;
+protected:
+    virtual ~moneypunct() {}
+    virtual charT       do_decimal_point() const { return charT(); }
+    virtual charT       do_thousands_sep() const { return charT(); }
+    virtual string      do_grouping() const { return string(); }
+    virtual string_type do_curr_symbol() const { return string_type(); }
+    virtual string_type do_positive_sign() const { return string_type(); }
+    virtual string_type do_negative_sign() const { return string_type(1, static_cast<charT>('-')); }
+    virtual int         do_frac_digits() const { return 0; }
+    virtual pattern     do_pos_format() const { pattern p = { { symbol, sign, none, value } }; return p; }
+    virtual pattern     do_neg_format() const { pattern p = { { symbol, sign, none, value } }; return p; }
+};
+template <class charT, bool International> locale::id moneypunct<charT, International>::id;
+template <class charT, bool International> const bool moneypunct<charT, International>::intl;
+
+template <class charT, bool International = false>
+class moneypunct_byname : public moneypunct<charT, International> {
+public:
+    typedef money_base::pattern pattern;
+    typedef basic_string<charT> string_type;
+    explicit moneypunct_byname(const char* name, size_t refs = 0) : moneypunct<charT, International>(refs) { __check_locale_name(name); }
+protected:
+    virtual ~moneypunct_byname() {}
+};
+
+// what money_put and money_get ask the locale's moneypunct, of either kind
+template <class charT>
+struct __money_punct {
+    charT               point, sep;
+    string              grouping;
+    basic_string<charT> symbol, positive, negative;
+    int                 frac;
+    money_base::pattern pos, neg;
+    __money_punct(const locale& loc, bool intl)
+    {
+        if (intl) __read(use_facet<moneypunct<charT, true> >(loc)); else __read(use_facet<moneypunct<charT, false> >(loc));
+    }
+    template <class Punct> void __read(const Punct& p)
+    {
+        point = p.decimal_point(); sep = p.thousands_sep(); grouping = p.grouping(); symbol = p.curr_symbol();
+        positive = p.positive_sign(); negative = p.negative_sign(); frac = p.frac_digits(); pos = p.pos_format(); neg = p.neg_format();
+        if (frac < 0) frac = 0;
+    }
+};
+
+// 22.2.6.2 money_put: an amount, a number of the smallest unit of the currency, as the locale's moneypunct says
+template <class charT, class OutputIterator = ostreambuf_iterator<charT> >
+class money_put : public locale::facet {
+public:
+    typedef charT               char_type;
+    typedef OutputIterator      iter_type;
+    typedef basic_string<charT> string_type;
+    explicit money_put(size_t refs = 0) : locale::facet(refs) {}
+    iter_type put(iter_type s, bool intl, ios_base& f, char_type fill, long double units) const { return do_put(s, intl, f, fill, units); }
+    iter_type put(iter_type s, bool intl, ios_base& f, char_type fill, const string_type& digits) const { return do_put(s, intl, f, fill, digits); }
+    static locale::id id;
+protected:
+    virtual ~money_put() {}
+    virtual iter_type do_put(iter_type s, bool intl, ios_base& f, char_type fill, long double units) const
+    {
+        // the digits of the amount rounded to a whole number of units, as printf's %.0Lf writes them (22.2.6.2.2/1)
+        char text[400];
+        const int n = sprintf(text, "%.0f", static_cast<double>(units));
+        string_type digits;
+        for (int i = 0; i < n; ++i) digits += static_cast<charT>(text[i]);
+        return do_put(s, intl, f, fill, digits);
+    }
+    virtual iter_type do_put(iter_type s, bool intl, ios_base& f, char_type fill, const string_type& digits) const
+    {
+        const __money_punct<charT> mp(f.getloc(), intl);
+        // an optional minus sign, then the digits up to the first character that is none
+        size_t at = 0;
+        const bool negative = !digits.empty() && digits[0] == static_cast<charT>('-');
+        if (negative) at = 1;
+        size_t stop = at;
+        while (stop < digits.size() && digits[stop] >= static_cast<charT>('0') && digits[stop] <= static_cast<charT>('9')) ++stop;
+        string_type number(digits, at, stop - at);
+        // the value: the units, grouped, then the point and the fraction digits; an amount shorter than the fraction
+        // is filled with zeros up to one digit before the point
+        const size_t frac = static_cast<size_t>(mp.frac);
+        if (frac > 0 && number.size() <= frac) number.insert(static_cast<size_t>(0), frac + 1 - number.size(), static_cast<charT>('0'));
+        string_type whole(number, 0, number.size() - frac);
+        string_type shown;
+        if (!mp.grouping.empty()) {
+            // from the right: a group of each size the grouping names, the last size for what is left (22.2.3.1.2/3)
+            size_t g = 0;
+            size_t left = whole.size();
+            while (left > 0) {
+                const char size = mp.grouping[g < mp.grouping.size() ? g : mp.grouping.size() - 1];
+                size_t take = size <= 0 || size == 127 || static_cast<size_t>(size) >= left ? left : static_cast<size_t>(size);
+                shown.insert(static_cast<size_t>(0), whole, left - take, take);
+                left -= take;
+                if (left > 0) shown.insert(static_cast<size_t>(0), static_cast<size_t>(1), mp.sep);
+                ++g;
+            }
+        } else shown = whole;
+        if (frac > 0) { shown += mp.point; shown.append(number, number.size() - frac, frac); }
+        const money_base::pattern& fmt = negative ? mp.neg : mp.pos;
+        const string_type& signText = negative ? mp.negative : mp.positive;
+        // the parts in the order of the format; the place where an internal adjustment pads is that of space or none
+        string_type before, after;
+        bool padSeen = false;
+        for (int i = 0; i < 4; ++i) {
+            string_type& out = padSeen ? after : before;
+            switch (fmt.field[i]) {
+            case money_base::symbol: if (f.flags() & ios_base::showbase) out += mp.symbol; break;
+            case money_base::sign: if (!signText.empty()) out += signText[0]; break;
+            case money_base::value: out += shown; break;
+            case money_base::space: out += fill; padSeen = true; break;
+            case money_base::none: padSeen = true; break;
+            default: break;
+            }
+        }
+        // what is left of a sign of several characters comes after everything else
+        if (signText.size() > 1) { if (padSeen) after.append(signText, 1, signText.size() - 1); else before.append(signText, 1, signText.size() - 1); }
+        const size_t length = before.size() + after.size();
+        const size_t width = f.width() > 0 ? static_cast<size_t>(f.width()) : 0;
+        const size_t pad = width > length ? width - length : 0;
+        const ios_base::fmtflags adjust = f.flags() & ios_base::adjustfield;
+        f.width(0);
+        if (adjust != ios_base::left && adjust != ios_base::internal) for (size_t i = 0; i < pad; ++i) { *s = fill; ++s; }
+        for (size_t i = 0; i < before.size(); ++i) { *s = before[i]; ++s; }
+        if (adjust == ios_base::internal) for (size_t i = 0; i < pad; ++i) { *s = fill; ++s; }
+        for (size_t i = 0; i < after.size(); ++i) { *s = after[i]; ++s; }
+        if (adjust == ios_base::left) for (size_t i = 0; i < pad; ++i) { *s = fill; ++s; }
+        return s;
+    }
+};
+template <class charT, class OutputIterator> locale::id money_put<charT, OutputIterator>::id;
+
+// 22.2.6.1 money_get: reads an amount written in the locale's negative format (22.2.6.1.2/1): the currency symbol
+// where showbase asks for it (otherwise taken when it is there and more of the format follows it), a sign by its
+// first character, the units with their separators and the fraction, white space where the format has space or
+// none, and the rest of the sign at the end. The digits are stored as they were read, leading zeros too, as cl's
+// library stores them
+template <class charT, class InputIterator = istreambuf_iterator<charT> >
+class money_get : public locale::facet {
+public:
+    typedef charT               char_type;
+    typedef InputIterator       iter_type;
+    typedef basic_string<charT> string_type;
+    explicit money_get(size_t refs = 0) : locale::facet(refs) {}
+    iter_type get(iter_type s, iter_type end, bool intl, ios_base& f, ios_base::iostate& err, long double& units) const { return do_get(s, end, intl, f, err, units); }
+    iter_type get(iter_type s, iter_type end, bool intl, ios_base& f, ios_base::iostate& err, string_type& digits) const { return do_get(s, end, intl, f, err, digits); }
+    static locale::id id;
+protected:
+    virtual ~money_get() {}
+    virtual iter_type do_get(iter_type s, iter_type end, bool intl, ios_base& f, ios_base::iostate& err, long double& units) const
+    {
+        string_type digits;
+        bool negative = false;
+        if (__parse(s, end, intl, f, digits, negative)) {
+            long double v = 0;
+            for (size_t i = 0; i < digits.size(); ++i) v = v * 10 + static_cast<int>(digits[i] - static_cast<charT>('0'));
+            units = negative ? -v : v;
+        } else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+    virtual iter_type do_get(iter_type s, iter_type end, bool intl, ios_base& f, ios_base::iostate& err, string_type& digits) const
+    {
+        string_type d;
+        bool negative = false;
+        if (__parse(s, end, intl, f, d, negative)) {
+            digits.erase();
+            if (negative) digits += static_cast<charT>('-');
+            digits += d;
+        } else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+private:
+    static bool __space(charT c) { return c == static_cast<charT>(' ') || (c >= static_cast<charT>('\t') && c <= static_cast<charT>('\r')); }
+    static bool __digit(charT c) { return c >= static_cast<charT>('0') && c <= static_cast<charT>('9'); }
+    // the characters of text at s, all of them
+    static bool __match(iter_type& s, iter_type end, const string_type& text, size_t from)
+    {
+        for (size_t i = from; i < text.size(); ++i, ++s) if (s == end || *s != text[i]) return false;
+        return true;
+    }
+    // the amount at s: its digits and its sign
+    static bool __parse(iter_type& s, iter_type end, bool intl, ios_base& f, string_type& digits, bool& negative)
+    {
+        const __money_punct<charT> mp(f.getloc(), intl);
+        const bool showbase = (f.flags() & ios_base::showbase) != 0;
+        string_type restOfSign;
+        negative = false;
+        for (int i = 0; i < 4; ++i) {
+            switch (mp.neg.field[i]) {
+            case money_base::space:
+                if (s == end || !__space(*s)) return false;
+                // fall through
+            case money_base::none:
+                if (i < 3) while (s != end && __space(*s)) ++s;
+                break;
+            case money_base::symbol:
+                // required with showbase; otherwise optional, and consumed only if other characters are needed to
+                // complete the format (22.2.6.1.2/3): another part after it, or the rest of the sign
+                if (showbase || ((i < 3 || restOfSign.size() > 1) && !mp.symbol.empty() && s != end && *s == mp.symbol[0])) { if (!__match(s, end, mp.symbol, 0)) return false; }
+                break;
+            case money_base::sign:
+                if (s != end && !mp.negative.empty() && *s == mp.negative[0] && (mp.positive.empty() || mp.positive[0] != mp.negative[0])) { negative = true; restOfSign = mp.negative; ++s; }
+                else if (s != end && !mp.positive.empty() && *s == mp.positive[0]) { restOfSign = mp.positive; ++s; }
+                else if (!mp.positive.empty() && !mp.negative.empty()) return false;   // a sign is required and neither is here
+                else if (mp.positive.empty() && !mp.negative.empty()) negative = false;
+                else if (!mp.positive.empty() && mp.negative.empty()) negative = true;
+                break;
+            case money_base::value: {
+                string_type whole;
+                string groups;          // the sizes of the groups read, the leftmost first
+                char run = 0;
+                bool any = false;
+                for (; s != end; ++s) {
+                    const charT c = *s;
+                    if (__digit(c)) { whole += c; ++run; any = true; }
+                    else if (!mp.grouping.empty() && c == mp.sep && any) { groups += run; run = 0; }
+                    else break;
+                }
+                if (!any) return false;
+                if (!groups.empty()) {
+                    // the groups from the right must be those the grouping names, the leftmost no longer than its size
+                    groups += run;
+                    size_t g = 0;
+                    for (size_t k = groups.size(); k > 0; --k, ++g) {
+                        const char want = mp.grouping[g < mp.grouping.size() ? g : mp.grouping.size() - 1];
+                        if (want <= 0 || want == 127) break;
+                        if (k == 1 ? groups[k - 1] > want || groups[k - 1] == 0 : groups[k - 1] != want) return false;
+                    }
+                }
+                if (mp.frac > 0) {
+                    if (s == end || *s != mp.point) return false;
+                    ++s;
+                    int n = 0;
+                    for (; s != end && n < mp.frac && __digit(*s); ++s, ++n) whole += *s;
+                    if (n != mp.frac) return false;
+                }
+                digits = whole;
+                break;
+            }
+            default: break;
+            }
+        }
+        if (restOfSign.size() > 1 && !__match(s, end, restOfSign, 1)) return false;
+        return true;
+    }
+};
+template <class charT, class InputIterator> locale::id money_get<charT, InputIterator>::id;
+
+// the library's facets, for a locale that holds none of its own (made once, kept for good)
+template <class internT, class externT, class stateT> struct __default_facet<codecvt<internT, externT, stateT> > {
+    static const locale::facet* get() { static const locale::facet* const f = new codecvt<internT, externT, stateT>(1); return f; }
+};
+template <class charT> struct __default_facet<messages<charT> > {
+    static const locale::facet* get() { static const locale::facet* const f = new messages<charT>(1); return f; }
+};
+template <class charT, class InputIterator> struct __default_facet<time_get<charT, InputIterator> > {
+    static const locale::facet* get() { static const locale::facet* const f = new time_get<charT, InputIterator>(1); return f; }
+};
+template <class charT, class OutputIterator> struct __default_facet<time_put<charT, OutputIterator> > {
+    static const locale::facet* get() { static const locale::facet* const f = new time_put<charT, OutputIterator>(1); return f; }
+};
+template <class charT, bool International> struct __default_facet<moneypunct<charT, International> > {
+    static const locale::facet* get() { static const locale::facet* const f = new moneypunct<charT, International>(1); return f; }
+};
+template <class charT, class OutputIterator> struct __default_facet<money_put<charT, OutputIterator> > {
+    static const locale::facet* get() { static const locale::facet* const f = new money_put<charT, OutputIterator>(1); return f; }
+};
+template <class charT, class InputIterator> struct __default_facet<money_get<charT, InputIterator> > {
+    static const locale::facet* get() { static const locale::facet* const f = new money_get<charT, InputIterator>(1); return f; }
+};
+
+}
+
+#endif

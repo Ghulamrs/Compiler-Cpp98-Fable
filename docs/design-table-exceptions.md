@@ -155,6 +155,87 @@ That is allowed by C++ ("implementation-defined whether the stack is unwound").
 
 `cppparse_frame_depth()` returns 0 in table mode (no frames are pushed), so the driver checks stay valid.
 
+**As built, and the cost of a throw (2026-11-19, row G24).** There is one phase: `dispatch` walks from the
+runtime function the generated code called to the first frame whose range table has a landing pad for its call
+site and enters it with `RtlRestoreContext`; a pad that does not keep the exception calls `cppparse_rethrow`, or
+`cppparse_unwind_destroy(object, destructor)` when its cleanup is one destructor call, and the walk goes on from
+there. M7 measured a throw out of one frame with 1,000 objects alive at 3.1 ms (cl 0.06 ms). The cause, by cycle
+counters in the runtime: each of the 1,000 pads started a dispatch of its own, and of its 7,000 cycles 5,100
+were `rangePad` reading the range table from the front (the pads lie behind the function's body, so the call site
+in a pad is behind nearly all of the 2,500 entries), 800 the lookups and virtual unwinds of four frames (three of
+them the runtime's own: dispatch, cppparse_rethrow, cppparse_unwind_destroy) and 900 `RtlRestoreContext`, the pad
+and the destructor. Three changes, all in the runtime, no object byte different:
+
+1. `rangePad` is a binary search (the entries are sorted by code offset).
+2. A frame's landing pads follow one another without a dispatch: when the call of a pad lies in the range of an
+   outer region of the same function (the object built before), the next landing pad is one of the same frame. The
+   pad finds what `RtlRestoreContext` would give it: the frame's stack pointer (it never moves in a body) and the
+   callee-saved registers as they are at the call. A frame is left with one dispatch however many objects it
+   holds. (In this row's first form `cppparse_unwind_destroy` looked its own call site up and returned into the
+   next pad by writing its return address; row G30, below, took that out: the generated code goes to the pad.)
+3. The walk starts in the runtime function that the generated code called (`DISPATCH` captures the context
+   there), so it passes one frame of the runtime where it passed three.
+
+Best of three runs of the probe (each the best of 15 loops; idle machine; frames at `-O0` / `-O2`, cl `/Od` / `/O2`):
+
+| what | cl /EHsc | `--eh=table` before | `--eh=table` after | `--eh=cl` |
+|---|---|---|---|---|
+| a throw out of one frame with 1,000 objects alive | 61.4 / 60.7 us | 2,966 / 2,967 us | 74.4 / 76.2 us | 98.5 / 97.5 us |
+| that function without a throw | 3.87 / 3.50 us | 4.46 / 4.58 us | 4.46 / 4.57 us | 4.51 / 4.94 us |
+| a throw through 10 frames with one object each | 6.12 / 5.72 us | 7.00 / 7.16 us | 5.53 / 5.64 us | 5.77 / 5.80 us |
+| the same path without a throw | 56.5 / 48.5 ns | 78.4 / 58.1 ns | 78.5 / 57.1 ns | 80.4 / 59.3 ns |
+
+The objects are the same bytes before and after (the 1,000-object unit: 47,924 bytes of code and 16,100 of unwind
+tables at `-O0`, 62,010 and 16,116 at `-O2`; cl's model 40,980 and 24,184, 55,082 and 24,200; cl 59,992 and
+30,864 at `/Od`, 42,672 and 9,955 at `/O2`). `RtlRestoreContext` into a pad that no `/guard:ehcont` table names
+does not pass that check (limit 2 of docs/design-cl-exceptions.md): for such a program the model is `--eh=cl`.
+eh.ps1 `ehManyObjects` runs a frame of
+18 objects with an inner block, a destructor that throws and catches on its own between two pads, and a value the
+handler reads, in every model at `-O0`..`-O3`. Left: what a pad with more than one cleanup costs (its
+`cppparse_unwind_enter`, destructors, `cppparse_unwind_leave` and `cppparse_rethrow` are a dispatch for each pad,
+as before; such pads are the flagged temporaries of a full expression, few to a frame), and the range table's
+fields (20 bits of code offset, 12 bits of pad number: the object writer refuses a function of more than 4,095
+pads or 1 MB of code, "too many landing pads or too much code for the range table").
+
+**The pads of a frame, by the generated code (2026-11-20, row G30).** Change 2 above, as first built, made
+`cppparse_unwind_destroy` write its own return address: the function returned into the next pad. A return to an
+address other than the call's is what a shadow stack (CET) refuses, and nothing in the runtime kept the write in
+bounds; the user asked for it to be resolved. The next pad of a frame is known where the code is generated: it is
+the pad of the innermost region open at the pad's own call (`EhRanges::now`), the block the range table names or
+the region's dispatch stub. So the pad of an object in a region of its function ends with
+
+    call cppparse_unwind_destroy_next     ; destroys the object while the exception is parked, and returns
+    jmp  <that region's landing pad>
+
+(`EhPads::isDestroy`, `destroyNext` and `next` in cppparse/eh/EhTable; `X86Function::nextPad`), and a pad in no
+region keeps `call cppparse_unwind_destroy`, which does not return: the exception leaves the frame through
+`dispatch`. The layout places such a pad right before the pad it goes on at (`X86Function::orderPads`: the pads of
+objects built one after another lie newest first), so the jump is not written and the 1,000-object unit has the
+bytes of code it had (47,924 and 62,010). The runtime lost its look-up of the call site and the function it noted
+for it; it reads its return address in one place (`cppparse_unwind_enter` notes the frame) and writes none. An
+object compiled before this row calls `cppparse_unwind_destroy` in every pad and is sent on by a dispatch for each,
+as before row G24 but with the binary search. IR, optimiser and register allocator are as they were: the pad's call
+was an exception edge to the pads around it already, and the pad that follows finds the frame and the callee-saved
+registers as at that call. Measured with the probe of the table above (best of three runs, `-O0` / `-O2`, cl `/Od` /
+`/O2`; another lane was building on the machine, which leaves cl's and `--eh=cl`'s figures a few percent above the
+idle ones of that table):
+
+| what | cl /EHsc | `--eh=table`, row G24 | `--eh=table` now | `--eh=cl` |
+|---|---|---|---|---|
+| a throw out of one frame with 1,000 objects alive | 63.2 / 65.1 us | 74.4 / 76.2 us | 13.4 / 12.4 us | 103.2 / 105.0 us |
+| that function without a throw | 3.99 / 3.72 us | 4.46 / 4.57 us | 4.73 / 4.72 us | 4.61 / 5.23 us |
+| a throw through 10 frames with one object each | 6.22 / 6.11 us | 5.53 / 5.64 us | 5.54 / 5.65 us | 6.01 / 6.09 us |
+| the same path without a throw | 60.7 / 52.6 ns | 78.5 / 57.1 ns | 81.0 / 59.9 ns | 84.2 / 63.0 ns |
+
+The suite reads front.cpp's listings (with the lean landing pads): every call of `cppparse_unwind_destroy_next` is
+followed by a jump or by the label of the pad laid out next, and the runtime's source reads its return address in
+one place and writes none. eh.ps1 `ehPadChain` runs chains that end in `catch (...)` and in clauses of which none
+matches, with an array and a temporary built under a condition among the pads, in the turns of a loop, in every
+model at `-O0`..`-O3` (the probe prints 106 lines). Not claimed: this machine's processor has no CET, so no run
+under a shadow stack was made. Every return of the model's code and of its runtime goes to the instruction after
+its call, which is the shadow stack's rule; a frame's first pad is entered by `RtlRestoreContext` as before (limit 2
+of docs/design-cl-exceptions.md, unchanged).
+
 ## 7. Optimiser and register allocator
 
 - In table mode, a call that may throw inside a region **ends its block** with two exits: the next block

@@ -181,13 +181,13 @@ protected:
         if (!m_file || !__flush()) return pos_type(off_type(-1));
         const off_type ahead = static_cast<off_type>(this->__gend - this->__gnext);
         if (way == ios_base::cur && off == 0) {
-            const long long at = _ftelli64(m_file);
+            const __cppparse_int64 at = _ftelli64(m_file);
             return at < 0 ? pos_type(off_type(-1)) : pos_type(static_cast<off_type>(at) - ahead);
         }
         if (way == ios_base::cur) off -= ahead;
         this->setg(0, 0, 0);
         if (_fseeki64(m_file, off, way == ios_base::beg ? SEEK_SET : way == ios_base::end ? SEEK_END : SEEK_CUR) != 0) return pos_type(off_type(-1));
-        const long long at = _ftelli64(m_file);
+        const __cppparse_int64 at = _ftelli64(m_file);
         return at < 0 ? pos_type(off_type(-1)) : pos_type(static_cast<off_type>(at));
     }
     virtual pos_type seekpos(pos_type sp, ios_base::openmode which) { return seekoff(off_type(sp), ios_base::beg, which); }

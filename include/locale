@@ -1,8 +1,8 @@
 // locale - cppparse's C++98 library: locales (22.1) as far as the streams use them. locale, its facets and ids,
 // use_facet and has_facet, ctype<char>, ctype<wchar_t>, numpunct and collate are in <__locale> (every stream includes
 // it), num_put and num_get in <__num_facets> (every stream includes it too); this header adds the convenience functions
-// of 22.1.3 and the _byname facets, which know the "C" locale only. Not provided: codecvt, the monetary, time and
-// messages facets, and named locales other than "C" and "".
+// of 22.1.3, the facets the streams do not use themselves (<__facets>: codecvt, the time, monetary and messages
+// facets) and the _byname facets, which know the "C" locale only. Not provided: named locales other than "C" and "".
 #ifndef CPPPARSE_LOCALE
 #define CPPPARSE_LOCALE
 
@@ -12,6 +12,7 @@
 #include <__locale>
 #include <istream>
 #include <ostream>
+#include <__facets>
 
 namespace std {
 
@@ -31,12 +32,7 @@ template <class charT> bool isgraph(charT c, const locale& loc) { return use_fac
 template <class charT> charT toupper(charT c, const locale& loc) { return use_facet<ctype<charT> >(loc).toupper(c); }
 template <class charT> charT tolower(charT c, const locale& loc) { return use_facet<ctype<charT> >(loc).tolower(c); }
 
-// the named facets: the "C" (or "") locale's
-inline void __check_locale_name(const char* name)
-{
-    if (!name || (strcmp(name, "C") != 0 && name[0] != 0)) throw runtime_error("bad locale name");
-}
-
+// the named facets: the "C" (or "") locale's (__check_locale_name is <__facets>')
 template <class charT>
 class ctype_byname : public ctype<charT> {
 public:

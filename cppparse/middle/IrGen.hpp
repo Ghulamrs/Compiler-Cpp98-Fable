@@ -52,7 +52,7 @@ public:
     void setNamedReturnElision(bool on) { m_nrvoEnabled = on; }
     // --eh=table: every object with a destructor gets a try region of its own whose landing pad destroys it (cl's
     // states), no constructed flag; the setjmp model keeps the flags and one unwind handler per function
-    void setTableExceptions(bool on) { m_tableEh = on; }
+    void setEhModel(EhModel model) { m_tableEh = model != EhModelSjlj; m_clEh = model == EhModelCl; }   // the table model's regions: one per object with a destructor (cl's model has them too)
     // the preprocessor's file table (Loc::file indexes it): every function's source file for the CodeView line tables
     void setFiles(const std::vector<std::string>& files);
     // members of class template instantiations whose bodies had errors (Symbol::instantiationFailed) that the
@@ -146,6 +146,8 @@ private:
     int  mpAddressOf(sema::Symbol* m, const sema::Type* t, int line);
     int  mpConvert(int v, const sema::Type* from, const sema::Type* to, int line);
     int  mpRemap(int v, const sema::Type* fu, const sema::Type* tu, sema::Symbol* fc, sema::Symbol* tc, int off, int line);   // into a class not sharing the vbptr
+    int  mpConvertPath(int v, const sema::Type* fu, const sema::Type* tu, sema::Symbol* fc, sema::Symbol* tc, bool up, int off, int line);   // along a non-virtual path, any two models
+    int  mpMapEntry(int idx, sema::Symbol* fc, sema::Symbol* tc, int line);   // a vbtable entry of fc as tc's
     int  mpCompare(int a, const sema::Type* ta, int b, const sema::Type* tb, bool ne, int line);
     int  mpToBool(int v, const sema::Type* t, int line);
     int  mpApply(cxx::Expr* e, int* code);
@@ -165,6 +167,7 @@ private:
     void genVbaseDestructor(sema::Symbol* fn);
     void catchableBases(sema::Symbol* top, std::vector<sema::Symbol*>& bases, std::vector<int>& offsets) const;
     std::string throwDescriptorFor(const sema::Type* t) const;
+    std::string throwInfoFor(const sema::Type* t, int line);     // cl's model: the IR name of the ThrowInfo of a thrown type, emitted once with its CatchableTypes (EhClThrowInfo)
 
     // special members
     sema::Symbol* findSpecial(sema::Symbol* cls, char which) const;   // 'd' default ctor, 'c' copy ctor, 'a' copy assignment, '~' destructor
@@ -184,7 +187,7 @@ private:
     void bitField(LValue& lv, const sema::Symbol* field) const;   // marks lv as the bit-field field (when it is one)
     int  loadBits(const LValue& lv, const sema::Type* t, int line);
     void storeBits(const LValue& lv, int temp, const sema::Type* t, int line);
-    int  bitConstant(unsigned long long v, const sema::Type* t, int line);
+    int  bitConstant(uint64 v, const sema::Type* t, int line);
     void copyConstruct(const sema::Type* t, int dst, int src, int line);
     void copyAssign(const sema::Type* t, int dst, int src, int line);
     void constructDefault(const sema::Type* t, int addr, int line);
@@ -217,6 +220,7 @@ private:
     void endFullExpr(int line, size_t from = 0);
     void keepTemporaries(size_t from);
     void handlerCleanups(size_t mark, int line);
+    void tryStatementCl(cxx::Stmt* s, int line);                        // a try statement in cl's exception model (--eh=cl)
     // the table model's object regions on m_tryStack: an entry e <= -2 is the cleanup m_flagged[-2 - e]
     static bool objectEntry(int e) { return e <= -2; }
     static int  entryIndex(int e) { return -2 - e; }
@@ -232,7 +236,7 @@ private:
     int  beginTerminateRegion(int& term, int line);
     void endTerminateRegion(int tid, int term, int line);
     int  registerFree(int ptr, sema::Symbol* cls, bool array, int count, int elemSize, int line);
-    int  placementNew(cxx::Expr* callE, const sema::Type* pt, bool wantFree, int& freeK, int line);
+    int  placementNew(cxx::Expr* callE, const sema::Type* pt, bool wantFree, int& freeK, int line, int& resultSlot, int& endBlock, int sizeTemp = -1);
     sema::Symbol* matchingPlacementDelete(sema::Symbol* opNew) const;
     void clearFlag(int index, int line);
     void returnSequence(int line);
@@ -249,7 +253,7 @@ private:
     bool constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataItem>& out, int depth);
     bool foldArith(cxx::Expr* x, double& v, int depth);
     bool foldToFloating(cxx::Expr* x, double& v, int depth);
-    bool foldInteger(cxx::Expr* x, const sema::Type* to, unsigned long long& bits, int depth);
+    bool foldInteger(cxx::Expr* x, const sema::Type* to, uint64& bits, int depth);
     bool convertFolded(const sema::Type* t, double& v) const;
     bool foldableFloating(cxx::Expr* e) const;
     bool aggregateData(const sema::Type* t, const std::vector<cxx::Expr*>* elems, std::vector<IrDataItem>& out, int depth);
@@ -297,7 +301,7 @@ private:
     bool   terminated() const;
     void   br(int target, int line);
     void   condbr(int cond, int t, int f, int line);
-    int    constant(long long v, const sema::Type* t, int line);   // a value outside the 32-bit immediates of a 64-bit type: bitConstant
+    int    constant(int64 v, const sema::Type* t, int line);   // a value outside the 32-bit immediates of a 64-bit type: bitConstant
     int    thisTemp(int line);
     int    addressOf(const LValue& lv, int line);
     int    load(const LValue& lv, const sema::Type* t, int line);
@@ -381,6 +385,14 @@ private:
     std::set<sema::Symbol*>    m_vtablesNeeded;            // the classes whose vfptrs a generated function stores
     std::vector<sema::Symbol*> m_vtableOrder;              // the same, in the order of the first store; their tables emitted
     size_t                     m_vtablesDone;              // up to here
+    // a variadic covariant override's return thunks: no thunk can pass the unnamed arguments on, so the function's
+    // body is compiled again under the thunk's name with the overridden function's return type (emitVtables asks,
+    // drainQueue generates after the function itself)
+    struct ReturnClone { sema::Symbol* fn; sema::Symbol* root; std::string name; };
+    std::vector<ReturnClone>   m_returnClones;
+    size_t                     m_returnClonesDone;
+    std::string                m_cloneName;                // not empty while such a body is generated
+    void genReturnClone(const ReturnClone& c);
     std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtors;   // class -> its vbase destructor (??_D)
     std::map<sema::Symbol*, sema::Symbol*> m_vbaseDtorOf;  // vbase destructor -> its class
     int                        m_ctorFlag;      // the "most derived" flag the next constructor call passes (1, 0 for a base)
@@ -390,9 +402,7 @@ private:
     int                        m_staticCount;
     int                        m_guardCount;    // guarded static locals so far in the function (cl's $TSS<n>)
     std::map<std::string, int> m_labels;           // goto labels of the current function -> block
-    std::vector<std::set<std::string> > m_handlerLabels;   // the labels inside each catch handler being generated
     cxx::Decl*                 m_functionTryDef;   // a constructor or destructor whose body is a function-try-block (0: none)
-    static void collectLabels(const cxx::Stmt* s, std::set<std::string>& out);
 
     IrFunction*                m_out;
     sema::Symbol*              m_fn;
@@ -428,11 +438,13 @@ private:
     int                        m_inPad;         // > 0 while a landing pad is generated: no cleanups are registered
     int                        m_unwindId;      // the function's catch-all region
     int                        m_bodyBlock;
-    bool                       m_tableEh;       // setTableExceptions
+    bool                       m_tableEh;       // setEhModel
+    bool                       m_clEh;          // cl's exception model (--eh=cl)
     int                        m_deferRegions;  // table model, > 0: a cleanup registered now gets its flag, its region later (openRegion at the join)
     std::vector<size_t>        m_scopeTry;      // table model: m_tryStack.size() at each open block scope
     struct Pad { int block, entry; bool guarded; };
     std::vector<Pad>           m_pads;   // table model: the landing pad blocks to fill; guarded: the pad tests the object's flag
+    std::set<long>             m_emptyRegions;   // cl's model: the regions of flagged objects around try bodies that had none; taken out by finishFunction
 };
 
 } // namespace cppparse

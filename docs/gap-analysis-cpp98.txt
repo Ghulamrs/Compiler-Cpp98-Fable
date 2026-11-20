@@ -1,101 +1,237 @@
-GAP ANALYSIS OF C++98 (main 7e9bfbe, 2026-10-14; every item reproduced against cl)
+GAP ANALYSIS OF C++98 (release 6.0 plus the mending up to 2026-11-20; every item reproduced against cl, and against
+clang -std=c++98 or Visual Studio's clang-cl where cl deviates from the standard)
 
-Review of 2026-10-15 (sandbox\out\fable-review\REPORT.md, 35 gaps; the state of each in docs/next-targets.md):
-fixed so far, each against cl at -O0 and -O2: casts through conversion functions ((int)obj, static_cast, (double)obj,
-(bool)(in >> v); the best conversion function, and two sequences through one conversion function ordered by the
-standard conversion after it); references bound to temporaries (const int& r = 5, const std::string& s = "x", a
-converted scalar argument, at namespace scope too); the arguments of calls through function pointers converted
-(Der& to Base& adjusted: std::cout << std::hex works); ++/-- on narrow types at -O2; the implicit constructor of
-`struct Leaf : Base {}` for a global (and global arrays of such classes constructed at all); function-try-blocks of
-constructors and destructors (members destroyed before the handler, rethrow at its end); the lifetime of a temporary
-passed through a function returning const T&; Base* ranked over void*; argument-dependent lookup on ordinary calls
-(the namespaces of the arguments' classes, bases, template arguments and enumerations) and friend functions declared
-in a class (functions of the enclosing namespace, found by ADL alone until the namespace declares them); internal
-linkage of const globals and COMDAT static data members of class templates (two units link); RTTI (cl's type
-descriptors, hierarchy descriptors and complete object locators before every vftable, typeid and dynamic_cast through
-vcruntime's __RTtypeid/__RTDynamicCast/__RTCastToVoid, <typeinfo> with bad_cast and bad_typeid); function templates
-(explicit arguments on calls, explicit specialisations of templates and of members of class templates, partial ordering,
-SFINAE, deduction from function types, non-deduced contexts), template template parameters, a 1000-deep instantiation
-limit and a 512 MB stack for the compiler (3000 nested blocks and 5000 nested parentheses compile); the library:
-<climits> <cfloat> <limits> <cerrno> <ciso646> <csignal> <csetjmp> <clocale> <cwchar> <cwctype> <iterator> <functional>
-<numeric> <memory> <deque> <list> <stack> <queue> <bitset> <iomanip>, <algorithm> over any iterator with the C++98
-algorithms, reverse iterators, nothrow new, set_terminate/uncaught_exception, cerr and cin tied to cout, -0; the exception
-runtime's stack of caught exceptions grows (40 nested live handlers) and operator new's failure throws a catchable
-std::bad_alloc (libcpp defines the allocation functions); 64-bit #if arithmetic with the usual conversions and short
-circuit, #line, an unterminated comment or #if is an error the compile path reports; access control (private and protected
-members, friends), abstract classes, the implicit assignment a reference or const member forbids, and cl /W4's warnings
-(unreferenced parameter and local, missing return, uninitialised local, unreachable code, shadowing, assignment as a
-condition, narrowing) with the parser's messages and recovery of cl.
-Also fixed: chained operator-> (applied until a pointer comes out).
-Fixed on 2026-10-20 (Fable 5.1; each with its test, the full suite and the self-hosting check - generation two
-identical - before its commit): char* from a string literal (M11: the deprecated conversion of 4.2/2, ranked below
-const char*); _purecall in pure virtual slots (m4: R6025 and cl's exit code instead of a jump to 0); the COFF
-writer's errors name the function and quote the assembly line, the driver calls them internal errors of cppparse and
-points at the listing (m6; --compile6 --obj <name>.asm assembles a listing through the writer alone); the driver's
--q prints only diagnostics, an output that cannot be written exits 1, response files take white-space separated
-arguments with quoted paths, the version 6 outputs are named after the input's stem (m2). Measured again (m8, m9,
-in docs/next-targets.md): big.cpp 17.5 s at -O0 and 29 s at -O2 against cl /Od 3.2 s; bench.cpp at -O2 within 20%
-of cl /O2 on the sieve, the hash and the virtual calls, 5x on matmul, 7x on the class-temporary loop, code 1.41x.
-CodeView line tables (M10): .debug$S sections with S_GPROC32/S_END and DEBUG_S_LINES per function, associative for
-COMDAT functions; link /DEBUG puts them in the PDB and dbghelp maps addresses to lines (test 18); no types or locals.
-Won't fix: dynamic exception specifications (as cl), export (as cl), other targets. Deferred: exceptions across cl-compiled frames (cl's own exception model); a pointer to member
-as a template argument stays refused (basic_string/wstring and the missing headers: done 2026-10-23, C3, below).
-Triage of 2026-10-21 (Fable 5.1; docs/next-targets.md "Triage of 2026-10-21": every "Left" re-checked, the common
-template shapes probed; each fix against cl at -O0 and -O2 with its test, the full suite and the self-hosting
-bootstrap before its commit). Silent differences fixed: the dynamic initialisers of a class template's static data
-members never ran (now one COMDAT initialiser per program, cl's ??__E and .CRT$XCU layout, so a mixed link runs it
-once too); placement new of an array allocated from the heap instead of the given address; the matching placement
-operator delete was not called when the constructor threw; typeid of an array type named a pointer. Valid C++98
-refused, now accepted: out-of-class constructors, member templates and nested classes of a class template; a static
-const member's in-class initializer as an array bound (and its out-of-class definition for pointers and references;
-an in-class static member declaration no longer counts as a definition, which gave LNK2005 across units); char array
-members from string literals in brace lists; local classes named inside their function as cl names them (same-named
-ones no longer collide; internal, their statics shared with cl's); operator new[](n) and operator delete(p) called by
-name; nested types used by member bodies written before them. Library: string::at and the position-checked members
-throw out_of_range, string::copy; map::value_type is pair<const K, V> (pair's converting constructor template, which
-the compiler now considers for implicit conversions; "M::value_type(k, v)" with a typedef M is a functional cast).
-Recorded as next work with the reason: 64-bit constant expressions (a 32-bit semaValue, 68 uses), explicit
-instantiation definitions (the members stay lazy), a pointer to member as a template argument, the C2385 ambiguity
-diagnostic, cl's argument evaluation order (unspecified; three rules, the bootstrap note), basic_string/wstring and the
-missing headers, S130/S131/S132. Won't fix, with the reason: the handler copy order when a by-value handler rethrows
-(cppparse follows 15.2/15.3, cl copies before it unwinds), out-of-range floating-to-integer folds (undefined, 4.9/1),
-NRVO in nested blocks (elision is permitted, not required), the order of class temporaries across arguments
-(unspecified), the 5000-deep value template (cl rejects it too), the sliced catch (std::exception e) message (an MSVC
-extension), typeid without <typeinfo> accepted, M12's C4701/C4458/C4459.
-C3, 2026-10-23 (Opus 5.5; each step with its tests against cl's own headers, the full suite, the self-hosting bootstrap
-and --health against the cl-built cppparse before its commit): std::string is basic_string<char> (with wstring and
-char_traits<char> and <wchar_t>, named as cl names them); the streams are clause 27's templates over a basic_streambuf
-(wcout, wostream, wistream, the wide string and file streams, stringstream, fstream, <streambuf>, a locale with ctype,
-numpunct and collate); <complex>, <valarray>, <strstream>, <locale>. What is left out, the two compiler changes and the
-compiler gaps found (two silent: rows A6, A7) are in docs/next-targets.md, row C3.
+cppparse release 6.0 (tag v6.0, 2026-11-04) plus the commits since: the review rows P1-P19 at the end of
+docs/next-targets.md and their fixes up to fe28628 (2026-11-10), and the mending of 2026-11-12 (rows P2-P4, P6, P7,
+P9, P14, R5, M12b, B1 and G1-G7) with G8 (2026-11-13), the round of 2026-11-13 (rows G9-G19), the rows of
+2026-11-18 (G17, the rest of G14 and G15, G20-G22, and M7: cl's own exception model, --eh=cl) and the small lane of
+2026-11-19 and 20 (G23-G25, G29, G30), listed under FIXED below. The version stays 6.0. The state of every item below is kept
+in docs/next-targets.md under the row named in brackets; this file is the summary. The entries this file held before
+(2026-10-14 to 2026-10-23) are in git: git show b21067a~1:docs/gap-analysis-cpp98.txt.
 
-Fixed on 2026-10-14 (lanes V, A, L; verified: suite, selfhost generation two, suite under the self-built compiler, cprog, matrix, eh, mix):
-T() value-initialisation zeroes as cl; a float passed to printf or any variadic function is promoted to double;
-catch (Base*) matches a thrown Derived* with the pointer adjusted; replaced global operator new/delete are called;
-delete[] of a cookie-less class uses its own operator delete[]; multicharacter constants ('ab') and "\x41" "b" as cl;
-floating constants cast to integers folded as cl, in code and in static initialisers; the halfway float literal is
-correctly rounded; member-pointer sizes of a class completed later; the old pipeline no longer overflows its stack on
-a folder that holds a class named T.
+WHAT HOLDS (verified on these commits in a clean worktree)
+- Self-hosting: the version 6 pipeline (--compile6) compiles cppparse's 47 own sources and libcpp, and the self-built
+  compiler reproduces every object and listing byte for byte through generation two, at -O0 and at -O2 (selfhost.ps1
+  -Lvl 0 and -Lvl 2); the 18-group suite passes under the MSVC-built compiler and under the -O2 self-built one.
+- The language: classes in every inheritance shape cl lays out (virtual bases, vtordisp and covariant thunks, pointers
+  to members in cl's representations), templates (class, function and member templates, partial and explicit
+  specialisations, explicit instantiation definitions, SFINAE, partial ordering, deduction from function types),
+  exceptions in the table model with destructors on every path, and in cl's own model (--eh=cl) for programs with
+  cl-compiled C++ code, where they cross both ways, RTTI through vcruntime, the preprocessor with
+  trigraphs, digraphs and the alternative tokens, access control, cl /W4's warnings, 64-bit constant expressions,
+  static locals with cl's thread-safe protocol, argument-dependent lookup, the standard conversions and ranking
+  rules the samples cover; objects link with cl's at every layout and decorated name the samples cover.
+- The library: the 32 C++ headers of C++98 and <strstream>, the 18 <cxxx> headers, basic_string and wstring, the
+  stream templates over basic_streambuf (narrow and wide, string and file streams), locale with ctype, numpunct,
+  num_put, num_get, collate, codecvt and the time, monetary and messages facets, complex, valarray, bitset, the containers and algorithms, nothrow new, bad_alloc,
+  set_new_handler, set_terminate and uncaught_exception.
 
-Left for later sessions, recorded in docs/next-targets.md with repros:
-Done on 2026-10-14 as well: pointers to members in cl's representations (data, functions, virtual functions through
-vcall thunks, multiple and virtual inheritance), covariant returns through a secondary base (cl's return thunks), and
-polymorphic virtual bases (vfptr in the virtual base, vtordisp and $4 thunks, the virtual bases' vftables, catch of
-virtual bases); layouts and symbols checked against cl's, objects shared with cl-compiled code.
-Refused with an error, not miscompiled: an override held by another virtual base (cl's vtordispex thunk, S130),
-covariant returns through a virtual base or needing a this adjustment too (S131), member-pointer conversions into a
-class with virtual bases that does not share the base's vbptr, a member pointer as a template argument; also
-tmake<V>(42), 64-bit literals as constant expressions, class placement new, a conversion operator against int/long
-overloads.
-Also fixed 2026-10-21 (found by the M11 checks): a user-defined operator, was bypassed ((Cm(1), Cm(2)) gave 2, cl
-102), and the address of an extern "C" function (&printf, a C callback) was referenced as the variable g_name.
-Cases that still behave differently from cl, silently:
-argument evaluation order (left to right, cl right to left) and NRVO in nested blocks at -O2;
-the handler copy order when a by-value handler rethrows into another;
-d.a hidden on one path and unqualified members inside member functions are not checked for ambiguity (C2385);
-(double)~(int)3e9 and (int)3e9 * x with a double x use the narrowed value (cl the untruncated one).
-Small: (&std::printf links since 2026-10-21, see above); a char array member initialised from a string in braces is rejected; a failed
-allocation ends the program (cl's operator new throws bad_alloc through cl's exception handling).
-Mixed cl/cppparse links only: statics in local classes; vtable names with longer base paths; exceptions crossing
-runtimes (both directions fail fast); ??_G where cl names some deleting destructors ??_E.
-Code size: 1.79 of cl on the Matrix members both emit (whole class 1.60, all common functions 1.55), plan to about 1.25.
+WHAT IS LEFT
+1. Valid C++98 refused with an error (never miscompiled): the range members of <vector> (constructor, assign,
+   insert) take pointer ranges only, so a range of another container's iterators, of reverse iterators or of stream
+   iterators is S107 (row G31, found 2026-11-20 by the compiler's own sources; 23.2.4.1 makes them member templates).
+   (Pointers to members convert along non-virtual bases between every pair of inheritance models; the conversions
+   through a virtual base that stay S132 are ill-formed in C++98, 4.11/2, and cl's extension: memptr-refused.cpp.)
+2. Ill-formed code accepted without a diagnostic:
+   - access control leaves out what only one of cl and clang refuses: the member types in the signature of a function
+     template (clang refuses, cl accepts), a thrown object with a private destructor (clang only), and every
+     specialisation of a befriended function template name counts as a friend, as with cl. A class with a friend
+     declared by a qualified name that only a template could match is not checked (M12, row G14: the rest is checked
+     since 2026-11-18).
+   - a class that is completed later in the unit counts as complete from its first declaration on: `struct I;
+     void f() { I x; }  struct I { };` compiles, and so does a handler for I* or I& there (3.2/4, 15.3/1; cl and
+     clang refuse; found by row G29's probes. The bodies of functions are analysed after the unit's declarations).
+3. Different from cl where C++98 leaves it unspecified or undefined (stays): the arguments of a call are evaluated
+   left to right, cl right to left (A5, 14d); NRVO in nested blocks at -O2, an elision cl makes and 12.8 permits; the
+   copy order when a by-value handler rethrows into another (15.2 and 15.3's order; cl copies before it unwinds);
+   (double)~(int)3e9 and (int)3e9 * x fold the narrowed value (undefined, 4.9/1).
+4. Won't fix: dynamic exception specifications are parsed and ignored, as cl does (C4290), so std::unexpected is
+   never called (15.4; m5); export (as every compiler); other targets (x86_64-linux is front end only).
+5. Deferred: cl has two type descriptors for a pointer to a function with an array parameter, one for each way of
+   writing it, and instantiates a function template for each; cppparse has one of each, spelled plainly (row G15,
+   by design: the two are one type);
+   the size of --eh=cl's unwind data, which keeps the table model the default (2.5 to 7.5 % more object bytes): FH4's
+   compressed tables in place of FH3's (row G26: the maps are two thirds of what the model adds in sample-eh's
+   probe) and the funclets' unwind records, equal ones written once and fewer cleanups with a frame (row G27: the
+   other third), both measured against cl on 2026-11-19; in the default model an exception that reaches a cl-compiled
+   frame with something to destroy or a handler stops with the runtime's message, as designed (M7); CodeView types
+   and locals (the line tables exist; M10: its design, docs/design-codeview.md, was written on 2026-11-19 on a
+   branch of its own and is under review); vftables stay static symbols in mixed links, by design (row 20); an
+   exception edge from every call in the IR and the optimiser (design-table-exceptions.md section 7), the remaining
+   code-size lever now that the plan's rows A to H are done or measured.
+6. Library: named locales other than "C" and "" are left out, and locale::global does not call setlocale (C3; the
+   facets of 22.2 are all there for the classic locale since 2026-11-18, row G22; the plan for the named ones, with
+   cl's reference values for four locales, is row G28). (<vector> copy-constructs, assigns and destroys as 23.2.4
+   says since P9; only arithmetic types and pointers are moved bytewise.)
+7. The sources against strict C++98: clang -std=c++98 -pedantic reports nothing but long long in the two typedef
+   pairs (common/Int64.hpp, include/__config; P4); sandbox/scripts/strict98.ps1 checks it and allows nothing else.
+8. Self-hosting boundary: the exception runtime runtime/cppparse_rt.cpp is compiled by cl in every self-host link
+   (it needs the SDK's unwind declarations and __declspec(thread), which the parser drops), and the linker and the C
+   runtime are MSVC's (P1: its design, docs/design-selfhost.md, was written on 2026-11-19 on a branch of its own
+   and is under review). The default command line still runs the version 1 to 5 pipeline; the complete compiler
+   needs --compile6 (P19).
+9. Limits: a recursive value template 5000 deep fails at the 400-deep expression limit (cl fails too; M13); a class
+   template instantiation nested 1000 deep is refused (S148, cl C2999).
+
+Not a gap, checked: "const int ci = 3.0; int a[ci];" is S114, which 5.19/1 requires (a floating literal takes part
+only when cast); cl accepts it as an extension (P18).
+
+FIXED SINCE THE PREVIOUS VERSION OF THIS FILE (2026-10-23)
+- N1-N8 (2026-10-27 and 28): qualification conversions at any depth (4.4/4), pointer differences without idiv for
+  one-byte and power-of-two elements, vftables emitted only where a vfptr is stored, explicit specialisations naming
+  themselves, wmem* inline, wchar_t widened without sign, the const and non-const overloads of 21.4, member names
+  that were clang keywords.
+- The code-size plan (2026-10-29 to 2026-11-04): the register allocator (B1-B7), instruction selection (D1-D11),
+  exceptions (A1-A7: the table model throughout, lean landing pads, regions to the end of a full expression), C and
+  F; own -O0 linked code about 18 % smaller than before B7.
+- Release 6.0 (2026-11-04): --version, the CRC32 manifest crc32.txt with crc32.ps1, the VS solution verified with v143.
+- P11-P13 (2026-11-05, e4e5cf8): trigraphs (2.3), digraphs and the alternative tokens (2.5), their spelling kept by
+  # and -E; cl refuses a line splice written as the ??/ trigraph and its /EP output keeps a trigraph inside a string
+  literal, which the compiled program replaces.
+- P15-P17 (2026-11-10, 4bf81b5): !obj through a conversion function to bool (5.3.1/8); "template <class T> int
+  Box<T>::In::twice(int) const" and deeper nestings, static data members and member templates of nested classes of
+  a class template defined out of class; goto out of a catch handler releases the exception and destroys the
+  handler's objects.
+- G1 (2026-11-12, rows 21 and B6): new and delete[] of a multidimensional array as one array of its innermost elements
+  (the class's own operator new[] and delete[], cl's cookie and sizes), new of a typedef of an array, and every
+  placement new through the operator new or new[] lookup finds: arrays with placement arguments (cookie, matching
+  operator delete[] when a constructor throws), a class's own operator new(size_t, void*), a user's operator new
+  taking a pointer, a null result that builds nothing (front2.cpp newarr::).
+- G2 (2026-11-12, row 18): pointers to members converted along non-virtual bases between any two inheritance models,
+  down and up, as cl converts them: a member function's pointer down to a base of multiple inheritance, data and
+  functions down between classes with virtual bases (the vbtable entry remapped), to and from the unspecified model
+  (front2.cpp mpdown::).
+- G3 (2026-11-12, rows 19 and B11): a covariant override in a virtual base's vftable whose overrider is held by
+  another virtual base gets a vtordispex thunk to the return thunk (covariant-vbase.cpp); cl's own code returns the
+  pointer unadjusted there.
+- G4, G5 (2026-11-12): "struct P" first named in a member or parameter declaration of a class is declared in the
+  enclosing namespace or block scope (3.3.1/5); a template parameter deduced through a reference, a pointer or an
+  array keeps the argument's qualifiers (T& from a const int, T (&)[N] from a string literal) (front2.cpp elab::,
+  deducecv::).
+- P9 (2026-11-12): <vector> copy-constructs into a new buffer and destroys the old elements, insert and erase
+  assign and destroy as 23.2.4.3 and 23.2.4.4 say, a throwing copy leaves push_back and reserve without effect and
+  loses nothing elsewhere; memcpy and memmove only for the arithmetic types and the pointers (__is_bytewise); the
+  storage from ::operator new. sample-lib/vector.cpp compares the counts of constructions, copies, assignments
+  and destructions with cl's library (test 15); strict98.ps1 no longer allows -Wnontrivial-memcall.
+- G7 (2026-11-12): a variadic function overridden with a covariant return type that moves the pointer: the slot
+  holds a second copy of the body that returns the overridden type (covariant-variadic.cpp; cl refuses it, C2688).
+- G6 (2026-11-12): a parameter declared as an array is decorated as cl's const pointer (void f(int a[3]) is
+  ?f@@YAXQEAH@Z; it was PEAH and did not link with cl's objects) (front2.cpp arrparm::).
+- Earlier, recorded in next-targets.md: the silent differences S1-S12 (2026-10-14), the review of 2026-10-15 (35
+  gaps), the triage of 2026-10-21, C3's library (2026-10-23).
+- P5, P8, P10 (2026-11-10, fe28628): the two local types used as template arguments moved to namespace scope; <new>
+  with throw(std::bad_alloc) and the replaceable nothrow forms; the eleven missing Annex D.5 .h headers.
+- P14, R5, M12b, B1 (2026-11-12): universal character names in identifiers and literals; an explicit specialisation
+  after a use is S110 (cl C2908), one after a mere naming takes the instantiation over; friend templates, qualified
+  friends and the protected-member rule of 11.5; array types in type descriptors and behind pointers and
+  references as cl spells them.
+- P2, P3, P4, P6, P7 (2026-11-12): harness.ps1 and gate.ps1 in the repository; test 19, the self-compile at -O0
+  inside the suite; long long through two typedef pairs and no LL literal, checked by strict98.ps1; the system
+  headers of PathUtil.cpp under their branch; <__config> in place of bare __declspec in the library headers.
+- G8 (2026-11-13): a template-id written with a qualified name deduces from its last component (14.8.2.4/4 makes
+  only the nested-name-specifier a non-deduced context): f(const ns::Box<T>&), ::ns::Box<T>, a member class
+  template Outer::In<T> and const std::vector<T>& outside std; the qualifier picks the template, so overloads on two
+  same-named templates of different namespaces each take their own (front2.cpp qualdeduce::).
+- G9 (2026-11-13): a variadic covariant override with a static local (it was S132): the second body of the function
+  (the slot's copy, G7) shares the first one's static objects and guards, so the function has one object, built once
+  by whichever body runs first and destroyed once (covariant-variadic.cpp; covariant-refused.cpp is gone).
+- G10 (2026-11-13): a protected static member, static member function or enumerator is open to a friend of any class
+  derived from its class, whichever class names it (11.2/4 of C++98; it was S150). CWG 1873 took the friends out
+  later and clang -std=c++98 follows it; cl keeps them (front2.cpp protstatic::).
+- G11 (2026-11-13): std::set_new_handler is declared, and libcpp's operator new calls the installed handler in a loop
+  when malloc fails (18.4.2.3, 18.4.1.1/3); operator new[] returns what operator new returns and the nothrow forms
+  what the throwing ones return, null when those throw (sample-lib/newhandler.cpp against cl's library, test 15).
+- G12 (2026-11-13): an explicitly specialised static const member of a class template is an integral constant
+  expression from its definition on ("template <> const int A<int>::s = 2; int arr[A<int>::s];" was S114): the
+  initialiser is folded at the specialisation, as a namespace-scope constant's is (front2.cpp specconst::).
+- G13 (2026-11-13): a plain "new C" or "new C[n]" of a class that declares only placement forms of operator new or
+  new[] is S107 (cl C2660): the class's operators hide the global ones (3.4, 5.3.4/9). It was accepted and got the
+  global operator (new-refused.cpp; front2.cpp newhide:: has what stays valid).
+- G16 (2026-11-13): an adjustor thunk with a negative adjustment is named as cl names it, the number unsigned
+  ("?get@VL@@WPPPPPPMI@EAAPEAUY@@XZ"; it was "W?DI@"), checked in covariant-vbase.cpp's listing.
+- G14, first part (2026-11-13): operators called as members (+, ==, [], ++, !, ->; = and the compound assignments were
+  checked already), conversion functions wherever one is applied and a class's own operator new are access-checked
+  like other members (access-refused.cpp, eleven more lines that cl and clang refuse; front2.cpp opaccess::).
+- G14, second part (2026-11-13): member types (a protected or private typedef, nested class or enumeration named by
+  a type specifier) and destructors (an object destroyed where its class's destructor cannot be reached: locals,
+  objects of namespace scope, temporaries of T(args), delete) are access-checked; a member's definition outside its
+  class and a friend's own declaration may name the types (11/5) (access-refused2.cpp, the seventeen lines cl and
+  clang refuse; front2.cpp typeaccess:: and dtoraccess::).
+- G14, third part (2026-11-13): a friend function template defined in its class is declared, as a template of the
+  enclosing namespace found by argument-dependent lookup, with its body in the lexical scope of the class (11.4/5); a
+  call of it was S103, valid C++98 refused. The class is access-checked again (front2.cpp friendtmpl::, against cl;
+  access-refused2.cpp line 26).
+- G14, fourth part (2026-11-13): the access of base classes (11.2): a member reached through a private or protected
+  base has the access the base specifiers leave it in the class it is named in, a using-declaration gives it the
+  access of the declaration, and a pointer, a reference or an object converts to a base only where the base is
+  accessible (access-refused3.cpp, the nine lines cl and clang refuse; front2.cpp baseaccess::).
+- G14, the rest (2026-11-18): a class's operator delete in delete- and new-expressions, static_cast to and from an
+  inaccessible base, member types named through such a base (D3::T) and the components of a qualifier
+  (A4::Priv::Inner), the destructors of the temporaries of calls and of by-value parameters, an implicit destructor
+  that cannot reach a base's or a member's destructor (12.4/5), the copy a throw makes, a friend declared with a
+  qualified name that names nothing (S116); a friend function template defined in a class template is declared with
+  each instantiation (a call of it was S103, valid code refused), and a name in parentheses finds no friend by its
+  arguments (access-refused4.cpp and friend-refused.cpp, the lines cl refuses; front2.cpp accessrest::).
+- G15 (2026-11-13): an array parameter of a function type inside a declared function's parameter is decorated as
+  cl's const pointer ("int fp(int (*cb)(int[3]), int a[3])" is ?fp@@YAHP6AHQEAH@Z0@Z; it was P6AHPEAH@Z and did
+  not link with cl's objects), the second use of a function type in a name a back-reference however it is written,
+  and a parameter of reference to function type A6A... (front2.cpp fnarr::, fourteen names equal to cl's).
+- G15, the rest (2026-11-18): an array parameter of a function type is cl's const pointer (Q) in the type a declared
+  function returns, in a function type named through a typedef and in a variable's type as well; every decorated
+  name of cl's object of front2.cpp is in cppparse's (front2.cpp fnarr2::).
+- G19 (2026-11-13), the one miscompile the round found: a function declared as returning a pointer to a function
+  ("int (*pick(char c[2]))(int[3])") was given the parameters of the returned function type as well; a direct call
+  was S107 and a call through a pointer crashed. It has the parameters of its own function part (front2.cpp fnarr::).
+- G18 (2026-11-13): a call through a reference to a function ("int apply(int (&f)(int), int x) { return f(x); }")
+  was S118; such a reference is called as the function it refers to and binds to a function as a parameter, a local
+  and at namespace scope (front2.cpp fnref::).
+- G17 (2026-11-18): a program that links libcpp may define allocation functions of its own (18.4.1.1/2; it was
+  LNK2005): libcpp's eight are defaults, weak externals (__declspec(replaceable), IMAGE_WEAK_EXTERN_SEARCH_ALIAS)
+  that give way to a definition in any object and otherwise stand before the C runtime's. Each is replaced by itself,
+  and the ones left call the ones defined, the deallocation functions too (sample-lib/replacenew.cpp, replacepart.cpp
+  and replacearray.cpp against cl's library, test 15).
+- G20 (2026-11-18): std::allocator, and with it basic_string, and the nodes and blocks of list, map, set, deque and
+  valarray take their storage from ::operator new (20.4.1.1/5; they called malloc), so a program's replacement sees
+  them and a failed allocation is a bad_alloc (sample-lib/replacenew.cpp).
+- G21 (2026-11-18): the member functions of a local class of an inline function or of a template's instantiation,
+  and the static locals in them, are COMDATs under cl's names, shared by every copy of the function's body, cl's
+  inlined one too (they were internal: one object for each unit); in an ordinary function they stay internal, as
+  cl's (sample-statics localClassCount, the mixed link with cl /O2).
+- G22 (2026-11-18): <locale> has codecvt, time_get and time_put, moneypunct, money_put and money_get, messages and
+  their _byname forms, for the classic locale (include/__facets; sample-lib/facets.cpp against cl's library).
+- M7 (2026-11-18): exceptions across cl-compiled frames. A third exception model, --eh=cl, emits cl's own tables
+  and funclets (ThrowInfo per thrown type, FuncInfo with unwind, try-block and handler maps for __CxxFrameHandler3)
+  and throws with _CxxThrowException: a cl throw is caught by a cppparse handler and unwinds cppparse's frames, and
+  the other way round. The models' families do not mix in one program (link stops with LNK2038), and in the table
+  and setjmp models an exception that would pass a frame of the other family with something to do stops with a
+  message where it went on silently. The exception code is in cppparse/eh/ as classes. The default stays table:
+  cl's model has equal code and time and 2.5 to 7.5 % more object bytes, in unwind data
+  (docs/design-cl-exceptions.md; eh.ps1 in five models, sample-ehx, harness.ps1 -Eh cl).
+- G23 (2026-11-19): the order of the handlers of a try block. A handler after catch (...) is S161 (15.3/6; it was
+  accepted). A handler that an earlier one hides is valid and never entered (15.3/5): it compiles, with the warning
+  S162 where cl reports the pair and the earlier handler catches all the later one would (cl's errors C2312, C2313
+  and C2315 for the same type, its warning C4286 for a class or a pointer to one after its unambiguous public base)
+  (handler-refused.cpp, handler-order.cpp; 68 probes against cl and clang).
+- G24 (2026-11-19): a throw out of a frame with many objects alive, in the table model: 3.0 ms for 1,000 objects,
+  0.075 ms now (cl 0.061, --eh=cl 0.098), and 5.6 us through ten frames where it took 7.1 (cl 5.7, --eh=cl 5.8). The
+  runtime searched the whole range table and walked the stack anew for every object's landing pad; now a frame's
+  pads follow one another without a dispatch. The runtime alone changed, no object byte (eh.ps1 ehManyObjects;
+  docs/design-table-exceptions.md, section 6).
+- G29 (2026-11-19): the type of a handler. `catch (void ())` stopped the compiler (an access violation), a named
+  `catch (int f(int))` declared a function, and `catch (int a[3])` was matched as an array, which nothing thrown
+  is: an array or a function in an exception-declaration is the pointer now (15.3/2), in the handler's variable
+  and in the match, in every exception model (eh.ps1 ehAdjustedHandlers). A handler for an incomplete type, or for
+  a pointer or a reference to one other than cv void*, is S163 (15.3/1: an incomplete class, void, an array of
+  unknown bound; they were accepted but for the class by value). cl 19.52 refuses the type itself (C2687) and the
+  reference (C2316) and takes the pointer; clang refuses the three (handler-refused.cpp, handler-order.cpp; 30
+  probes against cl and clang).
+- G30 (2026-11-20): row G24's runtime returned into a frame's next landing pad by writing its own return address,
+  which a shadow stack (CET) refuses. The generated code goes there itself now: a pad inside a region of its
+  function calls cppparse_unwind_destroy_next, which returns, and falls or jumps into that region's pad; the runtime
+  writes no return address. The 1,000-object frame is left in 0.013 ms (0.075 with the write; cl 0.063), the code is the
+  same size (eh.ps1 ehPadChain; the suite checks the pads' form and the runtime's source;
+  docs/design-table-exceptions.md, section 6). No run under a shadow stack was possible on this machine (its
+  processor has no CET).
+- covariant-vbase.cpp (row G3) is compared with the build of Visual Studio's clang-cl as well as with the lines the
+  standard requires; clang-cl crashes on covariant-variadic.cpp (row G7) and cl refuses it, so that one has no
+  reference compiler.

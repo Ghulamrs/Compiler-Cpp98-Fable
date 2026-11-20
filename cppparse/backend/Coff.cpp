@@ -15,6 +15,8 @@
 //
 // Strict C++98.
 #include "Coff.hpp"
+#include "EhClFuncInfo.hpp"
+#include "EhUnwindInfo.hpp"
 #include "Parallel.hpp"
 
 #include <algorithm>
@@ -55,7 +57,8 @@ std::string upperText(const std::string& s)
 
 std::string numText(long v) { std::ostringstream s; s << v; return s.str(); }
 
-bool isIdentStart(char c) { return isalpha(static_cast<unsigned char>(c)) || c == '_' || c == '@' || c == '$' || c == '?'; }
+// a byte of 0x80 and above belongs to a name too: an extended character of an identifier, in UTF-8 as cl decorates it
+bool isIdentStart(char c) { return isalpha(static_cast<unsigned char>(c)) || c == '_' || c == '@' || c == '$' || c == '?' || static_cast<unsigned char>(c) >= 0x80; }
 bool isIdentChar(char c) { return isIdentStart(c) || isdigit(static_cast<unsigned char>(c)); }
 
 // splits operands on commas that are outside brackets
@@ -285,19 +288,28 @@ struct Fixup {                // rel32 to a label of the same function
     unsigned long opcodeAt;   // offset of the first opcode byte (jumps only)
 };
 
-// one prologue step of a PROC FRAME, from its unwind directive: where the instruction before it ends, and what it did
-struct UnwindStep {
-    enum Op { Push, Alloc, SaveXmm };
-    Op            op;
-    int           reg;        // Push: register number; SaveXmm: xmm number
-    unsigned long value;      // Alloc: bytes; SaveXmm: offset from rsp after the prologue
-    unsigned long offset;     // code offset just after the instruction
+typedef EhUnwindStep UnwindStep;   // one prologue step of a PROC FRAME, from its unwind directive (cppparse/eh)
+
+// the FuncInfo of a PROC in cl's exception model (--eh=cl), as the listing's ";@eh" lines give it: labels, to be
+// resolved once the code is encoded (cppparse/eh EhClFuncInfo builds the tables)
+struct ClCatchLine { unsigned long adjectives; std::string type; long dispObject; std::string handler; long dispFrame; };
+struct ClTryLine { long low, high, catchHigh; std::vector<ClCatchLine> catches; };
+struct ClLines {
+    bool on;
+    long unwindHelp;
+    std::vector<std::pair<long, std::string> > states;       // the state it unwinds to, its action's label ("0": none)
+    std::vector<ClTryLine> tries;
+    std::vector<std::pair<std::string, long> > ips;          // a label and the state of the code from it on
+    ClLines() : on(false), unwindHelp(0) {}
 };
 
 struct Chunk {
     std::vector<unsigned char>                bytes;
     std::vector<UnwindStep>                   unwind;     // .pushreg / .allocstack / .savexmm128, in prologue order
     long                                      prologEnd;  // .endprolog: code offset, -1 when absent
+    std::vector<EhClFunclet>                  funclets;   // .funclet (cl's exception model): in code order
+    ClLines                                   cl;         // .ehcl and the lines after it
+    std::vector<unsigned long>                callEnds;   // the code offsets just behind every call (for EhClCheck)
     std::vector<std::vector<std::string> >    ehRanges;   // .ehrange begin, end, landing pad (labels of this function)
     std::vector<Reloc>                        relocs;
     std::vector<Fixup>                        fixups;
@@ -462,6 +474,13 @@ void Encoder::shrinkJumps()
             for (size_t r = 0; r < m_c.relocs.size(); ++r) if (m_c.relocs[r].offset >= end) m_c.relocs[r].offset -= removed;
             for (size_t u = 0; u < m_c.unwind.size(); ++u) if (m_c.unwind[u].offset >= end) m_c.unwind[u].offset -= removed;
             if (m_c.prologEnd >= static_cast<long>(end)) m_c.prologEnd -= static_cast<long>(removed);
+            for (size_t fn = 0; fn < m_c.funclets.size(); ++fn) {
+                EhClFunclet& fc = m_c.funclets[fn];
+                if (fc.start >= end) fc.start -= removed;
+                for (size_t u = 0; u < fc.unwind.size(); ++u) if (fc.unwind[u].offset >= end) fc.unwind[u].offset -= removed;
+                if (fc.prologEnd >= static_cast<long>(end)) fc.prologEnd -= static_cast<long>(removed);
+            }
+            for (size_t ce = 0; ce < m_c.callEnds.size(); ++ce) if (m_c.callEnds[ce] >= end) m_c.callEnds[ce] -= removed;
             for (size_t s = 0; s < m_c.symbols.size(); ++s) if (m_c.symbols[s].second >= end) m_c.symbols[s].second -= removed;
             for (size_t l = 0; l < m_c.lines.size(); ++l) if (m_c.lines[l].first >= end) m_c.lines[l].first -= removed;   // the line records move with the code
             f.at = f.opcodeAt + 1;
@@ -474,6 +493,17 @@ void Encoder::shrinkJumps()
 void Encoder::finish()
 {
     shrinkJumps();
+    // a RIP-relative operand that names a label of this PROC (cl's exception model: "lea rax, <label>", the address a
+    // handler funclet returns to go on at) is settled here; one that names a symbol stays a relocation
+    for (size_t r = 0; r < m_c.relocs.size();) {
+        const Reloc& rl = m_c.relocs[r];
+        std::map<std::string, unsigned long>::const_iterator it = rl.type >= RelRel32 && rl.type <= RelRel32 + 5 ? m_c.labels.find(rl.symbol) : m_c.labels.end();
+        if (it == m_c.labels.end()) { ++r; continue; }
+        unsigned long rel = it->second - (rl.offset + 4 + static_cast<unsigned long>(rl.type - RelRel32));   // modulo 2^32, as the field
+        for (int k = 0; k < 4; ++k) rel += static_cast<unsigned long>(m_c.bytes[rl.offset + static_cast<unsigned long>(k)]) << (8 * k);
+        for (int k = 0; k < 4; ++k) m_c.bytes[rl.offset + static_cast<unsigned long>(k)] = static_cast<unsigned char>((rel >> (8 * k)) & 0xFF);
+        m_c.relocs.erase(m_c.relocs.begin() + static_cast<std::ptrdiff_t>(r));
+    }
     for (size_t i = 0; i < m_c.fixups.size(); ++i) {
         const Fixup& f = m_c.fixups[i];
         std::map<std::string, unsigned long>::const_iterator it = m_c.labels.find(f.label);
@@ -516,6 +546,7 @@ bool Encoder::codeLine(const std::string& raw, int line)
     }
     size_t before = m_c.bytes.size();
     if (!instruction(mn, ops, line)) { m_c.bytes.resize(before); return false; }
+    if (mn == "call") m_c.callEnds.push_back(pos());
     ++m_c.instructions;
     if (m_pendingLine >= 0) { m_c.lines.push_back(std::make_pair(pos(), m_pendingLine)); m_pendingLine = -1; }
     return true;
@@ -544,10 +575,56 @@ bool Encoder::unwindDirective(const std::string& mn, const std::vector<std::stri
         else { m_c.lines.push_back(std::make_pair(pos(), static_cast<int>(n))); m_pendingLine = -1; }
         return true;
     }
-    if (m_c.prologEnd >= 0) return fail(mn + " after .endprolog", line);
+    if (mn == ".funclet") {
+        // a funclet of cl's exception model starts here: ".funclet 0|1|2" (a jump to a destructor, a cleanup with a
+        // frame, a handler)
+        long kind = 0;
+        if (opText.size() != 1 || !parseLong(opText[0], kind) || kind < 0 || kind > 2) return fail(".funclet needs its kind, 0, 1 or 2", line);
+        EhClFunclet fc;
+        fc.start = pos();
+        fc.kind = kind == 0 ? EhClFunclet::Jump : kind == 1 ? EhClFunclet::Cleanup : EhClFunclet::Catch;
+        m_c.funclets.push_back(fc);
+        return true;
+    }
+    if (mn == ".ehcl") {
+        // the PROC's FuncInfo follows: ".ehcl <offset of the unwind-help slot from the establisher frame>"
+        if (opText.size() != 1 || !parseLong(opText[0], m_c.cl.unwindHelp)) return fail(".ehcl needs the unwind-help offset", line);
+        m_c.cl.on = true;
+        return true;
+    }
+    if (mn == ".ehstate") {
+        long to = 0;
+        if (opText.size() != 2 || !parseLong(opText[0], to)) return fail(".ehstate needs the state it unwinds to and its action", line);
+        m_c.cl.states.push_back(std::make_pair(to, opText[1]));
+        return true;
+    }
+    if (mn == ".ehtry") {
+        ClTryLine t;
+        if (opText.size() != 3 || !parseLong(opText[0], t.low) || !parseLong(opText[1], t.high) || !parseLong(opText[2], t.catchHigh)) return fail(".ehtry needs tryLow, tryHigh, catchHigh", line);
+        m_c.cl.tries.push_back(t);
+        return true;
+    }
+    if (mn == ".ehcatch") {
+        ClCatchLine h;
+        long adjectives = 0;
+        if (opText.size() != 5 || m_c.cl.tries.empty() || !parseLong(opText[0], adjectives) || !parseLong(opText[2], h.dispObject) || !parseLong(opText[4], h.dispFrame))
+            return fail(".ehcatch needs adjectives, type descriptor, object offset, handler, frame offset, after an .ehtry", line);
+        h.adjectives = static_cast<unsigned long>(adjectives); h.type = opText[1]; h.handler = opText[3];
+        m_c.cl.tries.back().catches.push_back(h);
+        return true;
+    }
+    if (mn == ".ehip") {
+        long state = 0;
+        if (opText.size() != 2 || !parseLong(opText[1], state)) return fail(".ehip needs a label and a state", line);
+        m_c.cl.ips.push_back(std::make_pair(opText[0], state));
+        return true;
+    }
+    // the prologue directives describe the PROC's own prologue, or the one of the funclet that has begun
+    EhClFunclet* fc = m_c.funclets.empty() ? 0 : &m_c.funclets.back();
+    if ((fc ? fc->prologEnd : m_c.prologEnd) >= 0) return fail(mn + " after .endprolog", line);
     if (mn == ".endprolog") {
         if (!opText.empty()) return fail(".endprolog takes no operands", line);
-        m_c.prologEnd = static_cast<long>(pos());
+        (fc ? fc->prologEnd : m_c.prologEnd) = static_cast<long>(pos());
         return true;
     }
     UnwindStep s;
@@ -569,54 +646,26 @@ bool Encoder::unwindDirective(const std::string& mn, const std::vector<std::stri
             return fail(".savexmm128 needs an xmm register and an offset that is a multiple of 16", line);
         s.op = UnwindStep::SaveXmm; s.reg = x.reg; s.value = static_cast<unsigned long>(v);
     } else return fail("unsupported directive " + mn, line);
-    m_c.unwind.push_back(s);
+    (fc ? fc->unwind : m_c.unwind).push_back(s);
     return true;
 }
 
-const unsigned long kEhMagic = 0x58505043UL;   // "CPPX": the range table that follows the handler is cppparse's
-
-// the UNWIND_INFO of a PROC FRAME (Windows x64 exception handling): version 1, the prologue size, the unwind codes in
-// reverse prologue order (each code slot: code offset, then operation | info << 4; larger values in the slots after
-// it), padded to an even number of slots. With a handler (PROC FRAME:handler): flag EHANDLER, the handler's address,
-// then cppparse's range table: "CPPX", the count, and per range its begin, end and landing pad. Every address is
-// image-relative (ADDR32NB); 'relocs' gets them, at offsets within 'out', against 'fn' or the handler
+// the unwind info of a PROC FRAME, built by cppparse/eh: its UNWIND_INFO (EhUnwindInfo) and, with a handler (PROC
+// FRAME:handler, the table model), the handler's address and the range table of its ";@ehrange" lines (EhRangeTable).
+// Every address is image-relative (ADDR32NB); 'relocs' gets them, at offsets within 'out', against 'fn' or the handler
 bool buildUnwindInfo(const Chunk& c, const std::string& fn, const std::string& handler, std::vector<unsigned char>& out,
                      std::vector<Reloc>& relocs, std::string& err)
 {
-    if (c.prologEnd < 0) { err = "PROC FRAME without .endprolog"; return false; }
-    if (c.prologEnd > 255) { err = "prologue longer than 255 bytes"; return false; }
-    std::vector<unsigned long> slots;   // 16-bit each
-    for (size_t k = c.unwind.size(); k-- > 0;) {
-        const UnwindStep& s = c.unwind[k];
-        const unsigned long at = s.offset;
-        if (s.op == UnwindStep::Push) slots.push_back(at | (static_cast<unsigned long>(s.reg) << 12));                      // UWOP_PUSH_NONVOL
-        else if (s.op == UnwindStep::Alloc) {
-            if (s.value <= 128) slots.push_back(at | (2UL << 8) | (((s.value - 8) / 8) << 12));                             // UWOP_ALLOC_SMALL
-            else if (s.value <= 524280UL) { slots.push_back(at | (1UL << 8)); slots.push_back(s.value / 8); }               // UWOP_ALLOC_LARGE, size/8
-            else { slots.push_back(at | (1UL << 8) | (1UL << 12)); slots.push_back(s.value & 0xFFFFUL); slots.push_back(s.value >> 16); }
-        } else {
-            if (s.value / 16 <= 0xFFFFUL) { slots.push_back(at | (8UL << 8) | (static_cast<unsigned long>(s.reg) << 12)); slots.push_back(s.value / 16); }   // UWOP_SAVE_XMM128
-            else { slots.push_back(at | (9UL << 8) | (static_cast<unsigned long>(s.reg) << 12)); slots.push_back(s.value & 0xFFFFUL); slots.push_back(s.value >> 16); }
-        }
-    }
-    if (slots.size() > 255) { err = "too many unwind codes"; return false; }
-    out.clear();
+    if (!c.funclets.empty()) { err = ".funclet in a PROC that is not of cl's exception model (.ehcl)"; return false; }
+    std::vector<unsigned char> info;
+    if (!EhUnwindInfo::write(c.unwind, c.prologEnd, 0, handler.empty() ? 0 : EhUnwindInfo::FlagEHandler, info, err)) return false;
+    out = info;
     relocs.clear();
-    out.push_back(static_cast<unsigned char>(handler.empty() ? 1 : 1 | (1 << 3)));   // version 1, UNW_FLAG_EHANDLER
-    out.push_back(static_cast<unsigned char>(c.prologEnd));
-    out.push_back(static_cast<unsigned char>(slots.size()));
-    out.push_back(0);                                              // no frame register
-    if (slots.size() % 2) slots.push_back(0);
-    for (size_t k = 0; k < slots.size(); ++k) { out.push_back(static_cast<unsigned char>(slots[k] & 0xFF)); out.push_back(static_cast<unsigned char>((slots[k] >> 8) & 0xFF)); }
     if (handler.empty()) {
         if (!c.ehRanges.empty()) { err = ".ehrange in a PROC FRAME without a handler"; return false; }
         return true;
     }
-    // the ranges, sorted by their begin, become entries of one word each: the code offset in the function (20 bits)
-    // and the landing pad's number in the pad table that follows (12 bits, 0: none); an entry holds up to the next
-    // one's offset, a pad of 0 marks code outside every region (a gap between two ranges, the end of the last one).
-    // The entries are plain values; only the pad table's addresses need relocations
-    std::vector<std::pair<unsigned long, std::pair<unsigned long, unsigned long> > > ranges;   // begin -> (end, pad)
+    std::vector<EhRange> ranges;
     for (size_t r = 0; r < c.ehRanges.size(); ++r) {
         unsigned long v[3] = { 0, 0, 0 };
         for (int k = 0; k < 3; ++k) {
@@ -624,31 +673,55 @@ bool buildUnwindInfo(const Chunk& c, const std::string& fn, const std::string& h
             if (l == c.labels.end()) { err = ".ehrange label " + c.ehRanges[r][static_cast<size_t>(k)] + " is not defined"; return false; }
             v[k] = l->second;
         }
-        if (v[0] < v[1]) ranges.push_back(std::make_pair(v[0], std::make_pair(v[1], v[2])));   // (an empty range holds no code)
+        EhRange range; range.begin = v[0]; range.end = v[1]; range.pad = v[2];
+        ranges.push_back(range);
     }
-    std::sort(ranges.begin(), ranges.end());
-    std::vector<unsigned long> entries, pads;
-    std::map<unsigned long, unsigned long> padIndex;
-    for (size_t r = 0; r < ranges.size(); ++r) {
-        const unsigned long pad = ranges[r].second.second;
-        std::map<unsigned long, unsigned long>::iterator p = padIndex.find(pad);
-        if (p == padIndex.end()) { pads.push_back(pad); p = padIndex.insert(std::make_pair(pad, static_cast<unsigned long>(pads.size()))).first; }
-        entries.push_back((ranges[r].first << 12) | p->second);
-        const unsigned long end = ranges[r].second.first;
-        if (r + 1 == ranges.size() || ranges[r + 1].first != end) entries.push_back(end << 12);
+    std::vector<EhReloc> tableRelocs;
+    if (!EhRangeTable::write(fn, handler, ranges, out, tableRelocs, err)) return false;
+    for (size_t k = 0; k < tableRelocs.size(); ++k) { Reloc rl; rl.offset = tableRelocs[k].offset; rl.symbol = tableRelocs[k].symbol; rl.type = RelAddr32Nb; relocs.push_back(rl); }
+    return true;
+}
+
+// cl's exception model: the PROC's ";@eh" lines with their labels resolved, checked (EhClCheck: what the runtime takes
+// for granted) and built into the unwind info, the funclets' unwind info and the FuncInfo with its maps (EhClFuncInfo);
+// 'entries' gets the function table entries of the PROC and its funclets
+bool buildClInfo(const Chunk& c, const std::string& fn, const std::string& handler, std::vector<unsigned char>& out,
+                 std::vector<Reloc>& relocs, std::vector<EhFrameEntry>& entries, std::string& err)
+{
+    EhClFunction f;
+    f.unwind = c.unwind; f.prologEnd = c.prologEnd; f.codeSize = static_cast<unsigned long>(c.bytes.size());
+    f.unwindHelp = c.cl.unwindHelp; f.funclets = c.funclets; f.callEnds = c.callEnds;
+    for (size_t s = 0; s < c.cl.states.size(); ++s) {
+        EhClState st; st.to = c.cl.states[s].first; st.action = -1;
+        if (c.cl.states[s].second != "0") {
+            std::map<std::string, unsigned long>::const_iterator l = c.labels.find(c.cl.states[s].second);
+            if (l == c.labels.end()) { err = ".ehstate action " + c.cl.states[s].second + " is not defined"; return false; }
+            st.action = static_cast<long>(l->second);
+        }
+        f.states.push_back(st);
     }
-    if (pads.size() > 4095 || (!ranges.empty() && ranges.back().second.first >= (1UL << 20))) { err = "too many landing pads or too much code for the range table of " + fn; return false; }
-    std::vector<std::pair<std::string, unsigned long> > fields;   // symbol (empty: a plain value) and value / addend
-    fields.push_back(std::make_pair(handler, 0UL));
-    fields.push_back(std::make_pair(std::string(), kEhMagic));
-    fields.push_back(std::make_pair(std::string(), static_cast<unsigned long>(entries.size())));
-    fields.push_back(std::make_pair(std::string(), static_cast<unsigned long>(pads.size())));
-    for (size_t e = 0; e < entries.size(); ++e) fields.push_back(std::make_pair(std::string(), entries[e]));
-    for (size_t p = 0; p < pads.size(); ++p) fields.push_back(std::make_pair(fn, pads[p]));
-    for (size_t f = 0; f < fields.size(); ++f) {
-        if (!fields[f].first.empty()) { Reloc rl; rl.offset = static_cast<unsigned long>(out.size()); rl.symbol = fields[f].first; rl.type = RelAddr32Nb; relocs.push_back(rl); }
-        for (int b = 0; b < 4; ++b) out.push_back(static_cast<unsigned char>((fields[f].second >> (8 * b)) & 0xFF));
+    for (size_t t = 0; t < c.cl.tries.size(); ++t) {
+        EhClTry tb; tb.low = c.cl.tries[t].low; tb.high = c.cl.tries[t].high; tb.catchHigh = c.cl.tries[t].catchHigh;
+        for (size_t h = 0; h < c.cl.tries[t].catches.size(); ++h) {
+            const ClCatchLine& cl = c.cl.tries[t].catches[h];
+            std::map<std::string, unsigned long>::const_iterator l = c.labels.find(cl.handler);
+            if (l == c.labels.end()) { err = ".ehcatch handler " + cl.handler + " is not defined"; return false; }
+            EhClCatch ch; ch.adjectives = cl.adjectives; ch.type = cl.type == "0" ? std::string() : cl.type; ch.dispObject = cl.dispObject; ch.handler = l->second; ch.dispFrame = cl.dispFrame;
+            tb.catches.push_back(ch);
+        }
+        f.tries.push_back(tb);
     }
+    for (size_t k = 0; k < c.cl.ips.size(); ++k) {
+        std::map<std::string, unsigned long>::const_iterator l = c.labels.find(c.cl.ips[k].first);
+        if (l == c.labels.end()) { err = ".ehip label " + c.cl.ips[k].first + " is not defined"; return false; }
+        EhClIp ip; ip.at = l->second; ip.state = c.cl.ips[k].second;
+        f.ips.push_back(ip);
+    }
+    if (!EhClCheck::check(f, err)) { err = "exception tables (--eh=cl): " + err; return false; }
+    std::vector<EhReloc> built;
+    if (!EhClFuncInfo::write(f, fn, "$unwind$" + fn, handler, out, built, entries, err)) return false;
+    relocs.clear();
+    for (size_t k = 0; k < built.size(); ++k) { Reloc rl; rl.offset = built[k].offset; rl.symbol = built[k].symbol; rl.type = RelAddr32Nb; relocs.push_back(rl); }
     return true;
 }
 
@@ -1035,6 +1108,7 @@ struct CodeBlock {
     std::string sourceFile, displayName;   // ;@debug: the function's source file and the name its CodeView symbol shows
     std::vector<unsigned char> xdata;
     std::vector<Reloc> xdataRelocs;
+    std::vector<EhFrameEntry> entries;   // cl's exception model: the function table entries of the PROC and its funclets (else one, the PROC)
     CodeBlock() : comdat(false), frame(false) {}
 };
 
@@ -1048,8 +1122,12 @@ struct EncodeJob : public ParallelJob {
         for (size_t k = 0; k < b.lines.size(); ++k) enc.codeLine(b.lines[k].second, b.lines[k].first);
         enc.finish();
         std::string err;
-        if (b.frame && !buildUnwindInfo(b.chunk, b.name, b.handler, b.xdata, b.xdataRelocs, err)) b.chunk.errors.push_back(b.name + ": " + err);
-        if (!b.frame && (b.chunk.prologEnd >= 0 || !b.chunk.unwind.empty() || !b.chunk.ehRanges.empty())) b.chunk.errors.push_back(b.name + ": unwind directives in a PROC without FRAME");
+        if (b.frame && b.chunk.cl.on) {
+            if (b.handler.empty()) b.chunk.errors.push_back(b.name + ": .ehcl in a PROC FRAME without a handler");
+            else if (!buildClInfo(b.chunk, b.name, b.handler, b.xdata, b.xdataRelocs, b.entries, err)) b.chunk.errors.push_back(b.name + ": " + err);
+        }
+        else if (b.frame && !buildUnwindInfo(b.chunk, b.name, b.handler, b.xdata, b.xdataRelocs, err)) b.chunk.errors.push_back(b.name + ": " + err);
+        if (!b.frame && (b.chunk.prologEnd >= 0 || !b.chunk.unwind.empty() || !b.chunk.ehRanges.empty() || !b.chunk.funclets.empty() || b.chunk.cl.on)) b.chunk.errors.push_back(b.name + ": unwind directives in a PROC without FRAME");
     }
 };
 
@@ -1074,6 +1152,7 @@ struct SymbolEntry {
     int            storageClass;  // 2 external, 3 static
     bool           isSection;     // has one auxiliary record
     int            selection;     // section symbols: the COMDAT selection
+    std::string    weakDefault;   // a weak external (";@weak"): the symbol that stands for it when no object defines it
 };
 
 // data lines of one section, or of one COMDAT item (a vtable) that becomes a section of its own
@@ -1260,9 +1339,11 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     std::set<std::string> externSet;
     int section = 0;            // 0 none, 1 text, 2 data, 3 rdata, 4 CRT initialisers
     CodeBlock* current = 0;
+    std::map<std::string, std::string> weakDefaults;   // ";@weak <name> <default>": the weak externals and their defaults
     bool comdatNext = false;    // ";@comdat any" was seen: the next PROC or data item is a COMDAT
     unsigned long comdatAlign = 0;   // ";@comdat any align N": the alignment of that item's section
     std::string comdatAssoc;    // ";@comdat assoc <symbol>": the data item goes with that symbol's COMDAT section
+    std::string directives;     // ";@drectve <text>": the linker directives of the object (.drectve)
     std::vector<std::string> globalErrors;
 
     size_t lineStart = 0;
@@ -1277,6 +1358,13 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
             current->lines.push_back(std::make_pair(lineNo, ".ehrange " + marker.substr(10)));
             continue;
         }
+        // cl's exception model (comments to ml64): a funclet's start and its prologue, the FuncInfo's lines
+        if (current && (marker.compare(0, 10, ";@funclet ") == 0 || marker.compare(0, 6, ";@ehcl") == 0 || marker.compare(0, 10, ";@ehstate ") == 0 ||
+                        marker.compare(0, 8, ";@ehtry ") == 0 || marker.compare(0, 10, ";@ehcatch ") == 0 || marker.compare(0, 7, ";@ehip ") == 0 ||
+                        marker.compare(0, 10, ";@pushreg ") == 0 || marker.compare(0, 13, ";@allocstack ") == 0 || marker.compare(0, 13, ";@savexmm128 ") == 0 || marker == ";@endprolog")) {
+            current->lines.push_back(std::make_pair(lineNo, "." + marker.substr(2)));
+            continue;
+        }
         if (marker.compare(0, 7, ";@line ") == 0) {   // the source line of the code that follows (a comment to ml64)
             if (current) current->lines.push_back(std::make_pair(lineNo, ".line " + marker.substr(7)));
             continue;
@@ -1285,6 +1373,19 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
             // ;@debug "<source file>" <display name>: the function's CodeView symbol and line table (a comment to ml64)
             const size_t q1 = marker.find('"'), q2 = q1 == std::string::npos ? q1 : marker.find('"', q1 + 1);
             if (current && q2 != std::string::npos) { current->sourceFile = marker.substr(q1 + 1, q2 - q1 - 1); current->displayName = trimWs(marker.substr(q2 + 1)); }
+            continue;
+        }
+        if (marker.compare(0, 10, ";@drectve ") == 0) { directives += trimWs(marker.substr(10)) + " "; continue; }
+        if (marker.compare(0, 7, ";@weak ") == 0) {
+            // ;@weak <name> <default>: <name> is a weak external of this object. The linker takes <default>, a function
+            // defined here, for it unless another object defines <name> (a comment to ml64)
+            const std::string rest = trimWs(marker.substr(7));
+            const size_t sp = rest.find(' ');
+            if (sp != std::string::npos) {
+                const std::string name = rest.substr(0, sp);
+                weakDefaults[name] = trimWs(rest.substr(sp + 1));
+                if (externSet.insert(name).second) externs.push_back(name);
+            }
             continue;
         }
         if (marker.compare(0, 8, ";@comdat") == 0) {
@@ -1472,12 +1573,18 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
                 for (size_t r = 0; r < blocks[i].xdataRelocs.size(); ++r) { Reloc rl = blocks[i].xdataRelocs[r]; rl.offset += at; sec.relocs.push_back(rl); }
             }
             else {
-                const unsigned long addend[3] = { 0, static_cast<unsigned long>(c.bytes.size()), 0 };
-                const std::string relocTo[3] = { fn, fn, names[0] };
-                for (int k = 0; k < 3; ++k) {
-                    for (int b = 0; b < 4; ++b) sec.bytes.push_back(static_cast<unsigned char>((addend[k] >> (8 * b)) & 0xFF));
-                    Reloc rl; rl.offset = at + 4 * static_cast<unsigned long>(k); rl.symbol = relocTo[k]; rl.type = RelAddr32Nb;
-                    sec.relocs.push_back(rl);
+                // one entry for the PROC; in cl's exception model one for its own code and one per funclet with a
+                // frame, in address order (link refuses a contribution that is not)
+                std::vector<EhFrameEntry> entries = blocks[i].entries;
+                if (entries.empty()) { EhFrameEntry e; e.begin = 0; e.end = static_cast<unsigned long>(c.bytes.size()); e.unwindAt = 0; entries.push_back(e); }
+                for (size_t en = 0; en < entries.size(); ++en) {
+                    const unsigned long addend[3] = { entries[en].begin, entries[en].end, entries[en].unwindAt };
+                    const std::string relocTo[3] = { fn, fn, names[0] };
+                    for (int k = 0; k < 3; ++k) {
+                        Reloc rl; rl.offset = static_cast<unsigned long>(sec.bytes.size()); rl.symbol = relocTo[k]; rl.type = RelAddr32Nb;
+                        sec.relocs.push_back(rl);
+                        for (int b = 0; b < 4; ++b) sec.bytes.push_back(static_cast<unsigned char>((addend[k] >> (8 * b)) & 0xFF));
+                    }
                 }
             }
             SymbolEntry u;
@@ -1530,6 +1637,16 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     for (size_t p = 0; p < pieces.size(); ++p) delete pieces[p];
     pieces.clear();
     if (anyLines) fillDebugSection(secs[debugIndex], mainSyms, mainSymRelocs, mainLines, &debugFiles);
+    if (!directives.empty()) {
+        // the linker directives (";@drectve"): .drectve, information for link only (LNK_INFO | LNK_REMOVE, align 1),
+        // the last section, so that the numbers of the others stay what they were
+        Section d;
+        d.name = ".drectve";
+        d.characteristics = 0x00100A00UL;
+        for (size_t i = 0; i < directives.size(); ++i) d.bytes.push_back((unsigned char)directives[i]);
+        secs.push_back(d);
+        comdatSymbols.push_back(std::vector<SymbolEntry>());
+    }
     // a section whose contents need more than its default alignment (16, or 8 for the initialisers) says so in its
     // IMAGE_SCN_ALIGN_* bits, which the linker honours when it places the section (a 32- or 64-byte aligned variable)
     for (size_t s = 0; s < secs.size(); ++s) {
@@ -1567,6 +1684,12 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     for (size_t e = 0; e < externs.size(); ++e) {
         if (symbolIndex.count(externs[e])) continue;    // declared EXTERN but defined here as well
         SymbolEntry f; f.name = externs[e]; f.value = 0; f.section = 0; f.type = 0; f.storageClass = 2; f.isSection = false; f.selection = 0;
+        std::map<std::string, std::string>::const_iterator wk = weakDefaults.find(f.name);
+        if (wk != weakDefaults.end()) {
+            // IMAGE_SYM_CLASS_WEAK_EXTERNAL: one auxiliary record names the default
+            if (!symbolIndex.count(wk->second)) { result.errors.push_back("weak external " + f.name + ": its default " + wk->second + " is not defined in this object"); continue; }
+            f.storageClass = 105; f.weakDefault = wk->second;
+        }
         symbolIndex[f.name] = symbols.size(); symbols.push_back(f);
     }
     for (std::set<std::string>::const_iterator u = undefined.begin(); u != undefined.end(); ++u) {
@@ -1578,7 +1701,7 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     // symbol table indices count auxiliary records
     std::vector<unsigned long> tableIndex(symbols.size());
     unsigned long idx = 0;
-    for (size_t i = 0; i < symbols.size(); ++i) { tableIndex[i] = idx; idx += symbols[i].isSection ? 2 : 1; }
+    for (size_t i = 0; i < symbols.size(); ++i) { tableIndex[i] = idx; idx += symbols[i].isSection || !symbols[i].weakDefault.empty() ? 2 : 1; }
     unsigned long symbolCount = idx;
 
     std::string o;
@@ -1621,12 +1744,19 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
         if (s.name.size() <= 8) { std::string nm = s.name; nm.resize(8, '\0'); o += nm; }
         else { put32(o, 0); put32(o, static_cast<unsigned long>(strings.size())); strings += s.name; strings += '\0'; }
         put32(o, s.value); put16(o, static_cast<unsigned long>(s.section)); put16(o, static_cast<unsigned long>(s.type));
-        put8(o, s.storageClass); put8(o, s.isSection ? 1 : 0);
+        put8(o, s.storageClass); put8(o, s.isSection || !s.weakDefault.empty() ? 1 : 0);
         if (s.isSection) {
             const Section& sec = secs[static_cast<size_t>(s.section - 1)];
             put32(o, static_cast<unsigned long>(sec.bytes.size()));
             put16(o, sec.relocs.size() >= 0xFFFF ? 0xFFFF : static_cast<unsigned long>(sec.relocs.size()));
             put16(o, 0); put32(o, 0); put16(o, static_cast<unsigned long>(sec.associated)); put8(o, s.selection); put8(o, 0); put8(o, 0); put8(o, 0);
+        }
+        else if (!s.weakDefault.empty()) {
+            // the default's symbol index, then IMAGE_WEAK_EXTERN_SEARCH_ALIAS (3): the default stands for the name unless
+            // an object defines it. link.exe then takes the default before it searches the libraries, so the C
+            // runtime's function of the same name is not linked (with SEARCH_LIBRARY, 2, as /alternatename gives, it is)
+            put32(o, tableIndex[symbolIndex[s.weakDefault]]); put32(o, 3);
+            for (int z = 0; z < 10; ++z) put8(o, 0);
         }
     }
     unsigned long sl = static_cast<unsigned long>(strings.size());

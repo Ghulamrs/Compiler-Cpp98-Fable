@@ -4,8 +4,8 @@
 #   powershell -ExecutionPolicy Bypass -File "cpp\sandbox\build-cppparse.ps1"
 #
 # cmd.exe is disabled by policy on this machine, so the MSVC environment is
-# set by hand (see build.ps1). The sources are strict C++98; MSVC's oldest
-# mode is C++14, so they compile unchanged. /W4 /permissive- is used and any
+# set by hand (see build.ps1). The sources are strict C++98 (long long apart,
+# see scripts\strict98.ps1); MSVC's oldest mode is C++14, so they compile unchanged. /W4 /permissive- is used and any
 # warning fails the build.
 #
 # Tests:
@@ -31,7 +31,7 @@ $ErrorActionPreference = "Stop"
 $Sandbox = $PSScriptRoot
 $Src     = Split-Path $Sandbox -Parent
 # cppparse's source folders (see scripts\toolset.ps1): each is an include folder of the build as well
-$SourceDirs = @("driver", "common", "frontend", "middle", "backend", "analyzer", "analyzer\report")
+$SourceDirs = @("driver", "common", "frontend", "middle", "backend", "eh", "analyzer", "analyzer\report")
 $sourceIncludes = @(); foreach ($d in $SourceDirs) { $sourceIncludes += "/I..\cppparse\$d" }
 
 # PowerShell names are case-insensitive, so $Exe is also the $exe the tests run
@@ -246,13 +246,33 @@ try {
 
     # ---- test 2: folder input (the cpp folder itself) ------------------------
     Write-Host "=== Test 2: folder input (cpp folder, includes cppparse's own sources) ==="
-    & $exe -o "out\folder" -n "cpp-folder" ".."
+    # --exclude out: sandbox\out holds every test's outputs and whatever else is kept there (a copied code base
+    # under review once made this scan run for hours); only the tracked sources are meant
+    & $exe -o "out\folder" -n "cpp-folder" --exclude "out" ".."
     if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on the folder" }
     $report2 = Get-Content "out\folder\cpp-folder-report.txt" -Raw
     $failed = 0
-    foreach ($e in @('class cppparse::Parser', 'class cppparse::CodeBase', 'class Vector', 'class Matrix', 'struct cppparse::ClassInfo', 'folder scan (recursive)')) {
+    foreach ($e in @('class cppparse::Parser', 'class cppparse::CodeBase', 'class Vector', 'class Matrix', 'struct cppparse::ClassInfo', 'folder scan (recursive)', '/sandbox/out (--exclude)')) {
         if ($report2.Contains($e)) { Write-Host "  ok   $e" } else { Write-Host "  FAIL missing: $e"; $failed++ }
     }
+    if ($report2.Contains('sandbox/out/')) { Write-Host "  FAIL a file under sandbox\out was scanned"; $failed++ } else { Write-Host "  ok   nothing under sandbox\out scanned" }
+    # --exclude on a planted tree: the excluded folder (given in other case, with a trailing separator) and the
+    # folders under it are skipped, its sibling is not; without --exclude the same scan finds it
+    Remove-Item -Recurse -Force "out\exclude" -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force "out\exclude\src\gen\deep", "out\exclude\src\keep" | Out-Null
+    Set-Content -Encoding ascii "out\exclude\src\keep\keep.hpp" "class KeepMe { public: int k; };"
+    Set-Content -Encoding ascii "out\exclude\src\gen\drop.hpp" "class DropMe { public: int d; };"
+    Set-Content -Encoding ascii "out\exclude\src\gen\deep\deeper.hpp" "class DropMeToo { public: int d; };"
+    & $exe -o "out\exclude" -n "with" --text-only --exclude "out/exclude/src/GEN/" "out\exclude\src" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on the --exclude tree" }
+    & $exe -o "out\exclude" -n "without" --text-only "out\exclude\src" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "cppparse returned exit code $LASTEXITCODE on the --exclude tree without --exclude" }
+    $with = Get-Content "out\exclude\with-report.txt" -Raw
+    $without = Get-Content "out\exclude\without-report.txt" -Raw
+    if ($with.Contains('class KeepMe') -and -not $with.Contains('class DropMe') -and $with.Contains('/src/gen (--exclude)')) { Write-Host "  ok   --exclude skips the folder and its subfolders" }
+    else { Write-Host "  FAIL --exclude: KeepMe found $($with.Contains('class KeepMe')), DropMe found $($with.Contains('class DropMe')), note $($with.Contains('/src/gen (--exclude)'))"; $failed++ }
+    if ($without.Contains('class KeepMe') -and $without.Contains('class DropMe') -and $without.Contains('class DropMeToo')) { Write-Host "  ok   without --exclude the same scan finds all three" }
+    else { Write-Host "  FAIL without --exclude a planted class is missing"; $failed++ }
     # operator() keeps its own parentheses apart from the parameter list in the map
     $map2 = Get-Content "out\folder\cpp-folder-symbols.map" -Raw
     if ($map2.Contains('mx::Matrix::operator()(int r, int c)') -and -not $map2.Contains('operator()()(')) { Write-Host "  ok   map: operator()(int r, int c)" } else { Write-Host "  FAIL map: operator() shown wrongly"; $failed++ }
@@ -511,6 +531,24 @@ try {
     }
     $diagText = Get-Content "$Sandbox\out\par\pp-diag.txt" -Raw -ErrorAction SilentlyContinue
     if ($diagText -match 'error') { Write-Host "  FAIL preprocessor reported errors:"; Write-Host $diagText; $failed++ } else { Write-Host "  ok   no preprocessor errors" }
+    # sample-front\alttok.cpp (test 17's program): -E keeps the spelling of the alternative tokens and digraphs and
+    # replaces the trigraphs, as cl /EP /permissive- /Zc:trigraphs does (ALTTOK_NO_STDIO leaves <cstdio> and main out,
+    # so that only the file's own lines are compared)
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $clPp = & $cl /nologo /EP /permissive- /Zc:trigraphs /DALTTOK_NO_STDIO "..\examples\sample-front\alttok.cpp" 2>$null | Out-String
+    $ErrorActionPreference = $eap
+    $p = Start-Process -FilePath $exe -ArgumentList '-E','-DALTTOK_NO_STDIO','..\examples\sample-front\alttok.cpp' -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$Sandbox\out\par\alttok-out.txt" -RedirectStandardError "$Sandbox\out\par\alttok-diag.txt"
+    $rc = $p.ExitCode
+    $a = @(& $norm $clPp); $b = @(& $norm (Get-Content "$Sandbox\out\par\alttok-out.txt" -Raw))
+    $same = 0; $diff = 0
+    for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) { if ($i -lt $a.Count -and $i -lt $b.Count -and $a[$i] -eq $b[$i]) { $same++ } else { $diff++ } }
+    if ($rc -eq 0 -and $diff -eq 0 -and $same -gt 10 -and ($b -join "`n") -match 'x<:1:>' -and ($b -join "`n") -match 'intarr\[2\]=\{2,3\}') { Write-Host "  ok   cppparse -E matches cl /EP on sample-front\alttok.cpp ($same lines): alternative tokens and digraphs keep their spelling, trigraphs are replaced" }
+    else {
+        Write-Host "  FAIL -E of sample-front\alttok.cpp differs from cl /EP (exit $rc, $same same, $diff different):"
+        $shown = 0
+        for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count) -and $shown -lt 10; $i++) { if ($i -ge $a.Count -or $i -ge $b.Count -or $a[$i] -ne $b[$i]) { Write-Host "    [$i] cl: $($a[$i])"; Write-Host "    [$i] us: $($b[$i])"; $shown++ } }
+        $failed++
+    }
     # #error and a missing include are reported
     "#include ""nothere.h""`n#if 1`n#error stop here`n#endif`n" | Out-File -Encoding ascii "out\par\bad.cpp"
     $p = Start-Process -FilePath $exe -ArgumentList '-E',('"' + "$Sandbox\out\par\bad.cpp" + '"') -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$Sandbox\out\par\bad-out.txt" -RedirectStandardError "$Sandbox\out\par\bad-diag.txt"
@@ -716,7 +754,8 @@ try {
     # (A3: every object with a destructor has a cleanup region whose landing pad destroys it between cppparse_unwind_enter and
     # leave; the catch-all unwind handler with the flags remains for objects built on one path only)
     $pads = ([regex]::Matches($ir, '(?m)^B\d+:\s+; cleanup\s')).Count
-    if ($ir -match 'call Tracker::~Tracker\(\)' -and $ir -match 'call Text::Text\(const Text&\)' -and $pads -gt 0 -and $ir -match 'call cppparse_unwind_enter') { Write-Host "  ok   IR shows destructor calls, copy-constructor calls and the cleanup pads ($pads)" }
+    # (cl's model, harness.ps1 -Eh cl: a pad is a funclet that returns to the runtime, "throw @cleanupret" in the IR, with no enter and leave)
+    if ($ir -match 'call Tracker::~Tracker\(\)' -and $ir -match 'call Text::Text\(const Text&\)' -and $pads -gt 0 -and ($ir -match 'call cppparse_unwind_enter' -or $ir -match '@cleanupret')) { Write-Host "  ok   IR shows destructor calls, copy-constructor calls and the cleanup pads ($pads)" }
     else { Write-Host "  FAIL IR lacks destructor / copy-constructor calls or cleanup pads ($pads)"; $failed++ }
     if ($failed -ne 0) { throw "$failed object lifetime check(s) failed" }
 
@@ -823,8 +862,13 @@ try {
     }
     # the library programs (C3): each built by cl with its own headers, the reference, and by cppparse with include/ at
     # -O0 and -O2, linked with the libcpp/iostream.cpp objects above; the programs must print the same. threads.cpp runs the
-    # streams, strings and locales on eight threads at once (the locales' shared reference counts)
-    foreach ($prog in @("strings", "wstreams", "streambuf", "complex", "valarray", "strstream", "locale", "threads", "buffers", "complexf", "numfacets", "bigfile")) {
+    # streams, strings and locales on eight threads at once (the locales' shared reference counts); vector.cpp counts the
+    # constructions, copies, assignments and destructions <vector> makes (row P9); newhandler.cpp installs new-handlers
+    # and asks for storage no allocation function can give (row G11); replacenew.cpp, replacepart.cpp and replacearray.cpp
+    # define allocation functions of their own, which replace libcpp's when the program is linked: operator new and
+    # operator delete, operator new alone, the array forms alone (row G17); facets.cpp uses codecvt and the time, monetary
+    # and messages facets of the classic locale (row G22)
+    foreach ($prog in @("strings", "wstreams", "streambuf", "complex", "valarray", "strstream", "locale", "threads", "buffers", "complexf", "numfacets", "bigfile", "cheaders", "vector", "newhandler", "replacenew", "replacepart", "replacearray", "facets")) {
         $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\${prog}_cl.exe" "..\examples\sample-lib\$prog.cpp" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-lib\$prog.cpp" }
         $want = & ".\out\x64\${prog}_cl.exe" 2>&1 | Out-String
@@ -874,16 +918,27 @@ try {
         @{ unit = "sizeof-incomplete"; expect = @("error S113: sizeof of incomplete class 'Inc'", "error S113: sizeof of incomplete class 'std::", "error S113: sizeof of incomplete class 'Self'", "error S113: sizeof of void") },
         @{ unit = "vbase-refused"; expect = @("error S132: line 9: cannot convert from 'V' to 'D': 'V' is a virtual base") },
         @{ unit = "goto-refused"; expect = @("error S132: line 5: goto x jumps past the initialisation of an object with a destructor (ill-formed)", "error S132: line 6: goto y jumps into a try block or a handler (ill-formed)") },
-        @{ unit = "covariant-refused"; expect = @("(10): error S131: 'VL::get' overrides 'VB::get' with a covariant return type, and the overrider is held by another virtual base of the class", "(13): error S131: 'CD2::v' overrides 'SB2::v' with a covariant return type, and it is variadic"); errors = 2 },
-        @{ unit = "goto-handler"; expect = @("error S132: line 5: a goto out of a catch handler ('out')", "error S132: line 6: a goto out of a catch handler ('out')") },
-        @{ unit = "new-refused"; expect = @("error S132: line 8: new of a multidimensional array of 'S'", "error S132: line 8: delete[] of a multidimensional array of 'S'") },
-        @{ unit = "memptr-refused"; expect = @("error S132: line 17: conversion of a pointer to member from 'int() VM::*' to 'int() M::*' is not supported yet", "error S132: line 18: conversion of a pointer to member from 'int I1::*' to 'int I2::*', whose inheritance model is unspecified"); errors = 2 },
+        @{ unit = "new-refused"; expect = @("new-refused.cpp(11): error S107: no matching function for call to operator new(unsigned long long, char*) among 1 candidate(s)", "new-refused.cpp(12): error S107: no matching function for call to operator new[](unsigned long long, char*) among 1 candidate(s)", "new-refused.cpp(13): error S107: no matching function for call to operator new[](unsigned long long, Arena) among 3 candidate(s)", "new-refused.cpp(15): error S107: no matching function for call to operator new(unsigned long long) among 1 candidate(s)", "new-refused.cpp(16): error S107: no matching function for call to operator new[](unsigned long long) among 1 candidate(s)"); errors = 5 },
+        @{ unit = "memptr-refused"; expect = @("error S132: line 16: conversion of a pointer to member from 'int V1::*' to 'int DV::*' through a virtual base (ill-formed in C++98, 4.11/2; cl's extension)", "error S132: line 17: conversion of a pointer to member from 'int() V1::*' to 'int() DV::*' through a virtual base", "error S132: line 18: conversion of a pointer to member from 'int I1::*' to 'int I2::*', whose inheritance model is unspecified, through a virtual base"); errors = 3 },
         @{ unit = "ambiguous-base"; expect = @("(8): error S141: 'F': direct base 'V' is inaccessible; already a base of 'W'", "(9): error S141: 'H2': direct base 'V' is inaccessible; already a base of 'WV'", "(10): error S141: 'H5': direct base 'V' is inaccessible; already a base of 'X'", "(11): warning S142: 'G2': base-class 'V' is already a base-class of 'W'", "(12): warning S142: 'H3': base-class 'V' is already a base-class of 'WV'", "(16): warning S142: 'T7': base-class 'V' is already a base-class of 'XV'", "(17): error S141: 'T8': direct base 'V' is inaccessible; already a base of 'XV'") },
         @{ unit = "cstrovl-refused"; expect = @("cstrovl-refused.cpp(9): error S105: cannot initialise 'bad' of type char* from const char*", "cstrovl-refused.cpp(10): error S105: cannot initialise 'bad2' of type wchar_t* from const wchar_t*", "cstrovl-refused.cpp(11): error S105: cannot initialise 'bad3' of type void* from const void*"); errors = 3 },
         @{ unit = "explspec-refused"; expect = @("explspec-refused.cpp(6): error S110: redefinition of class 'Box<char>'"); errors = 1 },
+        @{ unit = "explspec-used"; expect = @("explspec-used.cpp(23): error S110: explicit specialisation of 'Obj<int>' after its use: it has already been instantiated (cl C2908)", "explspec-used.cpp(24): error S110: explicit specialisation of 'InBody<int>' after its use in 'inBody'", "explspec-used.cpp(25): error S110: explicit specialisation of 'Sized<int>' after its use", "explspec-used.cpp(26): error S110: explicit specialisation of 'Base<int>' after its use", "explspec-used.cpp(27): error S110: explicit specialisation of 'Mem<int>::f' after its use in 'callsMember'", "explspec-used.cpp(28): error S110: explicit specialisation of 'Mem<char>::s' after its use in 'readsStatic'", "explspec-used.cpp(29): error S110: explicit specialisation of 'fn<int>' after its use in 'callsFn'", "explspec-used.cpp(30): error S110: explicit specialisation of 'addr<long>' after its use"); errors = 8 },
+        @{ unit = "access-refused"; expect = @("access-refused.cpp(17): error S150: 'P::secret': cannot access private member declared in class 'P' (cl C2248)", "access-refused.cpp(20): error S150: 'B::x': cannot access protected member declared in class 'B' (cl C2248)", "access-refused.cpp(21): error S150: 'B::x'", "access-refused.cpp(22): error S150: 'B::f'", "access-refused.cpp(23): error S150: 'B::x'", "access-refused.cpp(24): error S150: 'B::f'", "access-refused.cpp(25): error S150: 'B::B'", "access-refused.cpp(26): error S150: 'B::B'", "access-refused.cpp(28): error S150: 'B::x'", "access-refused.cpp(30): error S150: 'B::x'", "access-refused.cpp(31): error S150: 'B::x'", "access-refused.cpp(46): error S150: 'O::operator+': cannot access private member declared in class 'O' (cl C2248)", "access-refused.cpp(47): error S150: 'O::operator=='", "access-refused.cpp(48): error S150: 'O::operator[]'", "access-refused.cpp(49): error S150: 'O::operator++'", "access-refused.cpp(50): error S150: 'O::operator++'", "access-refused.cpp(51): error S150: 'O::operator->'", "access-refused.cpp(52): error S150: 'O::operator!'", "access-refused.cpp(53): error S150: 'O::operator int'", "access-refused.cpp(54): error S150: 'O::operator int'", "access-refused.cpp(55): error S150: 'O::operator int'", "access-refused.cpp(56): error S150: 'O::operator new'"); errors = 22 },
+        @{ unit = "access-refused2"; expect = @("access-refused2.cpp(6): error S150: 'T4::T': cannot access protected member declared in class 'T4' (cl C2248)", "access-refused2.cpp(7): error S150: 'T4::In'", "access-refused2.cpp(8): error S150: 'T4::PT': cannot access private member", "access-refused2.cpp(9): error S150: 'T4::E'", "access-refused2.cpp(10): error S150: 'T4::PT'", "access-refused2.cpp(11): error S150: 'T4::In'", "access-refused2.cpp(12): error S150: 'T4::In'", "access-refused2.cpp(13): error S150: 'T4::T'", "access-refused2.cpp(14): error S150: 'T4::In'", "access-refused2.cpp(17): error S150: 'P2::~P2': cannot access private member declared in class 'P2' (cl C2248)", "access-refused2.cpp(18): error S150: 'P2::~P2'", "access-refused2.cpp(19): error S150: 'Q2::~Q2': cannot access protected member", "access-refused2.cpp(20): error S150: 'P2::~P2'", "access-refused2.cpp(21): error S150: 'P2::~P2'", "access-refused2.cpp(22): error S150: 'Q2::~Q2'", "access-refused2.cpp(23): error S150: 'P2::~P2'", "access-refused2.cpp(24): error S150: 'P2::~P2'", "access-refused2.cpp(26): error S150: 'F5::secret': cannot access private member declared in class 'F5' (cl C2248)"); errors = 18 },
+        @{ unit = "access-refused3"; expect = @("access-refused3.cpp(9): error S150: 'B1::x': not accessible here: 'B1' is reached through a private or protected base class (cl C2247)", "access-refused3.cpp(10): error S150: 'B1::f': not accessible here", "access-refused3.cpp(11): error S150: conversion from 'D1' to its base class 'B1': the base class is not accessible here (cl C2243)", "access-refused3.cpp(12): error S150: 'B1::x': not accessible here", "access-refused3.cpp(13): error S150: 'B1::x': not accessible here", "access-refused3.cpp(14): error S150: 'B1::s': not accessible here", "access-refused3.cpp(15): error S150: conversion from 'D1' to its base class 'B1'", "access-refused3.cpp(16): error S150: 'B1::sf': not accessible here", "access-refused3.cpp(17): error S150: conversion from 'D1' to its base class 'B1'"); errors = 9 },
+        @{ unit = "access-refused4"; expect = @("access-refused4.cpp(10): error S150: 'OD::operator delete': cannot access private member declared in class 'OD' (cl C2248)", "access-refused4.cpp(11): error S150: 'OD::operator delete[]': cannot access private member", "access-refused4.cpp(12): error S150: 'OD::operator delete': cannot access private member declared in class 'OD' (cl C2248)", "access-refused4.cpp(13): error S150: 'OD::operator delete[]': cannot access private member", "access-refused4.cpp(14): error S150: 'ODP::operator delete': cannot access protected member declared in class 'ODP' (cl C2248)", "access-refused4.cpp(17): error S150: static_cast between 'D2' and its base class 'B2': the base class is not accessible here (cl C2243)", "access-refused4.cpp(18): error S150: static_cast between 'D2' and its base class 'B2': the base class is not accessible here (cl C2243)", "access-refused4.cpp(19): error S150: static_cast between 'D2' and its base class 'B2': the base class is not accessible here (cl C2243)", "access-refused4.cpp(20): error S150: static_cast between 'D2' and its base class 'B2': the base class is not accessible here (cl C2243)", "access-refused4.cpp(24): error S150: 'B3::T': not accessible here: 'B3' is reached through a private or protected base class (cl C2247)", "access-refused4.cpp(25): error S150: 'B3::N': not accessible here", "access-refused4.cpp(26): error S150: 'B3::T': not accessible here: 'B3' is reached through a private or protected base class (cl C2247)", "access-refused4.cpp(27): error S150: 'B3::N': not accessible here", "access-refused4.cpp(28): error S150: 'B3::T': not accessible here: 'B3' is reached through a private or protected base class (cl C2247)", "access-refused4.cpp(30): error S150: 'A4::Priv': cannot access private member declared in class 'A4' (cl C2248)", "access-refused4.cpp(31): error S150: 'A4::Priv': cannot access private member declared in class 'A4' (cl C2248)", "access-refused4.cpp(32): error S150: 'A4::Priv': cannot access private member declared in class 'A4' (cl C2248)", "access-refused4.cpp(36): error S150: 'P6::~P6': cannot access private member declared in class 'P6' (cl C2248)", "access-refused4.cpp(37): error S150: 'P6::~P6': cannot access private member declared in class 'P6' (cl C2248)", "access-refused4.cpp(38): error S150: 'P6::~P6': cannot access private member declared in class 'P6' (cl C2248)", "access-refused4.cpp(44): error S150: 'H7': its implicit destructor cannot access the private destructor of 'M7' (cl C2248)", "access-refused4.cpp(45): error S150: 'HB7': its implicit destructor cannot access the private destructor of 'M7'", "access-refused4.cpp(46): error S150: 'H7': its implicit destructor cannot access the private destructor of 'M7'", "access-refused4.cpp(47): error S150: 'T7c::T7c': cannot access private member declared in class 'T7c' (cl C2248)", "access-refused4.cpp(48): error S150: 'CT8<int>::secret': cannot access private member declared in class 'CT8<int>' (cl C2248)", "access-refused4.cpp(50): error S103: call to undeclared function 'peek10'", "access-refused4.cpp(51): error S103: call to undeclared function 'plain10'"); diags = 27 },
+        @{ unit = "friend-refused"; expect = @("friend-refused.cpp(7): error S116: friend 'N::nothing': no function of this name and signature is declared in 'N' (cl C2039)", "friend-refused.cpp(8): error S150: 'C1::s': cannot access private member declared in class 'C1' (cl C2248)", "friend-refused.cpp(9): error S116: friend 'N::f': no function of this name and signature is declared in 'N'", "friend-refused.cpp(10): error S150: 'C3::s'", "friend-refused.cpp(11): error S116: friend '::nothing8': no function of this name and signature is declared in the global namespace (cl C2039)", "friend-refused.cpp(12): error S150: 'C8::s'", "friend-refused.cpp(14): error S150: 'C5::s'", "friend-refused.cpp(16): error S150: 'C4::s'"); errors = 8 },
+        @{ unit = "handler-refused"; expect = @("handler-refused.cpp(5): error S161: a handler after 'catch (...)' on line 4: '...' must be the last handler of its try block (C++98 15.3/6; cl C2311)", "handler-refused.cpp(8): error S161: a handler after 'catch (...)' on line 7", "handler-refused.cpp(11): error S161: a handler after 'catch (...)' on line 10",
+            "handler-refused.cpp(17): error S163: 'Inc*': a handler cannot catch a pointer to the incomplete type 'Inc' (C++98 15.3/1; cl accepts it)", "handler-refused.cpp(18): error S163: 'const Inc* const': a handler cannot catch a pointer to the incomplete type 'const Inc'", "handler-refused.cpp(19): error S163: 'Inc*': a handler cannot catch a pointer to",
+            "handler-refused.cpp(22): error S163: 'Inc&': a handler cannot catch a reference to the incomplete type 'Inc' (C++98 15.3/1; cl C2316)", "handler-refused.cpp(23): error S163: 'const IncU&': a handler cannot catch a reference to the incomplete type 'const IncU'",
+            "handler-refused.cpp(26): error S163: 'Inc': a handler cannot catch the incomplete type 'Inc' (C++98 15.3/1; cl C2687)", "handler-refused.cpp(29): error S163: 'void': a handler cannot catch the incomplete type 'void' (C++98 15.3/1; cl C2687)",
+            "handler-refused.cpp(32): error S163:", "handler-refused.cpp(33): error S163:", "handler-refused.cpp(36): error S163: 'Only<int>*': a handler cannot catch a pointer to the incomplete type 'Only<int>'", "handler-refused.cpp(39): error S163: 'Inc*': a handler cannot catch a pointer to the incomplete type 'Inc'"); errors = 14 },
+        @{ unit = "typeid-refused"; expect = @("typeid-refused.cpp(4): error S146: typeid: this 'std::type_info' is the program's own, not the one <typeinfo> defines: use of undefined type 'type_info' (cl C2027)"); errors = 1 },
         @{ unit = "qualconv-refused"; expect = @("qualconv-refused.cpp(6): error S105: cannot initialise 'bad' of type const int** from int**", "qualconv-refused.cpp(7): error S105: cannot initialise 'bad2' of type int* const** from int***", "qualconv-refused.cpp(8): error S105: cannot initialise 'bad3'"); errors = 3 },
         @{ unit = "wide-refused"; expect = @("wide-refused.cpp(3): error S114: array bound 4294967296: an array must not exceed 0x7fffffff bytes (cl C2148)", "wide-refused.cpp(5): error S114: array bound 1099511627776: an array must not exceed 0x7fffffff bytes (cl C2148)"); errors = 2 },
         @{ unit = "inftempl"; expect = @("error S148: template instantiation depth exceeds 1000 instantiating 'Inf<int*") },
+        @{ unit = "ucn-refused"; expect = @("ucn-refused.cpp(4): error: '\u0041': a universal-character-name cannot designate a character in the basic character set", "ucn-refused.cpp(5): error: '\u001f': a universal-character-name specifies a control character", "ucn-refused.cpp(6): error: '\u0085': a universal-character-name specifies a control character", "ucn-refused.cpp(7): error: '\u00d7': this character is not allowed in an identifier (C++98 Annex E; cl C3872)", "ucn-refused.cpp(8): error: '\u2030': this character is not allowed in an identifier", "ucn-refused.cpp(9): error: '\u0041': a universal-character-name cannot designate a character in the basic character set", "ucn-refused.cpp(10): error: '\u001f': a universal-character-name specifies a control character", "ucn-refused.cpp(11): error: '\ud800': a universal-character-name specifies an invalid character (cl C3850)", "ucn-refused.cpp(12): error: '\U00110000': a universal-character-name specifies an invalid character", "ucn-refused.cpp(13): error: incomplete universal-character-name: \u takes four hexadecimal digits", "ucn-refused.cpp(14): error: incomplete universal-character-name: \U takes eight hexadecimal digits", "ucn-refused.cpp(15): error: '\u0040': this character is not allowed in an identifier"); diags = 12 },
         @{ unit = "comment-unterminated"; expect = @("comment-unterminated.cpp(2): error: unterminated comment (cl C1071)") },
         @{ unit = "if-unterminated"; expect = @("if-unterminated.cpp(3): error: #if without #endif at end of file (cl C1070)") },
         @{ unit = "diagnostics"; expect = @("diagnostics.cpp(17): error S150: 'Priv::secret': cannot access private member declared in class 'Priv' (cl C2248)", "diagnostics.cpp(18): error S151: 'Ab': cannot instantiate abstract class ('f' is pure virtual) (cl C2259)", "diagnostics.cpp(19): error S151: 'Ab': cannot instantiate abstract class", "diagnostics.cpp(20): error S152: 'RefMem::operator=' cannot be generated: 'RefMem' has a data member 'r' of reference type (cl C2582)", "diagnostics.cpp(21): error S152: 'Holder::operator=' cannot be generated: 'Holder' has a data member 'm' whose class cannot be assigned", "diagnostics.cpp(9): error S150: 'Base::priv': cannot access private member declared in class 'Base'", "diagnostics.cpp(22): error S150: 'Base::prot': cannot access protected member declared in class 'Base'", "diagnostics.cpp(23): error S150: 'Hidden::Hidden': cannot access private member declared in class 'Hidden'", "diagnostics.cpp(14): error: expected ')' after the parameter list near '{'", "diagnostics.cpp(24): error: expected an expression near ';'") },
@@ -898,6 +953,8 @@ try {
         $missing = @($r.expect | Where-Object { -not $c6.Contains($_) })
         # errors: the number of errors the unit must report, no more (several on one line are not told apart above)
         if ($r.ContainsKey("errors")) { $n = ([regex]::Matches($c6, ': error S\d+')).Count; if ($n -ne $r["errors"]) { $missing += "$($r["errors"]) errors (reported: $n)" } }
+        # diags: the same for a unit whose errors come from the preprocessor or the parser (no S number)
+        if ($r.ContainsKey("diags")) { $n = ([regex]::Matches($c6, '\(\d+\): error')).Count; if ($n -ne $r["diags"]) { $missing += "$($r["diags"]) errors (reported: $n)" } }
         $left = @(@("6.obj", "6.asm", "6.map") | Where-Object { Test-Path "out\x64\$nm$_" })
         if ($rc -ne 0 -and $missing.Count -eq 0 -and $left.Count -eq 0) { Write-Host "  ok   $($r.unit).cpp: errors reported, exit code $rc, no object, listing or map" }
         else { Write-Host "  FAIL $($r.unit).cpp (exit $rc, missing diagnostics: $($missing -join ' | '), left behind: $($left -join ', ')):"; Write-Host $c6; $failed++ }
@@ -912,6 +969,16 @@ try {
     $countW = ([regex]::Matches($c6, "warning S1")).Count
     if ($rc -eq 0 -and $missingW.Count -eq 0 -and $countW -eq $wantW.Count) { Write-Host "  ok   warnings.cpp: the $countW warnings of cl /W4 and no other" }
     else { Write-Host "  FAIL warnings.cpp (exit $rc, $countW warnings, missing: $($missingW -join ' | ')):"; Write-Host $c6; $failed++ }
+    # handler-order.cpp: a handler hidden by an earlier one of its try block is valid (15.3/5) and compiles with a
+    # warning on the lines cl reports (its errors C2312, C2313, C2315 and its warning C4286) and no other (row G23)
+    $wantH = @("handler-order.cpp(11): warning S162: 'int': is caught by 'int' on line 10: the handler is never entered (cl C2312)", "handler-order.cpp(14): warning S162: 'int': is caught by 'int' on line 13", "handler-order.cpp(17): warning S162: 'const int&': reference is caught by 'int' on line 16: the handler is never entered (cl C2315)", "handler-order.cpp(20): warning S162: 'int': is caught by reference ('const int&') on line 19: the handler is never entered (cl C2313)", "handler-order.cpp(23): warning S162: 'D&': is caught by 'const D&' on line 22", "handler-order.cpp(26): warning S162: 'int*': is caught by 'const int*' on line 25", "handler-order.cpp(29): warning S162: 'D&': is caught by base class ('B&') on line 28: the handler is never entered (cl C4286)", "handler-order.cpp(32): warning S162: 'E*': is caught by base class ('const B*') on line 31", "handler-order.cpp(35): warning S162: 'D': is caught by base class ('B') on line 34", "handler-order.cpp(38): warning S162: 'W&': is caught by base class ('V&') on line 37", "handler-order.cpp(41): warning S162: 'int': is caught by 'int' on line 40", "handler-order.cpp(46): warning S162: 'int*': is caught by 'int*' on line 45: the handler is never entered (cl C2312)", "handler-order.cpp(49): warning S162: 'void()*': is caught by 'void()*' on line 48")
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n front-handlers "..\examples\sample-front\handler-order.cpp" 2>&1 | Out-String
+    $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+    $missingH = @($wantH | Where-Object { -not $c6.Contains($_) })
+    $countH = ([regex]::Matches($c6, "warning S1")).Count
+    if ($rc -eq 0 -and $missingH.Count -eq 0 -and $countH -eq $wantH.Count -and (Test-Path "out\x64\front-handlers6.obj")) { Write-Host "  ok   handler-order.cpp: compiled, the $countH warnings for hidden handlers and no other" }
+    else { Write-Host "  FAIL handler-order.cpp (exit $rc, $countH warnings, missing: $($missingH -join ' | ')):"; Write-Host $c6; $failed++ }
     # deep-nesting.cpp: 3000 nested blocks, 5000 nested parentheses and a 2000-term expression compile and run
     $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
     $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n front-deep "..\examples\sample-front\deep-nesting.cpp" 2>&1 | Out-String
@@ -1007,8 +1074,9 @@ try {
     # Buf lives, so they get no unwind handler and no range at -O0; cppBetween calls a C++ function meanwhile and keeps
     # them at -O0, and loses them at -O2, where that call is inlined away
     $eh = @{}
-    foreach ($f in @("lenOf", "before", "cppBetween")) { $m = [regex]::Match($asm0, "(?s)\?$f@nothrowc@@\S* PROC.*?ENDP"); $eh[$f] = if ($m.Success) { [int]($m.Value -match '(?m); (unwind|cleanup)\s*$') + [int]($m.Value -match ';@ehrange') } else { -1 } }
-    $m = [regex]::Match($asm2, "(?s)\?cppBetween@nothrowc@@\S* PROC.*?ENDP"); $eh["cppBetween2"] = if ($m.Success) { [int]($m.Value -match '(?m); (unwind|cleanup)\s*$') + [int]($m.Value -match ';@ehrange') } else { -1 }
+    # (a pad's block, or in cl's model its funclet "cleanup of region n"; a range, or in cl's model a state)
+    foreach ($f in @("lenOf", "before", "cppBetween")) { $m = [regex]::Match($asm0, "(?s)\?$f@nothrowc@@\S* PROC.*?ENDP"); $eh[$f] = if ($m.Success) { [int]($m.Value -match '(?m); (unwind|cleanup)( of region \d+)?\s*$') + [int]($m.Value -match ';@ehrange|;@ehstate') } else { -1 } }
+    $m = [regex]::Match($asm2, "(?s)\?cppBetween@nothrowc@@\S* PROC.*?ENDP"); $eh["cppBetween2"] = if ($m.Success) { [int]($m.Value -match '(?m); (unwind|cleanup)( of region \d+)?\s*$') + [int]($m.Value -match ';@ehrange|;@ehstate') } else { -1 }
     if ($eh["lenOf"] -eq 0 -and $eh["before"] -eq 0 -and $eh["cppBetween"] -eq 2 -and $eh["cppBetween2"] -eq 0) { Write-Host "  ok   front.cpp: nothrowc::lenOf and before have no unwind handler (C calls only while Buf lives), cppBetween has one at -O0 and none at -O2" }
     else { Write-Host "  FAIL front.cpp unwind handlers (handler + range found): lenOf $($eh['lenOf']), before $($eh['before']), cppBetween -O0 $($eh['cppBetween']), -O2 $($eh['cppBetween2']); expected 0, 0, 2, 0"; $failed++ }
     # a value takes over the register of an operand whose last use defines it (B4): coal::sum3's two-address forms copy no
@@ -1097,12 +1165,34 @@ try {
     $lp = @{}
     foreach ($lvl in @(0, 2)) {
         $a = (&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } })
-        $lp["destroy$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_unwind_destroy')).Count
+        # (cl's model: the lean pad is the funclet that is one jump to the destructor, ";@funclet 0")
+        $lp["destroy$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_unwind_destroy')).Count + ([regex]::Matches($a, '(?m)^;@funclet 0')).Count
         $lp["enter$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_unwind_enter')).Count
         $lp["stub$lvl"] = ([regex]::Matches($a, '(?m)^\S+_T\d+:[^\r\n]*\r?\n(?:\S+_R\d+[be]:\s*\r?\n)*\s+jmp ')).Count
     }
     if ($lp["destroy0"] -ge 100 -and $lp["destroy2"] -ge 50 -and $lp["stub0"] -eq 0 -and $lp["stub2"] -eq 0) { Write-Host "  ok   front.cpp: lean landing pads ($($lp['destroy0']) at -O0, $($lp['destroy2']) at -O2; $($lp['enter0']) pads with enter and leave at -O0), no dispatch stub that is one jump" }
     else { Write-Host "  FAIL front.cpp landing pads: cppparse_unwind_destroy calls $($lp['destroy0']) at -O0 (expected 100 or more), $($lp['destroy2']) at -O2 (expected 50 or more); dispatch stubs that are one jump $($lp['stub0']) at -O0, $($lp['stub2']) at -O2 (expected 0)"; $failed++ }
+    # the pads of a frame follow one another by the generated code (row G30): a pad inside a region of its function
+    # calls cppparse_unwind_destroy_next, which returns, and goes on at that region's pad by a jump or by falling into
+    # the pad laid out next (a label line follows the call); the entry that does not return is followed by neither.
+    # The runtime writes no return address: it reads its own in one place (cppparse_unwind_enter notes the frame)
+    $pc = @{}
+    foreach ($lvl in @(0, 2)) {
+        $a = (&{ if ($lvl -eq 0) { $asm0 } else { $asm2 } })
+        $pc["plain$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_unwind_destroy')).Count
+        $pc["next$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_unwind_destroy_next\s*$')).Count
+        $pc["jump$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_unwind_destroy_next\s*\r?\n\s+jmp \S+')).Count
+        $pc["fall$lvl"] = ([regex]::Matches($a, '(?m)^\s+call cppparse_unwind_destroy_next\s*\r?\n(?:\s+;[^\r\n]*\r?\n)*\S+:')).Count
+    }
+    $rtText = Get-Content "$Sandbox\..\runtime\cppparse_rt.cpp" -Raw
+    $rtReads = ([regex]::Matches($rtText, '_AddressOfReturnAddress\s*\(')).Count
+    $rtWrites = ([regex]::Matches($rtText, '\*\s*\(?\s*\(\s*void\s*\*\s*\*\s*\)\s*_AddressOfReturnAddress|\*\s*back\s*=')).Count
+    $padsOk = $true
+    foreach ($lvl in @(0, 2)) { if ($pc["jump$lvl"] + $pc["fall$lvl"] -ne $pc["next$lvl"]) { $padsOk = $false } }
+    # (cl's model has funclets in place of these pads: no such call in the listing)
+    if ($pc["plain0"] -gt 0 -and $pc["next0"] -eq 0) { $padsOk = $false }
+    if ($padsOk -and $rtReads -eq 1 -and $rtWrites -eq 0) { Write-Host "  ok   front.cpp: $($pc['next0']) pads at -O0 and $($pc['next2']) at -O2 go on at the frame's next pad themselves ($($pc['fall0']) and $($pc['fall2']) fall into it, the others jump); the runtime writes no return address" }
+    else { Write-Host "  FAIL front.cpp pad chain: at -O0 $($pc['next0']) calls of cppparse_unwind_destroy_next, $($pc['jump0']) followed by a jmp, $($pc['fall0']) by a label; at -O2 $($pc['next2']), $($pc['jump2']), $($pc['fall2']) (each call is followed by one or the other); cppparse_rt.cpp reads its return address in $rtReads place(s) (expected 1) and writes one in $rtWrites (expected 0)"; $failed++ }
     # a byte that only steers the next branch (D10) is tested where it is: no call's bool result zero-extended and then
     # tested as 32 bits, bytes compared in memory or tested in their byte register
     $bt = @{}
@@ -1156,6 +1246,142 @@ try {
         if ($LASTEXITCODE -eq 0 -and $got -eq $want) { Write-Host "  ok   copies.cpp (-O$lvl) logs the copies and destructions of cl $clOpt ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
         else { Write-Host "  FAIL copies.cpp (-O$lvl, exit $LASTEXITCODE) differs from cl $clOpt's build:"; Write-Host "  cl:"; Write-Host $want; Write-Host "  cppparse:"; Write-Host $got; $failed++ }
     }
+    # alttok.cpp: the alternative tokens, digraphs and trigraphs of C++98 (2.5, 2.3) mean their primary tokens, and
+    # # keeps the spelling written; cl reads them with /permissive- and /Zc:trigraphs
+    $clOut = & $cl /nologo /EHsc /W3 /permissive- /Zc:trigraphs "/Foout\x64\" "/Feout\x64\alttok_cl.exe" "..\examples\sample-front\alttok.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\alttok.cpp" }
+    $want = & ".\out\x64\alttok_cl.exe" 2>&1 | Out-String
+    foreach ($lvl in @(0, 2)) {
+        $nm = "alttok$lvl"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\alttok.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\alttok.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
+        $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $got -eq $want -and $want -match 'str a and b\|x<:1:>\|%: y' -and $want -match 'strlit 1') { Write-Host "  ok   alttok.cpp (-O$lvl): alternative tokens, digraphs and trigraphs as cl /permissive- /Zc:trigraphs reads them, # keeps their spelling" }
+        else { Write-Host "  FAIL alttok.cpp (-O$lvl, exit $LASTEXITCODE) differs from cl's build:"; Write-Host "  cl:"; Write-Host $want; Write-Host "  cppparse:"; Write-Host $got; $failed++ }
+    }
+    # ucn.cpp: universal character names (2.2/2, Annex E). In identifiers: the program built by cl against cppparse's
+    # object linked with cl's object of the file's other half (/DUCN_OTHER: the names must decorate alike, UTF-8 in
+    # the symbol); in literals: the code units cl gives (code page 1252 in narrow literals, UTF-16 in wide ones)
+    $clOut = & $cl /nologo /c /EHsc /W3 /permissive- /DUCN_OTHER "/Foout\x64\ucn_other.obj" "..\examples\sample-front\ucn.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\ucn.cpp (UCN_OTHER)" }
+    $clOut = & $cl /nologo /EHsc /W3 /permissive- "/Foout\x64\ucn_cl.obj" "/Feout\x64\ucn_cl.exe" "..\examples\sample-front\ucn.cpp" "out\x64\ucn_other.obj" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\ucn.cpp" }
+    $want = & ".\out\x64\ucn_cl.exe" 2>&1 | Out-String
+    foreach ($lvl in @(0, 2)) {
+        $nm = "ucn$lvl"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\ucn.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\ucn.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\ucn_other.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj with cl's ucn_other.obj:"; Write-Host $clOut; $failed++; continue }
+        $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $got -eq $want -and $want -match 'names 343374' -and $want -match 'n2 2: 80 00' -and $want -match '#if: a narrow') { Write-Host "  ok   ucn.cpp (-O$lvl): universal character names in identifiers (linked with cl's object) and in literals as cl reads them" }
+        else { Write-Host "  FAIL ucn.cpp (-O$lvl, exit $LASTEXITCODE) differs from cl's build:"; Write-Host "  cl:"; Write-Host $want; Write-Host "  cppparse:"; Write-Host $got; $failed++ }
+    }
+    # -E keeps the names as written (cl /EP prints them in the code page, which does not read back: no comparison)
+    $p = Start-Process -FilePath $exe -ArgumentList '-E','-DUCN_NO_STDIO','..\examples\sample-front\ucn.cpp' -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$Sandbox\out\x64\ucn-pp.txt" -RedirectStandardError "$Sandbox\out\x64\ucn-pp-diag.txt"
+    $ppText = Get-Content "$Sandbox\out\x64\ucn-pp.txt" -Raw
+    $wantPp = @('int local\u00e9 = caf\u00E9 + \u0434\u0430;', 'int x\u00e9y = 5;', 'n\u03b1::S\U000000e9::s\u4e2d * 10 + x\u00e9y + 7 + b.get\u00e9();', 'const char s2[] = "caf\u00E9 \U000000e9 x\u00e9y";')
+    $missingPp = @($wantPp | Where-Object { -not $ppText.Contains($_) })
+    if ($p.ExitCode -eq 0 -and $missingPp.Count -eq 0) { Write-Host "  ok   ucn.cpp: -E and # keep the universal character names as written" }
+    else { Write-Host "  FAIL -E of sample-front\ucn.cpp (exit $($p.ExitCode)), missing: $($missingPp -join ' | ')"; $failed++ }
+    # front2.cpp: built by cl (the reference) and by cppparse at -O0 and -O2; the programs must print the same lines
+    $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\front2_cl.exe" "..\examples\sample-front\front2.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\front2.cpp" }
+    $want = & ".\out\x64\front2_cl.exe" 2>&1 | Out-String
+    foreach ($lvl in @(0, 2)) {
+        $nm = "front2_$lvl"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\front2.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\front2.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
+        $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -and $got -eq $want -and $want -match 'explorder named 28 32 2 2 20 10 2 4' -and $want -match 'friends 7 7 8 9 14 21 2 8 6 5 5' -and $want -match 'protected 15 14 26 5 5 5 4' -and $want -match 'tiarray \.\$\$BY02H\|\.\$\$BY114H\|\.\$\$BY01\$\$CBH\|' -and $want -match 'tiarray \.PEAY02\$\$CBH\|\.PEAY112H\|' -and $want -match 'explorder 24 9 8 31 192151 322 4' -and $want -match 'newarr V new\[\] 104' -and $want -match 'newarr C delete\[\] placement 124 9' -and $want -match 'newarr live 0' -and $want -match 'mpdown VW2 fw\[16\] 0 0 fs\[16\] 0 8 fs2\[16\] 0 4' -and $want -match 'mpdown K2 nv\[12\] 48 40 0 s\[12\] 0 40 4' -and $want -match 'elab 4 5 1 6' -and $want -match 'deducecv 4 7 3 4 25 3' -and $want -match 'deducecv 1 0 1 0 1' -and $want -match 'arrparm 249' -and $want -match 'qualdeduce 11 3 12 8 20 72' -and $want -match 'qualdeduce 1 2 105 203 8 16 9 3\.5' -and $want -match 'protstatic 32 64 15' -and $want -match 'specconst 2 13 20 2' -and $want -match 'newhide 7 7 7 4' -and $want -match 'opaccess 161 109 -21 42' -and $want -match 'typeaccess 11 8 19 42' -and $want -match 'dtoraccess 1 134' -and $want -match 'friendtmpl 35 36 14 1 0' -and $want -match 'baseaccess 14 2 7 7 5 16 10' -and $want -match 'fnarr 4 2 8 4 4 15 11 0 0 9 31' -and $want -match 'fnref 41 2 8 2 10 14' -and $want -match 'accessrest 12 13 9 6 8 7 17' -and $want -match 'fnarr2 20 20 1 4 7 2 10 100 60') { Write-Host "  ok   front2.cpp (-O$lvl) prints what cl's build prints ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
+        else { Write-Host "  FAIL front2.cpp (-O$lvl, exit $LASTEXITCODE) differs from cl's build:"; Write-Host "  cl:"; Write-Host $want; Write-Host "  cppparse:"; Write-Host $got; $failed++ }
+    }
+    # parameters declared as arrays decorate as cl's const pointers (front2.cpp arrparm::, the names cl gives them)
+    $arrNames = @('?f1@arrparm@@YAHQEAH@Z', '?f2@arrparm@@YAHQEAH0@Z', '?f3@arrparm@@YAHQEAHPEAH0@Z', '?f4@arrparm@@YAHQEAPEBDQEBH@Z', '?f5@arrparm@@YAHQEAY02H0@Z', '?g@S@arrparm@@QEBAHQEAH@Z', '?h@S@arrparm@@SAHQEAD@Z', '?decl@arrparm@@YAHQEAH@Z', '?decl2@arrparm@@YAHPEAH@Z', '??$t1@H@arrparm@@YAHQEAH@Z', '??$t1@N@arrparm@@YAHQEAN@Z')
+    $asmArr = if (Test-Path "out\x64\front2_06.asm") { Get-Content "out\x64\front2_06.asm" -Raw } else { "" }
+    $arrMissing = @($arrNames | Where-Object { -not $asmArr.Contains("$_ PROC") })
+    if ($arrMissing.Count -eq 0) { Write-Host "  ok   front2.cpp (-O0): $($arrNames.Count) functions with array parameters decorate as cl's (QEAH, QEAPEBD, QEAY02H, back-references)" }
+    else { Write-Host "  FAIL front2.cpp (-O0): not in the listing: $($arrMissing -join ' ')"; $failed++ }
+    # array parameters inside the function types of a parameter (front2.cpp fnarr::, the names of cl's object): const
+    # pointers there as well, the second use of a function type a back-reference however it is written, a reference
+    # to a function as A6A (G15)
+    $fnArrNames = @('?one@fnarr@@YAHQEAH@Z', '?fp@fnarr@@YAHP6AHQEAH@Z0@Z', '?two@fnarr@@YAHP6AHQEAH@Z1@Z', '?two2@fnarr@@YAHP6AHPEAH@Z1@Z', '?mix@fnarr@@YAHP6AHPEAH@ZQEAH@Z', '?mix2@fnarr@@YAHP6AHQEAH@ZPEAH@Z', '?ref@fnarr@@YAHA6AHQEAPEAD@ZPEAPEAD@Z', '?inner@fnarr@@YAHP6AHQEAH@Z0@Z', '?deep@fnarr@@YAHP6AHP6AHQEAH@Z0@Z@Z', '?rep@fnarr@@YAHP6AHP6AHQEAH@Z10@Z@Z', '?ret@fnarr@@YAHP6AP6AHQEAH@ZQEAD@Z@Z', '?m@S@fnarr@@QEAAHP6AXQEAH@Z@Z', '?sm@S@fnarr@@SAHP6AHQEBD@Z0@Z', '??$tp@H@fnarr@@YAHP6AHQEAH@ZH@Z')
+    $fnArrMissing = @($fnArrNames | Where-Object { -not $asmArr.Contains("$_ PROC") })
+    if ($fnArrMissing.Count -eq 0) { Write-Host "  ok   front2.cpp (-O0): $($fnArrNames.Count) functions with array parameters inside function-pointer parameters decorate as cl's (P6AHQEAH@Z, back-references, A6A)" }
+    else { Write-Host "  FAIL front2.cpp (-O0): not in the listing: $($fnArrMissing -join ' ')"; $failed++ }
+    # and in the type a declared function returns, through a typedef and in a variable's type (front2.cpp fnarr2::, the
+    # names of cl's object; G15, the rest)
+    $fnArr2Fns = @('?pick@fnarr@@YAP6AHQEAH@ZQEAD@Z', '?pick@fnarr2@@YAP6AHQEAH@ZQEAD@Z', '?pick3@fnarr2@@YAP6AP6AHQEAH@ZQEAD@ZH@Z', '?t1@fnarr2@@YAHP6AHQEAH@Z@Z', '?t2@fnarr2@@YAHP6AHPEAH@Z@Z', '?t3@fnarr2@@YAHP6AHQEAH@Z@Z', '?t4@fnarr2@@YAHP6AHQEAH@Z1@Z', '?t5@fnarr2@@YAHP6AHPEAH@Z1@Z', '?t6@fnarr2@@YAHA6AHQEAH@Z@Z')
+    $fnArr2Vars = @('?gp@fnarr2@@3P6AHQEAH@ZEA', '?gp2@fnarr2@@3P6AHPEAH@ZEA', '?gp3@fnarr2@@3P6AHQEAH@ZEA', '?gp4@fnarr2@@3P6AHQEAH@ZEA', '?garr@fnarr2@@3PAP6AHQEAH@ZA', '?gpp@fnarr2@@3P6AP6AHQEAH@ZQEAD@ZEA', '?sm@S@fnarr2@@2P6AHQEAH@ZEA', '?sm2@S@fnarr2@@2P6AHQEAH@ZEA')
+    $fnArr2Missing = @($fnArr2Fns | Where-Object { -not $asmArr.Contains("$_ PROC") }) + @($fnArr2Vars | Where-Object { -not $asmArr.Contains("PUBLIC $_") })
+    if ($fnArr2Missing.Count -eq 0) { Write-Host "  ok   front2.cpp (-O0): $($fnArr2Fns.Count) functions and $($fnArr2Vars.Count) variables with array parameters in a result type, a typedef or a variable's type decorate as cl's" }
+    else { Write-Host "  FAIL front2.cpp (-O0): not in the listing: $($fnArr2Missing -join ' ')"; $failed++ }
+    # covariant-vbase.cpp: a covariant override in a virtual base's vftable whose overrider is held by another virtual
+    # base. The output is compared with the lines the standard requires and with the build of Visual Studio's
+    # clang-cl (the reference here, at /Od for -O0 and /O2 for -O2), not with cl's build: cl's own vtordispex thunk
+    # there skips the return adjustment (the file's header)
+    $wantCov = "covvbx 2 3 2 1 5`ncovvbx 2 5 1 15`ncovvbx 1 1 2 3`ncovvbx 2 3 7 1`n"
+    $clangCl = "$VsRoot\VC\Tools\Llvm\x64\bin\clang-cl.exe"
+    if (-not (Test-Path $clangCl)) { Write-Host "  note covariant-vbase.cpp: clang-cl is not installed ($clangCl); compared with the fixed lines only" }
+    foreach ($lvl in @(0, 2)) {
+        $nm = "covvbx_$lvl"
+        $refCov = $wantCov
+        if (Test-Path $clangCl) {
+            $copt = if ($lvl -eq 0) { "/Od" } else { "/O2" }
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $ccOut = & $clangCl /nologo /EHsc $copt "/Foout\x64\${nm}_clang.obj" "/Feout\x64\${nm}_clang.exe" "..\examples\sample-front\covariant-vbase.cpp" 2>&1 | Out-String
+            $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+            if ($rc -ne 0) { Write-Host "  FAIL clang-cl $copt of sample-front\covariant-vbase.cpp:"; Write-Host $ccOut; $failed++; continue }
+            $refCov = ((& ".\out\x64\${nm}_clang.exe" 2>&1 | Out-String) -replace "`r", "")
+            if ($LASTEXITCODE -ne 0 -or $refCov -ne $wantCov) { Write-Host "  FAIL covariant-vbase.cpp: clang-cl $copt does not print the lines the standard requires (exit $LASTEXITCODE):"; Write-Host $refCov; $failed++; continue }
+        }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\covariant-vbase.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\covariant-vbase.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
+        $got = ((& ".\out\x64\${nm}.exe" 2>&1 | Out-String) -replace "`r", "")
+        if ($LASTEXITCODE -eq 0 -and $got -eq $refCov) { Write-Host "  ok   covariant-vbase.cpp (-O$lvl): the overrider in another virtual base returns the adjusted pointer (4 lines, as clang-cl's build and the standard's)" }
+        else { Write-Host "  FAIL covariant-vbase.cpp (-O$lvl, exit $LASTEXITCODE):"; Write-Host $got; $failed++ }
+    }
+    # covariant-variadic.cpp: a variadic function overridden with a covariant return type that moves the pointer; cl
+    # refuses the program (C2688), so the output is compared with the lines the file's header lists. The last two: the
+    # static locals of CD3::w are one object each for its two bodies, built once and destroyed once after main (G9)
+    $wantVar = "covvar 2 60 21 1`ncovvar 2 11 9`ncovvar 2 115 109 1 5`ncovvar static 4101 4102 4103 1`ncovvar dropped 41 1`n"
+    foreach ($lvl in @(0, 2)) {
+        $nm = "covvar_$lvl"
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\covariant-variadic.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\covariant-variadic.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
+        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
+        $got = ((& ".\out\x64\${nm}.exe" 2>&1 | Out-String) -replace "`r", "")
+        if ($LASTEXITCODE -eq 0 -and $got -eq $wantVar) { Write-Host "  ok   covariant-variadic.cpp (-O$lvl): the overridden slots return the adjusted pointer and reference, the two bodies share their static locals (5 lines)" }
+        else { Write-Host "  FAIL covariant-variadic.cpp (-O$lvl, exit $LASTEXITCODE):"; Write-Host $got; $failed++ }
+    }
+    $asmCov = if (Test-Path "out\x64\covvbx_06.asm") { Get-Content "out\x64\covvbx_06.asm" -Raw } else { "" }
+    if ($asmCov.Contains('DQ OFFSET ?get@VL@@$R4BA@7PPPPPPPM@CI@EAAPEAUX@@XZ') -and $asmCov.Contains('DQ OFFSET ?ref@VL@@$R4BA@7PPPPPPPM@CI@EAAAEAUX@@HHHHH@Z')) { Write-Host "  ok   covariant-vbase.cpp (-O0): WL's slots hold the vtordispex thunks to the return thunks (`$R4 named with the slot's return type)" }
+    else { Write-Host "  FAIL covariant-vbase.cpp (-O0): the `$R4 thunks returning X* and X& are not in WL's vftable"; $failed++ }
+    # an adjustor thunk that moves this forward (VL::get in the vftable of VL's virtual base): the adjustment spelled as
+    # cl spells it, an unsigned 32-bit number (cl's object has ?get@VL@@WPPPPPPMI@EAAPEAUY@@XZ; it was W?DI@) (G16)
+    if ($asmCov.Contains('?get@VL@@WPPPPPPMI@EAAPEAUY@@XZ') -and -not $asmCov.Contains('@VL@@W?')) { Write-Host "  ok   covariant-vbase.cpp (-O0): the adjustor thunk with a negative adjustment is named as cl's (WPPPPPPMI@)" }
+    else { Write-Host "  FAIL covariant-vbase.cpp (-O0): the adjustor thunk of VL::get is not named ?get@VL@@WPPPPPPMI@EAAPEAUY@@XZ"; $failed++ }
+    # a pointer and a reference to an array in a function's decorated name, as cl's (front2.cpp tiarray::byPtr, byRef)
+    $asmF2 = if (Test-Path "out\x64\front2_06.asm") { Get-Content "out\x64\front2_06.asm" -Raw } else { "" }
+    if ($asmF2.Contains('?byPtr@tiarray@@YAHPEAY02H@Z PROC') -and $asmF2.Contains('?byRef@tiarray@@YAHAEAY01$$CBH@Z PROC')) { Write-Host "  ok   front2.cpp (-O0): a pointer and a reference to an array decorate as cl's (PEAY02H, AEAY01`$`$CBH)" }
+    else { Write-Host "  FAIL front2.cpp (-O0): ?byPtr@tiarray@@YAHPEAY02H@Z or ?byRef@tiarray@@YAHAEAY01`$`$CBH@Z is not in the listing"; $failed++ }
     # MatrixTest.cpp (Matrix.hpp, Vector.hpp; asserts and streams) against cl: member templates of class templates,
     # injected class names with arguments, a function template declared before its definition. std::cout comes
     # from the libcpp/iostream.cpp objects of test 15
@@ -1244,6 +1470,77 @@ try {
         else { Write-Host "  FAIL $nm.exe (-O$lvl) line record offsets: $($bad -join '; ')"; Write-Host $offs; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed CodeView check(s) failed" }
+
+    Write-Host ""
+    Write-Host "=== Test 19: version 6 self-compile (--compile6 -O0 of cppparse's own sources and libcpp, linked and run) ==="
+    # row P3: a change to the front end, the back end or a header that breaks the self-host fails the suite, not only
+    # selfhost.ps1. The units compile to out\self6, one process each and as many at a time as there are processors;
+    # the objects are linked with libcpp and the exception runtime, and the program must compile sample-opt to the
+    # object and listings the compiler under test writes. selfhost.ps1 stays the full check (-O2, generation two).
+    $failed = 0
+    $selfDir = "$Sandbox\out\self6"
+    New-Item -ItemType Directory -Force $selfDir, "$selfDir\run", "$selfDir\ref" | Out-Null
+    Get-ChildItem $selfDir -File -Recurse | Remove-Item
+    $selfInc = @(); foreach ($sdir in $SourceDirs) { $selfInc += "-I `"$Src\cppparse\$sdir`"" }
+    $selfInc += @("-I `"$Src\include`"", "-I `"$Src\platform`"")
+    $selfJobs = New-Object System.Collections.ArrayList
+    foreach ($sdir in $SourceDirs) {
+        foreach ($f in Get-ChildItem "$Src\cppparse\$sdir\*.cpp") {
+            $null = $selfJobs.Add(@{ Name = $f.BaseName; Args = "--compile6 -O0 --obj --msvc-mangling -q $($selfInc -join ' ') -o `"$selfDir`" -n $($f.BaseName) `"$($f.FullName)`"" })
+        }
+    }
+    $selfUnits = $selfJobs.Count
+    $null = $selfJobs.Add(@{ Name = "iostream"; Args = "--compile6 -O0 --obj --msvc-mangling -q -I `"$Src\include`" -o `"$selfDir`" -n iostream `"$Src\libcpp\iostream.cpp`"" })
+    $selfStart = Get-Date
+    $running = New-Object System.Collections.ArrayList
+    $next = 0; $slots = [Math]::Max(1, [Environment]::ProcessorCount)
+    $selfBad = @()
+    while ($next -lt $selfJobs.Count -or $running.Count -gt 0) {
+        while ($next -lt $selfJobs.Count -and $running.Count -lt $slots) {
+            $job = $selfJobs[$next]; $next++
+            $proc = Start-Process -FilePath $exe -ArgumentList $job.Args -WorkingDirectory $Sandbox -NoNewWindow -PassThru -RedirectStandardOutput "$selfDir\$($job.Name).out" -RedirectStandardError "$selfDir\$($job.Name).err"
+            $null = $proc.Handle   # keeps the process handle so that ExitCode is available after the exit
+            $null = $running.Add(@{ Job = $job; Proc = $proc })
+        }
+        $null = $running[0].Proc.WaitForExit(250)
+        foreach ($r in @($running)) {
+            if (-not $r.Proc.HasExited) { continue }
+            $running.Remove($r)
+            if ($r.Proc.ExitCode -ne 0 -or -not (Test-Path "$selfDir\$($r.Job.Name)6.obj")) { $selfBad += "$($r.Job.Name) (exit $($r.Proc.ExitCode))" }
+        }
+    }
+    $selfSecs = ((Get-Date) - $selfStart).TotalSeconds
+    if ($selfBad.Count -eq 0) { Write-Host ("  ok   all {0} own sources and libcpp\iostream.cpp compile at -O0 ({1:N0} s, {2} at a time)" -f $selfUnits, $selfSecs, $slots) }
+    else {
+        Write-Host "  FAIL $($selfBad.Count) unit(s) not compiled: $($selfBad -join ', ')"
+        foreach ($b in @($selfBad | Select-Object -First 3)) {
+            $nm = ($b -split ' ')[0]
+            Get-Content "$selfDir\$nm.out", "$selfDir\$nm.err" -ErrorAction SilentlyContinue | Select-String -Pattern "error|note" | Select-Object -First 4 | ForEach-Object { Write-Host "    $($_.Line.Trim())" }
+        }
+        $failed++
+    }
+    if ($failed -eq 0) {
+        $linkExe = "$Msvc\bin\Hostx64\x64\link.exe"
+        $selfObjs = @(); foreach ($j in $selfJobs) { $selfObjs += "$selfDir\$($j.Name)6.obj" }
+        $lo = & $linkExe /nologo /SUBSYSTEM:CONSOLE "/OUT:$selfDir\cppparse-s6.exe" @selfObjs "out\x64\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$selfDir\cppparse-s6.exe")) { Write-Host "  FAIL link of the self-compiled objects:"; Write-Host $lo; $failed++ }
+        else {
+            Write-Host "  ok   $($selfObjs.Count) objects, the exception runtime and the C runtime link to out\self6\cppparse-s6.exe"
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $c6 = & "$selfDir\cppparse-s6.exe" --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\self6\run -n self-opt "..\examples\sample-opt\opt.cpp" 2>&1 | Out-String
+            $rc = $LASTEXITCODE
+            $null = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\self6\ref -n self-opt "..\examples\sample-opt\opt.cpp" 2>&1
+            $ErrorActionPreference = $eap
+            $differ = @()
+            foreach ($suffix in @("6.obj", "6.asm", "-ir6.txt", "-asm6.txt", "-sym6.txt")) {
+                $fa = "$selfDir\run\self-opt$suffix"; $fb = "$selfDir\ref\self-opt$suffix"
+                if (-not (Test-Path $fa) -or -not (Test-Path $fb) -or -not [System.Linq.Enumerable]::SequenceEqual([byte[]][System.IO.File]::ReadAllBytes($fa), [byte[]][System.IO.File]::ReadAllBytes($fb))) { $differ += $suffix }
+            }
+            if ($rc -eq 0 -and $differ.Count -eq 0) { Write-Host "  ok   cppparse-s6.exe compiles sample-opt to the object and listings the compiler under test writes" }
+            else { Write-Host "  FAIL cppparse-s6.exe on sample-opt (exit $rc), differs: $($differ -join ', ')"; Write-Host $c6; $failed++ }
+        }
+    }
+    if ($failed -ne 0) { throw "$failed self-compile check(s) failed" }
 
     Write-Host ""
     Write-Host "=== cppparse: build and all tests succeeded ==="

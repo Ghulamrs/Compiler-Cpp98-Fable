@@ -42,6 +42,13 @@ std::string CodeBase::displayPath(const std::string& abs) const
 
 // ---- loading ------------------------------------------------------------------
 
+void CodeBase::excludeFolder(const std::string& path)
+{
+    std::string dir = normalizePath(absolutePath(path));
+    if (dir.size() > 1 && dir[dir.size() - 1] == '/') dir.erase(dir.size() - 1);
+    m_excluded.push_back(dir);
+}
+
 bool CodeBase::addInput(const std::string& path)
 {
     m_inputs.push_back(path);
@@ -107,8 +114,9 @@ bool CodeBase::loadFolder(const std::string& path)
     if (p.name.empty()) p.name = dir;
     p.path = dir + "/(folder)";     // dirName(path) yields the folder itself
     p.version = "folder scan (recursive)";
-    std::vector<std::string> dirsWithHeaders;
-    findSourceFiles(dir, p.headerFiles, p.sourceFiles, dirsWithHeaders, 0);
+    std::vector<std::string> dirsWithHeaders, skipped;
+    findSourceFiles(dir, p.headerFiles, p.sourceFiles, dirsWithHeaders, 0, &m_excluded, &skipped);
+    for (size_t i = 0; i < skipped.size(); ++i) m_messages.push_back("folder scan skipped " + skipped[i] + " (--exclude)");
     p.includeDirs.push_back(dir);
     for (size_t i = 0; i < dirsWithHeaders.size(); ++i) addUnique(p.includeDirs, dirsWithHeaders[i]);
     if (p.headerFiles.empty() && p.sourceFiles.empty()) {

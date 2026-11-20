@@ -10,6 +10,8 @@
 #ifndef CPPPARSE_CXXAST_HPP
 #define CPPPARSE_CXXAST_HPP
 
+#include "Int64.hpp"
+
 #include <string>
 #include <vector>
 
@@ -71,6 +73,7 @@ struct DeclSpec {                   // decl-specifier-seq
     Loc           loc;
     int           align;            // __declspec(align(N)) among the specifiers (0: none)
     bool          noreturn;         // __declspec(noreturn)
+    bool          replaceable;      // __declspec(replaceable): the function's definition is a default the program may replace
     DeclSpec();
     bool hasType() const { return kind != None; }
     std::string text() const;       // "const unsigned int", "std::vector<int>"
@@ -158,8 +161,8 @@ struct Expr {
     sema::Symbol*      semaSym;     // the entity a Name/Member/Call refers to (variable, function chosen by overload resolution, ...)
     bool               semaLvalue;
     bool               semaConst;   // a constant expression
-    long long          semaValue;   // its value when semaConst (see Sema.hpp, Symbol::constValue)
-    const sema::Type*  semaOperand; // Typeid: the type the operand names or has (typeid(int), typeid(x))
+    int64              semaValue;   // its value when semaConst (see Sema.hpp, Symbol::constValue)
+    const sema::Type*  semaOperand; // Typeid: the type the operand names or has (typeid(int), typeid(x)); New: the array type a typedef names (new A3)
     Expr() : kind(Error), type(0), arrayDelete(false), hasInit(false), arrowMember(false), globalScope(false), semaType(0), semaSym(0), semaLvalue(false), semaConst(false), semaValue(0), semaOperand(0) {}
 };
 

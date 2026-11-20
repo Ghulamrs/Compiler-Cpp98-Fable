@@ -3,6 +3,8 @@
 #ifndef CPPPARSE_LITERAL_HPP
 #define CPPPARSE_LITERAL_HPP
 
+#include "Int64.hpp"
+
 #include <string>
 #include <vector>
 
@@ -16,8 +18,21 @@ bool stringLiteralUnits(const std::string& text, std::vector<unsigned long>& uni
 long stringLiteralLength(const std::string& text);
 
 // the value of a character literal and the number of characters it holds (more than one: a multicharacter
-// constant of type int; L'ab' is L'a' as with cl). A single narrow character is a signed char
-long charLiteralValue(const std::string& text, int& count);
+// constant of type int; L'ab' is L'a' as with cl). A single narrow character is a signed char. preprocessor: the
+// value in an #if, where cl reads a universal character name of a narrow constant as its UTF-8 bytes (16.1/4
+// leaves open whether the value is the one the constant has in an expression)
+long charLiteralValue(const std::string& text, int& count, bool preprocessor = false);
+
+// a universal character name (C++98 2.2/2) at text[at]: \u and four hexadecimal digits or \U and eight. value is
+// the code point and len the characters it takes; false when text[at] does not start a complete one
+bool universalCharacterName(const std::string& text, size_t at, unsigned long& value, size_t& len);
+// why the code point may not be written as a universal character name (2.2/2: below 0x20, 0x7F to 0x9F, a member
+// of the basic source character set; not a character at all: a surrogate or beyond 0x10FFFF), 0 when it may
+const char* universalCharacterError(unsigned long value);
+// Annex E: the code points a universal character name may designate in an identifier
+bool identifierCharacter(unsigned long value);
+// the code point as UTF-8, the form cl gives an identifier's extended characters in a decorated name
+std::string utf8Of(unsigned long value);
 
 // the value of a floating literal (digits, '.', an exponent, an f/F/l/L suffix ignored): as a double, or with
 // asFloat as a float rounded once from the decimal, as cl rounds it (decimal -> double -> float differs when the
@@ -28,7 +43,7 @@ double floatingLiteralValue(const std::string& text, bool asFloat);
 // 2^64 (not saturated) and narrowed, so (int)3e9 is B2D05E00h and (int)-2147483649.0 7FFFFFFFh. raw is the
 // 64-bit value before narrowing, read as signed or unsigned: cl converts the folded constant to a floating type
 // from there ((unsigned char)300.0 + 0.5 is 300.5). False for NaN and the infinities
-bool foldFloatToInteger(double d, int bits, bool isUnsigned, unsigned long long& out, double& raw);
+bool foldFloatToInteger(double d, int bits, bool isUnsigned, uint64& out, double& raw);
 
 } // namespace cppparse
 

@@ -104,7 +104,7 @@ void Parser::skipBalanced()
     } while (depth > 0 && !atEnd());
 }
 
-int Parser::declspecArguments(bool* noreturn)
+int Parser::declspecArguments(bool* noreturn, bool* replaceable)
 {
     if (!at("(")) return 0;
     int align = 0;
@@ -113,6 +113,9 @@ int Parser::declspecArguments(bool* noreturn)
     // __declspec( align(N) ) among other attributes such as dllimport or noinline; noreturn is kept for the flow
     // analysis (a call of such a function ends the control path, as cl knows for abort and exit)
     for (size_t p = start + 1; p < m_pos; ++p) if (noreturn && m_toks[p].kind == PpToken::Ident && m_toks[p].text == "noreturn") *noreturn = true;
+    // replaceable (cppparse's own): the function's definition is a default that another object's definition of the
+    // same function replaces at link time, as a program's allocation functions replace the library's (18.4.1.1/2)
+    for (size_t p = start + 1; p < m_pos; ++p) if (replaceable && m_toks[p].kind == PpToken::Ident && m_toks[p].text == "replaceable") *replaceable = true;
     for (size_t p = start + 1; p + 3 < m_pos; ++p)
         if (m_toks[p].kind == PpToken::Ident && m_toks[p].text == "align" && m_toks[p + 1].is("(") && m_toks[p + 2].kind == PpToken::Number && m_toks[p + 3].is(")")) {
             int n = std::atoi(m_toks[p + 2].text.c_str());
@@ -410,7 +413,7 @@ bool Parser::declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef)
         if (w == "volatile") { spec.isVolatile = true; advance(); any = true; continue; }
         if (w == "__declspec") {                                // Microsoft extension: align(N) and noreturn are kept, the rest ignored
             advance();
-            int a = declspecArguments(&spec.noreturn);
+            int a = declspecArguments(&spec.noreturn, &spec.replaceable);
             if (a > spec.align) spec.align = a;
             any = true; continue;
         }

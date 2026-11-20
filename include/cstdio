@@ -9,7 +9,7 @@
 
 struct _iobuf { void* _Placeholder; };
 typedef struct _iobuf FILE;
-typedef long long fpos_t;
+typedef __cppparse_int64 fpos_t;
 
 extern "C" {
     FILE*  __acrt_iob_func(unsigned index);
@@ -20,8 +20,8 @@ extern "C" {
     size_t fwrite(const void* buffer, size_t size, size_t count, FILE* f);
     int    fseek(FILE* f, long offset, int origin);
     long   ftell(FILE* f);
-    int    _fseeki64(FILE* f, long long offset, int origin);
-    long long _ftelli64(FILE* f);
+    int    _fseeki64(FILE* f, __cppparse_int64 offset, int origin);
+    __cppparse_int64 _ftelli64(FILE* f);
     int    feof(FILE* f);
     int    ferror(FILE* f);
     int    fgetc(FILE* f);

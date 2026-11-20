@@ -4,7 +4,9 @@
 #ifndef CPPPARSE_CSETJMP
 #define CPPPARSE_CSETJMP
 
-struct __declspec(align(16)) __cppparse_jmp_buf { unsigned long long data[32]; };
+#include <__config>
+
+struct __cppparse_align(16) __cppparse_jmp_buf { __cppparse_uint64 data[32]; };
 typedef __cppparse_jmp_buf jmp_buf[1];
 
 extern "C" {

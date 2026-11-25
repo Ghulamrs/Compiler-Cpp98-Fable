@@ -35,6 +35,9 @@ int ehCatchVbase(int k);
 const char* ehFunctionTry(int k);
 int ehRtti(int k);
 int ehDeepHandlers(int n);
+int ehManyObjects(int k);
+int ehAdjustedHandlers(int k);
+int ehPadChain(int k);
 int ehPadDtor(int k);
 int ehNestedCond(int k, const char** log);
 const char* ehCondTemps(int k);
@@ -127,6 +130,9 @@ int main()
       for (size_t i = 0; i < sizeof ks / sizeof ks[0]; ++i) { const char* log = ""; const int r = ehNestedCond(ks[i], &log); printf("ehNestedCond(%d) = %d %s\n", ks[i], r, log); } }
     for (int k = 0; k <= 4; ++k) printf("ehCondTemps(%d) = %s\n", k, ehCondTemps(k));
     printf("ehDeepHandlers(1) = %d, ehDeepHandlers(10) = %d\n", ehDeepHandlers(1), ehDeepHandlers(10));
+    for (int k = 0; k <= 4; ++k) printf("ehManyObjects(%d) = %d\n", k, ehManyObjects(k));
+    for (int k = 0; k <= 4; ++k) printf("ehAdjustedHandlers(%d) = %d\n", k, ehAdjustedHandlers(k));
+    for (int k = 0; k <= 6; ++k) printf("ehPadChain(%d) = %d\n", k, ehPadChain(k));
     printf("destructors: %d\n", g_destroyed);
     check("try frames left", (unsigned long long)cppparse_frame_depth(), 0);
     check("caught exceptions left", (unsigned long long)cppparse_caught_depth(), 0);

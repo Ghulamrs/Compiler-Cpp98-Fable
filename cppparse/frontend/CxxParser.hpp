@@ -70,7 +70,7 @@ private:
     void  error(const std::string& msg);
     void  skipTo(const char* a, const char* b);       // error recovery: skip to a or b at depth 0 (consumes a ';', not a '}')
     void  skipBalanced();                             // skip a balanced (...) [...] {...}
-    int   declspecArguments(bool* noreturn = 0, bool* replaceable = 0);   // after __declspec: skips "(...)", returns N of an align(N) in it (0: none); *noreturn when it holds noreturn, *replaceable when replaceable
+    int   declspecArguments(bool* noreturn = 0, bool* replaceable = 0, bool* thread = 0);   // after __declspec: skips "(...)", returns N of an align(N) in it (0: none); *noreturn when it holds noreturn, *replaceable when replaceable, *thread when thread
     static bool isKeyword(const std::string& s);
     static bool isTypeKeyword(const std::string& s);
     static bool isDeclSpecKeyword(const std::string& s);

@@ -1,6 +1,10 @@
 // deque - cppparse's C++98 library: a double-ended queue (23.2.1) kept contiguous in a block from operator new with room
 // at both ends, so that its iterators are pointers; growing at an end that is full reallocates (unlike the
 // standard's deque, push_front and push_back invalidate the iterators and references then).
+// The range constructor, assign and insert are member templates over any input iterator (23.2.1.1); two arguments of
+// one integral type are a count and a value (23.1.1/9). A range of forward iterators is measured once and placed with
+// at most one allocation (at the front without moving an element when there is room), an input range is read element
+// by element (insert reads it into a deque of its own first).
 #ifndef CPPPARSE_DEQUE
 #define CPPPARSE_DEQUE
 
@@ -29,10 +33,18 @@ public:
     deque() : m_block(0), m_first(0), m_last(0), m_cap(0) {}
     explicit deque(size_t n) : m_block(0), m_first(0), m_last(0), m_cap(0) { resize(n); }
     deque(size_t n, const T& v) : m_block(0), m_first(0), m_last(0), m_cap(0) { assign(n, v); }
-    template <class It> deque(It first, It last) : m_block(0), m_first(0), m_last(0), m_cap(0) { initRange(first, last, typename __is_integer<It>::type()); }
-    deque(const deque& o) : m_block(0), m_first(0), m_last(0), m_cap(0) { assign(o.begin(), o.end()); }
+    // a range of any iterators, or "n copies of v" when both arguments are integers (a constructor that throws has
+    // no destructor to clean up after it)
+    template <class It> deque(It first, It last) : m_block(0), m_first(0), m_last(0), m_cap(0)
+    {
+        try { assignRange(first, last, static_cast<typename __range_category<It>::type*>(0)); } catch (...) { clear(); ::operator delete(m_block); throw; }
+    }
+    deque(const deque& o) : m_block(0), m_first(0), m_last(0), m_cap(0)
+    {
+        try { assignRange(o.begin(), o.end(), static_cast<forward_iterator_tag*>(0)); } catch (...) { clear(); ::operator delete(m_block); throw; }
+    }
     ~deque() { clear(); ::operator delete(m_block); }
-    deque& operator=(const deque& o) { if (this != &o) assign(o.begin(), o.end()); return *this; }
+    deque& operator=(const deque& o) { if (this != &o) assignRange(o.begin(), o.end(), static_cast<forward_iterator_tag*>(0)); return *this; }
 
     iterator begin() { return m_block + m_first; }
     iterator end() { return m_block + m_last; }
@@ -63,7 +75,7 @@ public:
     void resize(size_t n) { while (size() > n) pop_back(); while (size() < n) push_back(T()); }
     void resize(size_t n, const T& v) { while (size() > n) pop_back(); while (size() < n) push_back(v); }
     void assign(size_t n, const T& v) { clear(); for (size_t i = 0; i < n; ++i) push_back(v); }
-    template <class It> void assign(It first, It last) { clear(); for (; first != last; ++first) push_back(*first); }
+    template <class It> void assign(It first, It last) { assignRange(first, last, static_cast<typename __range_category<It>::type*>(0)); }
     void swap(deque& o)
     {
         T* b = m_block; m_block = o.m_block; o.m_block = b;
@@ -81,7 +93,7 @@ public:
         return begin() + at;
     }
     void insert(iterator pos, size_t n, const T& v) { size_t at = pos - begin(); for (size_t k = 0; k < n; ++k) insert(begin() + at, v); }
-    template <class It> void insert(iterator pos, It first, It last) { size_t at = pos - begin(); for (; first != last; ++first, ++at) insert(begin() + at, *first); }
+    template <class It> void insert(iterator pos, It first, It last) { insertRange(pos, first, last, static_cast<typename __range_category<It>::type*>(0)); }
     iterator erase(iterator pos)
     {
         size_t at = pos - begin();
@@ -99,18 +111,74 @@ public:
     }
 
 private:
-    template <class It> void initRange(It first, It last, __false_type) { for (; first != last; ++first) push_back(*first); }
-    template <class N> void initRange(N n, N v, __true_type) { assign(static_cast<size_t>(n), static_cast<T>(v)); }
-    // a bigger block with the elements in its middle (the live objects are moved by their copy constructors)
+    // The workers of the member templates, chosen by __range_category: two integers (a count and a value), a range
+    // of forward iterators, a range of input iterators.
+    template <class N> void assignRange(N n, N v, __true_type*) { assign(static_cast<size_t>(n), static_cast<T>(v)); }
+    template <class It> void assignRange(It first, It last, forward_iterator_tag*)
+    {
+        size_t n = static_cast<size_t>(std::distance(first, last));
+        clear();
+        if (n > m_cap) makeRoom(n, false);
+        else m_first = m_last = (m_cap - n) / 2;
+        for (; first != last; ++first) { new (m_block + m_last) T(*first); ++m_last; }
+    }
+    template <class It> void assignRange(It first, It last, input_iterator_tag*) { clear(); for (; first != last; ++first) push_back(*first); }
+
+    template <class N> void insertRange(iterator pos, N n, N v, __true_type*) { insert(pos, static_cast<size_t>(n), static_cast<T>(v)); }
+    // the range is not of this deque's elements. At the front the new elements are built before the first one; elsewhere
+    // room is made at the back and the elements after pos move up: what lands past the old end is copy-constructed, the
+    // rest assigned
+    template <class It> void insertRange(iterator pos, It first, It last, forward_iterator_tag*)
+    {
+        size_t at = static_cast<size_t>(pos - begin());
+        size_t n = static_cast<size_t>(std::distance(first, last));
+        if (n == 0) return;
+        if (at == 0) {
+            if (m_first < n) makeRoom(n, true);
+            T* d = m_block + m_first - n;
+            size_t k = 0;
+            try { for (; k < n; ++k, ++first) new (d + k) T(*first); } catch (...) { while (k > 0) { --k; d[k].~T(); } throw; }
+            m_first -= n;
+            return;
+        }
+        if (m_cap - m_last < n) makeRoom(n, false);
+        T* p = m_block + m_first;
+        size_t old = size(), tail = old - at, i;
+        if (n > tail) {
+            It mid = first;
+            std::advance(mid, static_cast<typename iterator_traits<It>::difference_type>(tail));
+            for (It s = mid; s != last; ++s) { new (m_block + m_last) T(*s); ++m_last; }
+            for (i = at; i < old; ++i) { new (m_block + m_last) T(p[i]); ++m_last; }
+            for (i = 0; i < tail; ++i, ++first) p[at + i] = *first;
+        } else {
+            for (i = old - n; i < old; ++i) { new (m_block + m_last) T(p[i]); ++m_last; }
+            for (i = old - n; i > at; --i) p[i + n - 1] = p[i - 1];
+            for (i = 0; i < n; ++i, ++first) p[at + i] = *first;
+        }
+    }
+    // the range can be read once only: into a deque of its own, which is then inserted
+    template <class It> void insertRange(iterator pos, It first, It last, input_iterator_tag*)
+    {
+        size_t at = static_cast<size_t>(pos - begin());
+        deque read;
+        for (; first != last; ++first) read.push_back(*first);
+        insertRange(begin() + at, read.begin(), read.end(), static_cast<forward_iterator_tag*>(0));
+    }
+    // a bigger block with the elements in its middle and room for extra more at the end named (the live objects are
+    // moved by their copy constructors: all are copied before the first is destroyed, so a copy that throws leaves
+    // the deque as it was)
     void makeRoom(size_t extra, bool atFront)
     {
         size_t n = size();
         size_t cap = m_cap ? m_cap * 2 + extra : 8 + extra;
         T* block = static_cast<T*>(::operator new(cap * sizeof(T)));
         size_t first = (cap - n) / 2;
-        if (atFront && first == 0) first = 1;
-        if (!atFront && first + n == cap) first = cap - n - 1;
-        for (size_t i = 0; i < n; ++i) { new (block + first + i) T(m_block[m_first + i]); m_block[m_first + i].~T(); }
+        if (atFront && first < extra) first = extra;
+        if (!atFront && cap - first - n < extra) first = cap - n - extra;
+        size_t i = 0;
+        try { for (; i < n; ++i) new (block + first + i) T(m_block[m_first + i]); }
+        catch (...) { while (i > 0) { --i; block[first + i].~T(); } ::operator delete(block); throw; }
+        for (i = 0; i < n; ++i) m_block[m_first + i].~T();
         ::operator delete(m_block);
         m_block = block; m_first = first; m_last = first + n; m_cap = cap;
     }

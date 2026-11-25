@@ -30,9 +30,13 @@
 #    VCRUNTIME140.dll; /DEBUG /INCREMENTAL: incremental-link thunks; /OPT:REF,ICF), and once with both sides using
 #    cppparse's library (cl /X with cppparse's headers), where the standard exceptions are caught by value as well.
 #    link refuses an --eh=cl object beside an --eh=table one (/FAILIFMISMATCH in each object's .drectve).
-param([string]$Compiler = "", [string[]]$Groups = @("throw", "unwind", "catch", "cross", "state"))
+# -Linker ms|gride: the linker of every program (toolset.ps1, Link-Program). Under gride two cases stay on Microsoft's
+# link, each printed "not under GRIDE's link: ..." (docs\design-selfhost.md 4.6): the /INCREMENTAL flavour, whose thunks
+# GRIDE's link does not make, and the mixed-family link, which GRIDE's link does not refuse (request G5).
+param([string]$Compiler = "", [string[]]$Groups = @("throw", "unwind", "catch", "cross", "state"), [string]$Linker = "")
 . "$PSScriptRoot\toolset.ps1"
 if ($Compiler -ne "") { $Exe = (Resolve-Path $Compiler).Path }
+Assert-Linker
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
 $out = "out\ehx"
@@ -52,7 +56,7 @@ function RunProgram([string]$prog, [string]$arguments) {
 }
 
 Write-Host "=== exceptions across compilers (sample-ehx) ==="
-$msg = & $cl /nologo /c /EHsc /W4 /WX "/Fo$out\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" 2>&1 | Out-String
+$msg = Build-Runtime "$out\cppparse_rt.obj" @("/EHsc", "/W4", "/WX")   # cl's, or cppparse's with CPPPARSE_RT=cppparse (toolset.ps1)
 Report "runtime compiled (/W4 /WX)" ($LASTEXITCODE -eq 0) $msg
 $msg = & $cl /nologo /c /EHsc /O2 /W3 "/Fo$out\main.obj" "$src\main.cpp" 2>&1 | Out-String
 Report "main.cpp compiled by cl" ($LASTEXITCODE -eq 0) $msg
@@ -82,7 +86,7 @@ foreach ($tables in "FH4", "FH3") {
         if ($LASTEXITCODE -ne 0) { Report "cl cross.cpp side $side ($tables)" $false $msg; exit 1 }
     }
     $rest = @(ClObjects @("cross"))
-    $msg = & $link /nologo "/OUT:$dir\ref.exe" "$out\main.obj" "$dir\cross-A.obj" "$dir\cross-B.obj" @rest "$out\cppparse_rt.obj" 2>&1 | Out-String
+    $msg = Link-Program (@("$out\main.obj", "$dir\cross-A.obj", "$dir\cross-B.obj") + $rest + @("$out\cppparse_rt.obj")) "$dir\ref.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Report "reference link ($tables)" $false $msg; exit 1 }
     $ref0 = RunProgram "$dir\ref.exe" "cross 0"
     Report "cl's tables ${tables}: the all-cl build runs path 0" ($ref0[0] -eq 0 -and $ref0[1] -match "(?m)^done$") $ref0[1]
@@ -92,7 +96,7 @@ foreach ($tables in "FH4", "FH3") {
             $msg = & $Exe --compile6 "-O$lvl" --obj --msvc-mangling "--eh=$model" -q -D "SIDE=B" -I ..\include -I .. -o $dir -n $name "$src\cross.cpp" 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$dir\${name}6.obj")) { Report "$model -O$lvl compile cross.cpp" $false $msg; continue }
             $prog = "$dir\$model-O$lvl.exe"
-            $msg = & $link /nologo "/OUT:$prog" "$out\main.obj" "$dir\cross-A.obj" "$dir\${name}6.obj" @rest "$out\cppparse_rt.obj" 2>&1 | Out-String
+            $msg = Link-Program (@("$out\main.obj", "$dir\cross-A.obj", "$dir\${name}6.obj") + $rest + @("$out\cppparse_rt.obj")) $prog | Out-String
             if ($LASTEXITCODE -ne 0) { Report "$model -O$lvl link" $false $msg; continue }
             $r = RunProgram $prog "cross 0"
             Report "cl ($tables) + cppparse --eh=$model -O${lvl}: path 0 as the all-cl build" ($r[0] -eq 0 -and $r[1] -eq $ref0[1]) "       got '$($r[1])' exit $($r[0])"
@@ -121,13 +125,19 @@ function ClModel([string]$flavour, [int[]]$levels) {
     $dir = "$out\cl-$flavour"
     New-Item -ItemType Directory -Force $dir | Out-Null
     $clOpt = @("/EHsc"); $linkOpt = @(); $cpOpt = @(); $rt = "$out\cppparse_rt.obj"
+    # (the libraries of the link: Microsoft's static C runtime, or with /MD none but those the objects name)
+    $linkLibs = $null; $linkWith = ""
     if ($flavour -eq "EHa") { $clOpt = @("/EHa", "/DEHX_EHA") }
     if ($flavour -eq "MD") {
-        $clOpt = @("/EHsc", "/MD"); $rt = "$dir\cppparse_rt.obj"
-        $msg = & $cl /nologo /c /EHsc /MD /W4 /WX "/Fo$rt" "..\runtime\cppparse_rt.cpp" 2>&1 | Out-String
+        $clOpt = @("/EHsc", "/MD"); $rt = "$dir\cppparse_rt.obj"; $linkLibs = @()
+        $linkOpt = @("legacy_stdio_definitions.lib")   # cppparse's object of the runtime calls fprintf, which the DLL runtime has inline only
+        $msg = Build-Runtime $rt @("/EHsc", "/MD", "/W4", "/WX")
         if ($LASTEXITCODE -ne 0) { Report "cl /MD runtime" $false $msg; return }
     }
-    if ($flavour -eq "DEBUG") { $linkOpt = @("/DEBUG", "/INCREMENTAL") }
+    if ($flavour -eq "DEBUG") {
+        $linkOpt = @("/DEBUG", "/INCREMENTAL")
+        if ($Linker -eq "gride") { $linkWith = "ms"; Write-NotUnderGride "ehx.ps1, the /DEBUG /INCREMENTAL flavour is linked by Microsoft's link: GRIDE's link accepts /INCREMENTAL and makes no thunks, so the case would test nothing" }
+    }
     if ($flavour -eq "OPT") { $linkOpt = @("/OPT:REF,ICF", "/INCREMENTAL:NO") }
     if ($flavour -eq "ONELIB") { $clOpt = @("/EHsc", "/DEHX_ONE_LIBRARY"); $cpOpt = @("-D", "EHX_ONE_LIBRARY") }
     $msg = & $cl /nologo /c /O2 /W3 @clOpt "/Fo$dir\main.obj" "$src\main.cpp" 2>&1 | Out-String
@@ -143,7 +153,7 @@ function ClModel([string]$flavour, [int[]]$levels) {
         }
     }
     $rest = @(); foreach ($g in $AllGroups) { if ($Groups -notcontains $g) { $rest += "$dir\$g-A.obj"; $rest += "$dir\$g-B.obj" } }
-    $msg = & $link /nologo @linkOpt "/OUT:$dir\ehx.exe" "$dir\main.obj" @($clObjs["A"]) @($clObjs["B"]) @rest $rt 2>&1 | Out-String
+    $msg = Link-Program (@("$dir\main.obj") + @($clObjs["A"]) + @($clObjs["B"]) + $rest + @($rt)) "$dir\ehx.exe" $linkOpt $linkLibs $linkWith | Out-String
     if ($LASTEXITCODE -ne 0) { Report "cl /$flavour reference link" $false $msg; return }
     $reference = RunProgram "$dir\ehx.exe" ($Groups -join " ")
     Report "--eh=cl against cl ${flavour}: the reference (both sides cl; $($Groups -join ', ')) runs to its end" ($reference[0] -eq 0 -and $reference[1] -match "(?m)^done$") ("       exit $($reference[0]), last line '" + ($reference[1] -split "`n")[-1] + "'")
@@ -164,7 +174,7 @@ function ClModel([string]$flavour, [int[]]$levels) {
             $a = if ($combo.StartsWith("cppparse")) { $cpObjs["A"] } else { $clObjs["A"] }
             $b = if ($combo.EndsWith("cppparse")) { $cpObjs["B"] } else { $clObjs["B"] }
             $prog = "$cdir\ehx-$flavour-$($combo -replace '\+', '-').exe"
-            $msg = & $link /nologo @linkOpt "/OUT:$prog" "$dir\main.obj" @($a) @($b) @rest $rt 2>&1 | Out-String
+            $msg = Link-Program (@("$dir\main.obj") + @($a) + @($b) + $rest + @($rt)) $prog $linkOpt $linkLibs $linkWith | Out-String
             if ($LASTEXITCODE -ne 0) { Report "--eh=cl A+B = $combo -O$lvl link (cl $flavour)" $false $msg; continue }
             $run = RunProgram $prog ($Groups -join " ")
             $detail = ""
@@ -194,7 +204,9 @@ ClModel "OPT" @(2)
 ClModel "ONELIB" @(2)
 # the two families of models do not link together
 $msg = & $Exe --compile6 -O0 --obj --msvc-mangling --eh=table -q -D "SIDE=B" -I ..\include -I .. -o "$out\O0" -n "cross-B-table" "$src\cross.cpp" 2>&1 | Out-String
-$msg = & $link /nologo "/OUT:$out\O0\mismatch.exe" "$out\cl-EHsc\main.obj" "$out\O0\cross-A6.obj" "$out\O0\cross-B-table6.obj" "$out\cl-EHsc\throw-A.obj" "$out\cl-EHsc\throw-B.obj" "$out\cl-EHsc\unwind-A.obj" "$out\cl-EHsc\unwind-B.obj" "$out\cl-EHsc\catch-A.obj" "$out\cl-EHsc\catch-B.obj" "$out\cl-EHsc\state-A.obj" "$out\cl-EHsc\state-B.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
+$mismatchWith = ""
+if ($Linker -eq "gride") { $mismatchWith = "ms"; Write-NotUnderGride "ehx.ps1, the mixed-family link that must fail with LNK2038 is linked by Microsoft's link: GRIDE's link does not enforce /FAILIFMISMATCH (request G5)" }
+$msg = Link-Program @("$out\cl-EHsc\main.obj", "$out\O0\cross-A6.obj", "$out\O0\cross-B-table6.obj", "$out\cl-EHsc\throw-A.obj", "$out\cl-EHsc\throw-B.obj", "$out\cl-EHsc\unwind-A.obj", "$out\cl-EHsc\unwind-B.obj", "$out\cl-EHsc\catch-A.obj", "$out\cl-EHsc\catch-B.obj", "$out\cl-EHsc\state-A.obj", "$out\cl-EHsc\state-B.obj", "$out\cppparse_rt.obj") "$out\O0\mismatch.exe" @() $null $mismatchWith | Out-String
 Report "link refuses an --eh=cl object beside an --eh=table one (LNK2038: cppparse_eh)" ($LASTEXITCODE -ne 0 -and $msg -match "LNK2038" -and $msg -match "cppparse_eh") $msg
 # the ml64 path cannot carry the model's tables: the driver refuses it, and the listing stops ml64
 $msg = & $Exe --compile6 --assemble --eh=cl -q -I ..\include -o $out -n refused "$src\throw.cpp" 2>&1 | Out-String
@@ -202,5 +214,5 @@ Report "--eh=cl with --assemble is refused" ($LASTEXITCODE -ne 0 -and $msg -matc
 Report "an --eh=cl listing stops ml64 (.ERR)" ([bool](Select-String -Path "$out\O0\throw-A6.asm" -Pattern "^\.ERR <--eh=cl" -Quiet)) ""
 
 if ($failed) { Write-Host "ehx: $failed check(s) failed"; exit 1 }
-Write-Host "ehx: all checks passed"
+Write-Host "ehx: all checks passed$(Get-KnownDifferences)"
 exit 0

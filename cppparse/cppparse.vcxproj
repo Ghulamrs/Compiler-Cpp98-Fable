@@ -42,7 +42,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <ConformanceMode>true</ConformanceMode>
       <ExceptionHandling>Sync</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir)driver;$(ProjectDir)common;$(ProjectDir)frontend;$(ProjectDir)middle;$(ProjectDir)backend;$(ProjectDir)eh;$(ProjectDir)analyzer;$(ProjectDir)analyzer\report;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)driver;$(ProjectDir)common;$(ProjectDir)frontend;$(ProjectDir)middle;$(ProjectDir)backend;$(ProjectDir)eh;$(ProjectDir)cv;$(ProjectDir)target;$(ProjectDir)analyzer;$(ProjectDir)analyzer\report;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
@@ -72,6 +72,8 @@
     <ClCompile Include="middle\*.cpp" />
     <ClCompile Include="backend\*.cpp" />
     <ClCompile Include="eh\*.cpp" />
+    <ClCompile Include="cv\*.cpp" />
+    <ClCompile Include="target\*.cpp" />
     <ClCompile Include="analyzer\*.cpp" />
     <ClCompile Include="analyzer\report\*.cpp" />
   </ItemGroup>
@@ -81,6 +83,8 @@
     <ClInclude Include="middle\*.hpp" />
     <ClInclude Include="backend\*.hpp" />
     <ClInclude Include="eh\*.hpp" />
+    <ClInclude Include="cv\*.hpp" />
+    <ClInclude Include="target\*.hpp" />
     <ClInclude Include="analyzer\*.hpp" />
     <ClInclude Include="analyzer\report\*.hpp" />
   </ItemGroup>

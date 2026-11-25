@@ -5,10 +5,12 @@
 # unwinds through whatever frames are active at that moment, up to the driver's handler. Every run must end either
 # with "cppparse: out of memory" and exit code 4, or (k beyond the run's allocations) as the run without a failure
 # ends; no run may end with any other exit code (an access violation, a fail-fast of the runtime).
-# Not part of harness.ps1: about ten minutes. Exit code 1 when a run ends otherwise.
-param([string]$Compiler = "", [string[]]$Models = @("table", "cl"), [int]$Steps = 60)
+# Not part of harness.ps1: about ten minutes. Exit code 1 when a run ends otherwise. -Linker ms|gride: the linker of
+# the compilers (toolset.ps1, Link-Program).
+param([string]$Compiler = "", [string[]]$Models = @("table", "cl"), [int]$Steps = 60, [string]$Linker = "")
 . "$PSScriptRoot\toolset.ps1"
 if ($Compiler -ne "") { $Exe = (Resolve-Path $Compiler).Path }
+Assert-Linker
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
 $failed = 0
@@ -25,8 +27,8 @@ foreach ($model in $Models) {
         if (-not (Test-Path "$dir\${name}6.obj")) { Write-Host "  FAIL compile $name"; Write-Host $msg; $failed++ }
         $objs += "$dir\${name}6.obj"
     }
-    & $cl /nologo /c /EHsc /W3 "/Fo$dir\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" | Out-Null
-    $msg = & $link /nologo /SUBSYSTEM:CONSOLE "/OUT:$dir\cppparse-failnew.exe" @objs "$dir\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Out-String
+    $null = Build-Runtime "$dir\cppparse_rt.obj"   # cl's, or cppparse's with CPPPARSE_RT=cppparse (toolset.ps1)
+    $msg = Link-Program ($objs + @("$dir\cppparse_rt.obj")) "$dir\cppparse-failnew.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link"; Write-Host $msg; $failed++; continue }
     function RunAt([long]$k) {
         $env:CPPPARSE_FAILNEW = "$k"

@@ -11,13 +11,20 @@
 // (begin, end, unwind info) in .pdata, as ml64 writes them; a COMDAT function's go into associative COMDAT sections.
 // Debug info: the ";@debug" and ";@line" markers of the listing become CodeView line tables and procedure symbols in
 // .debug$S sections (one for .text with the module's file tables, an associative one per COMDAT function), which
-// link /DEBUG puts in the PDB (see the CodeView helpers below).
+// link /DEBUG puts in the PDB (the records are cppparse/cv's, see "CodeView debug information" below).
 //
 // Strict C++98.
 #include "Coff.hpp"
+#include "CvCheck.hpp"
+#include "CvModule.hpp"
+#include "CvScopes.hpp"
+#include "CvNames.hpp"
+#include "CvSection.hpp"
+#include "CvTypes.hpp"
 #include "EhClFuncInfo.hpp"
 #include "EhUnwindInfo.hpp"
 #include "Parallel.hpp"
+#include "TargetTls.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -178,7 +185,9 @@ struct Operand {
     int         base, index, scale;   // Mem; -1 when absent
     long        disp;
     std::string symbol;   // Mem: RIP-relative symbol; Sym: the name
-    Operand() : kind(None), reg(-1), size(0), imm(0), base(-1), index(-1), scale(1), disp(0) {}
+    bool        gs;       // Mem: gs:[...], the thread's own block (the segment prefix 65h; thread-locals, cppparse/target)
+    bool        secRel;   // Sym: SECTIONREL <name>, the symbol's offset in its section (a 32-bit SECREL relocation)
+    Operand() : kind(None), reg(-1), size(0), imm(0), base(-1), index(-1), scale(1), disp(0), gs(false), secRel(false) {}
     bool isReg() const { return kind == Reg; }
     bool isMem() const { return kind == Mem; }
     bool isRm()  const { return kind == Reg || kind == Mem; }
@@ -250,6 +259,8 @@ bool parseOperand(const std::string& text, Operand& op, std::string& err)
         if (l[l.size() - 1] != ']') { err = "bad operand " + t; return false; }
         std::string pre = trimWs(l.substr(0, br));
         op.kind = Operand::Mem;
+        // "qword ptr gs:[58h]": the gs segment (only gs: a thread-local's access, TargetTls)
+        if (pre.size() >= 3 && pre.compare(pre.size() - 3, 3, "gs:") == 0) { op.gs = true; pre = trimWs(pre.substr(0, pre.size() - 3)); }
         if (!pre.empty()) {
             if (pre == "byte ptr") op.size = 1;
             else if (pre == "word ptr") op.size = 2;
@@ -261,6 +272,7 @@ bool parseOperand(const std::string& text, Operand& op, std::string& err)
         return parseMemory(t.substr(br + 1, t.size() - br - 2), op, err);
     }
     if (l.compare(0, 7, "offset ") == 0) t = trimWs(t.substr(7));
+    else if (l.compare(0, 11, "sectionrel ") == 0) { t = trimWs(t.substr(11)); op.secRel = true; }
     if (!t.empty() && isIdentStart(t[0])) {
         for (size_t i = 0; i < t.size(); ++i) if (!isIdentChar(t[i])) { err = "bad operand " + t; return false; }
         op.kind = Operand::Sym; op.symbol = t; return true;
@@ -270,7 +282,7 @@ bool parseOperand(const std::string& text, Operand& op, std::string& err)
 }
 
 
-enum { RelAddr64 = 0x0001, RelAddr32Nb = 0x0003, RelRel32 = 0x0004 };   // ADDR32NB: image-relative (.pdata entries)
+enum { RelAddr64 = 0x0001, RelAddr32Nb = 0x0003, RelRel32 = 0x0004, RelSecRel32 = 0x000B };   // SECREL: a thread-local's offset   // ADDR32NB: image-relative (.pdata entries)
 
 struct Reloc {
     unsigned long  offset;    // within the section (chunk-relative until layout)
@@ -318,6 +330,8 @@ struct Chunk {
     std::vector<unsigned long>                padStarts;  // where ALIGN padding begins: a data item ends there
     unsigned long                             maxAlign;   // the largest ALIGN (or COMDAT marker alignment): the section's alignment
     std::vector<std::pair<unsigned long, int> > lines;    // .line (the listing's ;@line markers): code offset, source line, in offset order
+    std::vector<std::pair<unsigned long, int> > cvMarks;  // .cvmark (-g: the listing's position markers): code offset, the marker's number
+    std::vector<unsigned long>                retEnds;    // the code offsets just behind every ret (-g: CvCheck's epilogues)
     std::vector<std::string>                  errors;
     int                                       instructions;
     Chunk() : prologEnd(-1), maxAlign(1), instructions(0) {}
@@ -483,6 +497,8 @@ void Encoder::shrinkJumps()
             for (size_t ce = 0; ce < m_c.callEnds.size(); ++ce) if (m_c.callEnds[ce] >= end) m_c.callEnds[ce] -= removed;
             for (size_t s = 0; s < m_c.symbols.size(); ++s) if (m_c.symbols[s].second >= end) m_c.symbols[s].second -= removed;
             for (size_t l = 0; l < m_c.lines.size(); ++l) if (m_c.lines[l].first >= end) m_c.lines[l].first -= removed;   // the line records move with the code
+            for (size_t k = 0; k < m_c.cvMarks.size(); ++k) if (m_c.cvMarks[k].first >= end) m_c.cvMarks[k].first -= removed;
+            for (size_t k = 0; k < m_c.retEnds.size(); ++k) if (m_c.retEnds[k] >= end) m_c.retEnds[k] -= removed;
             f.at = f.opcodeAt + 1;
             f.shortForm = true;
             changed = true;
@@ -539,14 +555,27 @@ bool Encoder::codeLine(const std::string& raw, int line)
     std::vector<std::string> opText;
     if (sp != std::string::npos) splitOperands(text.substr(sp + 1), opText);
     if (mn[0] == '.') return unwindDirective(mn, opText, line);
+    // "lock <instruction>": the prefix F0h before it (the interlocked intrinsics, cppparse/target TargetIntrinsics)
+    bool lockPrefix = false;
+    if (mn == "lock" && sp != std::string::npos) {
+        const std::string rest = trimWs(text.substr(sp + 1));
+        const size_t sp2 = rest.find_first_of(" \t");
+        mn = lowerText(sp2 == std::string::npos ? rest : rest.substr(0, sp2));
+        opText.clear();
+        if (sp2 != std::string::npos) splitOperands(rest.substr(sp2 + 1), opText);
+        if (mn != "xadd" && mn != "cmpxchg" && mn != "xchg" && mn != "add" && mn != "sub" && mn != "inc" && mn != "dec") return fail("lock: not a read-modify-write instruction", line);
+        lockPrefix = true;
+    }
     std::vector<Operand> ops(opText.size());
     for (size_t i = 0; i < opText.size(); ++i) {
         std::string err;
         if (!parseOperand(opText[i], ops[i], err)) return fail(err, line);
     }
     size_t before = m_c.bytes.size();
+    if (lockPrefix) byte(0xF0);
     if (!instruction(mn, ops, line)) { m_c.bytes.resize(before); return false; }
     if (mn == "call") m_c.callEnds.push_back(pos());
+    else if (mn == "ret") m_c.retEnds.push_back(pos());
     ++m_c.instructions;
     if (m_pendingLine >= 0) { m_c.lines.push_back(std::make_pair(pos(), m_pendingLine)); m_pendingLine = -1; }
     return true;
@@ -573,6 +602,13 @@ bool Encoder::unwindDirective(const std::string& mn, const std::vector<std::stri
             if (m_c.lines.size() == 1 && pos() == 0) m_pendingLine = static_cast<int>(n); else m_c.lines.back().second = static_cast<int>(n);
         }
         else { m_c.lines.push_back(std::make_pair(pos(), static_cast<int>(n))); m_pendingLine = -1; }
+        return true;
+    }
+    if (mn == ".cvmark") {
+        // -g: a position marker of the listing (;@prologend, ;@epilog, ;@scope): the code offset it stands at
+        long k = 0;
+        if (opText.size() != 1 || !parseLong(opText[0], k) || k < 0) return fail(".cvmark needs the marker's number", line);
+        m_c.cvMarks.push_back(std::make_pair(pos(), static_cast<int>(k)));
         return true;
     }
     if (mn == ".funclet") {
@@ -762,6 +798,7 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
     if (mn == "int" && n == 1 && ops[0].kind == Operand::Imm && ops[0].imm == 3) { byte(0xCC); return true; }   // ml64's spelling
     const Operand& a = ops[0];
     const Operand* b = n > 1 ? &ops[1] : 0;
+    for (size_t i = 0; i < n; ++i) if (ops[i].kind == Operand::Mem && ops[i].gs) { if (!ops[i].symbol.empty()) return fail("gs: with a symbol", line); byte(0x65); break; }
     bool mixed = false;
     for (size_t i = 0; i < n; ++i) if (ops[i].kind == Operand::Xmm) mixed = true;
 
@@ -812,6 +849,16 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
             if (a.size != b->size) return fail("mov: register sizes differ", line);
             op[0] = static_cast<unsigned char>(a.size == 1 ? 0x88 : 0x89);
             emitRm(a.size == 2 ? 0x66 : 0, op, 1, b->reg, a, a.size == 8, 0, forceRex);
+            return true;
+        }
+        if (a.isReg() && b->kind == Operand::Sym && b->secRel) {
+            // mov r32, SECTIONREL sym: the symbol's offset in its section as a 32-bit immediate (zero-extended)
+            if (a.size != 4) return fail("SECTIONREL needs a 32-bit register", line);
+            if (a.reg >= 8) byte(0x41);
+            byte(0xB8 + (a.reg & 7));
+            Reloc rl; rl.offset = pos(); rl.symbol = b->symbol; rl.type = RelSecRel32;
+            m_c.relocs.push_back(rl);
+            dword(0);
             return true;
         }
         if (a.isReg() && b->kind == Operand::Imm) {
@@ -999,6 +1046,14 @@ bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int 
         if (a.isMem()) { op[0] = static_cast<unsigned char>(mn == "push" ? 0xFF : 0x8F); emitRm(0, op, 1, mn == "push" ? 6 : 0, a, false, 0, false); return true; }
         return fail(mn + ": bad operand", line);
     }
+    if ((mn == "xadd" || mn == "cmpxchg") && n == 2 && a.isRm() && b->isReg()) {
+        // 0F C1 / 0F B1 /r (0F C0 / 0F B0 for bytes): r/m, r
+        const int sz = b->size;
+        op[0] = 0x0F; op[1] = static_cast<unsigned char>((mn == "xadd" ? 0xC0 : 0xB0) + (sz == 1 ? 0 : 1));
+        emitRm(sz == 2 ? 0x66 : 0, op, 2, b->reg, a, sz == 8, 0, forceRex);
+        return true;
+    }
+    if (mn == "xchg" && n == 2 && a.isMem() && b->isReg()) { op[0] = static_cast<unsigned char>(b->size == 1 ? 0x86 : 0x87); emitRm(b->size == 2 ? 0x66 : 0, op, 1, b->reg, a, b->size == 8, 0, forceRex); return true; }
     if (mn == "xchg" && n == 2 && a.isReg() && b->isReg()) { op[0] = 0x87; emitRm(a.size == 2 ? 0x66 : 0, op, 1, b->reg, a, a.size == 8, 0, forceRex); return true; }
 
     return fail("unknown instruction " + mn, line);
@@ -1098,6 +1153,7 @@ bool Encoder::dataLine(const std::string& raw, int line)
 }
 
 
+
 struct CodeBlock {
     std::string name;
     std::vector<std::pair<int, std::string> > lines;
@@ -1106,6 +1162,8 @@ struct CodeBlock {
     bool  frame;       // PROC FRAME: gets unwind info (.xdata) and a function table entry (.pdata)
     std::string handler;   // PROC FRAME:handler, empty without one
     std::string sourceFile, displayName;   // ;@debug: the function's source file and the name its CodeView symbol shows
+    CvProcedureMarks debug;                // -g: ;@proc, ;@block, ;@local, ;@gone, ;@static (CvScopes)
+    std::vector<std::string> positions;    // -g: the position markers (;@prologend, ;@epilog, ;@scope), by the number .cvmark gives
     std::vector<unsigned char> xdata;
     std::vector<Reloc> xdataRelocs;
     std::vector<EhFrameEntry> entries;   // cl's exception model: the function table entries of the PROC and its funclets (else one, the PROC)
@@ -1159,7 +1217,7 @@ struct SymbolEntry {
 struct DataPiece {
     Chunk    chunk;
     Encoder* enc;
-    int      kind;       // 2 data, 3 rdata, 4 CRT initialisers
+    int      kind;       // 2 data, 3 rdata, 4 CRT initialisers, 5 thread-locals (.tls$)
     bool     comdat;
     std::string assoc;   // ";@comdat assoc <symbol>": kept or dropped with the COMDAT data item of that symbol
     DataPiece(int k, bool c) : enc(0), kind(k), comdat(c) { enc = new Encoder(chunk); }
@@ -1206,138 +1264,46 @@ struct SymbolInfoOrder {
 // link /DEBUG reads them into the PDB, so Visual Studio, WinDbg and dbghelp (SymGetLineFromAddr64) map an address of
 // cppparse's code to its source line. The listing carries ";@debug "<file>" <name>" after a PROC and ";@line N"
 // before the code of a new line (comments to ml64); the encoder records the code offset of every ;@line.
-// A section is CV_SIGNATURE_C13 (4), then subsections of {DWORD kind, DWORD length, data, padding to 4}:
-//   DEBUG_S_SYMBOLS (0xF1): S_OBJNAME and S_COMPILE3 once per object, then per function S_GPROC32 (S_LPROC32 when it
-//     is not PUBLIC) and S_END; the function's offset and segment are SECREL and SECTION relocations on its symbol
-//   DEBUG_S_LINES (0xF2) per function: {offCon SECREL, segCon SECTION, flags 0, cbCon = the code size}, then one
-//     block {offFile, nLines, cbBlock, nLines x {code offset, line | 0x80000000 (a statement)}}, offFile the file's
-//     entry in the checksum table
-//   DEBUG_S_FILECHKSMS (0xF4): per file {offstName into the string table, cbChecksum 0, type 0 (none), padding}
-//   DEBUG_S_STRINGTABLE (0xF3): "" then the file names, null-terminated
+// The records are built by cppparse/cv: a section's subsections (CvSection), the module's S_OBJNAME and S_COMPILE3
+// and a function's S_GPROC32 or S_LPROC32 with its S_END (CvSymbols), its line table (CvLines), the module's file
+// table (CvFiles). Here: which sections there are, and their bytes and relocations into the object.
 // As cl lays it out: the functions of .text share one .debug$S, which also holds the module's checksum and string
 // tables; a COMDAT function gets an associative .debug$S of its own (its symbols and lines) that refers to them.
 const unsigned long kDebugFlags = 0x42100040UL;   // .debug$S: initialized | discardable | read | align 1
 enum { RelSecRel = 0x000B, RelSection = 0x000A };
-enum { DebugSymbols = 0xF1, DebugLines = 0xF2, DebugStrings = 0xF3, DebugChecksums = 0xF4 };
 
-void pad4(std::string& s) { while (s.size() % 4) put8(s, 0); }
-
-// a subsection appended to a section's bytes; the relocations of its data are moved to the section's offsets
-void debugSubsection(std::string& sec, std::vector<Reloc>& secRelocs, unsigned long kind, const std::string& data, const std::vector<Reloc>& relocs)
+// one .debug$S: the bytes of the section 'cv' describes, with the module's file tables when 'files' is given; a
+// function's address in them is a SECREL and a SECTION relocation on its symbol
+void fillDebugSection(Section& sec, const CvSection& cv, const CvFiles* files)
 {
-    const unsigned long base = static_cast<unsigned long>(sec.size()) + 8;
-    for (size_t r = 0; r < relocs.size(); ++r) { Reloc rl = relocs[r]; rl.offset += base; secRelocs.push_back(rl); }
-    put32(sec, kind); put32(sec, static_cast<unsigned long>(data.size()));
-    sec += data;
-    pad4(sec);
-}
-
-// a symbol record: reclen (counting the type and the body, padded to 4), type, body
-void symbolRecord(std::string& syms, unsigned long type, const std::string& body)
-{
-    std::string r = body;
-    pad4(r);
-    put16(syms, static_cast<unsigned long>(r.size() + 2)); put16(syms, type); syms += r;
-}
-
-// S_OBJNAME (the object's file name) and S_COMPILE3 (C++ for x64, "cppparse 6")
-void moduleSymbols(std::string& syms, const std::string& objName)
-{
-    std::string b;
-    put32(b, 0); b += objName; b += '\0';
-    symbolRecord(syms, 0x1101, b);
-    b.clear();
-    put32(b, 1);                                     // flags: the language, CV_CFL_CXX
-    put16(b, 0xD0);                                  // machine: CV_CFL_X64
-    for (int k = 0; k < 8; ++k) put16(b, k == 0 || k == 4 ? 6 : 0);   // front end 6.0.0.0, back end 6.0.0.0
-    b += "cppparse 6"; b += '\0';
-    symbolRecord(syms, 0x113C, b);
-}
-
-// S_GPROC32 / S_LPROC32 and S_END of one function; the relocations are at offsets within 'syms'
-void procedureSymbols(std::string& syms, std::vector<Reloc>& relocs, const std::string& fn, const std::string& display, unsigned long codeSize, bool internal)
-{
-    std::string b;
-    put32(b, 0); put32(b, 0); put32(b, 0);           // pParent, pEnd, pNext: the linker fills them in
-    put32(b, codeSize); put32(b, 0); put32(b, codeSize);   // len, DbgStart, DbgEnd
-    put32(b, 0);                                     // typind: T_NOTYPE (no type information)
-    Reloc a; a.offset = static_cast<unsigned long>(syms.size() + 4 + b.size()); a.symbol = fn; a.type = RelSecRel; relocs.push_back(a);
-    put32(b, 0);                                     // off
-    Reloc s; s.offset = static_cast<unsigned long>(syms.size() + 4 + b.size()); s.symbol = fn; s.type = RelSection; relocs.push_back(s);
-    put16(b, 0);                                     // seg
-    put8(b, 0);                                      // flags
-    b += display; b += '\0';
-    symbolRecord(syms, internal ? 0x110F : 0x1110, b);
-    symbolRecord(syms, 0x0006, std::string());       // S_END
-}
-
-// the module's file tables: an entry per distinct file name, its offset in the checksum table returned
-struct DebugFiles {
-    std::string strings, checksums;
-    std::map<std::string, unsigned long> offsets;
-    DebugFiles() { strings += '\0'; }
-    unsigned long entry(const std::string& name)
-    {
-        std::map<std::string, unsigned long>::const_iterator it = offsets.find(name);
-        if (it != offsets.end()) return it->second;
-        const unsigned long off = static_cast<unsigned long>(checksums.size());
-        put32(checksums, static_cast<unsigned long>(strings.size()));
-        strings += name; strings += '\0';
-        put8(checksums, 0); put8(checksums, 0);      // cbChecksum 0, type 0: no checksum
-        pad4(checksums);
-        offsets[name] = off;
-        return off;
-    }
-};
-
-// the DEBUG_S_LINES data of one function: its chunk's (code offset, source line) pairs, already in offset order with
-// one line per offset, those inside the code
-std::string lineTable(std::vector<Reloc>& relocs, const std::string& fn, unsigned long fileEntry, unsigned long codeSize, const std::vector<std::pair<unsigned long, int> >& lines)
-{
-    std::vector<std::pair<unsigned long, int> > kept;
-    for (size_t i = 0; i < lines.size(); ++i) if (lines[i].first < codeSize && lines[i].second > 0) kept.push_back(lines[i]);
-    std::string d;
-    Reloc a; a.offset = 0; a.symbol = fn; a.type = RelSecRel; relocs.push_back(a);
-    put32(d, 0);                                     // offCon
-    Reloc s; s.offset = 4; s.symbol = fn; s.type = RelSection; relocs.push_back(s);
-    put16(d, 0); put16(d, 0);                        // segCon, flags (no columns)
-    put32(d, codeSize);
-    put32(d, fileEntry); put32(d, static_cast<unsigned long>(kept.size())); put32(d, 12 + 8 * static_cast<unsigned long>(kept.size()));
-    for (size_t i = 0; i < kept.size(); ++i) { put32(d, kept[i].first); put32(d, (static_cast<unsigned long>(kept[i].second) & 0xFFFFFFUL) | 0x80000000UL); }
-    return d;
-}
-
-// one .debug$S: the signature, then the subsections given
-void fillDebugSection(Section& sec, const std::string& syms, const std::vector<Reloc>& symRelocs,
-                      const std::vector<std::pair<std::string, std::vector<Reloc> > >& lineTables, const DebugFiles* files)
-{
-    std::string bytes;
-    std::vector<Reloc> relocs;
-    put32(bytes, 4);                                 // CV_SIGNATURE_C13
-    debugSubsection(bytes, relocs, DebugSymbols, syms, symRelocs);
-    for (size_t i = 0; i < lineTables.size(); ++i) debugSubsection(bytes, relocs, DebugLines, lineTables[i].first, lineTables[i].second);
-    if (files) {
-        debugSubsection(bytes, relocs, DebugChecksums, files->checksums, std::vector<Reloc>());
-        debugSubsection(bytes, relocs, DebugStrings, files->strings, std::vector<Reloc>());
-    }
+    CvBytes built;
+    cv.write(built, files);
+    const std::string& bytes = built.bytes();
+    const std::vector<CvReloc>& relocs = built.relocs();
     sec.bytes.clear();
     for (size_t i = 0; i < bytes.size(); ++i) sec.bytes.push_back(static_cast<unsigned char>(bytes[i]));
-    sec.relocs = relocs;
+    sec.relocs.clear();
+    for (size_t r = 0; r < relocs.size(); ++r) {
+        Reloc rl; rl.offset = relocs[r].offset; rl.symbol = relocs[r].symbol; rl.type = RelSection;
+        if (relocs[r].kind == CvReloc::SecRel) rl.type = RelSecRel;
+        sec.relocs.push_back(rl);
+    }
 }
 
 } // namespace
 
 // objName: what S_OBJNAME records (the object's file name; empty when no object is written)
-static bool assembleCoffNamed(const std::string& masmText, const std::string& objName, int threads, std::string& objectBytes, CoffResult& result)
+// debugInfo: with -g, what the types and variables of the unit are made from (0: the object as it is without -g)
+static bool assembleCoffNamed(const std::string& masmText, const std::string& objName, int threads, std::string& objectBytes, CoffResult& result, const CvModule* debugInfo)
 {
     std::vector<CodeBlock> blocks;
     std::vector<DataPiece*> pieces;
-    DataPiece* plain[5] = { 0, 0, 0, 0, 0 };     // the non-COMDAT piece of each data section kind
+    DataPiece* plain[6] = { 0, 0, 0, 0, 0, 0 };  // the non-COMDAT piece of each data section kind
     DataPiece* currentPiece = 0;
     std::set<std::string> publics;
     std::vector<std::string> externs;
     std::set<std::string> externSet;
-    int section = 0;            // 0 none, 1 text, 2 data, 3 rdata, 4 CRT initialisers
+    int section = 0;            // 0 none, 1 text, 2 data, 3 rdata, 4 CRT initialisers, 5 thread-locals
     CodeBlock* current = 0;
     std::map<std::string, std::string> weakDefaults;   // ";@weak <name> <default>": the weak externals and their defaults
     bool comdatNext = false;    // ";@comdat any" was seen: the next PROC or data item is a COMDAT
@@ -1373,6 +1339,64 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
             // ;@debug "<source file>" <display name>: the function's CodeView symbol and line table (a comment to ml64)
             const size_t q1 = marker.find('"'), q2 = q1 == std::string::npos ? q1 : marker.find('"', q1 + 1);
             if (current && q2 != std::string::npos) { current->sourceFile = marker.substr(q1 + 1, q2 - q1 - 1); current->displayName = trimWs(marker.substr(q2 + 1)); }
+            continue;
+        }
+        // -g (comments to ml64; docs/design-codeview.md 5.4; T<n> is a type's number in the module's CvModule):
+        //   ;@proc T<n> <frame> <saved> <flags>     the PROC's type and S_FRAMEPROC's numbers
+        //   ;@block <id> <parent>                   a block scope that declares something
+        //   ;@local <block> T<n> [rbp-N] <p|l>[r] <name>, ;@gone <block> T<n> <p|l> <name>   a variable, with or without
+        //                                           its place in the frame
+        //   ;@static <block> T<n> <symbol> <name>   a static local
+        //   ;@prologend, ;@epilog, ;@scope <id>     positions in the code: the encoder records their offsets (.cvmark)
+        if (current && (marker == ";@prologend" || marker == ";@epilog" || marker.compare(0, 8, ";@scope ") == 0)) {
+            current->lines.push_back(std::make_pair(lineNo, ".cvmark " + numText(static_cast<long>(current->positions.size()))));
+            current->positions.push_back(marker);
+            continue;
+        }
+        if (marker.compare(0, 7, ";@proc ") == 0) {
+            std::istringstream fields(marker.substr(7));
+            std::string type;
+            fields >> type;
+            if (current && type.size() > 1 && type[0] == 'T') {
+                current->debug.type = atoi(type.c_str() + 1);
+                fields >> current->debug.frameBytes >> current->debug.savedBytes >> current->debug.frameFlags;
+            }
+            continue;
+        }
+        if (marker.compare(0, 8, ";@block ") == 0) {
+            std::istringstream fields(marker.substr(8));
+            int id = 0, parent = 0;
+            fields >> id >> parent;
+            if (current && id == static_cast<int>(current->debug.blockParents.size()) + 1) current->debug.blockParents.push_back(parent);
+            continue;
+        }
+        if (marker.compare(0, 8, ";@local ") == 0 || marker.compare(0, 7, ";@gone ") == 0) {
+            const bool placed = marker[2] == 'l';
+            std::istringstream fields(marker.substr(placed ? 8 : 7));
+            std::string type, at, kind;
+            CvFrameVariable v;
+            fields >> v.block >> type;
+            if (placed) fields >> at;
+            fields >> kind;
+            std::getline(fields, v.name);
+            v.name = trimWs(v.name);
+            v.type = type.size() > 1 && type[0] == 'T' ? atoi(type.c_str() + 1) : 0;
+            v.placed = placed;
+            v.param = !kind.empty() && kind[0] == 'p';
+            v.byAddress = kind.size() > 1 && kind[1] == 'r';
+            if (placed && at.size() > 5 && at.compare(0, 4, "[rbp") == 0) v.offset = (at[4] == '-' ? -1 : 1) * atol(at.c_str() + 5);
+            if (current && !v.name.empty()) current->debug.variables.push_back(v);
+            continue;
+        }
+        if (marker.compare(0, 9, ";@static ") == 0) {
+            std::istringstream fields(marker.substr(9));
+            std::string type;
+            CvStaticLocal st;
+            fields >> st.block >> type >> st.symbol;
+            std::getline(fields, st.name);
+            st.name = trimWs(st.name);
+            st.type = type.size() > 1 && type[0] == 'T' ? atoi(type.c_str() + 1) : 0;
+            if (current && st.type != 0 && !st.symbol.empty() && !st.name.empty()) current->debug.statics.push_back(st);
             continue;
         }
         if (marker.compare(0, 10, ";@drectve ") == 0) { directives += trimWs(marker.substr(10)) + " "; continue; }
@@ -1412,7 +1436,7 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
         if (u0 == ".CODE") { section = 1; currentPiece = 0; continue; }
         if (u0 == ".DATA") { section = 2; currentPiece = 0; continue; }
         if (u0 == ".CONST" || u0 == ".RDATA") { section = 3; currentPiece = 0; continue; }
-        if (u1 == "SEGMENT") { section = u0 == "CRT$XCU" ? 4 : 0; currentPiece = 0; if (section == 0) globalErrors.push_back("line " + numText(lineNo) + ": unknown segment " + w0); continue; }
+        if (u1 == "SEGMENT") { section = u0 == "CRT$XCU" ? 4 : TargetTls::isSegmentName(u0) ? 5 : 0; currentPiece = 0; if (section == 0) globalErrors.push_back("line " + numText(lineNo) + ": unknown segment " + w0); continue; }
         if (u1 == "ENDS") { section = 0; currentPiece = 0; continue; }
         if (u0[0] == '.' || u0 == "OPTION" || u0 == "END" || u0 == "INCLUDE" || u0 == "INCLUDELIB") continue;
         if (u0 == "PUBLIC") { publics.insert(w1); if (currentPiece && currentPiece->comdat) currentPiece = 0; continue; }
@@ -1437,7 +1461,7 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
         if (section == 1) {
             if (!current) { globalErrors.push_back("line " + numText(lineNo) + ": code outside PROC: " + text); continue; }
             current->lines.push_back(std::make_pair(lineNo, text));
-        } else if (section >= 2 && section <= 4) {
+        } else if (section >= 2 && section <= 5) {
             // a COMDAT data item ends where the next labelled definition begins: a symbol of internal linkage
             // has no PUBLIC line before it, and must not join the COMDAT section the linker may discard
             // (an ALIGN starts the next item too: it pads for the definition after it)
@@ -1472,6 +1496,10 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     secs[2].name = ".rdata"; secs[2].characteristics = kRdataFlags;
     if (plain[4]) { Section s; s.name = ".CRT$XCU"; s.characteristics = kCrtFlags; secs.push_back(s); }
     const size_t crtIndex = plain[4] ? 3 : 0;
+    // the thread-locals' initial values (cppparse/target TargetTls): only in an object that has some, so that no other
+    // object's sections are renumbered
+    size_t tlsIndex = 0;
+    if (plain[5]) { Section s; s.name = TargetTls::sectionName(); s.characteristics = TargetTls::sectionFlags; tlsIndex = secs.size(); secs.push_back(s); }
     // the unwind info and function table of the functions in .text (a COMDAT function has its own)
     bool plainFrames = false;
     for (size_t i = 0; i < blocks.size(); ++i) if (blocks[i].frame && !blocks[i].comdat) plainFrames = true;
@@ -1486,11 +1514,19 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     for (size_t i = 0; i < blocks.size(); ++i) if (!blocks[i].chunk.lines.empty() && !blocks[i].sourceFile.empty()) anyLines = true;
     size_t debugIndex = 0;
     if (anyLines) { Section d; d.name = ".debug$S"; d.characteristics = kDebugFlags; debugIndex = secs.size(); secs.push_back(d); }
-    DebugFiles debugFiles;
-    std::string mainSyms;
-    std::vector<Reloc> mainSymRelocs;
-    std::vector<std::pair<std::string, std::vector<Reloc> > > mainLines;
-    if (anyLines) moduleSymbols(mainSyms, objName);
+    CvFiles debugFiles;
+    CvSection mainDebug;
+    if (anyLines) mainDebug.symbols().addModule(objName);
+    // -g: the type records, written as the symbols below ask for them, here in this sequential loop only, so that
+    // the indices follow the listing's order whatever the number of threads; the variables the object defines
+    // (the data lines are encoded as they are read, so their symbols are known before the functions are placed)
+    CvModule noModule;
+    CvTypes debugTypes(debugInfo ? *debugInfo : noModule);
+    std::set<std::string> definedData;
+    if (debugInfo)
+        for (size_t p = 0; p < pieces.size(); ++p)
+            for (size_t k = 0; k < pieces[p]->chunk.symbols.size(); ++k) definedData.insert(pieces[p]->chunk.symbols[k].first);
+    std::vector<std::string> debugSymbolRecords;   // the symbol records of every .debug$S, for CvCheck
     const size_t plainSections = secs.size();
     std::vector<SymbolEntry> symbols;
     std::map<std::string, size_t> symbolIndex;   // name -> index in 'symbols'
@@ -1538,20 +1574,52 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
             const unsigned long codeSize = static_cast<unsigned long>(c.bytes.size());
             const bool internal = !publics.count(blocks[i].name);
             const unsigned long fileEntry = debugFiles.entry(blocks[i].sourceFile);
+            const CvLines lines(blocks[i].name, fileEntry, codeSize, c.lines);
+            // -g: the procedure's type; a marker that names a type the description does not have is an error of
+            // cppparse (CvCheck (a): no T<n> is unresolved)
+            CvProcedureMarks& marks = blocks[i].debug;
+            unsigned long procType = 0;
+            if (debugInfo && marks.type != 0) {
+                int bad = marks.type > debugInfo->typeCount() ? marks.type : 0;
+                for (size_t v = 0; v < marks.variables.size(); ++v) if (marks.variables[v].type > debugInfo->typeCount()) bad = marks.variables[v].type;
+                for (size_t v = 0; v < marks.statics.size(); ++v) if (marks.statics[v].type > debugInfo->typeCount()) bad = marks.statics[v].type;
+                if (bad) { result.errors.push_back("CodeView: " + blocks[i].name + " names type T" + numText(bad) + ", which the module's description does not have"); marks.type = 0; }
+                else procType = debugTypes.index(marks.type);
+            }
+            CvSection own;
+            CvSymbols& procSymbols = blocks[i].comdat ? own.symbols() : mainDebug.symbols();
+            if (debugInfo && marks.type != 0) {
+                // -g: the variables and block scopes (CvScopes chooses the form), its static locals each an S_LDATA32 in
+                // its block (the object defines the variable: a record names no symbol the object would not have without
+                // -g); the frame's places checked against the code the encoder saw (CvCheck (c))
+                for (size_t k = 0; k < c.cvMarks.size(); ++k)
+                    if (static_cast<size_t>(c.cvMarks[k].second) < blocks[i].positions.size()) marks.positions.push_back(std::make_pair(c.cvMarks[k].first, blocks[i].positions[static_cast<size_t>(c.cvMarks[k].second)]));
+                const CvScopes scopes(marks, codeSize, blocks[i].frame && marks.savedBytes != 0);
+                procSymbols.beginProcedure(blocks[i].name, blocks[i].displayName, codeSize, internal, procType, scopes.dbgStart(), scopes.dbgEnd(), scopes.procedureFlags());
+                scopes.write(procSymbols, debugTypes, blocks[i].name, definedData);
+                std::vector<std::pair<unsigned long, unsigned long> > windows;
+                windows.push_back(std::make_pair(0UL, c.prologEnd > 0 ? static_cast<unsigned long>(c.prologEnd) : 0UL));
+                for (size_t fc = 0; fc < c.funclets.size(); ++fc) windows.push_back(std::make_pair(c.funclets[fc].start, c.funclets[fc].prologEnd > 0 ? static_cast<unsigned long>(c.funclets[fc].prologEnd) : c.funclets[fc].start));
+                for (size_t k = 0; k < marks.positions.size(); ++k) {
+                    if (marks.positions[k].second != ";@epilog") continue;
+                    unsigned long end = codeSize;
+                    for (size_t r = 0; r < c.retEnds.size(); ++r) if (c.retEnds[r] > marks.positions[k].first && c.retEnds[r] < end) end = c.retEnds[r];
+                    windows.push_back(std::make_pair(marks.positions[k].first, end));
+                }
+                std::vector<std::string> problems;
+                CvCheck::frameRanges(blocks[i].name, scopes.offsetRanges(), windows, problems);
+                for (size_t k = 0; k < problems.size() && k < 10; ++k) result.errors.push_back("CodeView: " + problems[k]);
+            }
+            else procSymbols.beginProcedure(blocks[i].name, blocks[i].displayName, codeSize, internal, procType);
+            procSymbols.endProcedure();
             if (blocks[i].comdat) {
                 Section d; d.name = ".debug$S"; d.characteristics = kDebugFlags | kComdat; d.selection = kSelectAssociative; d.associated = sectionNumber;
-                std::string syms; std::vector<Reloc> symRelocs;
-                procedureSymbols(syms, symRelocs, blocks[i].name, blocks[i].displayName, codeSize, internal);
-                std::vector<std::pair<std::string, std::vector<Reloc> > > tables(1);
-                tables[0].first = lineTable(tables[0].second, blocks[i].name, fileEntry, codeSize, c.lines);
-                fillDebugSection(d, syms, symRelocs, tables, 0);
+                own.add(lines);
+                fillDebugSection(d, own, 0);
+                if (debugInfo) debugSymbolRecords.push_back(own.symbols().records().bytes());
                 secs.push_back(d);
                 comdatSymbols.push_back(std::vector<SymbolEntry>());
-            } else {
-                procedureSymbols(mainSyms, mainSymRelocs, blocks[i].name, blocks[i].displayName, codeSize, internal);
-                mainLines.push_back(std::make_pair(std::string(), std::vector<Reloc>()));
-                mainLines.back().first = lineTable(mainLines.back().second, blocks[i].name, fileEntry, codeSize, c.lines);
-            }
+            } else mainDebug.add(lines);
         }
         if (!blocks[i].frame || blocks[i].xdata.empty()) continue;
         // UNWIND_INFO ($unwind$f) and RUNTIME_FUNCTION ($pdata$f: begin, end, unwind info as image-relative
@@ -1617,6 +1685,7 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
             comdatSymbols.push_back(std::vector<SymbolEntry>());
             target = &secs.back(); sectionNumber = static_cast<int>(secs.size());
         } else if (dp.kind == 4) { target = &secs[crtIndex]; sectionNumber = static_cast<int>(crtIndex + 1); }
+        else if (dp.kind == 5) { target = &secs[tlsIndex]; sectionNumber = static_cast<int>(tlsIndex + 1); }
         else { target = &secs[static_cast<size_t>(dp.kind - 1)]; sectionNumber = dp.kind; }
         unsigned long base = static_cast<unsigned long>(target->bytes.size());
         if (c.maxAlign > target->align) target->align = c.maxAlign;
@@ -1636,7 +1705,64 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     }
     for (size_t p = 0; p < pieces.size(); ++p) delete pieces[p];
     pieces.clear();
-    if (anyLines) fillDebugSection(secs[debugIndex], mainSyms, mainSymRelocs, mainLines, &debugFiles);
+    // -g (docs/design-codeview.md 5.1, 5.3): the module's variables, constants and type names behind the procedures in
+    // the module's .debug$S, a COMDAT variable's record in an associative .debug$S of its own (it goes when the COMDAT
+    // goes), the types in .debug$T. A section -g adds comes behind every section the object has without it, .drectve
+    // included, and its section symbol behind every symbol: nothing the code's relocations name is renumbered, which
+    // is what scripts\cvsame.ps1 checks byte for byte
+    std::vector<Section> lateSections;
+    std::vector<char> lateHasSymbol;
+    if (debugInfo) {
+        CvSection lateModule;                    // the module's .debug$S of an object that has none without -g
+        if (!anyLines) lateModule.symbols().addModule(objName);
+        CvSymbols& moduleSymbols = anyLines ? mainDebug.symbols() : lateModule.symbols();
+        const unsigned long before = moduleSymbols.records().size();
+        const std::vector<CvVariable>& variables = debugInfo->variables();
+        for (size_t v = 0; v < variables.size(); ++v) {
+            const CvVariable& var = variables[v];
+            // a variable the object defines by its address; one it does not define has no record (a relocation to it
+            // would add an undefined external), unless it is a constant: then by its value
+            if (!var.symbol.empty() && symbolIndex.count(var.symbol)) {
+                const unsigned long type = debugTypes.symbolIndex(var.type);
+                std::map<std::string, int>::const_iterator comdat = dataSectionOf.find(var.symbol);
+                if (comdat == dataSectionOf.end()) { moduleSymbols.addData(var.symbol, var.name, type, var.internal, var.thread); continue; }
+                Section d; d.name = ".debug$S"; d.characteristics = kDebugFlags | kComdat; d.selection = kSelectAssociative; d.associated = comdat->second;
+                CvSection own;
+                own.symbols().addData(var.symbol, var.name, type, var.internal);
+                fillDebugSection(d, own, 0);
+                debugSymbolRecords.push_back(own.symbols().records().bytes());
+                lateSections.push_back(d); lateHasSymbol.push_back(1);
+            }
+            else if (var.hasValue) moduleSymbols.addConstant(var.name, debugTypes.symbolIndex(var.type), var.value);
+        }
+        const std::vector<CvTypedef>& typedefs = debugInfo->typedefs();
+        for (size_t t = 0; t < typedefs.size(); ++t) moduleSymbols.addUdt(typedefs[t].name, debugTypes.symbolIndex(typedefs[t].type));
+        // every class named so far that the unit has complete gets its definition, and each definition its S_UDT
+        debugTypes.finish();
+        const std::vector<std::pair<int, unsigned long> >& definitions = debugTypes.definitions();
+        for (size_t k = 0; k < definitions.size(); ++k) {
+            const CvClass& cls = debugInfo->classAt(definitions[k].first);
+            moduleSymbols.addUdt(CvNames::cutName(cls.udtName.empty() ? cls.name : cls.udtName), definitions[k].second);
+        }
+        debugSymbolRecords.push_back(moduleSymbols.records().bytes());
+        if (!anyLines && moduleSymbols.records().size() != before) {
+            Section d; d.name = ".debug$S"; d.characteristics = kDebugFlags;
+            fillDebugSection(d, lateModule, 0);
+            lateSections.push_back(d); lateHasSymbol.push_back(0);
+        }
+        if (debugTypes.count() != 0) {
+            Section t; t.name = ".debug$T"; t.characteristics = kDebugFlags;
+            const std::string bytes = debugTypes.section();
+            for (size_t k = 0; k < bytes.size(); ++k) t.bytes.push_back(static_cast<unsigned char>(bytes[k]));
+            lateSections.push_back(t); lateHasSymbol.push_back(0);
+            // the records as they will be written, checked (CvCheck): a violation is an error of cppparse
+            std::vector<std::string> problems;
+            const unsigned long typeCount = CvCheck::types(bytes, problems);
+            for (size_t k = 0; k < debugSymbolRecords.size(); ++k) { CvCheck::symbols(debugSymbolRecords[k], typeCount, problems); CvCheck::procedures(debugSymbolRecords[k], bytes, problems); }
+            for (size_t k = 0; k < problems.size() && k < 10; ++k) result.errors.push_back("CodeView: " + problems[k]);
+        }
+    }
+    if (anyLines) fillDebugSection(secs[debugIndex], mainDebug, &debugFiles);
     if (!directives.empty()) {
         // the linker directives (";@drectve"): .drectve, information for link only (LNK_INFO | LNK_REMOVE, align 1),
         // the last section, so that the numbers of the others stay what they were
@@ -1647,6 +1773,10 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
         secs.push_back(d);
         comdatSymbols.push_back(std::vector<SymbolEntry>());
     }
+    // what -g adds: behind the last section the object has without it (no entry in comdatSymbols: their section
+    // symbols come behind every other symbol, below)
+    const size_t lateStart = secs.size();
+    secs.insert(secs.end(), lateSections.begin(), lateSections.end());
     // a section whose contents need more than its default alignment (16, or 8 for the initialisers) says so in its
     // IMAGE_SCN_ALIGN_* bits, which the linker honours when it places the section (a 32- or 64-byte aligned variable)
     for (size_t s = 0; s < secs.size(); ++s) {
@@ -1659,7 +1789,7 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     }
     for (size_t s = 0; s < secs.size(); ++s) {
         CoffSectionInfo si; si.number = static_cast<int>(s + 1); si.name = secs[s].name; si.size = static_cast<unsigned long>(secs[s].bytes.size());
-        si.isCode = secs[s].isCode; si.comdat = (secs[s].characteristics & kComdat) != 0; si.debug = secs[s].name == ".debug$S";
+        si.isCode = secs[s].isCode; si.comdat = (secs[s].characteristics & kComdat) != 0; si.debug = secs[s].name == ".debug$S" || secs[s].name == ".debug$T";
         result.sectionList.push_back(si);
     }
     std::stable_sort(result.symbolList.begin(), result.symbolList.end(), SymbolInfoOrder());
@@ -1679,8 +1809,13 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     // externals: the declared ones first, then anything referenced but never defined (sorted, for determinism)
     std::set<std::string> undefined;
     for (size_t s = 0; s < secs.size(); ++s)
-        for (size_t r = 0; r < secs[s].relocs.size(); ++r)
-            if (!symbolIndex.count(secs[s].relocs[r].symbol) && !externSet.count(secs[s].relocs[r].symbol)) undefined.insert(secs[s].relocs[r].symbol);
+        for (size_t r = 0; r < secs[s].relocs.size(); ++r) {
+            if (symbolIndex.count(secs[s].relocs[r].symbol)) continue;
+            // a debug record's address names a symbol the object defines, never an external: debug information must
+            // not add a symbol to the table (docs/design-codeview.md 5.1; the relocation rule of CvCheck (b))
+            if (secs[s].name == ".debug$S" || secs[s].name == ".debug$T") { result.errors.push_back("CodeView: a debug record's address names " + secs[s].relocs[r].symbol + ", which the object does not define"); continue; }
+            if (!externSet.count(secs[s].relocs[r].symbol)) undefined.insert(secs[s].relocs[r].symbol);
+        }
     for (size_t e = 0; e < externs.size(); ++e) {
         if (symbolIndex.count(externs[e])) continue;    // declared EXTERN but defined here as well
         SymbolEntry f; f.name = externs[e]; f.value = 0; f.section = 0; f.type = 0; f.storageClass = 2; f.isSection = false; f.selection = 0;
@@ -1695,6 +1830,12 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     for (std::set<std::string>::const_iterator u = undefined.begin(); u != undefined.end(); ++u) {
         SymbolEntry f; f.name = *u; f.value = 0; f.section = 0; f.type = 0; f.storageClass = 2; f.isSection = false; f.selection = 0;
         symbolIndex[f.name] = symbols.size(); symbols.push_back(f);
+    }
+    // -g: the section symbols of the associative sections it adds, behind every symbol the object has without it
+    for (size_t l = 0; l < lateSections.size(); ++l) {
+        if (!lateHasSymbol[l]) continue;
+        SymbolEntry se; se.name = secs[lateStart + l].name; se.value = 0; se.section = static_cast<int>(lateStart + l + 1); se.type = 0; se.storageClass = 3; se.isSection = true; se.selection = secs[lateStart + l].selection;
+        symbols.push_back(se);
     }
     if (!result.errors.empty()) return false;
 
@@ -1754,7 +1895,10 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
         else if (!s.weakDefault.empty()) {
             // the default's symbol index, then IMAGE_WEAK_EXTERN_SEARCH_ALIAS (3): the default stands for the name unless
             // an object defines it. link.exe then takes the default before it searches the libraries, so the C
-            // runtime's function of the same name is not linked (with SEARCH_LIBRARY, 2, as /alternatename gives, it is)
+            // runtime's function of the same name is not linked (with SEARCH_LIBRARY, 2, as /alternatename gives, it is).
+            // SEARCH_NOLIBRARY (1) is no substitute: link.exe honours it only while no other object names the function
+            // (it then takes a library's definition, or reports the name unresolved, by the objects' order; measured for
+            // row P1, scripts\replace.ps1), and every caller of operator new is such an object
             put32(o, tableIndex[symbolIndex[s.weakDefault]]); put32(o, 3);
             for (int z = 0; z < 10; ++z) put8(o, 0);
         }
@@ -1766,8 +1910,8 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     unsigned long relocations = 0, dataBytes = 0, rdataBytes = 0;
     for (size_t s = 0; s < n; ++s) {
         relocations += static_cast<unsigned long>(secs[s].relocs.size());
-        if (secs[s].isCode || secs[s].name == ".debug$S") continue;
-        if (secs[s].name == ".data") dataBytes += static_cast<unsigned long>(secs[s].bytes.size()); else rdataBytes += static_cast<unsigned long>(secs[s].bytes.size());
+        if (secs[s].isCode || secs[s].name == ".debug$S" || secs[s].name == ".debug$T") continue;
+        if (secs[s].name == ".data" || secs[s].name == TargetTls::sectionName()) dataBytes += static_cast<unsigned long>(secs[s].bytes.size()); else rdataBytes += static_cast<unsigned long>(secs[s].bytes.size());
     }
     result.relocations = static_cast<int>(relocations);
     result.symbols = static_cast<int>(symbols.size());
@@ -1779,16 +1923,16 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     return true;
 }
 
-bool assembleCoff(const std::string& masmText, int threads, std::string& objectBytes, CoffResult& result)
+bool assembleCoff(const std::string& masmText, int threads, std::string& objectBytes, CoffResult& result, const CvModule* debugInfo)
 {
-    return assembleCoffNamed(masmText, std::string(), threads, objectBytes, result);
+    return assembleCoffNamed(masmText, std::string(), threads, objectBytes, result, debugInfo);
 }
 
-bool writeCoffObject(const std::string& masmText, const std::string& objPath, int threads, CoffResult& result)
+bool writeCoffObject(const std::string& masmText, const std::string& objPath, int threads, CoffResult& result, const CvModule* debugInfo)
 {
     std::string bytes;
     // S_OBJNAME holds the object's file name alone: an absolute path would make the object depend on where it is written
-    if (!assembleCoffNamed(masmText, objPath.substr(objPath.find_last_of("/\\") + 1), threads, bytes, result)) return false;
+    if (!assembleCoffNamed(masmText, objPath.substr(objPath.find_last_of("/\\") + 1), threads, bytes, result, debugInfo)) return false;
     std::ofstream out(objPath.c_str(), std::ios::binary);
     if (!out) { result.errors.push_back("cannot write " + objPath); result.writeFailed = true; return false; }
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));

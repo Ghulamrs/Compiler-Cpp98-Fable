@@ -50,6 +50,8 @@
 #include "CxxParser.hpp"
 #include "Sema.hpp"
 #include "IrGen.hpp"
+#include "CvFromSema.hpp"
+#include "CvModule.hpp"
 #include "Mangle.hpp"
 #include "BackEnd.hpp"
 #include "Report.hpp"
@@ -118,6 +120,10 @@ void usage()
         "                   -asm6.txt, <name>6.asm (and <name>6.obj with --obj); -O, --msvc-mangling apply.\n"
         "                   With --obj an input <name>.asm (a listing in cppparse's MASM subset) is assembled\n"
         "                   by the COFF writer alone into <name>6.obj\n"
+        "  -g               version 6 (--compile6): CodeView types and variables in the object, beside the line tables\n"
+        "                   every object has: the types in .debug$T, the globals, constants and type names in .debug$S\n"
+        "                   (and <name>-cv6.txt, the description they are written from). The code is the same bytes\n"
+        "                   with and without it. -g0: none (the default); CPPPARSE_G=1 in the environment: -g\n"
         "  -I <dir>         version 6: include directory for the preprocessor (also -Idir)\n"
         "  -D NAME[=value]  version 6: predefine a macro (also -DNAME=value); -U NAME undefines one\n"
         "  --target NAME    version 6: x86_64-windows (default; COFF objects, MSVC ABI) or x86_64-linux\n"
@@ -280,9 +286,13 @@ int cppparseMain(int argc, char* argv[])
 #pragma warning(disable: 4996)      // MSVC deprecates getenv for its _dupenv_s, which is not C++98
 #endif
     const char* const ehFromEnvironment = std::getenv("CPPPARSE_EH");
+    const char* const debugFromEnvironment = std::getenv("CPPPARSE_G");
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+    // -g when the command line has none: CPPPARSE_G=1 in the environment, so that a test script's objects can be had
+    // both ways and compared (scripts\cvsame.ps1: debug information changes no code)
+    bool debugInfo = debugFromEnvironment && std::string(debugFromEnvironment) == "1";
     if (const char* model = ehFromEnvironment) {
         const std::string m = model;
         if (m == "sjlj") copt.eh = EhModelSjlj;
@@ -321,6 +331,8 @@ int cppparseMain(int argc, char* argv[])
         else if (a == "--assemble") assemble = true;
         else if (a == "--obj") obj = true;
         else if (a == "--msvc-mangling") copt.msvcNames = true;
+        else if (a == "-g") debugInfo = true;
+        else if (a == "-g0") debugInfo = false;
         else if (a == "--eh=table") copt.eh = EhModelTable;
         else if (a == "--eh=sjlj") copt.eh = EhModelSjlj;
         else if (a == "--eh=cl") { copt.eh = EhModelCl; ehClAsked = true; }
@@ -492,9 +504,15 @@ int cppparseMain(int argc, char* argv[])
                     // version 6 stage 4: IR from the analysed tree, then the shared back end
                     IrGen gen(program, types);
                     gen.setFiles(pp.files());   // the functions' source files, for the CodeView line tables
+                    // -g: the unit's types and variables described for CodeView while the IR is generated; the object
+                    // writer gets the description beside the listing, whose markers name its types by number
+                    CvModule cvModule;
+                    CvFromSema cvFromSema(types, cvModule);
+                    if (debugInfo) gen.setDebugInfo(&cvFromSema);
                     std::vector<IrFunction*> functions;
                     X86Module x86(copt.msvcNames);
                     x86.setEhModel(copt.eh);
+                    for (size_t k = 0; k < pp.linkerDirectives().size(); ++k) x86.addLinkerDirective(pp.linkerDirectives()[k]);   // #pragma comment(linker)
                     unsigned long unitId = 2166136261UL;   // FNV-1a of the input path: this unit's anonymous namespace id
                     for (size_t k = 0; k < inputs[i].size(); ++k) unitId = (unitId ^ static_cast<unsigned char>(inputs[i][k])) * 16777619UL;
                     setMangleUnitId(unitId & 0xFFFFFFFFUL);
@@ -502,6 +520,17 @@ int cppparseMain(int argc, char* argv[])
                     gen.setEhModel(copt.eh);                         // table model: a region per object with a destructor (cl's states) instead of flags
                     gen.registerMetadata(x86, copt.msvcNames);   // first: it registers the globals and the dynamic initialisers
                     gen.generate(functions);
+                    if (!gen.refusals().empty()) {
+                        // thread-locals the target refuses (S164, docs/design-selfhost.md 4.1): errors of the unit, nothing is written
+                        const std::vector<sema::Diag>& bad = gen.refusals();
+                        for (size_t k = 0; k < bad.size(); ++k)
+                            std::cout << "  " << (bad[k].loc.file >= 0 && bad[k].loc.file < static_cast<int>(pp.files().size()) ? pp.files()[static_cast<size_t>(bad[k].loc.file)] : inputs[i])
+                                      << "(" << bad[k].loc.line << "): error " << bad[k].code << ": " << bad[k].message << "\n";
+                        totalErrors += static_cast<int>(bad.size());
+                        removeUnitOutputs(base);
+                        for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
+                        continue;
+                    }
                     if (!gen.unsupported().empty()) {
                         // constructs with virtual bases that would compile to wrong code: nothing is written (S132)
                         const std::vector<std::string>& bad = gen.unsupported();
@@ -527,6 +556,7 @@ int cppparseMain(int argc, char* argv[])
                         for (size_t k = 0; k < functions.size(); ++k) delete functions[k];
                         continue;
                     }
+                    if (debugInfo) cvFromSema.finish(program);   // every layout is final: the classes' members, the typedef names
                     BackEndOptions bo;
                     bo.optLevel = copt.optLevel; bo.threads = copt.threads; bo.x86 = copt.x86;
                     BackEndResult br;
@@ -536,11 +566,13 @@ int cppparseMain(int argc, char* argv[])
                     writeOut(base + "-ir6.txt", br.irText, quiet, written);
                     writeOut(base + "-opt6.log", br.log, quiet, written);
                     writeOut(base + "-asm6.txt", br.asmText, quiet, written);
+                    if (debugInfo) writeOut(base + "-cv6.txt", cvModule.dump(), quiet, written);
                     if (copt.x86) {
                         writeOut(base + "6.asm", br.x86Text, quiet, written);
                         CoffResult cr;
-                        if (!obj) { std::string bytes; assembleCoff(br.x86Text, copt.threads, bytes, cr); }   // only for the map
-                        else if (writeCoffObject(br.x86Text, base + "6.obj", copt.threads, cr)) { if (!quiet) std::cout << "  wrote " << base << "6.obj\n"; }
+                        const CvModule* const cv = debugInfo ? &cvModule : 0;
+                        if (!obj) { std::string bytes; assembleCoff(br.x86Text, copt.threads, bytes, cr, cv); }   // only for the map
+                        else if (writeCoffObject(br.x86Text, base + "6.obj", copt.threads, cr, cv)) { if (!quiet) std::cout << "  wrote " << base << "6.obj\n"; }
                         else if (cr.writeFailed) { std::cerr << "error: cannot write " << base << "6.obj\n"; ++g_writeFailures; }
                         else {
                             // the code generator wrote assembly the COFF writer cannot encode: an error of cppparse, not of the

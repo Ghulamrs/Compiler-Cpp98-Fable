@@ -9,6 +9,7 @@
 
 #include <cfloat>
 #include <climits>
+#include <clocale>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -686,7 +687,8 @@ private:
         return in;
     }
     // stage 2 of a floating value: the characters of [sign] digits [point digits] [e [sign] digits], narrowed, in buf
-    // (zero-terminated); failbit when no digit was taken
+    // (zero-terminated) for strtod; failbit when no digit was taken. The point is written as strtod reads it: '.',
+    // or the decimal point of the C library's locale once locale::global has changed that (a comma in "de-DE")
     iter_type __get_real(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err, char* buf) const
     {
         const locale loc = f.getloc();
@@ -709,7 +711,7 @@ private:
             digits = true;
         }
         if (in != end && char_traits<charT>::eq(*in, point)) {
-            if (n < 64) buf[n++] = '.';
+            if (n < 64) buf[n++] = __c_locale_given() ? *localeconv()->decimal_point : '.';
             for (++in; in != end; ++in) {
                 const char c = ct.narrow(*in, 0);
                 if (c < '0' || c > '9') break;

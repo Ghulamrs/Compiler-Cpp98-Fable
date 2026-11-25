@@ -24,6 +24,9 @@ extern "C" {
     char*  strerror(int code);
     size_t strspn(const char* s, const char* accept);
     size_t strcspn(const char* s, const char* reject);
+    // Microsoft's: strcoll and strxfrm in a locale of the C runtime (<clocale>)
+    int    _strcoll_l(const char* a, const char* b, _locale_t locale);
+    size_t _strxfrm_l(char* dst, const char* src, size_t n, _locale_t locale);
 }
 
 // 21.4: the search functions as a const and a non-const overload, as the UCRT's string.h has them for C++

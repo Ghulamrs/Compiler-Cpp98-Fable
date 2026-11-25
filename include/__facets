@@ -1,25 +1,215 @@
 // __facets - cppparse's C++98 library: the facets of 22.2 that the streams do not use themselves, for <locale>:
 // codecvt (22.2.1.5), time_get and time_put (22.2.5), moneypunct, money_put and money_get (22.2.6), messages
-// (22.2.7) and their _byname forms. They are those of the classic "C" locale: a char converts to a wchar_t and back by
-// its value, dates are month/day/year and times strftime's, money has no currency symbol, no fraction and "-" for
-// the negative sign, and there are no message catalogues. Every locale has them without holding them (__default_facet
-// gives use_facet and has_facet one, made once), until the program installs a facet of its own.
+// (22.2.7) and their _byname forms, and what every facet of a named locale is made of (__named_locale: the C
+// runtime's locale of the name). The facets themselves are those of the classic "C" locale: a char converts to a
+// wchar_t and back by its value, dates are month/day/year and times strftime's, money has no currency symbol, no
+// fraction and "-" for the negative sign, and there are no message catalogues. Every locale has them without holding
+// them (__default_facet gives use_facet and has_facet one, made once), until the program installs a facet of its own
+// or the locale has a name: a named locale holds the _byname forms of the time facets, of moneypunct and of
+// codecvt<wchar_t, char, mbstate_t>, which write, read and convert as the C runtime's locale of that name does
+// (messages has no catalogues there either).
 #ifndef CPPPARSE_FACETS
 #define CPPPARSE_FACETS
 
+#include <cctype>
+#include <clocale>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <cwchar>
+#include <cwctype>
 #include <string>
 #include <__locale>
 #include <__num_facets>
 
 namespace std {
 
+// ---- the C runtime's locale of a name, which the facets of a named locale read ----
+
+// The calling thread on a C locale of its own while this lives: setlocale then changes nothing for the other
+// threads. At the end the thread has the program's locale again, or the one of its own that it had before
+struct __thread_locale {
+    int    config;
+    bool   own;
+    string saved;
+    __thread_locale() : config(_configthreadlocale(_ENABLE_PER_THREAD_LOCALE)), own(false) {}
+    void keep()
+    {
+        if (config != _ENABLE_PER_THREAD_LOCALE) return;
+        const char* now = setlocale(LC_ALL, 0);
+        if (now) { saved = now; own = true; }
+    }
+    ~__thread_locale()
+    {
+        if (own) setlocale(LC_ALL, saved.c_str());
+        if (config == _DISABLE_PER_THREAD_LOCALE) _configthreadlocale(config);
+    }
+};
+
+// A named locale's data: the C runtime's locale object of the name, for the functions that take one (_strcoll_l,
+// _strftime_l, ...), and its lconv, copied (no function gives a locale object's). Shared by the facets made of it
+// (refs, interlocked) and freed with the last of them.
+// It is made by setlocale on the calling thread's own C locale (_configthreadlocale), which leaves the other threads
+// and the program's C locale alone, and where localeconv and _get_current_locale give what belongs to the name:
+// measured, a sixth of what _create_locale costs for the object alone (5 us against 33)
+struct __named_locale {
+    long volatile refs;
+    _locale_t     handle;
+    char          point, sep;                       // numbers: decimal_point, thousands_sep and grouping
+    wchar_t       wpoint, wsep;
+    string        grouping;
+    char          mon_point, mon_sep;               // money
+    wchar_t       wmon_point, wmon_sep;
+    string        mon_grouping, symbol, int_symbol, positive, negative;
+    wstring       wsymbol, wint_symbol, wpositive, wnegative;
+    char          frac, int_frac, p_cs_precedes, p_sep_by_space, p_sign_posn, n_cs_precedes, n_sep_by_space, n_sign_posn;
+
+    // the data of the name; none (0) for "C", whose facets are the classic ones; runtime_error for a name the C
+    // runtime does not know (22.1.1.2)
+    static __named_locale* open(const char* name)
+    {
+        if (!name) throw runtime_error("bad locale name");
+        if (name[0] == 'C' && name[1] == 0) return 0;
+        __thread_locale mine;
+        mine.keep();
+        if (!setlocale(LC_ALL, name)) throw runtime_error("bad locale name");
+        const lconv* lc = localeconv();
+        __named_locale* p = new __named_locale;
+        p->refs = 1;
+        p->handle = 0;
+        try {
+            p->point = lc->decimal_point[0]; p->sep = lc->thousands_sep[0]; p->grouping = lc->grouping;
+            p->wpoint = __first(lc->_W_decimal_point, p->point); p->wsep = __first(lc->_W_thousands_sep, p->sep);
+            p->mon_point = lc->mon_decimal_point[0]; p->mon_sep = lc->mon_thousands_sep[0]; p->mon_grouping = lc->mon_grouping;
+            p->wmon_point = __first(lc->_W_mon_decimal_point, p->mon_point); p->wmon_sep = __first(lc->_W_mon_thousands_sep, p->mon_sep);
+            p->symbol = lc->currency_symbol; p->int_symbol = lc->int_curr_symbol; p->positive = lc->positive_sign; p->negative = lc->negative_sign;
+            if (lc->_W_currency_symbol) p->wsymbol = lc->_W_currency_symbol;
+            if (lc->_W_int_curr_symbol) p->wint_symbol = lc->_W_int_curr_symbol;
+            if (lc->_W_positive_sign) p->wpositive = lc->_W_positive_sign;
+            if (lc->_W_negative_sign) p->wnegative = lc->_W_negative_sign;
+            p->frac = lc->frac_digits; p->int_frac = lc->int_frac_digits;
+            p->p_cs_precedes = lc->p_cs_precedes; p->p_sep_by_space = lc->p_sep_by_space; p->p_sign_posn = lc->p_sign_posn;
+            p->n_cs_precedes = lc->n_cs_precedes; p->n_sep_by_space = lc->n_sep_by_space; p->n_sign_posn = lc->n_sign_posn;
+            p->handle = _get_current_locale();
+            if (!p->handle) throw runtime_error("bad locale name");
+        } catch (...) {
+            delete p;
+            throw;
+        }
+        return p;
+    }
+    void retain() { cppparse_interlocked_increment(&refs); }
+    void release()
+    {
+        if (cppparse_interlocked_decrement(&refs) != 0) return;
+        if (handle) _free_locale(handle);
+        delete this;
+    }
+    static wchar_t __first(const wchar_t* wide, char narrow) { return wide ? wide[0] : static_cast<wchar_t>(static_cast<unsigned char>(narrow)); }
+};
+
+// one reference to a named locale's data (to none for "C"): what a facet that asks the C runtime at each call keeps,
+// and what the others are made from
+class __named_ref {
+public:
+    explicit __named_ref(const char* name) : m_p(__named_locale::open(name)) {}
+    __named_ref(const __named_ref& o) : m_p(o.m_p) { if (m_p) m_p->retain(); }
+    ~__named_ref() { if (m_p) m_p->release(); }
+    const __named_locale* get() const { return m_p; }
+    _locale_t handle() const { return m_p->handle; }
+private:
+    void operator=(const __named_ref&);
+    __named_locale* m_p;
+};
+
+// the narrow or the wide form of a locale's character or text, by the facet's character type (another type than
+// char and wchar_t takes the narrow form, each character by its value)
+template <class charT> struct __lc_text {
+    static charT one(char narrow, wchar_t) { return static_cast<charT>(static_cast<unsigned char>(narrow)); }
+    static basic_string<charT> all(const string& narrow, const wstring&)
+    {
+        basic_string<charT> r;
+        for (size_t i = 0; i < narrow.size(); ++i) r += static_cast<charT>(static_cast<unsigned char>(narrow[i]));
+        return r;
+    }
+};
+template <> struct __lc_text<char> {
+    static char one(char narrow, wchar_t) { return narrow; }
+    static string all(const string& narrow, const wstring&) { return narrow; }
+};
+template <> struct __lc_text<wchar_t> {
+    static wchar_t one(char, wchar_t wide) { return wide; }
+    static wstring all(const string&, const wstring& wide) { return wide; }
+};
+
+// the wide case conversions of a locale. The C runtime's go wrong from U+0080 to U+00FF, where they look the
+// character up in the table of the locale's code page (U+00FF becomes U+009F in code page 1252, and nothing is
+// converted in a double-byte one): those are converted here, as Latin-1 has them in every locale
+inline wchar_t __wide_upper(wchar_t c, _locale_t h)
+{
+    if (c >= 0x80 && c <= 0xFF) return static_cast<wchar_t>(c == 0xFF ? 0x178 : c >= 0xE0 && c != 0xF7 ? c - 0x20 : c);
+    return static_cast<wchar_t>(_towupper_l(c, h));
+}
+inline wchar_t __wide_lower(wchar_t c, _locale_t h)
+{
+    if (c >= 0x80 && c <= 0xFF) return static_cast<wchar_t>(c >= 0xC0 && c <= 0xDE && c != 0xD7 ? c + 0x20 : c);
+    return static_cast<wchar_t>(_towlower_l(c, h));
+}
+
+// the C runtime's functions that take a locale object, by the facet's character type: the order of two strings and
+// the string to compare in its place (strcoll, strxfrm), a character's lower case, and one conversion of strftime.
+// Another type than char and wchar_t has no locale: its strings compare by their characters' values, and its dates
+// are the narrow ones, each character by its value
+template <class charT> struct __lc_call {
+    static int coll(const charT* a, const charT* b, _locale_t)
+    {
+        for (; *a != charT() && *b != charT(); ++a, ++b) {
+            if (char_traits<charT>::lt(*a, *b)) return -1;
+            if (char_traits<charT>::lt(*b, *a)) return 1;
+        }
+        return *b != charT() ? -1 : *a != charT() ? 1 : 0;
+    }
+    static size_t xfrm(charT* out, const charT* in, size_t n, _locale_t)
+    {
+        size_t len = 0;
+        for (; in[len] != charT(); ++len) if (len < n) out[len] = in[len];
+        if (len < n) out[len] = charT();
+        return len;
+    }
+    static charT lower(charT c, _locale_t) { return c; }
+    static size_t strf(charT* out, size_t n, const char* pattern, const tm* t, _locale_t h)
+    {
+        char text[160];
+        const size_t len = _strftime_l(text, n < sizeof(text) ? n : sizeof(text), pattern, t, h);
+        for (size_t i = 0; i < len; ++i) out[i] = static_cast<charT>(static_cast<unsigned char>(text[i]));
+        return len;
+    }
+};
+template <> struct __lc_call<char> {
+    static int    coll(const char* a, const char* b, _locale_t h) { return _strcoll_l(a, b, h); }
+    static size_t xfrm(char* out, const char* in, size_t n, _locale_t h) { return _strxfrm_l(out, in, n, h); }
+    static char   lower(char c, _locale_t h) { return static_cast<char>(_tolower_l(static_cast<unsigned char>(c), h)); }
+    static size_t strf(char* out, size_t n, const char* pattern, const tm* t, _locale_t h) { return _strftime_l(out, n, pattern, t, h); }
+};
+template <> struct __lc_call<wchar_t> {
+    static int     coll(const wchar_t* a, const wchar_t* b, _locale_t h) { return _wcscoll_l(a, b, h); }
+    static size_t  xfrm(wchar_t* out, const wchar_t* in, size_t n, _locale_t h) { return _wcsxfrm_l(out, in, n, h); }
+    static wchar_t lower(wchar_t c, _locale_t h) { return __wide_lower(c, h); }
+    static size_t  strf(wchar_t* out, size_t n, const char* pattern, const tm* t, _locale_t h)
+    {
+        wchar_t wide[8];
+        size_t i = 0;
+        for (; pattern[i] && i < 7; ++i) wide[i] = static_cast<wchar_t>(pattern[i]);
+        wide[i] = 0;
+        return _wcsftime_l(out, n, wide, t, h);
+    }
+};
+
+// a facet named for a locale takes any name a locale takes: "C", or a name the C runtime knows
 inline void __check_locale_name(const char* name)
 {
-    if (!name || (strcmp(name, "C") != 0 && name[0] != 0)) throw runtime_error("bad locale name");
+    __named_ref known(name);
 }
 
 // 22.2.1.5 codecvt: the conversion between the characters of a program (internT) and those of a file (externT). For
@@ -81,12 +271,79 @@ protected:
 };
 template <class internT, class externT, class stateT> locale::id codecvt<internT, externT, stateT>::id;
 
+// 22.2.1.6 codecvt_byname: the classic conversion under any name a locale takes, but for wchar_t and char (below)
 template <class internT, class externT, class stateT>
 class codecvt_byname : public codecvt<internT, externT, stateT> {
 public:
     explicit codecvt_byname(const char* name, size_t refs = 0) : codecvt<internT, externT, stateT>(refs) { __check_locale_name(name); }
 protected:
     virtual ~codecvt_byname() {}
+};
+
+// codecvt_byname<wchar_t, char, mbstate_t>: between the locale's code page and Unicode (_mbtowc_l, _wctomb_s_l), a
+// character at a time and without a shift state. A wide character the code page lacks is an error, as is a byte
+// that is no character; the first byte of a longer character at the end of the input is partial. A named locale
+// holds this one (the streams convert through the C runtime, not through this facet)
+template <>
+class codecvt_byname<wchar_t, char, mbstate_t> : public codecvt<wchar_t, char, mbstate_t> {
+public:
+    explicit codecvt_byname(const char* name, size_t refs = 0) : codecvt<wchar_t, char, mbstate_t>(refs), m_nl(name), m_max(1) { __init(); }
+    codecvt_byname(const __named_ref& nl, size_t refs) : codecvt<wchar_t, char, mbstate_t>(refs), m_nl(nl), m_max(1) { __init(); }
+protected:
+    virtual ~codecvt_byname() {}
+    virtual result do_out(mbstate_t& state, const wchar_t* from, const wchar_t* from_end, const wchar_t*& from_next, char* to, char* to_limit, char*& to_next) const
+    {
+        if (!m_nl.get()) return codecvt<wchar_t, char, mbstate_t>::do_out(state, from, from_end, from_next, to, to_limit, to_next);
+        for (from_next = from, to_next = to; from_next != from_end; ++from_next) {
+            if (to_next == to_limit) return partial;
+            char bytes[8];
+            int count = 0;
+            if (_wctomb_s_l(&count, bytes, sizeof bytes, *from_next, m_nl.handle()) != 0 || count < 1) return error;
+            if (to_limit - to_next < count) return partial;
+            for (int i = 0; i < count; ++i) *to_next++ = bytes[i];
+        }
+        return ok;
+    }
+    virtual result do_in(mbstate_t& state, const char* from, const char* from_end, const char*& from_next, wchar_t* to, wchar_t* to_limit, wchar_t*& to_next) const
+    {
+        if (!m_nl.get()) return codecvt<wchar_t, char, mbstate_t>::do_in(state, from, from_end, from_next, to, to_limit, to_next);
+        for (from_next = from, to_next = to; from_next != from_end; ++to_next) {
+            if (to_next == to_limit) return partial;
+            const int count = __one(from_next, from_end, to_next);
+            if (count < 0) return count == -2 ? partial : error;
+            from_next += count;
+        }
+        return ok;
+    }
+    virtual int  do_encoding() const throw() { return m_max == 1 ? 1 : 0; }
+    virtual bool do_always_noconv() const throw() { return false; }
+    virtual int  do_length(const mbstate_t& state, const char* from, const char* end, size_t max) const
+    {
+        if (!m_nl.get()) return codecvt<wchar_t, char, mbstate_t>::do_length(state, from, end, max);
+        const char* p = from;
+        for (size_t n = 0; n < max && p != end; ++n) {
+            wchar_t w;
+            const int count = __one(p, end, &w);
+            if (count < 0) break;
+            p += count;
+        }
+        return static_cast<int>(p - from);
+    }
+    virtual int  do_max_length() const throw() { return m_max; }
+private:
+    void __init() { if (m_nl.get()) m_max = ___mb_cur_max_l_func(m_nl.handle()); if (m_max < 1) m_max = 1; }
+    // the character at p: the number of its bytes; -1 when the bytes are none, -2 when they end within one
+    int __one(const char* p, const char* end, wchar_t* out) const
+    {
+        if (*p == 0) { *out = 0; return 1; }
+        const int count = _mbtowc_l(out, p, static_cast<size_t>(end - p), m_nl.handle());
+        if (count > 0) return count;
+        const unsigned char first = static_cast<unsigned char>(*p);
+        const bool leads = m_max > 2 ? first >= 0xC0 : m_max == 2 && _isctype_l(first, 0x8000, m_nl.handle()) != 0;
+        return leads && end - p < m_max ? -2 : -1;
+    }
+    __named_ref m_nl;
+    int         m_max;
 };
 
 // 22.2.7 messages: the catalogues of translated messages. There are none: open gives a negative catalogue and get the
@@ -198,7 +455,7 @@ protected:
         if (s == end) err |= ios_base::eofbit;
         return s;
     }
-private:
+    // (protected from here on, for time_get_byname)
     // up to maxDigits decimal digits, at least one
     static bool __number(iter_type& s, iter_type end, int maxDigits, int& value, int* count = 0)
     {
@@ -220,6 +477,7 @@ private:
     }
     // tm_year of a year read with that many digits: years since 1900; two digits below 69 are of this century
     static int __year(int year, int digits) { return digits > 2 ? year - 1900 : year < 69 ? year + 100 : year; }
+private:
     // the letters at s as one of count names, in full or its first three letters, in either case: its index, -1 for none
     static int __name(iter_type& s, iter_type end, int count, bool months)
     {
@@ -246,17 +504,181 @@ private:
 };
 template <class charT, class InputIterator> locale::id time_get<charT, InputIterator>::id;
 
+// what a named locale's time_get reads: the names of the weekdays and of the months, in full and abbreviated, in the
+// locale's lower case, and the order and the separator of the three numbers of a date as %x writes it
+template <class charT> struct __time_names {
+    enum { days = 0, months = 14, count = 38 };   // 7 weekdays, their 7 abbreviations, 12 months, their 12 abbreviations
+    basic_string<charT> name[count];
+    char  field[3];                               // 'd', 'm' and 'y' in %x's order; field[0] is 0 when %x is no such date
+    charT sep;                                    // what %x writes between them
+    void fill(_locale_t h)
+    {
+        tm t;
+        memset(&t, 0, sizeof t);
+        t.tm_year = 98; t.tm_mday = 1;
+        for (int i = 0; i < 7; ++i) {
+            t.tm_wday = i;
+            set(days + i, "%A", t, h);
+            set(days + 7 + i, "%a", t, h);
+        }
+        for (int i = 0; i < 12; ++i) {
+            t.tm_mon = i;
+            set(months + i, "%B", t, h);
+            set(months + 12 + i, "%b", t, h);
+        }
+        // the 22nd of November 1998 as %x has it: the values tell the three numbers apart
+        t.tm_mon = 10; t.tm_mday = 22; t.tm_wday = 0; t.tm_yday = 325;
+        char date[64];
+        const size_t len = _strftime_l(date, sizeof date, "%x", &t, h);
+        int n = 0;
+        bool separated = false;
+        char between = '/';
+        for (size_t i = 0; i < len && n < 3; ) {
+            if (date[i] < '0' || date[i] > '9') {
+                if (n == 1 && !separated && date[i] != ' ') { between = date[i]; separated = true; }
+                ++i;
+                continue;
+            }
+            int v = 0;
+            for (; i < len && date[i] >= '0' && date[i] <= '9'; ++i) v = v * 10 + (date[i] - '0');
+            const char kind = v == 22 ? 'd' : v == 11 ? 'm' : v == 1998 || v == 98 ? 'y' : 0;
+            if (!kind || (n > 0 && field[0] == kind) || (n > 1 && field[1] == kind)) { n = 0; break; }
+            field[n++] = kind;
+        }
+        if (n != 3) field[0] = 0;
+        sep = static_cast<charT>(static_cast<unsigned char>(n == 3 && !separated ? ' ' : between));
+    }
+    void set(int index, const char* pattern, const tm& t, _locale_t h)
+    {
+        charT text[128];
+        const size_t len = __lc_call<charT>::strf(text, 128, pattern, &t, h);
+        for (size_t i = 0; i < len; ++i) text[i] = __lc_call<charT>::lower(text[i], h);
+        name[index].assign(text, len);
+    }
+};
+
+// 22.2.5.2 time_get_byname: reads what the locale of the name writes. A weekday or a month by its name or its
+// abbreviation as %A, %a, %B and %b write them there, in either case (the longest name the characters spell; ones
+// read beyond it that began a longer name make it none, since an input iterator cannot go back: "Sept" is no month
+// where "Sep" and "September" are, as in cl's library). A date as the three numbers of %x in its order, with %x's
+// separator or one of / , : between them (those cl's library takes in every locale, and no other), the year of two
+// or four digits as in the "C" locale. A time is hh:mm:ss in every locale, as cl's library reads it. The names are
+// asked of the C runtime when the facet is first used (39 conversions): a locale that reads no date pays nothing
 template <class charT, class InputIterator = istreambuf_iterator<charT> >
 class time_get_byname : public time_get<charT, InputIterator> {
 public:
     typedef time_base::dateorder dateorder;
     typedef InputIterator        iter_type;
-    explicit time_get_byname(const char* name, size_t refs = 0) : time_get<charT, InputIterator>(refs) { __check_locale_name(name); }
+    explicit time_get_byname(const char* name, size_t refs = 0) : time_get<charT, InputIterator>(refs), m_nl(name), m_state(0) {}
+    time_get_byname(const __named_ref& nl, size_t refs) : time_get<charT, InputIterator>(refs), m_nl(nl), m_state(0) {}
 protected:
     virtual ~time_get_byname() {}
+    virtual dateorder do_date_order() const
+    {
+        __own own;
+        const __time_names<charT>* names = __names(own);
+        if (!names) return time_get<charT, InputIterator>::do_date_order();
+        const char* f = names->field;
+        return f[0] == 'd' && f[1] == 'm' ? time_base::dmy : f[0] == 'm' && f[1] == 'd' ? time_base::mdy : f[0] == 'y' && f[1] == 'm' ? time_base::ymd
+               : f[0] == 'y' && f[1] == 'd' ? time_base::ydm : time_base::no_order;
+    }
+    virtual iter_type do_get_date(iter_type s, iter_type end, ios_base& f, ios_base::iostate& err, tm* t) const
+    {
+        __own own;
+        const __time_names<charT>* names = __names(own);
+        if (!names || !names->field[0]) return time_get<charT, InputIterator>::do_get_date(s, end, f, err, t);
+        int day = 0, mon = 0, year = 0, digits = 0;
+        bool good = true;
+        for (int k = 0; k < 3 && good; ++k) {
+            if (k > 0) {
+                while (s != end && *s == static_cast<charT>(' ')) ++s;
+                if (s != end && (*s == names->sep || *s == static_cast<charT>('/') || *s == static_cast<charT>(',') || *s == static_cast<charT>(':'))) ++s;
+                while (s != end && *s == static_cast<charT>(' ')) ++s;
+            }
+            switch (names->field[k]) {
+            case 'd': good = time_get<charT, InputIterator>::__number(s, end, 2, day) && day >= 1 && day <= 31; break;
+            case 'm': good = time_get<charT, InputIterator>::__number(s, end, 2, mon) && mon >= 1 && mon <= 12; break;
+            default: good = time_get<charT, InputIterator>::__number(s, end, 4, year, &digits); break;
+            }
+        }
+        if (good) { t->tm_mon = mon - 1; t->tm_mday = day; t->tm_year = time_get<charT, InputIterator>::__year(year, digits); } else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+    virtual iter_type do_get_weekday(iter_type s, iter_type end, ios_base& f, ios_base::iostate& err, tm* t) const
+    {
+        __own own;
+        const __time_names<charT>* names = __names(own);
+        if (!names) return time_get<charT, InputIterator>::do_get_weekday(s, end, f, err, t);
+        const int i = __match(s, end, *names, __time_names<charT>::days, 7);
+        if (i >= 0) t->tm_wday = i; else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+    virtual iter_type do_get_monthname(iter_type s, iter_type end, ios_base& f, ios_base::iostate& err, tm* t) const
+    {
+        __own own;
+        const __time_names<charT>* names = __names(own);
+        if (!names) return time_get<charT, InputIterator>::do_get_monthname(s, end, f, err, t);
+        const int i = __match(s, end, *names, __time_names<charT>::months, 12);
+        if (i >= 0) t->tm_mon = i; else err |= ios_base::failbit;
+        if (s == end) err |= ios_base::eofbit;
+        return s;
+    }
+private:
+    // a call's own names, for the one case below
+    struct __own {
+        __time_names<charT>* p;
+        __own() : p(0) {}
+        ~__own() { delete p; }
+    };
+    // the locale's names, none for "C": the facet's, which the first call to ask fills (m_state 0: not filled, 1:
+    // a thread is filling them, 2: filled); a call that finds another thread filling them reads its own
+    const __time_names<charT>* __names(__own& own) const
+    {
+        if (!m_nl.get()) return 0;
+        if (m_state == 2) return &m_names;
+        if (cppparse_interlocked_compare_exchange(&m_state, 1, 0) == 0) {
+            try { m_names.fill(m_nl.handle()); }
+            catch (...) { cppparse_interlocked_compare_exchange(&m_state, 0, 1); throw; }
+            cppparse_interlocked_compare_exchange(&m_state, 2, 1);
+            return &m_names;
+        }
+        if (m_state == 2) return &m_names;
+        own.p = new __time_names<charT>;
+        own.p->fill(m_nl.handle());
+        return own.p;
+    }
+    // the name at s among the count names from index first and their abbreviations behind them: its number, -1 for none
+    int __match(iter_type& s, iter_type end, const __time_names<charT>& names, int first, int count) const
+    {
+        bool alive[24];
+        const int all = 2 * count;
+        for (int i = 0; i < all; ++i) alive[i] = true;
+        int best = -1;
+        size_t pos = 0, bestLength = 0;
+        while (s != end) {
+            const charT c = __lc_call<charT>::lower(*s, m_nl.handle());
+            bool any = false;
+            for (int i = 0; i < all; ++i) {
+                if (!alive[i]) continue;
+                const basic_string<charT>& name = names.name[first + i];
+                if (pos < name.size() && name[pos] == c) any = true; else alive[i] = false;
+            }
+            if (!any) break;
+            ++s;
+            ++pos;
+            for (int i = 0; i < all; ++i) if (alive[i] && names.name[first + i].size() == pos) { best = i; bestLength = pos; }
+        }
+        return best >= 0 && bestLength == pos ? best % count : -1;
+    }
+    __named_ref                 m_nl;
+    mutable long volatile       m_state;
+    mutable __time_names<charT> m_names;
 };
 
-// 22.2.5.3 time_put: each conversion of the pattern is strftime's, the other characters are copied
+// 22.2.5.3 time_put: each conversion of the pattern is strftime's in the "C" locale (also after locale::global has
+// given the C library another, see __c_locale), the other characters are copied
 template <class charT, class OutputIterator = ostreambuf_iterator<charT> >
 class time_put : public locale::facet {
 public:
@@ -278,9 +700,12 @@ public:
     static locale::id id;
 protected:
     virtual ~time_put() {}
-    virtual iter_type do_put(iter_type s, ios_base&, char_type, const tm* t, char format, char modifier) const
+    virtual iter_type do_put(iter_type s, ios_base&, char_type, const tm* t, char format, char modifier) const { return __write(s, t, format, modifier, __c_locale()); }
+    // one conversion as the C runtime's locale h writes it
+    static iter_type __write(iter_type s, const tm* t, char format, char modifier, _locale_t h)
     {
-        // (%c is the date and the time as %x and %X write them, as in cl's library; the C runtime's own %c is ctime's)
+        // (%c is the date and the time as %x and %X write them, as in cl's library; the C runtime's own %c is ctime's
+        // in the "C" locale)
         char pattern[8];
         int n = 0;
         pattern[n++] = '%';
@@ -288,9 +713,9 @@ protected:
         pattern[n++] = format;
         pattern[n] = 0;
         if (format == 'c' && modifier != '#') strcpy(pattern, "%x %X");
-        char text[128];
-        const size_t len = strftime(text, sizeof(text), pattern, t);
-        for (size_t i = 0; i < len; ++i) { *s = static_cast<charT>(static_cast<unsigned char>(text[i])); ++s; }
+        charT text[160];
+        const size_t len = __lc_call<charT>::strf(text, 160, pattern, t, h);
+        for (size_t i = 0; i < len; ++i) { *s = text[i]; ++s; }
         return s;
     }
 };
@@ -301,9 +726,18 @@ class time_put_byname : public time_put<charT, OutputIterator> {
 public:
     typedef charT          char_type;
     typedef OutputIterator iter_type;
-    explicit time_put_byname(const char* name, size_t refs = 0) : time_put<charT, OutputIterator>(refs) { __check_locale_name(name); }
+    explicit time_put_byname(const char* name, size_t refs = 0) : time_put<charT, OutputIterator>(refs), m_nl(name) {}
+    time_put_byname(const __named_ref& nl, size_t refs) : time_put<charT, OutputIterator>(refs), m_nl(nl) {}
 protected:
     virtual ~time_put_byname() {}
+    // each conversion is strftime's in the locale of the name (_strftime_l; _wcsftime_l for wchar_t)
+    virtual iter_type do_put(iter_type s, ios_base& f, char_type fill, const tm* t, char format, char modifier) const
+    {
+        if (!m_nl.get()) return time_put<charT, OutputIterator>::do_put(s, f, fill, t, format, modifier);
+        return time_put<charT, OutputIterator>::__write(s, t, format, modifier, m_nl.handle());
+    }
+private:
+    __named_ref m_nl;
 };
 
 // 22.2.6 the monetary facets
@@ -352,9 +786,62 @@ class moneypunct_byname : public moneypunct<charT, International> {
 public:
     typedef money_base::pattern pattern;
     typedef basic_string<charT> string_type;
-    explicit moneypunct_byname(const char* name, size_t refs = 0) : moneypunct<charT, International>(refs) { __check_locale_name(name); }
+    explicit moneypunct_byname(const char* name, size_t refs = 0) : moneypunct<charT, International>(refs) { __named_ref nl(name); __init(nl.get()); }
+    moneypunct_byname(const __named_ref& nl, size_t refs) : moneypunct<charT, International>(refs) { __init(nl.get()); }
 protected:
     virtual ~moneypunct_byname() {}
+    virtual charT       do_decimal_point() const { return m_point; }
+    virtual charT       do_thousands_sep() const { return m_sep; }
+    virtual string      do_grouping() const { return m_grouping; }
+    virtual string_type do_curr_symbol() const { return m_symbol; }
+    virtual string_type do_positive_sign() const { return m_positive; }
+    virtual string_type do_negative_sign() const { return m_negative; }
+    virtual int         do_frac_digits() const { return m_frac; }
+    virtual pattern     do_pos_format() const { return m_pos; }
+    virtual pattern     do_neg_format() const { return m_neg; }
+private:
+    // the locale's lconv as cl's library reads it (measured on its moneypunct_byname with every value of the three
+    // format members): the international form has the international symbol and fraction and the format symbol,
+    // sign, none, value; a sign position above 4 leaves "" and "-" for the signs; a fraction that is not known is 0
+    void __init(const __named_locale* nl)
+    {
+        if (!nl) {
+            m_point = charT(); m_sep = charT(); m_frac = 0;
+            m_negative = string_type(1, static_cast<charT>('-'));
+            m_pos = m_neg = __format(true, 0, 0, 0);
+            return;
+        }
+        m_point = __lc_text<charT>::one(nl->mon_point, nl->wmon_point);
+        m_sep = __lc_text<charT>::one(nl->mon_sep, nl->wmon_sep);
+        m_grouping = nl->mon_grouping;
+        m_symbol = International ? __lc_text<charT>::all(nl->int_symbol, nl->wint_symbol) : __lc_text<charT>::all(nl->symbol, nl->wsymbol);
+        if (static_cast<unsigned char>(nl->p_sign_posn) <= 4) m_positive = __lc_text<charT>::all(nl->positive, nl->wpositive);
+        if (static_cast<unsigned char>(nl->n_sign_posn) <= 4) m_negative = __lc_text<charT>::all(nl->negative, nl->wnegative);
+        else m_negative = string_type(1, static_cast<charT>('-'));
+        const char frac = International ? nl->int_frac : nl->frac;
+        m_frac = frac < 0 || frac >= CHAR_MAX ? 0 : frac;
+        m_pos = __format(International, static_cast<unsigned char>(nl->p_sep_by_space), static_cast<unsigned char>(nl->p_cs_precedes), static_cast<unsigned char>(nl->p_sign_posn));
+        m_neg = __format(International, static_cast<unsigned char>(nl->n_sep_by_space), static_cast<unsigned char>(nl->n_cs_precedes), static_cast<unsigned char>(nl->n_sign_posn));
+    }
+    // the parts in order for an lconv's sep_by_space (0 to 2), cs_precedes (0, 1) and sign_posn (0 to 4): + the sign,
+    // $ the symbol, v the value, a blank for space and x for none; anything else is the international format
+    static pattern __format(bool international, unsigned sep, unsigned precedes, unsigned posn)
+    {
+        static const char* const formats =
+            "+v$x+v$xv$+xv+$xv$+x" "+$vx+$vx$v+x+$vx$+vx"
+            "+v $+v $v $+v +$v $+" "+$ v+$ v$ v++$ v$+ v"
+            "+xv$+ v$v$ +v+ $v$ +" "+x$v+ $v$v ++ $v$ +v";
+        const char* f = international || sep > 2 || precedes > 1 || posn > 4 ? "$+xv" : formats + (sep * 10 + precedes * 5 + posn) * 4;
+        pattern p;
+        for (int i = 0; i < 4; ++i)
+            p.field[i] = static_cast<char>(f[i] == 'v' ? money_base::value : f[i] == '$' ? money_base::symbol : f[i] == '+' ? money_base::sign : f[i] == ' ' ? money_base::space : money_base::none);
+        return p;
+    }
+    charT       m_point, m_sep;
+    string      m_grouping;
+    string_type m_symbol, m_positive, m_negative;
+    int         m_frac;
+    pattern     m_pos, m_neg;
 };
 
 // what money_put and money_get ask the locale's moneypunct, of either kind

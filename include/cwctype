@@ -22,6 +22,10 @@ extern "C" {
     wint_t towupper(wint_t c);
     wctype_t wctype(const char* name);
     int    iswctype(wint_t c, wctype_t type);
+    // Microsoft's: the same in a locale of the C runtime (<clocale>)
+    int    _iswctype_l(wint_t c, wctype_t type, _locale_t locale);
+    wint_t _towupper_l(wint_t c, _locale_t locale);
+    wint_t _towlower_l(wint_t c, _locale_t locale);
 }
 
 namespace std {

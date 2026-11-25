@@ -121,7 +121,7 @@ struct Renamer {
                     // constant store: materialise as a const definition so the value has a temp
                     IrInst c;
                     c.op = in.args[1].kind == IrOperand::FImm ? IrInst::FConst : IrInst::Const;
-                    c.type = in.type; c.line = in.line;
+                    c.type = in.type; c.line = in.line; c.scope = in.scope;
                     c.dst = f.newTemp(in.type);
                     c.args.push_back(in.args[1]);
                     kept.push_back(c);
@@ -266,7 +266,7 @@ int simplifyPhis(IrFunction& f)
                 if (!eq) { same = false; break; }
             }
             if (!any || !same) continue;
-            IrInst n; n.dst = in.dst; n.type = in.type; n.line = in.line;
+            IrInst n; n.dst = in.dst; n.type = in.type; n.line = in.line; n.scope = in.scope;
             if (only.kind == IrOperand::Temp) { n.op = IrInst::Copy; n.args.push_back(only); }
             else { n.op = only.kind == IrOperand::FImm ? IrInst::FConst : IrInst::Const; n.args.push_back(only); }
             in = n;
@@ -286,7 +286,7 @@ struct GvnState {
 
     std::string key(const IrInst& in)
     {
-        bool addr = in.op == IrInst::AddrField || in.op == IrInst::AddrIndex || in.op == IrInst::AddrLocal || in.op == IrInst::AddrGlobal;
+        bool addr = in.op == IrInst::AddrField || in.op == IrInst::AddrIndex || in.op == IrInst::AddrLocal || in.op == IrInst::AddrGlobal || in.op == IrInst::AddrTls;
         std::string k = intToString(static_cast<int>(in.op)) + "|" + in.sub + "|" + intToString(static_cast<int>(in.extra)) + "|" + (in.type && !addr ? in.type->str() : "") + "|";
         for (size_t a = 0; a < in.args.size(); ++a) {
             IrOperand o = in.args[a];
@@ -305,7 +305,7 @@ struct GvnState {
             std::string k = key(in);
             std::map<std::string, int>::iterator it = table.find(k);
             if (it == table.end()) { table[k] = in.dst; continue; }
-            IrInst n; n.op = IrInst::Copy; n.dst = in.dst; n.type = in.type; n.line = in.line;
+            IrInst n; n.op = IrInst::Copy; n.dst = in.dst; n.type = in.type; n.line = in.line; n.scope = in.scope;
             n.args.push_back(IrOperand::temp(it->second, in.type));
             in = n;
             replaced[in.dst] = it->second;

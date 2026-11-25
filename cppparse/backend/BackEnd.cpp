@@ -64,6 +64,8 @@ void runBackEnd(std::vector<IrFunction*>& functions, X86Module* x86, const BackE
         long t3 = millisecondsNow();
         out.tLocal = t1 - t0; out.tInter = t2 - t1; out.tSsa = t3 - t2;
     }
+    // -g: what the optimiser did decides which variables have a place (docs/design-codeview.md 5.3)
+    for (size_t i = 0; i < n; ++i) functions[i]->debugOptimized = opt.optLevel > 0;
     LowerJob lj;
     lj.functions = &functions; lj.x86 = opt.x86 ? x86 : 0;
     lj.vmText.resize(n); lj.x86Text.resize(n); lj.afterText.resize(n); lj.vmStats.resize(n);

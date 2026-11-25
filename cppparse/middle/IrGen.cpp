@@ -1,10 +1,13 @@
 // IrGen.cpp - version 6 stage 4: IR generation from the analysed syntax tree. See IrGen.hpp.
 #include "IrGen.hpp"
+#include "CvFromSema.hpp"
 #include "EhClThrowInfo.hpp"
 #include "Literal.hpp"
 #include "Mangle.hpp"
 #include "Optimizer.hpp"
 #include "PathUtil.hpp"
+#include "TargetIntrinsics.hpp"
+#include "TargetTls.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -95,9 +98,37 @@ cxx::Expr* floatingCast(cxx::Expr* x)
 static Symbol* namedLocal(cxx::Expr* e);
 
 IrGen::IrGen(sema::Program& program, sema::TypeTable& semaTypes)
-    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_nrvoEnabled(false), m_nrvo(0), m_scopeSerial(0), m_tryCount(0),
+    : m_prog(program), m_semaTypes(semaTypes), m_types(m_emptyCb), m_outList(0), m_generated(0), m_out(0), m_fn(0), m_block(0), m_sretSlot(-1), m_retReg(0), m_nrvoEnabled(false), m_cv(0), m_nrvo(0), m_scopeSerial(0), m_debugScope(0), m_tryCount(0),
       m_initSymbol(0), m_exitThunksDone(0), m_returnClonesDone(0), m_x86(0), m_msvcNames(false), m_clEh(false), m_deletingDone(0), m_vtablesDone(0), m_ctorFlag(1), m_vbFlagSlot(-1),m_staticCount(0), m_guardCount(0), m_inPad(0), m_unwindId(-1), m_bodyBlock(-1), m_tableEh(false), m_deferRegions(0),
-      m_functionTryDef(0), m_rawTemp(-1), m_rawFunction(0), m_rawBlock(-1), m_rawEnd(0), m_raw(0), m_thisSlot(0) {}
+      m_functionTryDef(0), m_rawTemp(-1), m_rawFunction(0), m_rawBlock(-1), m_rawEnd(0), m_raw(0), m_thisSlot(0)
+{
+    m_dataOwner = 0;
+    m_lastRefused = 0;
+}
+
+// the address of an intrinsic of the target (S165, docs/design-selfhost.md 4.2): it has no code of its own
+void IrGen::refuseIntrinsicAddress(const Symbol* fn, int line)
+{
+    if (TargetIntrinsics::of(fn) == TargetIntrinsics::None) return;
+    sema::Diag d;
+    d.code = TargetIntrinsics::code();
+    d.loc = fn->loc;
+    d.loc.line = line;
+    if (m_fn) d.loc.file = m_fn->loc.file;
+    d.message = TargetIntrinsics::addressMessage(fn->name);
+    m_refusals.push_back(d);
+}
+
+// a thread-local the target refuses (S164): an error of the unit at the variable's declaration
+void IrGen::refuseTls(const Symbol* var, int refusal, const std::string& detail)
+{
+    sema::Diag d;
+    d.code = TargetTls::code();
+    if (var) d.loc = var->loc;
+    d.message = TargetTls::message(static_cast<TargetTls::Refusal>(refusal), var ? var->qualifiedName() : detail, detail);
+    m_refusals.push_back(d);
+    m_lastRefused = var;
+}
 
 IrGen::~IrGen()
 {
@@ -1197,6 +1228,7 @@ IrInst IrGen::make(IrInst::Op op, const sema::Type* type, int line)
     in.op = op;
     in.type = type ? oldType(type) : 0;
     in.line = line;
+    in.scope = m_debugScope;
     return in;
 }
 
@@ -1222,10 +1254,10 @@ int IrGen::emit(IrInst inst)
     if (terminated()) m_block = m_out->newBlock("dead");
     if (inst.op == IrInst::Call && !inst.nothrow && runtimeNoThrow(inst.sub)) inst.nothrow = true;
     bool producesValue = inst.op == IrInst::Const || inst.op == IrInst::FConst || inst.op == IrInst::StrConst || inst.op == IrInst::Copy ||
-                         inst.op == IrInst::LoadLocal || inst.op == IrInst::AddrLocal || inst.op == IrInst::LoadGlobal || inst.op == IrInst::AddrGlobal ||
+                         inst.op == IrInst::LoadLocal || inst.op == IrInst::AddrLocal || inst.op == IrInst::LoadGlobal || inst.op == IrInst::AddrGlobal || inst.op == IrInst::AddrTls ||
                          inst.op == IrInst::LoadMem || inst.op == IrInst::AddrField || inst.op == IrInst::AddrIndex || inst.op == IrInst::Bin ||
                          inst.op == IrInst::Un || inst.op == IrInst::Cmp || inst.op == IrInst::Conv || inst.op == IrInst::CatchParam ||
-                         ((inst.op == IrInst::Call || inst.op == IrInst::VCall) && inst.type && !inst.type->isVoid());
+                         ((inst.op == IrInst::Call || inst.op == IrInst::VCall || inst.op == IrInst::Intrinsic) && inst.type && !inst.type->isVoid());
     if (producesValue && inst.dst < 0) inst.dst = m_out->newTemp(inst.type);
     m_out->blocks[static_cast<size_t>(m_block)].insts.push_back(inst);
     return inst.dst;
@@ -1653,6 +1685,7 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
         // ("int (&r)(int) = twice;", a function passed for a parameter "int (&f)(int)")
         if (s && s->kind == Symbol::Function && !(s->ownerClass && !s->isStatic)) {
             need(s);
+            refuseIntrinsicAddress(s, line);
             IrInst fa = make(IrInst::AddrGlobal, 0, line);
             fa.type = m_types.function(oldType(s->type ? s->type->inner : 0));
             fa.args.push_back(IrOperand::global(irName(s), fa.type));
@@ -1691,6 +1724,14 @@ IrGen::LValue IrGen::lvalue(cxx::Expr* e)
             if (isReference(s->type)) { IrInst ld = make(IrInst::LoadMem, m_semaTypes.pointer(s->type->inner), line); ld.args.push_back(IrOperand::temp(emit(in), oldType(m_semaTypes.pointer(s->type)))); lv.kind = LValue::Mem; lv.addr = emit(ld); lv.type = s->type->inner; return lv; }
             lv.kind = LValue::Mem; lv.addr = emit(in);
             bitField(lv, s);
+            return lv;
+        }
+        if (s->isThread) {
+            // a thread-local: its address in this thread (addrtls, docs/design-selfhost.md 4.1), then memory through it
+            IrInst ta = make(IrInst::AddrTls, m_semaTypes.pointer(lv.type), line);
+            ta.args.push_back(IrOperand::global(s->qualifiedName(), oldType(lv.type)));
+            lv.kind = LValue::Mem; lv.addr = emit(ta);
+            if (isReference(s->type)) { IrInst ld = make(IrInst::LoadMem, m_semaTypes.pointer(s->type->inner), line); ld.args.push_back(IrOperand::temp(lv.addr, oldType(m_semaTypes.pointer(s->type)))); lv.addr = emit(ld); lv.type = s->type->inner; }
             return lv;
         }
         lv.kind = LValue::Global; lv.global = s->qualifiedName();
@@ -2065,6 +2106,17 @@ int IrGen::emitCall(Symbol* fn, int thisPtr, int sretAddr, const std::vector<IrO
     const sema::Type* ft = fn->type;
     const sema::Type* rt = ft && ft->kind == sema::Type::Function ? ft->inner : m_semaTypes.basic(sema::Type::Void);
     const bool mpResult = mpKind(rt) == 3 && !isReference(rt);   // cl passes its hidden result pointer before this
+    const TargetIntrinsics::Kind intrinsic = thisPtr < 0 ? TargetIntrinsics::of(fn) : TargetIntrinsics::None;
+    if (intrinsic != TargetIntrinsics::None) {
+        // an intrinsic of the target (docs/design-selfhost.md 4.2): emitted inline. _AddressOfReturnAddress binds its
+        // function: it keeps its frame and is never inlined, so the value is about the function the source wrote it in
+        IrInst ii = make(IrInst::Intrinsic, rt, line);
+        ii.sub = TargetIntrinsics::name(intrinsic);
+        ii.nothrow = true;
+        for (size_t a = 0; a < argOps.size(); ++a) ii.args.push_back(argOps[a]);
+        if (intrinsic == TargetIntrinsics::AddressOfReturnAddress) m_out->keepsFrame = true;
+        return emit(ii);
+    }
     bool sret = (isClassType(rt) || mpResult) && !isReference(rt);
     const sema::Type* retReg = sret ? regReturnType(fn, rt) : 0;
     IrInst in = make(IrInst::Call, retReg ? retReg : sret ? m_semaTypes.basic(sema::Type::Void) : rt, line);
@@ -2750,6 +2802,7 @@ void IrGen::openScope()
     m_scopes.push_back(m_cleanups.size());
     m_scopeIds.push_back(m_scopeSerial++);
     m_scopeTry.push_back(m_tryStack.size());
+    m_debugScopeSaved.push_back(m_debugScope);
 }
 
 // table model: the cleanups registered on one path only since m_flagged[from] (an arm of ?:, an operand of && or ||
@@ -2809,6 +2862,13 @@ void IrGen::gotoExit(const JumpState& from, const JumpState& to, const std::stri
 
 void IrGen::closeScope(int line)
 {
+    // -g: the code after the scope belongs to the block around it again (the scope's own cleanups, made below, to it)
+    struct RestoreScope {
+        int* scope; int value;
+        RestoreScope(int* s, int v) : scope(s), value(v) {}
+        ~RestoreScope() { *scope = value; }
+    } restore(&m_debugScope, m_debugScopeSaved.back());
+    m_debugScopeSaved.pop_back();
     size_t mark = m_scopes.back();
     m_scopes.pop_back();
     m_scopeIds.pop_back();
@@ -3071,6 +3131,7 @@ void IrGen::finishFunction(int line)
         m_emptyRegions.clear();
     }
     m_block = 0;
+    m_debugScope = -1;   // -g: the entry block (the flags, the function's unwind region) comes before the first statement
     const sema::Type* b = m_semaTypes.basic(sema::Type::Bool);
     bool anyFlag = false;
     for (size_t i = 0; i < m_flagged.size(); ++i) {
@@ -3087,6 +3148,7 @@ void IrGen::finishFunction(int line)
         emit(tb);
         br(m_bodyBlock, line);
         m_block = handler;
+        m_debugScope = 0;
         if (m_clEh) {
             // cl's model: the function's unwind region is a state like any other, its pad a cleanup funclet that
             // destroys the flagged objects still alive and returns to the runtime
@@ -3404,7 +3466,7 @@ int IrGen::value(cxx::Expr* e)
     case cxx::Expr::This: return m_out->hasThis ? thisTemp(line) : constant(0, t, line);
     case cxx::Expr::Name: {
         Symbol* s = e->semaSym;
-        if (s && (s->kind == Symbol::Function || s->kind == Symbol::FunctionTemplate)) { need(s); IrInst in = make(IrInst::AddrGlobal, 0, line); in.type = m_types.function(oldType(s->type ? s->type->inner : 0)); in.args.push_back(IrOperand::global(irName(s), in.type)); return emit(in); }
+        if (s && (s->kind == Symbol::Function || s->kind == Symbol::FunctionTemplate)) { need(s); refuseIntrinsicAddress(s, line); IrInst in = make(IrInst::AddrGlobal, 0, line); in.type = m_types.function(oldType(s->type ? s->type->inner : 0)); in.args.push_back(IrOperand::global(irName(s), in.type)); return emit(in); }
         if (s && s->kind == Symbol::Enumerator) return constant(s->constValue, t, line);
         LValue lv = lvalue(e);
         if (lv.kind == LValue::None) { m_notes.push_back("L" + numText(line) + ": unresolved name " + e->name.text() + " read as 0"); return constant(0, t, line); }
@@ -4043,6 +4105,13 @@ void IrGen::localDecl(cxx::Decl* d)
             // emits the same symbol (the global is then a COMDAT like the function)
             std::string gname = shared ? first->second : m_out->name + "::" + var->name + "#" + numText(m_staticCount++);
             m_staticNames[var] = gname;
+            if (m_cv && !shared) {
+                // -g: the function's symbols list the variable (an S_LDATA32 in its procedure)
+                IrDebugStatic ds; ds.name = var->name; ds.global = gname; ds.type = m_cv->typeOf(var->type);
+                ds.block = debugBlock(var);
+                if (ds.block > 0) m_debugScope = ds.block;
+                if (ds.type != 0) m_out->debugStatics.push_back(ds);
+            }
             long block = 2;
             if (m_msvcNames && m_x86 && !shared) {
                 // cl numbers the blocks of a function; the body is 2 (numberStaticBlocks). Without that number
@@ -4075,6 +4144,7 @@ void IrGen::localDecl(cxx::Decl* d)
             // a table of constants and addresses is static data, built before anything runs (no guard)
             else if (id.init.kind != cxx::Initializer::None && !isReference(var->type) && !needsDtor(vt) && !var->initCtor) {
                 std::vector<IrDataItem> items;
+                m_dataOwner = var;
                 if (staticData(var->type, id.init, items)) { g.data = items; g.readOnly = readOnlyObject(var->type); scalarConstant = true; }
             }
             else if (id.init.kind == cxx::Initializer::None && !isReference(var->type)) {
@@ -4175,6 +4245,8 @@ void IrGen::localDecl(cxx::Decl* d)
         }
         int slot = newLocal(var->name, var->type, false);
         m_slots[var] = slot;
+        markSource(slot, var, var->name, var->type, -1);
+        if (m_cv && m_out->locals[static_cast<size_t>(slot)].block > 0) m_debugScope = m_out->locals[static_cast<size_t>(slot)].block;
         LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = m_semaTypes.unref(var->type);
         initObject(lv, var->type, var, id, id.decl->loc.line);
         if (!isReference(var->type) && needsDtor(var->type)) registerCleanup(slot, var->type, false, 0, id.decl->loc.line);
@@ -4517,6 +4589,8 @@ void IrGen::stmt(cxx::Stmt* s)
                     // caught by value: copy-constructed from the thrown object, as cl does (C++98 15.3/16)
                     int slot = newLocal(var->name, var->type, true);
                     m_slots[var] = slot;
+                    markSource(slot, var, var->name, var->type, -1);
+                    if (m_cv && m_out->locals[static_cast<size_t>(slot)].block > 0) m_debugScope = m_out->locals[static_cast<size_t>(slot)].block;
                     LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = ct;
                     // a copy constructor that throws here calls terminate (C++98 15.5.1), as cl does
                     int term = -1;
@@ -4527,6 +4601,8 @@ void IrGen::stmt(cxx::Stmt* s)
                 } else if (ct->kind != sema::Type::Class && !isReference(var->type)) {
                     int slot = newLocal(var->name, var->type, false);
                     m_slots[var] = slot;
+                    markSource(slot, var, var->name, var->type, -1);
+                    if (m_cv && m_out->locals[static_cast<size_t>(slot)].block > 0) m_debugScope = m_out->locals[static_cast<size_t>(slot)].block;
                     IrInst ld = make(IrInst::LoadMem, ct, h->loc.line); ld.args.push_back(IrOperand::temp(ev, oldType(m_semaTypes.pointer(ct))));
                     int v = emit(ld);
                     LValue lv; lv.kind = LValue::Local; lv.local = slot; lv.type = ct;
@@ -4537,6 +4613,8 @@ void IrGen::stmt(cxx::Stmt* s)
                     int slot = newLocal(var->name, refT, false);
                     m_slots[var] = slot;
                     var->type = refT;
+                    markSource(slot, var, var->name, refT, -1);
+                    if (m_cv && m_out->locals[static_cast<size_t>(slot)].block > 0) m_debugScope = m_out->locals[static_cast<size_t>(slot)].block;
                     IrInst st = make(IrInst::StoreLocal, refT, h->loc.line); st.args.push_back(IrOperand::local(slot, oldType(refT))); st.args.push_back(IrOperand::temp(ev, oldType(m_semaTypes.pointer(ct)))); emit(st);
                 }
             }
@@ -4683,6 +4761,7 @@ void IrGen::tryStatementCl(cxx::Stmt* s, int line)
                 slot = newLocal(var->name, stored, true);
                 m_slots[var] = slot;
                 if (reference) var->type = stored;
+                markSource(slot, var, var->name, stored, -1);   // (its block is entered with the handler's scope, below)
             }
         }
         cp.args.push_back(IrOperand::imm(adjectives, m_types.intType()));
@@ -4698,6 +4777,7 @@ void IrGen::tryStatementCl(cxx::Stmt* s, int line)
         m_tryStack.push_back(-1);
         m_tryStack.push_back(hid);
         openScope();   // the handler's object of class type: destroyed when the handler ends
+        if (m_cv && slot >= 0 && m_out->locals[static_cast<size_t>(slot)].block > 0) m_debugScope = m_out->locals[static_cast<size_t>(slot)].block;
         if (slot >= 0 && ct && ct->kind == sema::Type::Class && ct->decl && !isReference(var->type) && needsDtor(ct)) registerCleanup(slot, ct, false, 0, hline);
         stmt(h->kids[0]);
         // 15.3/16: reaching the end of a handler of a constructor's or destructor's function-try-block rethrows
@@ -5282,6 +5362,14 @@ void IrGen::prologue(Symbol* fn)
     const cxx::Loc& where = fn->definition ? fn->definition->loc : fn->loc;
     m_out->sourceFile = where.file >= 0 && static_cast<size_t>(where.file) < m_files.size() ? m_files[static_cast<size_t>(where.file)] : std::string();
     m_out->sourceLine = where.line;
+    m_out->debugName = CvFromSema::functionName(fn);
+    m_out->debugType = m_cv ? m_cv->functionType(fn) : 0;
+    m_out->debugInline = fn->isInline;
+    // -g: what is made until the first statement is the entry sequence (scope -1), behind which the parameters are in
+    // their places (DbgStart, docs/design-codeview.md 5.3)
+    m_debugScope = -1;
+    m_debugScopeSaved.clear();
+    m_debugBlockOf.clear();
     m_out->variadic = fn->type && fn->type->kind == sema::Type::Function && fn->type->variadic;
     m_out->linkOnce = fn->isInline || fn->isImplicit || fn->instantiatedFrom != 0 || (fn->ownerClass && fn->ownerClass->instantiatedFrom != 0);
     m_out->internal = hasInternalLinkage(fn) || (fn->ownerClass && hasInternalLinkage(fn->ownerClass));
@@ -5310,7 +5398,9 @@ void IrGen::prologue(Symbol* fn)
         m_out->locals[static_cast<size_t>(slot)].isThis = true;
         m_out->locals[static_cast<size_t>(slot)].nonNull = true;
         m_thisSlot = slot;
+        markSource(slot, 0, "this", m_semaTypes.pointer(ct), 0);
     }
+    const int firstParam = m_out->hasThis ? 1 : 0;   // -g: the declared parameters' places, "this" first
     m_vbFlagSlot = -1;
     // MSVC's "most derived" flag of a constructor of a class with virtual bases (1: it builds them): the last
     // parameter, the one after this when the constructor is variadic
@@ -5327,6 +5417,7 @@ void IrGen::prologue(Symbol* fn)
     std::vector<std::pair<int, const sema::Type*> > byValue;   // class objects the callee owns
     std::vector<Symbol*> byValueParam;                          // their parameters
     std::vector<std::pair<int, Symbol*> > inRegister;           // small class objects that arrive as an integer
+    std::vector<int> inRegisterIndex;                           // -g: their places among the declared parameters
     for (size_t p = 0; p < fn->params.size(); ++p) {
         Symbol* ps = fn->params[p];
         const sema::Type* pt = ps->type;
@@ -5334,6 +5425,7 @@ void IrGen::prologue(Symbol* fn)
             int slot = newLocal(ps->name.empty() ? "arg" + numText(static_cast<long>(p)) : ps->name + ".bits", it, false);
             m_out->locals[static_cast<size_t>(slot)].isParam = true;
             inRegister.push_back(std::make_pair(slot, ps));
+            inRegisterIndex.push_back(firstParam + static_cast<int>(p));
             continue;
         }
         const bool object = (isClassType(pt) || mpKind(pt) == 3) && !isReference(pt);
@@ -5347,6 +5439,9 @@ void IrGen::prologue(Symbol* fn)
             byValueParam.push_back(ps);
             ps->type = m_semaTypes.reference(ps->type);   // reads go through the pointer
         }
+        // -g: an object passed by address is listed as a reference to it (docs/design-codeview.md 5.3)
+        markSource(slot, ps, ps->name.empty() ? std::string("__formal") : ps->name, ps->type, firstParam + static_cast<int>(p));
+        if (object && m_cv) m_out->locals[static_cast<size_t>(slot)].byAddress = true;
     }
     if (vbFlag && !m_out->variadic) {
         m_vbFlagSlot = newLocal("vb.flag", m_semaTypes.basic(sema::Type::Int), false);
@@ -5373,6 +5468,7 @@ void IrGen::prologue(Symbol* fn)
         const sema::Type* ct = m_semaTypes.unqualified(m_semaTypes.unref(ps->type));
         const sema::Type* it = regParamType(ct);
         int obj = newLocal(ps->name.empty() ? "argobj" : ps->name + ".obj", ct, true);
+        markSource(obj, ps, ps->name.empty() ? std::string("__formal") : ps->name, ct, inRegisterIndex[i]);   // -g: the object is the parameter
         LValue ol; ol.kind = LValue::Local; ol.local = obj; ol.type = ct;
         int addr = addressOf(ol, fn->loc.line);
         LValue bl; bl.kind = LValue::Local; bl.local = inRegister[i].first; bl.type = it;
@@ -5401,6 +5497,35 @@ void IrGen::prologue(Symbol* fn)
     for (size_t p = fn->params.size(); p-- > 0;)
         for (size_t i = 0; i < byValue.size(); ++i)
             if (byValueParam[i] == fn->params[p] && needsDtor(byValue[i].second)) registerCleanup(byValue[i].first, byValue[i].second, true, 0, fn->loc.line);
+    m_debugScope = 0;   // -g: the statements follow, in the function's own block
+}
+
+// -g: the number of the block scope that declares var, given when IrGen first meets the scope (its parent is the block
+// the code is in then); 0 for the function's own (its parameters and the body's outermost block)
+int IrGen::debugBlock(Symbol* var)
+{
+    if (!m_cv || !var || !var->scope) return 0;
+    const Scope* s = var->scope;
+    if (s->kind != Scope::Block || s->blockIndex == 0) return 0;
+    std::map<const Scope*, int>::const_iterator it = m_debugBlockOf.find(s);
+    if (it != m_debugBlockOf.end()) return it->second;
+    m_out->debugBlocks.push_back(m_debugScope < 0 ? 0 : m_debugScope);
+    const int id = static_cast<int>(m_out->debugBlocks.size());
+    m_debugBlockOf[s] = id;
+    return id;
+}
+
+// -g: the local 'slot' is a variable of the source, listed by 'name' with the type 'shown'; param: its place among
+// the declared parameters, -1 for a local (whose block is var's)
+void IrGen::markSource(int slot, Symbol* var, const std::string& name, const sema::Type* shown, int param)
+{
+    if (!m_cv) return;
+    IrLocal& l = m_out->locals[static_cast<size_t>(slot)];
+    l.source = true;
+    l.debugName = name;
+    l.debugType = m_cv->typeOf(shown);
+    l.debugParam = param;
+    l.block = param >= 0 ? 0 : debugBlock(var);
 }
 
 void IrGen::constructorInit(Symbol* fn, cxx::Decl* def)
@@ -6177,6 +6302,7 @@ void IrGen::emitVtables(Symbol* s)
         }
         x86.addVtable(v);
         if (msvc) x86.registerGlobalName(name, msvcMangleVtableSymbol(*s, names[t]));
+        if (m_cv) m_cv->vftable(s, v.entries.size(), x86.globalSymbol(name));   // -g: its S_GDATA32, as cl lists the table
     }
 }
 
@@ -6229,11 +6355,21 @@ void IrGen::registerMetadata(X86Module& x86, bool msvc)
             else dynamic = s->init != 0;
             // zero-initialised static storage that holds pointers to members: cl writes their null values
             if (!dynamic && !s->init && g.init.empty() && g.data.empty() && !isReference(s->type)) { std::vector<IrDataItem> items; if (nullMemberPointerData(st, items, true)) g.data = items; }
+            if (s->isThread) {
+                // a thread-local (docs/design-selfhost.md 4.1): its initial value in .tls$, which the loader copies for each
+                // thread, so nothing may need code: no dynamic initialiser, no constructor, no destructor; aligned to 16 at most
+                g.threadLocal = true;
+                g.readOnly = false;
+                if ((dynamic || (!isReference(s->type) && needsDtor(s->type))) && m_lastRefused != s) refuseTls(s, TargetTls::Dynamic);
+                dynamic = false;
+                if (g.align > TargetTls::maxAlignment) refuseTls(s, TargetTls::Alignment, numText(g.align));
+            }
             // a COMDAT variable (the static data member of a class template instantiation) gets a COMDAT initialiser of
             // its own, so that one unit's runs for the program (14.7.1), as cl emits it; the rest go in the module's
             if (dynamic && g.linkOnce) m_comdatGlobals.push_back(s);
             else if (dynamic) m_dynamicGlobals.push_back(s);
             x86.addGlobal(g);
+            if (m_cv) m_cv->variable(s, x86.globalSymbol(name), g.internal);   // -g: its S_GDATA32 or S_LDATA32
         }
         if (msvc && s->kind == Symbol::Function && !s->isExternC) x86.registerSymbolName(irName(s), msvcMangleSymbol(*s));
         // a function whose IR name has no parameter list (extern "C", main): its address names the function, not a variable
@@ -6287,6 +6423,7 @@ void IrGen::genInitializer()
         m_fn = f;
         m_slots.clear(); m_loops.clear(); m_tryStack.clear(); m_tryCount = 0;
         prologue(f);
+        m_out->debugName = CvNames::dynamicInitializer(CvFromSema::variableName(m_comdatGlobals[i]));   // as cl names the function
         initGlobal(m_comdatGlobals[i]);
         returnSequence(f->loc.line);
         emit(make(IrInst::Ret, 0, f->loc.line));
@@ -6316,6 +6453,7 @@ bool IrGen::staticInit(Symbol* var, IrGlobal& g)
     if (var->declAst) for (size_t k = 0; k < var->declAst->declarators.size(); ++k) if (var->declAst->declarators[k].decl && var->declAst->declarators[k].decl->semaSym == var) id = &var->declAst->declarators[k];
     if (!id || id->init.kind == cxx::Initializer::None) return false;
     std::vector<IrDataItem> d;
+    m_dataOwner = var;
     if (!staticData(var->type, id->init, d)) return false;
     g.data = d;
     g.readOnly = readOnlyObject(var->type);
@@ -6416,6 +6554,7 @@ bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataIt
         if (!s) return false;
         if (s->kind == Symbol::Function) {
             if (s->ownerClass && !s->isStatic) return false;
+            refuseIntrinsicAddress(s, s->loc.line);
             need(s);
             it.text = irName(s);
         } else if (s->kind == Symbol::Variable) {
@@ -6423,6 +6562,9 @@ bool IrGen::constantData(const sema::Type* t, cxx::Expr* x, std::vector<IrDataIt
             if (isReference(s->type) || s->isParam || (s->isMember && !s->isStatic)) return false;
             if (!addressOf && m_semaTypes.unref(s->type)->kind != sema::Type::Array) return false;
             if (s->isMember && s->isStatic && s->hasConstValue && s->init && s->init->semaConst) return false;   // folded, never emitted
+            // a thread-local's address is the thread's block plus its offset: not a constant (docs/design-selfhost.md 4.1).
+            // Every caller builds the contents of a variable with static storage, so this is the unit's error
+            if (s->isThread) { refuseTls(m_dataOwner, TargetTls::AddressConstant, s->qualifiedName()); return false; }
             if (s->isLocal) {
                 std::map<Symbol*, std::string>::const_iterator sn = m_staticNames.find(s);
                 if (!s->isStatic || sn == m_staticNames.end()) return false;

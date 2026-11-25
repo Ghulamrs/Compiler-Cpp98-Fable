@@ -372,6 +372,7 @@ void Preprocessor::directive(std::vector<PpToken>& line, int fileIndex, std::vec
     if (name == "pragma") {
         if (line.size() >= 2 && line[1].text == "once" && fileIndex >= 0) m_pragmaOnce.insert(toLower(normalizePath(m_files[static_cast<size_t>(fileIndex)])));
         if (line.size() >= 2 && line[1].text == "pack") packPragma(line, fileIndex);
+        if (line.size() >= 2 && line[1].text == "comment") commentPragma(line, fileIndex);
         return;                                                 // other pragmas are ignored
     }
     if (name == "line") {
@@ -657,6 +658,28 @@ void Preprocessor::expandChunk(std::vector<PpToken>& chunk)
     expandTokens(chunk, out);
     for (size_t i = 0; i < out.size(); ++i) out[i].pack = m_pack;   // the parser reads it at each class key
     m_out.insert(m_out.end(), out.begin(), out.end());
+}
+
+// #pragma comment(linker, "<text>") (row P1, docs/design-selfhost.md 4.5): the text goes to the object's linker directives
+// when it is one /alternatename:<a>=<b> (or -alternatename:, the option's name in any case, as cl takes it): what a
+// source may tell the linker stays a short list. Any other text is a warning and is dropped; comment(lib, ...) and the
+// other kinds are ignored, as before
+void Preprocessor::commentPragma(const std::vector<PpToken>& line, int fileIndex)
+{
+    const int ln = line.empty() ? 0 : line[0].line;
+    if (line.size() < 7 || !line[2].is("(") || line[3].text != "linker") return;
+    if (!line[4].is(",") || line[5].kind != PpToken::String || !line[6].is(")") || line[5].text.size() < 2 || line[5].text[0] != '"') {
+        diag(PpDiag::Warning, fileIndex, ln, "#pragma comment(linker, ...): expected one string literal; dropped");
+        return;
+    }
+    const std::string text = line[5].text.substr(1, line[5].text.size() - 2);
+    const std::string option = "alternatename:";
+    bool ok = text.size() > option.size() + 1 && (text[0] == '/' || text[0] == '-') && toLower(text.substr(1, option.size())) == option;
+    std::string names = ok ? text.substr(1 + option.size()) : std::string();
+    const size_t eq = names.find('=');
+    if (ok) ok = eq != std::string::npos && eq > 0 && eq + 1 < names.size() && names.find_first_of(" \t\"=", eq + 1) == std::string::npos && names.find_first_of(" \t\"") == std::string::npos;
+    if (!ok) { diag(PpDiag::Warning, fileIndex, ln, "#pragma comment(linker, \"" + text + "\"): only /alternatename:<name>=<name> is passed on to the linker; dropped"); return; }
+    m_linker.push_back("/alternatename:" + names);
 }
 
 // #pragma pack( [show] | [push|pop] [, identifier] [, n] | [n] ), as MSVC: n is 1, 2, 4, 8 or 16; "pack()" restores

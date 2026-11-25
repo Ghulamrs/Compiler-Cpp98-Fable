@@ -36,6 +36,8 @@
 
 namespace cppparse {
 
+class CvFromSema;
+
 class IrGen {
 public:
     IrGen(sema::Program& program, sema::TypeTable& semaTypes);
@@ -50,6 +52,9 @@ public:
     int functionsGenerated() const { return m_generated; }
     // builds a local that every return statement names directly in the caller's result object (cl /O2's NRVO)
     void setNamedReturnElision(bool on) { m_nrvoEnabled = on; }
+    // -g: every function gets the number of its type's description, the variables with static storage are listed
+    // (docs/design-codeview.md 5.4). It fills fields nothing reads to decide anything: the code is the same without
+    void setDebugInfo(CvFromSema* cv) { m_cv = cv; }
     // --eh=table: every object with a destructor gets a try region of its own whose landing pad destroys it (cl's
     // states), no constructed flag; the setjmp model keeps the flags and one unwind handler per function
     void setEhModel(EhModel model) { m_tableEh = model != EhModelSjlj; m_clEh = model == EhModelCl; }   // the table model's regions: one per object with a destructor (cl's model has them too)
@@ -60,8 +65,17 @@ public:
     const std::vector<sema::Symbol*>& failedMembersUsed() const { return m_failedUsed; }
     // constructs with virtual bases --compile6 cannot generate correctly (S132): "line: message"
     const std::vector<std::string>& unsupported() const { return m_unsupported; }
+    // thread-locals the target refuses (S164, docs/design-selfhost.md 4.1): an initialiser that needs code, a
+    // constructor or destructor, an alignment over 16, a thread-local's address as an address constant. Errors of the
+    // unit, as Sema's; nothing is written
+    const std::vector<sema::Diag>& refusals() const { return m_refusals; }
 
 private:
+    std::vector<sema::Diag>    m_refusals;
+    const sema::Symbol*        m_dataOwner;     // the variable with static storage whose contents staticData builds
+    const sema::Symbol*        m_lastRefused;   // the variable of the last refusal (one message for it)
+    void refuseTls(const sema::Symbol* var, int refusal, const std::string& detail = std::string());
+    void refuseIntrinsicAddress(const sema::Symbol* fn, int line);
     struct LValue {
         enum Kind { None, Local, Global, Mem } kind;
         int         local;
@@ -410,6 +424,7 @@ private:
     int                        m_sretSlot;
     const sema::Type*          m_retReg;        // the integer type a small class result returns in, else 0
     bool                       m_nrvoEnabled;   // named return value optimisation (-O1 and up, as cl /O2)
+    CvFromSema*                m_cv;            // -g: where the types and variables are described (0: no -g)
     std::vector<std::string>   m_files;         // the preprocessor's file table as absolute Windows paths (setFiles)
     sema::Symbol*              m_nrvo;          // the local built in the hidden result object of this function, or 0
     std::map<sema::Symbol*, int> m_slots;
@@ -420,6 +435,14 @@ private:
     std::vector<size_t>        m_scopes;        // m_cleanups.size() at each open block scope
     std::vector<int>           m_scopeIds;      // a number for each open block scope (goto: the scopes it leaves)
     int                        m_scopeSerial;
+    // -g (docs/design-codeview.md 5.4): the block scope the instructions made now belong to (IrInst::scope), its value
+    // when each open block scope was opened (closeScope restores it), and the number of each of the function's Sema
+    // block scopes that declares a variable (a lookup only: numbers are given in the order the source is generated)
+    int                        m_debugScope;
+    std::vector<int>           m_debugScopeSaved;
+    std::map<const sema::Scope*, int> m_debugBlockOf;
+    int  debugBlock(sema::Symbol* var);                     // the number of the block that declares var (0: the function's)
+    void markSource(int slot, sema::Symbol* var, const std::string& name, const sema::Type* shown, int param);
     struct JumpState {                          // the scopes, objects and try regions at a goto or a label
         int                  block;             // goto: the block that leaves the scopes (forward jumps)
         int                  line;

@@ -16,6 +16,11 @@ typedef unsigned long long __cppparse_uint64;
 #define __CPPPARSE_INT64_MAX  (static_cast<__cppparse_int64>(__CPPPARSE_UINT64_MAX >> 1))
 #define __CPPPARSE_INT64_MIN  (-__CPPPARSE_INT64_MAX - 1)
 
+// the C runtime's locale object, which Microsoft's _l functions take (<clocale> makes them, <cctype>, <cstring>,
+// <ctime> and the wide headers declare the functions): an opaque pointer, named as the C runtime's headers name it
+struct __crt_locale_pointers;
+typedef __crt_locale_pointers* _locale_t;
+
 #if defined(__GNUC__)
 #define __cppparse_noreturn __attribute__((__noreturn__))
 #define __cppparse_align(n) __attribute__((__aligned__(n)))

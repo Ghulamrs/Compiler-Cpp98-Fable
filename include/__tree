@@ -1,5 +1,7 @@
-// __tree - cppparse's C++98 library: the AVL tree behind map and set. Nodes keep parent links
-// for bidirectional iteration; erase unlinks nodes, so other iterators stay valid.
+// __tree - cppparse's C++98 library: the AVL tree behind map, set, multimap and multiset (insertEqual, countEqual and
+// eraseEqual are the members of the two that keep equal keys: a new element goes after those of its key). Nodes keep parent links
+// for bidirectional iteration; erase unlinks nodes, so other iterators stay valid. Its iterator has the member types
+// iterator_traits reads (24.3.1), so that a range of a map's or a set's iterators is one the other containers measure.
 #ifndef CPPPARSE_TREE
 #define CPPPARSE_TREE
 
@@ -7,6 +9,7 @@
 #include <cstdlib>
 #include <new>
 #include <utility>
+#include <__iterator>
 
 namespace std {
 
@@ -24,6 +27,11 @@ public:
 
     class iterator {
     public:
+        typedef bidirectional_iterator_tag iterator_category;
+        typedef Value     value_type;
+        typedef ptrdiff_t difference_type;
+        typedef Value*    pointer;
+        typedef Value&    reference;
         iterator() : n(0), owner(0) {}
         iterator(node* at, const __tree* t) : n(at), owner(t) {}
         Value& operator*() const { return n->value; }
@@ -88,6 +96,37 @@ public:
         return pair<iterator, bool>(iterator(n, this), true);
     }
 
+    // multiset and multimap: equal keys are kept, the new element after the ones there are
+    iterator insertEqual(const Value& v)
+    {
+        const Key& k = m_keyOf(v);
+        node* parent = 0;
+        node** link = &m_root;
+        while (*link) {
+            parent = *link;
+            link = m_cmp(k, m_keyOf(parent->value)) ? &parent->left : &parent->right;
+        }
+        node* n = static_cast<node*>(::operator new(sizeof(node)));
+        try { new (n) node(v); } catch (...) { ::operator delete(n); throw; }
+        n->parent = parent;
+        *link = n;
+        ++m_size;
+        rebalance(parent);
+        return iterator(n, this);
+    }
+    size_t countEqual(const Key& k) const
+    {
+        size_t c = 0;
+        for (iterator i = lower_bound(k), e = upper_bound(k); i != e; ++i) ++c;
+        return c;
+    }
+    size_t eraseEqual(const Key& k)
+    {
+        size_t c = 0;
+        for (iterator i = lower_bound(k), e = upper_bound(k); i != e; ++c) { iterator n = i; ++n; erase(i); i = n; }
+        return c;
+    }
+
     void erase(iterator at)
     {
         node* z = at.n;
@@ -141,7 +180,7 @@ private:
     }
     void copyFrom(const __tree& o)
     {
-        for (node* n = leftmost(o.m_root); n; n = next(n)) insert(n->value);
+        for (node* n = leftmost(o.m_root); n; n = next(n)) insertEqual(n->value);   // in order: each goes to the end
     }
     void destroy(node* n)
     {

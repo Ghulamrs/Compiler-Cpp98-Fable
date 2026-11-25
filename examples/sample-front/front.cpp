@@ -2222,6 +2222,16 @@ void show()
 }
 }
 
+namespace fwd {   // G31: a function that only passes its arguments on to one call, with at most one more, is inlined at -O2
+                  // whatever their count: a call in the place of a call (the member templates of the library's containers
+                  // are such: insert(pos, first, last) is insertRange(pos, first, last, tag); test 17 reads the listing)
+struct Tag {};
+int work(int a, int b, int c, int d, int e, Tag*) { return a * 10000 + b * 1000 + c * 100 + d * 10 + e; }
+int pass(int a, int b, int c, int d, int e) { return work(a, b, c, d, e, static_cast<Tag*>(0)); }
+int use(int x) { return pass(x, 2, 3, 4, 5) + 1; }
+void show() { std::printf("fwd %d\n", use(1)); }
+}
+
 namespace nothrowc {   // A1: a call to a function with C linkage cannot throw (cl /EHsc). While their Buf lives, lenOf and before
                        // call only strcpy and strlen, so they need no unwind handler and no flag; cppBetween calls a C++ function
                        // meanwhile and keeps them (at -O2 that call is inlined away, and the handler with it)
@@ -2314,6 +2324,54 @@ int g(int k) { switch (k) { case 1: return 10; case 2: return 20; default: retur
 void show() { P q = { 3, 4 }; std::printf("unread8 %d %d %d %d\n", f(&q, 5), g(1), g(2), g(7)); }
 }
 
+namespace notbool {   // P15: without an operator! of its own, "!obj" converts the class operand to bool through its
+                      // conversion function (5.3.1/8), as a condition does; a class with an operator! still calls it
+struct Flag { bool ok; explicit Flag(bool b) : ok(b) {} operator bool() const { return ok; } };
+struct Num { int n; explicit Num(int v) : n(v) {} operator int() const { return n; } };
+struct Own { int calls; Own() : calls(0) {} operator bool() const { return true; } bool operator!() { ++calls; return false; } };
+void show()
+{
+    Flag t(true), f(false); Num z(0), seven(7); Own o;
+    const bool a = !t, b = !f, c = !z, d = !seven, e = !o, g = !Flag(false), h = !!seven;
+    std::printf("notbool %d %d %d %d %d %d %d calls %d\n", a, b, c, d, e, g, h, o.calls);
+}
+}
+
+namespace nestedtm {   // P16: members of the nested classes of a class template defined outside the classes, one and
+                       // two classes deep, beside a static data member of the template defined out of class
+template <class T> struct Box {
+    struct In { int twice(int v) const; T t; struct Deep { static T pick(T a, T b); }; };
+    In in;
+    static int count;
+};
+template <class T> int Box<T>::In::twice(int v) const { return v * 2 + static_cast<int>(sizeof(T)) / static_cast<int>(sizeof(T)); }
+template <class T> T Box<T>::In::Deep::pick(T a, T b) { return a < b ? a : b; }
+template <class T> int Box<T>::count = 3;
+void show()
+{
+    Box<int> b; Box<double> d;
+    std::printf("nestedtm %d %d %d %g %d\n", b.in.twice(2), d.in.twice(5), Box<int>::In::Deep::pick(4, 9), Box<double>::In::Deep::pick(2.5, 1.5), Box<char>::count);
+}
+}
+
+namespace gotoh {   // P17: a goto out of a catch handler releases the handled exception and destroys the handler's
+                    // objects (6.6/2): by reference, by value, backward, out of a loop and out of nested try blocks
+struct B { int v; int tag; B(int x) : v(x), tag(0) {} B(const B& o) : v(o.v), tag(0) {} ~B() { if (tag) ++destroyed; } static int destroyed; };
+int B::destroyed = 0;
+int byRef() { int r = 0; try { throw B(1); } catch (B& b) { r = b.v; goto out; } out: return r; }
+int byValue() { int r = 0; try { throw B(2); } catch (B b) { b.tag = 1; r = b.v; goto out; } out: return r; }
+int backward() { int n = 0; again: if (n == 2) return n * 100; try { throw B(3); } catch (...) { ++n; goto again; } return -1; }
+int inLoop() { int sum = 0; for (int i = 0; i < 3; ++i) { try { throw B(i); } catch (B b) { b.tag = 1; sum += b.v; if (i == 1) goto done; } } done: return sum; }
+int nested() { int r = 0; try { try { throw B(5); } catch (B& b) { r = b.v; goto out; } } catch (...) { r = -1; } out: return r + 100; }
+void show()
+{
+    const int a = byRef(), b = byValue(), c = backward(), d = inLoop(), e = nested();
+    std::printf("gotoh %d %d %d %d %d destroyed %d\n", a, b, c, d, e, B::destroyed);
+    int f = 0; try { throw 7; } catch (int x) { f = x; }   // the handlers left by the gotos are released: a new throw is caught
+    std::printf("gotoh after %d\n", f);
+}
+}
+
 int main()
 {
     memInitOverloads();
@@ -2389,6 +2447,7 @@ int main()
     callregs::show();
     stdexc::show();
     inl::show();
+    fwd::show();
     nothrowc::show();
     coal::show();
     fvol::show();
@@ -2399,6 +2458,9 @@ int main()
     nest6::show();
     cond7::show();
     unread8::show();
+    notbool::show();
+    nestedtm::show();
+    gotoh::show();
     std::printf("\nhiding after using namespace std: %d\n", localHidesFileUsing(5));
     // ::printf, found directly and through std's "using ::printf", is one function, not an ambiguity
     printf("unqualified printf after using namespace std: %d %s\n", 5, "ok");

@@ -104,7 +104,7 @@ void Parser::skipBalanced()
     } while (depth > 0 && !atEnd());
 }
 
-int Parser::declspecArguments(bool* noreturn, bool* replaceable)
+int Parser::declspecArguments(bool* noreturn, bool* replaceable, bool* thread)
 {
     if (!at("(")) return 0;
     int align = 0;
@@ -116,6 +116,8 @@ int Parser::declspecArguments(bool* noreturn, bool* replaceable)
     // replaceable (cppparse's own): the function's definition is a default that another object's definition of the
     // same function replaces at link time, as a program's allocation functions replace the library's (18.4.1.1/2)
     for (size_t p = start + 1; p < m_pos; ++p) if (replaceable && m_toks[p].kind == PpToken::Ident && m_toks[p].text == "replaceable") *replaceable = true;
+    // thread: a thread-local variable (docs/design-selfhost.md 4.1); Sema checks where it stands
+    for (size_t p = start + 1; p < m_pos; ++p) if (thread && m_toks[p].kind == PpToken::Ident && m_toks[p].text == "thread") *thread = true;
     for (size_t p = start + 1; p + 3 < m_pos; ++p)
         if (m_toks[p].kind == PpToken::Ident && m_toks[p].text == "align" && m_toks[p + 1].is("(") && m_toks[p + 2].kind == PpToken::Number && m_toks[p + 3].is(")")) {
             int n = std::atoi(m_toks[p + 2].text.c_str());
@@ -281,6 +283,7 @@ bool Parser::looksLikeTypeStart() const
     const PpToken& t = cur();
     if (t.kind != PpToken::Ident && !(t.kind == PpToken::Punct && t.text == "::")) return false;
     if (isTypeKeyword(t.text) || t.text == "const" || t.text == "volatile" || t.text == "class" || t.text == "struct" || t.text == "union" || t.text == "enum" || t.text == "typename") return true;
+    if (t.text == "__declspec") return true;   // a Microsoft attribute before the type ("int f(__declspec(thread) int p)", refused by Sema)
     if (isKeyword(t.text)) return false;
     size_t e; bool ht;
     if (!qualifiedNameAhead(e, ht)) return false;
@@ -413,7 +416,7 @@ bool Parser::declSpecifiers(DeclSpec& spec, bool inClass, bool allowClassDef)
         if (w == "volatile") { spec.isVolatile = true; advance(); any = true; continue; }
         if (w == "__declspec") {                                // Microsoft extension: align(N) and noreturn are kept, the rest ignored
             advance();
-            int a = declspecArguments(&spec.noreturn, &spec.replaceable);
+            int a = declspecArguments(&spec.noreturn, &spec.replaceable, &spec.thread);
             if (a > spec.align) spec.align = a;
             any = true; continue;
         }
@@ -1171,10 +1174,12 @@ Decl* Parser::declaration(bool inClass, Access& access)
             advance();
             result = m_arena.decl(Decl::Class, here);
             result->classDef = spec.classDef;
+            if (spec.thread) { result->spec.thread = true; result->spec.loc = spec.loc; }   // refused by Sema (a type is not thread-local)
         } else if (spec.kind == DeclSpec::Enum && spec.enumDef && at(";")) {
             advance();
             result = m_arena.decl(Decl::Enum, here);
             result->enumDef = spec.enumDef;
+            if (spec.thread) { result->spec.thread = true; result->spec.loc = spec.loc; }
         } else {
             result = simpleOrFunction(inClass, spec, here, false, 0);
         }

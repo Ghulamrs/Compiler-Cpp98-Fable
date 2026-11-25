@@ -1,6 +1,10 @@
 // __locale - cppparse's C++98 library: the part of <locale> the streams need (22.1): locale with its facets, facet
 // ids, use_facet and has_facet, and the facets ctype<char>, ctype<wchar_t>, numpunct and collate of the classic "C"
-// locale. <locale> adds the convenience functions (isspace(c, loc), toupper(c, loc), ...).
+// locale. <locale> adds the convenience functions (isspace(c, loc), toupper(c, loc), ...), the other facets and the
+// named locales: a unit that makes a locale of a name or of the categories of two includes <locale>, the header
+// C++98 gives std::locale (without it the program does not link: std::locale::__named_imp is <locale>'s).
+// The classic locale's facets do not follow the C library's locale when locale::global sets it (22.1.1.5): its
+// classification and case conversions are those of ASCII, written out here (see also __c_locale).
 // Every stream holds locales, and the global one is shared by all the streams of every thread: the reference counts
 // and the facet ids change by the runtime's interlocked operations, the classic and global locales are made once
 // (static locals, whose initialisation is thread-safe in cl's and cppparse's code), and an imp made global stays
@@ -10,6 +14,7 @@
 #define CPPPARSE_LOCALE_BASE
 
 #include <cctype>
+#include <clocale>
 #include <cstddef>
 #include <cstdlib>
 #include <cwctype>
@@ -70,6 +75,7 @@ public:
     locale() throw() : m_imp(__global_imp()) { cppparse_interlocked_increment(&m_imp->refs); }
     locale(const locale& o) throw() : m_imp(o.m_imp) { cppparse_interlocked_increment(&m_imp->refs); }
     explicit locale(const char* name);
+    // (<locale> defines these two)
     locale(const locale& other, const char* name, category cats);
     locale(const locale& other, const locale& one, category cats);
     template <class Facet> locale(const locale& other, Facet* f) : m_imp(__copy(other.m_imp))
@@ -159,8 +165,41 @@ private:
     // the global locale's imp: the classic one until locale::global is called (which only ever replaces the pointer)
     static __imp*& __global_imp() { static __imp* g = __classic_ref(); return g; }
     static __imp* __global() { return __global_imp(); }
+    // (<locale> defines these three: the locale of a name that is not "C", the facets of the categories cats, and
+    // the name of a locale made of two)
+    static __imp* __named_imp(const char* name);
     static void __take(__imp* to, const __imp* from, category cats);
+    static string __combined_name(const __imp* other, const __imp* one, category cats);
+    // the facet from holds at index, or none, in to
+    static void __carry(__imp* to, const __imp* from, size_t index)
+    {
+        if (index >= __slots) return;
+        facet* f = from->facets[index];
+        if (f) cppparse_interlocked_increment(&f->m_holders);
+        facet* old = to->facets[index];
+        to->facets[index] = f;
+        if (old) __drop(old);
+    }
 };
+
+// whether locale::global has given the C library a locale other than "C" (set once, for good). Until then the
+// classic locale's facets ask the C library as they always did (strftime, strtod), at no cost; from then on they
+// spell the "C" locale out. (A program that calls setlocale itself is not seen here: its C locale shows in the
+// dates the classic locale writes and in the floating-point numbers the streams read, as it did before.)
+inline long volatile& __c_locale_given()
+{
+    static long volatile given = 0;
+    return given;
+}
+
+// the C runtime's locale object for the classic locale's facets: none (the C library's current locale, "C") until
+// locale::global has changed that one, the "C" locale's from then on, made once by the first to ask
+inline _locale_t __c_locale()
+{
+    if (!__c_locale_given()) return 0;
+    static const _locale_t c = _create_locale(LC_ALL, "C");
+    return c;
+}
 
 // the facet a locale holds for a facet class with no facet of its own there: none, but for num_put and num_get, whose
 // library facet every locale has (<__num_facets> specialises this)
@@ -182,20 +221,16 @@ struct ctype_base {
     typedef short mask;
     static const mask upper = 0x1, lower = 0x2, digit = 0x4, space = 0x8, punct = 0x10, cntrl = 0x20, xdigit = 0x80,
                       alpha = 0x100 | 0x1 | 0x2, alnum = alpha | digit, graph = alnum | punct, print = graph | 0x40;
-    // the mask of a character of the classic locale (from the C library's classification)
+    // the mask of a character of the classic locale: ASCII's classes, as the C library's "C" locale has them
     static mask __classify(int c)
     {
-        mask m = 0;
-        if (isupper(c)) m |= upper;
-        if (islower(c)) m |= lower;
-        if (isdigit(c)) m |= digit;
-        if (isspace(c)) m |= space;
-        if (ispunct(c)) m |= punct;
-        if (iscntrl(c)) m |= cntrl;
-        if (isxdigit(c)) m |= xdigit;
-        if (isalpha(c)) m |= 0x100;
-        if (isprint(c)) m |= 0x40;
-        return m;
+        if (c < 0 || c > 127) return 0;
+        if (c < 32 || c == 127) return static_cast<mask>((c >= 9 && c <= 13) ? cntrl | space : cntrl);
+        if (c == 32) return static_cast<mask>(space | 0x40);
+        if (c >= '0' && c <= '9') return static_cast<mask>(digit | xdigit | 0x40);
+        if (c >= 'A' && c <= 'Z') return static_cast<mask>(c <= 'F' ? upper | xdigit | 0x140 : upper | 0x140);
+        if (c >= 'a' && c <= 'z') return static_cast<mask>(c <= 'f' ? lower | xdigit | 0x140 : lower | 0x140);
+        return static_cast<mask>(punct | 0x40);
     }
     static mask __wclassify(wint_t c)
     {
@@ -250,9 +285,9 @@ protected:
     }
     virtual const charT* do_scan_is(mask m, const charT* low, const charT* high) const { while (low < high && !do_is(m, *low)) ++low; return low; }
     virtual const charT* do_scan_not(mask m, const charT* low, const charT* high) const { while (low < high && do_is(m, *low)) ++low; return low; }
-    virtual charT do_toupper(charT c) const { return static_cast<charT>(towupper(static_cast<wint_t>(c))); }
+    virtual charT do_toupper(charT c) const { return c >= static_cast<charT>('a') && c <= static_cast<charT>('z') ? static_cast<charT>(c - ('a' - 'A')) : c; }
     virtual const charT* do_toupper(charT* low, const charT* high) const { for (; low < high; ++low) *low = do_toupper(*low); return high; }
-    virtual charT do_tolower(charT c) const { return static_cast<charT>(towlower(static_cast<wint_t>(c))); }
+    virtual charT do_tolower(charT c) const { return c >= static_cast<charT>('A') && c <= static_cast<charT>('Z') ? static_cast<charT>(c + ('a' - 'A')) : c; }
     virtual const charT* do_tolower(charT* low, const charT* high) const { for (; low < high; ++low) *low = do_tolower(*low); return high; }
     virtual charT do_widen(char c) const { return static_cast<charT>(static_cast<unsigned char>(c)); }
     virtual const char* do_widen(const char* low, const char* high, charT* to) const { for (; low < high; ++low, ++to) *to = do_widen(*low); return high; }
@@ -300,9 +335,9 @@ public:
 protected:
     virtual ~ctype() { if (m_delete) delete[] m_table; }
     const mask* table() const throw() { return m_table; }
-    virtual char do_toupper(char c) const { return static_cast<char>(::toupper(static_cast<unsigned char>(c))); }
+    virtual char do_toupper(char c) const { return c >= 'a' && c <= 'z' ? static_cast<char>(c - ('a' - 'A')) : c; }
     virtual const char* do_toupper(char* low, const char* high) const { for (; low < high; ++low) *low = do_toupper(*low); return high; }
-    virtual char do_tolower(char c) const { return static_cast<char>(::tolower(static_cast<unsigned char>(c))); }
+    virtual char do_tolower(char c) const { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; }
     virtual const char* do_tolower(char* low, const char* high) const { for (; low < high; ++low) *low = do_tolower(*low); return high; }
     virtual char do_widen(char c) const { return c; }
     virtual const char* do_widen(const char* low, const char* high, char* to) const { for (; low < high; ++low, ++to) *to = *low; return high; }
@@ -400,43 +435,12 @@ template <class charT> const ctype<charT>* __classic_ctype()
     return p;
 }
 
-// the named locales: "C" and "" (the environment's, which is "C" here) are the classic locale; others are refused
+// the locale of a name: "C" is the classic locale; any other name is the C runtime's locale of that name, whose
+// facets <locale> has
 inline locale::locale(const char* name) : m_imp(0)
 {
     if (!name) throw runtime_error("locale: null name");
-    if (strcmp(name, "C") != 0 && name[0] != 0) throw runtime_error("bad locale name");
-    m_imp = __classic_ref();
-}
-
-// the facets of the categories cats from one (or from the locale named), the rest from other
-inline void locale::__take(__imp* to, const __imp* from, category cats)
-{
-    if (cats & ctype) {
-        __install(to, from->facets[std::ctype<char>::id.__index()], std::ctype<char>::id.__index());
-        __install(to, from->facets[std::ctype<wchar_t>::id.__index()], std::ctype<wchar_t>::id.__index());
-    }
-    if (cats & numeric) {
-        __install(to, from->facets[numpunct<char>::id.__index()], numpunct<char>::id.__index());
-        __install(to, from->facets[numpunct<wchar_t>::id.__index()], numpunct<wchar_t>::id.__index());
-    }
-    if (cats & collate) {
-        __install(to, from->facets[std::collate<char>::id.__index()], std::collate<char>::id.__index());
-        __install(to, from->facets[std::collate<wchar_t>::id.__index()], std::collate<wchar_t>::id.__index());
-    }
-}
-
-inline locale::locale(const locale& other, const char* name, category cats) : m_imp(0)
-{
-    locale named(name);
-    m_imp = __copy(other.m_imp);
-    __take(m_imp, named.m_imp, cats);
-    m_imp->name = cats == none || other.m_imp->name == named.m_imp->name ? other.m_imp->name : string("*");
-}
-
-inline locale::locale(const locale& other, const locale& one, category cats) : m_imp(__copy(other.m_imp))
-{
-    __take(m_imp, one.m_imp, cats);
-    m_imp->name = cats == none || other.m_imp->name == one.m_imp->name ? other.m_imp->name : string("*");
+    m_imp = name[0] == 'C' && name[1] == 0 ? __classic_ref() : __named_imp(name);
 }
 
 // the new global imp gets the holder's reference, which is never given back (nor is the old one's): a thread making
@@ -448,6 +452,11 @@ inline locale locale::global(const locale& loc)
     cppparse_interlocked_increment(&old.m_imp->refs);
     cppparse_interlocked_increment(&loc.m_imp->refs);
     g = loc.m_imp;
+    // 22.1.1.5/2: a locale with a name is the C library's locale from here on as well
+    if (loc.m_imp->name != "*") {
+        if (loc.m_imp->name != "C") __c_locale_given() = 1;
+        setlocale(LC_ALL, loc.m_imp->name.c_str());
+    }
     return old;
 }
 

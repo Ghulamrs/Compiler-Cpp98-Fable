@@ -2,6 +2,7 @@
 #include "Sema.hpp"
 #include "Literal.hpp"
 #include "PathUtil.hpp"
+#include "TargetTls.hpp"
 
 #include <cstdlib>
 #include <sstream>
@@ -603,6 +604,24 @@ int compareConversions(TypeTable& types, const Conversion& a, const Conversion& 
 
 } // namespace
 
+// 13.3.3.2/4: of two conversions of one class to two of its bases (the object, a pointer to it or a reference bound to
+// it) the one to the base that derives from the other is better: with C from B from A, C to B beats C to A, C* to B*
+// beats C* to A* (what tells f(forward_iterator_tag) from f(input_iterator_tag) for a bidirectional iterator).
+// Negative: a better, positive: b better, 0: indistinguishable
+int Sema::compareBaseConversions(const Conversion& a, const Conversion& b)
+{
+    if (!a.derivedToBase || !b.derivedToBase || a.rank != b.rank || !a.target || !b.target) return 0;
+    const Type* ta = m_types.unref(a.target);
+    const Type* tb = m_types.unref(b.target);
+    if (ta->kind == Type::Pointer && tb->kind == Type::Pointer) { ta = ta->inner; tb = tb->inner; }
+    ta = m_types.unqualified(ta);
+    tb = m_types.unqualified(tb);
+    if (ta == tb || ta->kind != Type::Class || tb->kind != Type::Class || !ta->decl || !tb->decl) return 0;
+    if (derivesFrom(ta->decl, tb->decl, 0)) return -1;
+    if (derivesFrom(tb->decl, ta->decl, 0)) return 1;
+    return 0;
+}
+
 Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vector<cxx::Expr*>& args, size_t firstArg, cxx::Expr* thisExpr, Scope* in, const cxx::Loc& loc, const std::string& what, bool report, const std::vector<cxx::TemplateArg>* explicitArgs)
 {
     size_t nargs = args.size() - firstArg;
@@ -665,6 +684,7 @@ Symbol* Sema::resolveOverload(const std::vector<Symbol*>& cands, const std::vect
         int better = 0, worse = 0;
         for (size_t a = 0; a < nargs; ++a) {
             int c = compareConversions(m_types, viable[i].convs[a], viable[best].convs[a]);
+            if (c == 0) c = compareBaseConversions(viable[i].convs[a], viable[best].convs[a]);
             if (c < 0) ++better; else if (c > 0) ++worse;
         }
         if (viable[i].exactThis != viable[best].exactThis) { if (viable[i].exactThis) ++better; else ++worse; }
@@ -745,7 +765,8 @@ bool Sema::deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::
     if (d) parts = d->parts;
     // reference parameters bind the argument as is (arrays stay arrays); value parameters see the decayed type
     bool byRef = !parts.empty() && parts.back().kind == cxx::DeclaratorPart::Reference;
-    if (!byRef) { if (a->kind == Type::Array || a->kind == Type::Function) a = m_types.decay(a); a = m_types.unqualified(a); }
+    // (a template argument matched against a partial specialisation's pattern is no function argument: it is taken as it is)
+    if (!byRef && !m_argDeduce) { if (a->kind == Type::Array || a->kind == Type::Function) a = m_types.decay(a); a = m_types.unqualified(a); }
     // peel the declarator from the outside in
     for (size_t i = parts.size(); i > 0; --i) {
         const cxx::DeclaratorPart& pt = parts[i - 1];
@@ -858,9 +879,19 @@ bool Sema::deduceTemplateId(const cxx::NameComponent& c, Symbol* tmpl, const Typ
     if (a->kind != Type::Class || !a->decl || !a->decl->instantiatedFrom) return false;
     if (tmpl ? a->decl->instantiatedFrom != tmpl : a->decl->instantiatedFrom->name != c.ident) return false;
     if (c.templateArgs.size() != a->decl->templateArgs.size()) return false;
+    // the arguments of the instantiation are template arguments, taken as they are: "pair<U, W>" from a
+    // pair<const int, long> is U = const int (14.8.2.4)
+    const bool savedArg = m_argDeduce;
     for (size_t k = 0; k < c.templateArgs.size(); ++k) {
         const cxx::TemplateArg& ta = c.templateArgs[k];
-        if (ta.type) { cxx::Param sub; sub.spec = ta.type->spec; sub.decl = ta.type->decl; if (!a->decl->templateArgs[k] || !deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints)) return false; }
+        if (ta.type) {
+            cxx::Param sub; sub.spec = ta.type->spec; sub.decl = ta.type->decl;
+            if (!a->decl->templateArgs[k]) return false;
+            m_argDeduce = true;
+            const bool ok = deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints);
+            m_argDeduce = savedArg;
+            if (!ok) return false;
+        }
         else if (ta.expr) {
             // a parameter of this template is deduced; any other argument is a value that must match: a
             // literal, or a parameter of the enclosing class template bound in its instantiation
@@ -870,7 +901,13 @@ bool Sema::deduceTemplateId(const cxx::NameComponent& c, Symbol* tmpl, const Typ
             bool np = false;
             if (single && tscope) { const std::vector<Symbol*>* v = tscope->find(pn); if (v) np = !v->empty(); }
             if (np) {
-                if (a->decl->templateArgs[k]) { cxx::Param sub; sub.spec.kind = cxx::DeclSpec::Named; sub.spec.name = ta.expr->name; if (!deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints)) return false; }
+                if (a->decl->templateArgs[k]) {
+                    cxx::Param sub; sub.spec.kind = cxx::DeclSpec::Named; sub.spec.name = ta.expr->name;
+                    m_argDeduce = true;
+                    const bool ok = deduce(&sub, a->decl->templateArgs[k], tscope, bindings, ints);
+                    m_argDeduce = savedArg;
+                    if (!ok) return false;
+                }
                 else if (ints.count(pn) && ints[pn] != a->decl->templateIntArgs[k]) return false;
                 else ints[pn] = a->decl->templateIntArgs[k];
             } else {
@@ -2164,7 +2201,7 @@ const Type* Sema::expr(cxx::Expr* e, Scope* in)
 
 void Sema::localDecl(cxx::Decl* d, Scope* in, bool isHandler)
 {
-    if (d->kind == cxx::Decl::Class) { declareClass(d->classDef, in, cxx::AccessPublic, 0); return; }
+    if (d->kind == cxx::Decl::Class) { Symbol* c = declareClass(d->classDef, in, cxx::AccessPublic, 0); if (d->spec.thread) error(d->spec.loc, TargetTls::code(), TargetTls::message(TargetTls::BlockScope, c ? c->name : std::string("(unnamed)"))); return; }
     if (d->kind == cxx::Decl::Enum) { declareEnum(d->enumDef, in, cxx::AccessPublic); return; }
     if (d->kind != cxx::Decl::Simple) { declare(d, in, cxx::AccessPublic); return; }
     Symbol* defined = 0;
@@ -2179,6 +2216,8 @@ void Sema::localDecl(cxx::Decl* d, Scope* in, bool isHandler)
         const Type* t = completedArray(applyDeclarator(base, *dcl, in, &params), id.init);
         if (isHandler) t = handlerType(t, dcl->loc);
         const std::string& name = dcl->name.parts.empty() ? std::string("") : dcl->name.parts.back().ident;
+        // __declspec(thread) at block scope, a static local or an extern declaration among them (docs/design-selfhost.md 4.1)
+        if (d->spec.thread) error(dcl->loc, TargetTls::code(), TargetTls::message(TargetTls::BlockScope, name));
         if (d->spec.isTypedef) { Symbol* td = m_prog.newSymbol(Symbol::Typedef, name, in); td->type = t; td->loc = dcl->loc; dcl->semaSym = td; continue; }
         if (t->kind == Type::Function) { declareFunction(d, dcl, d->spec, in, cxx::AccessPublic, t, params); continue; }
         if (d->spec.isExtern && id.init.kind == cxx::Initializer::None) {

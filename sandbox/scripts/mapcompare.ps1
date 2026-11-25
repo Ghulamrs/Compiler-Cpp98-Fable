@@ -16,9 +16,13 @@
 #      each linker kept it, and the class totals
 # Both programs must print ALL OK. Exit code 1 when a build fails or part A finds a disagreement.
 # (mapcompare.py is a different tool: maps.ps1 uses it to compare the reference and self-built compilers' maps.)
-param([string]$Lvl = "2", [string]$Compiler = "")
+# Both links are Microsoft's under -Linker gride too (printed as "not under GRIDE's link"): the parts read link.exe's
+# map and compare with cl's layout under it.
+param([string]$Lvl = "2", [string]$Compiler = "", [string]$Linker = "")
 . "$PSScriptRoot\toolset.ps1"
 if ($Compiler -ne "") { $Exe = (Resolve-Path $Compiler).Path }
+Assert-Linker
+if ($Linker -eq "gride") { Write-NotUnderGride "mapcompare.ps1 links with Microsoft's link: it reads link.exe's map format and compares cppparse's layout with cl's under that linker" }
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
 $w = "out\mapex"
@@ -38,7 +42,7 @@ function Run([string]$exe) {
 foreach ($f in Get-ChildItem "$w\cl", "$w\cpp" -File -ErrorAction SilentlyContinue) { Remove-Item $f.FullName }
 $out = & $cl /nologo /c /O2 /EHsc /I.. /I..\examples\sample-matrix "/Fo$w\cl\" @src $drv 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { Write-Host $out }
-$null = & $link /nologo /SUBSYSTEM:CONSOLE "/OUT:$w\cl\matrix.exe" "/MAP:$w\cl\matrix.map" "$w\cl\matrix.obj" "$w\cl\solver.obj" "$w\cl\driver-matrix.obj" @libs 2>&1
+$null = Link-Program @("$w\cl\matrix.obj", "$w\cl\solver.obj", "$w\cl\driver-matrix.obj") "$w\cl\matrix.exe" @("/MAP:$w\cl\matrix.map") $libs "ms"
 $r = Run "$w\cl\matrix.exe"; Write-Host "cl /O2 build:          $r"; if ($r -ne "ALL OK") { $failed++ }
 
 # ---- 2. cppparse, linked with the cl-compiled driver + link /MAP --------------------------------------------
@@ -47,7 +51,7 @@ foreach ($s in $src) {
     if ($LASTEXITCODE -ne 0) { Write-Host $out }
 }
 & $cl /nologo /c /EHsc /W3 "/Fo$w\cpp\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" | Out-Null
-$null = & $link /nologo /SUBSYSTEM:CONSOLE "/OUT:$w\cpp\matrix.exe" "/MAP:$w\cpp\linked.map" "$w\cl\driver-matrix.obj" "$w\cpp\matrix6.obj" "$w\cpp\solver6.obj" "$w\cpp\cppparse_rt.obj" @libs 2>&1
+$null = Link-Program @("$w\cl\driver-matrix.obj", "$w\cpp\matrix6.obj", "$w\cpp\solver6.obj", "$w\cpp\cppparse_rt.obj") "$w\cpp\matrix.exe" @("/MAP:$w\cpp\linked.map") $libs "ms"
 $r = Run "$w\cpp\matrix.exe"; Write-Host "cppparse -O$Lvl build:   $r"; if ($r -ne "ALL OK") { $failed++ }
 if ($failed -ne 0 -or -not (Test-Path "$w\cl\matrix.map") -or -not (Test-Path "$w\cpp\linked.map")) { Write-Host "mapcompare: a build failed"; exit 1 }
 

@@ -1,9 +1,12 @@
 // __iterator - cppparse's C++98 library: the iterator categories, iterator_traits, reverse_iterator, advance and
-// distance (24.3, 24.4.1), the part of <iterator> the containers need without the streams.
+// distance (24.3, 24.4.1), the part of <iterator> the containers need without the streams; and __range_category and
+// __range_kind, by which the containers' member templates over two arguments of one type tell a count and a value from
+// a range, and a range they can measure from one they can only read (23.1.1/9).
 #ifndef CPPPARSE_ITERATOR_BASE
 #define CPPPARSE_ITERATOR_BASE
 
 #include <cstddef>
+#include <__traits>
 
 namespace std {
 
@@ -71,6 +74,25 @@ template <class It>
 typename iterator_traits<It>::difference_type __distance(It first, It last, random_access_iterator_tag) { return last - first; }
 template <class It>
 typename iterator_traits<It>::difference_type distance(It first, It last) { return __distance(first, last, typename iterator_traits<It>::iterator_category()); }
+
+// What the two arguments (first, last) of a container's member template are, as a type to overload on; the members
+// pass a null pointer of that type to their workers, so that no object is made for the choice (23.1.1/9:
+// "template <class InputIterator> X(InputIterator, InputIterator)" and the assign and insert of that form):
+//   __true_type                 InputIterator is an integral type: a count and a value, as if the count form were called
+//   the iterator's category     a range: one that is at least forward is measured with distance and its elements are
+//                               placed in one step, an input range is read element by element
+// __range_kind<It, T> is __pointer_range_tag besides when It is T* or const T*, the iterators of vector<T> and of
+// basic_string<T>: those containers copy such a range as they did before the members were templates (memcpy for the
+// bytewise types).
+struct __pointer_range_tag {};
+
+template <class It, class Integer> struct __range_category2 { typedef typename iterator_traits<It>::iterator_category type; };
+template <class It> struct __range_category2<It, __true_type> { typedef __true_type type; };
+template <class It> struct __range_category { typedef typename __range_category2<It, typename __is_integer<It>::type>::type type; };
+
+template <class It, class T> struct __range_kind { typedef typename __range_category<It>::type type; };
+template <class T> struct __range_kind<T*, T> { typedef __pointer_range_tag type; };
+template <class T> struct __range_kind<const T*, T> { typedef __pointer_range_tag type; };
 
 template <class It>
 class reverse_iterator {

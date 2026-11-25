@@ -1,6 +1,9 @@
-// clocale - cppparse's C++98 library: setlocale and localeconv of MSVC's C runtime.
+// clocale - cppparse's C++98 library: setlocale and localeconv of MSVC's C runtime, and Microsoft's locale objects
+// (_locale_t, declared in <__config>), which <locale> makes its named locales of.
 #ifndef CPPPARSE_CLOCALE
 #define CPPPARSE_CLOCALE
+
+#include <__config>
 
 struct lconv {
     char* decimal_point;
@@ -34,6 +37,13 @@ struct lconv {
 extern "C" {
     char*  setlocale(int category, const char* locale);
     lconv* localeconv(void);
+    // Microsoft's: a locale object of a name (null for a name the C runtime does not know) and of the calling thread's
+    // current locale, each freed with _free_locale; _configthreadlocale gives the calling thread a C locale of its own
+    // (_ENABLE_PER_THREAD_LOCALE), which setlocale then changes, or the program's again, and returns the setting before
+    _locale_t _create_locale(int category, const char* locale);
+    _locale_t _get_current_locale(void);
+    void      _free_locale(_locale_t locale);
+    int       _configthreadlocale(int setting);
 }
 
 #define LC_ALL      0
@@ -42,6 +52,9 @@ extern "C" {
 #define LC_MONETARY 3
 #define LC_NUMERIC  4
 #define LC_TIME     5
+
+#define _ENABLE_PER_THREAD_LOCALE  1
+#define _DISABLE_PER_THREAD_LOCALE 2
 
 namespace std {
     using ::lconv; using ::setlocale; using ::localeconv;

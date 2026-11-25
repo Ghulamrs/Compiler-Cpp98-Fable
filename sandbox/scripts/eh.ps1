@@ -9,10 +9,11 @@
 #   unwind walk: from inside nested frames, RtlVirtualUnwind must find every frame and restore the callee-saved
 #   registers (rbx rbp rsi rdi r12-r15, xmm6-xmm15) that an ml64 function set before calling in
 #   exceptions: the results of the eh* functions and the number of destructors run
-# Exit code 1 when anything fails.
-param([string]$Compiler = "")
+# Exit code 1 when anything fails. -Linker ms|gride: the linker of every program (toolset.ps1, Link-Program).
+param([string]$Compiler = "", [string]$Linker = "")
 . "$PSScriptRoot\toolset.ps1"
 if ($Compiler -ne "") { $Exe = (Resolve-Path $Compiler).Path }
+Assert-Linker
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
 $ml64 = "$Msvc\bin\Hostx64\x64\ml64.exe"
@@ -27,7 +28,7 @@ function Report([string]$name, [bool]$ok, [string]$detail = "") {
 function Normalize([string]$t) { return ($t -replace "`r`n", "`n").TrimEnd() }
 
 Write-Host "=== exceptions and unwind tables (sample-eh) ==="
-$msg = & $cl /nologo /c /EHsc /W4 /WX "/Fo$out\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" 2>&1 | Out-String
+$msg = Build-Runtime "$out\cppparse_rt.obj" @("/EHsc", "/W4", "/WX")   # cl's, or cppparse's with CPPPARSE_RT=cppparse (toolset.ps1)
 Report "runtime compiled (/W4 /WX)" ($LASTEXITCODE -eq 0) $msg
 $msg = & $ml64 /nologo /c "/Fo$out\entry.obj" "$drv\entry.asm" 2>&1 | Out-String
 Report "entry.asm assembled by ml64" ($LASTEXITCODE -eq 0) $msg
@@ -36,7 +37,7 @@ New-Item -ItemType Directory -Force "$out\cl" | Out-Null
 # /EHa: cl 19.52 (preview) with /EHsc or /EHs at /O1 and above crashes on a throw out of a recursion whose frames
 # have destructors (deep() below; a 6-line program reproduces it, clang -O2 and cl /EHa run it correctly)
 # /Zc:implicitNoexcept-: C++98's destructors, which may throw (ehDtorThrow, ehArrays)
-$msg = & $cl /nologo /EHa /Zc:implicitNoexcept- /W4 /O2 "/Fo$out\cl\" "/Fe$out\cl\eh.exe" "$drv\driver-eh.cpp" "$src\probe.cpp" "$src\probe-mix.cpp" "$out\entry.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
+$msg = Build-Program @("/EHa", "/Zc:implicitNoexcept-", "/W4", "/O2", "/Fo$out\cl\", "$drv\driver-eh.cpp", "$src\probe.cpp", "$src\probe-mix.cpp") @("$out\cl\driver-eh.obj", "$out\cl\probe.obj", "$out\cl\probe-mix.obj", "$out\entry.obj", "$out\cppparse_rt.obj") "$out\cl\eh.exe" | Out-String
 if ($LASTEXITCODE -ne 0) { Report "cl reference build" $false $msg; exit 1 }
 $reference = Normalize (& "$out\cl\eh.exe" 2>&1 | Out-String)
 Report "cl reference build runs, ALL OK" ($LASTEXITCODE -eq 0 -and $reference -match 'ALL OK') $reference
@@ -54,7 +55,7 @@ foreach ($m in $models.Keys) {
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$dir\${name}6.obj")) { Report "$m -O$lvl compile $name" $false $msg; $ok = $false }
         }
         if (-not $ok) { continue }
-        $msg = & $cl /nologo /EHsc /W4 /WX "/Fo$dir\" "/Fe$dir\eh.exe" "$drv\driver-eh.cpp" "$dir\probe6.obj" "$dir\probe-mix6.obj" "$out\entry.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
+        $msg = Build-Program @("/EHsc", "/W4", "/WX", "/Fo$dir\", "$drv\driver-eh.cpp") @("$dir\driver-eh.obj", "$dir\probe6.obj", "$dir\probe-mix6.obj", "$out\entry.obj", "$out\cppparse_rt.obj") "$dir\eh.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Report "$m -O$lvl link" $false $msg; continue }
         $p = Start-Process -FilePath "$dir\eh.exe" -NoNewWindow -PassThru -RedirectStandardOutput "$dir\eh.out" -RedirectStandardError "$dir\eh.err"
         $null = $p.Handle
@@ -75,10 +76,12 @@ foreach ($m in $models.Keys) {
 #   terminate-catch.cpp: a copy constructor that throws while it initializes a by-value catch parameter
 #   terminate-handler.cpp: the destructor of a by-value parameter that throws while an exception leaves its handler
 #   purecall.cpp: a pure virtual function called from a constructor (vcruntime's _purecall in the slot, R6025, abort)
-foreach ($tn in "terminate", "terminate-catch", "terminate-handler", "purecall") {
+# and one that must not (row P1 stage 2): dtor-catch.cpp, a destructor run by the unwinding throws and catches inside, the
+#   program goes on (terminate.cpp's sibling: the runtime notes the pad's frame with _AddressOfReturnAddress)
+foreach ($tn in "terminate", "terminate-catch", "terminate-handler", "purecall", "dtor-catch") {
     $tdir = "$out\$tn"
     New-Item -ItemType Directory -Force "$tdir\cl" | Out-Null
-    $msg = & $cl /nologo /EHsc /Zc:implicitNoexcept- /O2 "/Fo$tdir\cl\" "/Fe$tdir\cl\$tn.exe" "$src\$tn.cpp" 2>&1 | Out-String
+    $msg = Build-Program @("/EHsc", "/Zc:implicitNoexcept-", "/O2", "/Fo$tdir\cl\", "$src\$tn.cpp") @("$tdir\cl\$tn.obj") "$tdir\cl\$tn.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Report "${tn}: cl reference build" $false $msg; continue }
     $tref = Normalize (& "$tdir\cl\$tn.exe" 2>$null | Out-String)
     $tcode = $LASTEXITCODE
@@ -88,16 +91,16 @@ foreach ($tn in "terminate", "terminate-catch", "terminate-handler", "purecall")
             New-Item -ItemType Directory -Force $d | Out-Null
             $msg = & $Exe --compile6 "-O$lvl" --obj --msvc-mangling $m -q -I ..\include -I .. -o $d -n $tn "$src\$tn.cpp" 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0) { Report "$tn $m -O$lvl compile" $false $msg; continue }
-            $msg = & $link /nologo "/OUT:$d\$tn.exe" "$d\${tn}6.obj" "$out\cppparse_rt.obj" 2>&1 | Out-String
+            $msg = (Link-Program @("$d\${tn}6.obj", "$out\cppparse_rt.obj") "$d\$tn.exe") -join "`n"   # the C runtime named: cppparse's object of the runtime has no /DEFAULTLIB, cl's has
             if ($LASTEXITCODE -ne 0) { Report "$tn $m -O$lvl link" $false $msg; continue }
             $run = Normalize (& "$d\$tn.exe" 2>$null | Out-String)
-            Report "$tn $m -O${lvl}: output and exit code equal cl's ($LASTEXITCODE)" ($run -eq $tref -and $LASTEXITCODE -eq $tcode -and $tcode -ne 0) "       got '$run' exit $LASTEXITCODE, cl '$tref' exit $tcode"
+            Report "$tn $m -O${lvl}: output and exit code equal cl's ($LASTEXITCODE)" ($run -eq $tref -and $LASTEXITCODE -eq $tcode -and ($tcode -ne 0) -ne ($tn -eq "dtor-catch")) "       got '$run' exit $LASTEXITCODE, cl '$tref' exit $tcode"
         }
     }
 }
 # exceptions across compilers (cppparse's models and cl's code in one program): its own script, its lines shown here
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot\ehx.ps1" -Compiler $Exe | ForEach-Object { Write-Host $_ }
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot\ehx.ps1" -Compiler $Exe -Linker $Linker | ForEach-Object { if ("$_" -match "^not under GRIDE's link:") { $script:KnownDifferences++ }; Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { $failed++ }
 if ($failed) { Write-Host "eh: $failed check(s) failed"; exit 1 }
-Write-Host "eh: all checks passed"
+Write-Host "eh: all checks passed$(Get-KnownDifferences)"
 exit 0

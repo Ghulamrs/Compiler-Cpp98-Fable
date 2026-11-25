@@ -2,6 +2,8 @@
 #ifndef CPPPARSE_CCTYPE
 #define CPPPARSE_CCTYPE
 
+#include <__config>
+
 extern "C" {
     int isalpha(int c);
     int isdigit(int c);
@@ -16,6 +18,11 @@ extern "C" {
     int isgraph(int c);
     int toupper(int c);
     int tolower(int c);
+    // Microsoft's: the classification bits of c that are in mask (those of ctype_base), and the case conversions, in a
+    // locale of the C runtime (<clocale>)
+    int _isctype_l(int c, int mask, _locale_t locale);
+    int _toupper_l(int c, _locale_t locale);
+    int _tolower_l(int c, _locale_t locale);
 }
 
 namespace std {

@@ -47,11 +47,15 @@ struct CoffResult {
     CoffResult() : functions(0), instructions(0), relocations(0), symbols(0), textBytes(0), dataBytes(0), rdataBytes(0), fileBytes(0), writeFailed(false) {}
 };
 
-// assembles the MASM text and writes the object; false when a line could not be encoded or the file could not be written
-bool writeCoffObject(const std::string& masmText, const std::string& objPath, int threads, CoffResult& result);
+class CvModule;
+
+// assembles the MASM text and writes the object; false when a line could not be encoded or the file could not be written.
+// debugInfo: with -g, the description of the unit's types and variables (cppparse/cv), which the markers of the text
+// name by number: the object then carries them as CodeView in .debug$T and .debug$S, behind what it has without
+bool writeCoffObject(const std::string& masmText, const std::string& objPath, int threads, CoffResult& result, const CvModule* debugInfo = 0);
 
 // assembles into memory only (used by the writer and by tests)
-bool assembleCoff(const std::string& masmText, int threads, std::string& objectBytes, CoffResult& result);
+bool assembleCoff(const std::string& masmText, int threads, std::string& objectBytes, CoffResult& result, const CvModule* debugInfo = 0);
 
 } // namespace cppparse
 

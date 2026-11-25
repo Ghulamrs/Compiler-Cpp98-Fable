@@ -1,4 +1,4 @@
-# strict98.ps1 - cppparse's own sources against strict C++98: clang's C++98 front end with -pedantic over the 39 units,
+# strict98.ps1 - cppparse's own sources and its runtime against strict C++98: clang's C++98 front end with -pedantic over the units,
 # against cppparse's own library headers (include\) and Windows declarations (platform\), as the review of 2026-11-05
 # ran it (docs/next-targets.md, rows P4-P9):
 #   clang++ --target=x86_64-pc-windows-msvc -std=c++98 -pedantic -fsyntax-only -fno-ms-compatibility
@@ -29,7 +29,9 @@ $started = Get-Date
 $slots = [Math]::Max(1, [Environment]::ProcessorCount)
 $running = New-Object System.Collections.ArrayList
 $next = 0
-$units = @($OwnSources)
+# the runtime too (row P1 stage 2, docs\design-selfhost.md 4.3): C++98 but for its documented extensions, which it spells
+# through macros clang takes (CPPPARSE_THREAD, __cppparse_align) or through the 64-bit typedefs of include\__config
+$units = @($OwnSources) + @(Get-Item "$Src\runtime\cppparse_rt.cpp")
 while ($next -lt $units.Count -or $running.Count -gt 0) {
     while ($next -lt $units.Count -and $running.Count -lt $slots) {
         $u = $units[$next]; $next++

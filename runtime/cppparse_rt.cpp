@@ -33,8 +33,14 @@
 // cppparse_eh_handler for a cl exception that passes a table-model frame inside a region. A setjmp frame has no
 // unwind handler, so a cl exception that passes one is not seen.
 //
-// Build: cl /c /EHsc cppparse_rt.cpp, then link the object with the cppparse-generated .obj.
-// Strict C++98 (C subset).
+// Build: by cl (cl /c /EHsc cppparse_rt.cpp) or by cppparse itself (--compile6 -O2 --obj --msvc-mangling --eh=table
+// -I include -I platform, row P1 of docs/design-selfhost.md): one source, one object per compiler, which carries no
+// exception model's mark and so links with the table and sjlj models' objects and with --eh=cl's alike. Then link the
+// object with the cppparse-generated objects.
+// C++98 (the C subset) with three documented extensions, each checked by scripts\strict98.ps1 (clang -std=c++98
+// -pedantic): thread-local storage (CPPPARSE_THREAD below: __declspec(thread), __thread for clang), alignment (the
+// unwind structures of <windows.h>) and a 64-bit integer type (DWORD64). Under cppparse the headers are platform\'s
+// (windows.h, eh.h, intrin.h); the five intrinsics of <intrin.h> are emitted inline by cl and by cppparse alike.
 #ifndef _WIN32
 #error "the cppparse runtime serves the 64-bit Windows target only"
 #endif
@@ -46,6 +52,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* the attribute of a thread-local: cl's and cppparse's __declspec(thread), clang's __thread (strict98.ps1 reads the file) */
+#if defined(__GNUC__)
+#define CPPPARSE_THREAD __thread
+#else
+#define CPPPARSE_THREAD __declspec(thread)
+#endif
 
 extern "C" {
 
@@ -64,8 +77,8 @@ struct cppparse_exception {
 };
 
 /* per thread: the compiler runs its phases on a worker pool, and every thread has its own chain of frames */
-static __declspec(thread) struct cppparse_frame*    g_top = 0;
-static __declspec(thread) struct cppparse_exception g_inflight = { 0, 0, 0, 0, 0 };
+static CPPPARSE_THREAD struct cppparse_frame*    g_top = 0;
+static CPPPARSE_THREAD struct cppparse_exception g_inflight = { 0, 0, 0, 0, 0 };
 
 static void dropException(struct cppparse_exception* e)
 {
@@ -87,9 +100,9 @@ static void (*g_unexpectedHandler)(void) = 0;
 void cppparse_terminate(void);
 /* the exceptions caught and not yet released, innermost last (a handler that calls deeper keeps its own alive):
    a per-thread array that doubles as handlers nest */
-static __declspec(thread) struct cppparse_exception* g_caught = 0;
-static __declspec(thread) int                        g_caughtCount = 0;
-static __declspec(thread) int                        g_caughtCap = 0;
+static CPPPARSE_THREAD struct cppparse_exception* g_caught = 0;
+static CPPPARSE_THREAD int                        g_caughtCount = 0;
+static CPPPARSE_THREAD int                        g_caughtCap = 0;
 
 static void pushCaught(const struct cppparse_exception* e)
 {
@@ -172,11 +185,23 @@ extern EXCEPTION_DISPOSITION __CxxFrameHandler4(struct _EXCEPTION_RECORD*, void*
 extern EXCEPTION_DISPOSITION __GSHandlerCheck_EH(struct _EXCEPTION_RECORD*, void*, struct _CONTEXT*, void*);
 extern EXCEPTION_DISPOSITION __GSHandlerCheck_EH4(struct _EXCEPTION_RECORD*, void*, struct _CONTEXT*, void*);
 
+/* the handler no frame has: the default of the three names above that a C++ runtime may lack. Where a library defines
+   the name (vcruntime), the linker takes that definition; where none does (GRIDE's runtime has __CxxFrameHandler3
+   alone), the name is this function, which no frame's handler equals (docs/design-selfhost.md 3.6) */
+EXCEPTION_DISPOSITION cppparse_no_handler(struct _EXCEPTION_RECORD* record, void* frame, struct _CONTEXT* context, void* dispatcher)
+{
+    (void)record; (void)frame; (void)context; (void)dispatcher;
+    return ExceptionContinueSearch;
+}
+#pragma comment(linker, "/alternatename:__CxxFrameHandler4=cppparse_no_handler")
+#pragma comment(linker, "/alternatename:__GSHandlerCheck_EH=cppparse_no_handler")
+#pragma comment(linker, "/alternatename:__GSHandlerCheck_EH4=cppparse_no_handler")
+
 /* the code an address leads to: through the jumps of an incremental link's thunk (E9 rel32) and of an import thunk
    (FF 25 disp32), so that a handler named through a thunk compares equal to the function */
-static const unsigned char* codeBehind(const void* p)
+static const unsigned char* codeBehind(PEXCEPTION_ROUTINE f)
 {
-    const unsigned char* c = (const unsigned char*)p;
+    const unsigned char* c = (const unsigned char*)(DWORD64)f;   /* through an integer: C++98 has no cast of a function pointer to an object pointer */
     int hops;
     for (hops = 0; c && hops < 4; ++hops) {
         if (c[0] == 0xE9) { int rel; memcpy(&rel, c + 1, sizeof rel); c = c + 5 + rel; }
@@ -204,9 +229,9 @@ static unsigned long readCompressed(const unsigned char** p)
    destroy or a try block around the call. 0 for any other frame, and for one of cl's whose tables say state -1 */
 static int clFrameHasState(PEXCEPTION_ROUTINE handler, const void* data, PRUNTIME_FUNCTION rf, DWORD64 base, DWORD64 returnAddress)
 {
-    const unsigned char* h = codeBehind((const void*)handler);
-    const int fh3 = h == codeBehind((const void*)&__CxxFrameHandler3) || h == codeBehind((const void*)&__GSHandlerCheck_EH);
-    const int fh4 = h == codeBehind((const void*)&__CxxFrameHandler4) || h == codeBehind((const void*)&__GSHandlerCheck_EH4);
+    const unsigned char* h = codeBehind(handler);
+    const int fh3 = h == codeBehind(&__CxxFrameHandler3) || h == codeBehind(&__GSHandlerCheck_EH);
+    const int fh4 = h == codeBehind(&__CxxFrameHandler4) || h == codeBehind(&__GSHandlerCheck_EH4);
     long state = -1;
     if (!data || (!fh3 && !fh4)) return 0;
     if (fh3) {
@@ -244,8 +269,8 @@ static int clFrameHasState(PEXCEPTION_ROUTINE handler, const void* data, PRUNTIM
 /* the destructors the landing pads run while an exception unwinds (cppparse_unwind_enter / leave below), and the
    stack pointer of the frame whose pad runs the innermost one */
 #define CPPPARSE_UNWIND_DEPTH 64
-static __declspec(thread) int g_unwinding = 0;
-static __declspec(thread) DWORD64 g_unwindFrame[CPPPARSE_UNWIND_DEPTH];
+static CPPPARSE_THREAD int g_unwinding = 0;
+static CPPPARSE_THREAD DWORD64 g_unwindFrame[CPPPARSE_UNWIND_DEPTH];
 
 /* sends the exception in flight to the nearest place that takes it, walking the stack from here with the unwind
    tables: a table landing pad (the range of the frame's call site, --eh=table) is entered with RtlRestoreContext,
@@ -386,11 +411,11 @@ static int splitPointer(const char* t, char* out, size_t cap, int* cv)
    null ("Base*+16"); a virtual base of the pointee ("Base*+v8:4+16": the vbptr at 8, its vbtable's entry at 4, then
    16 further) lies where the pointed-to object's vbtable says, as the object may be of a class derived from the
    pointee's */
-static __declspec(thread) unsigned long g_matchOffset = 0;
-static __declspec(thread) int           g_matchPointer = 0;
-static __declspec(thread) int           g_matchVirtual = 0;
-static __declspec(thread) unsigned long g_matchVbptr = 0;
-static __declspec(thread) unsigned long g_matchVbentry = 0;
+static CPPPARSE_THREAD unsigned long g_matchOffset = 0;
+static CPPPARSE_THREAD int           g_matchPointer = 0;
+static CPPPARSE_THREAD int           g_matchVirtual = 0;
+static CPPPARSE_THREAD unsigned long g_matchVbptr = 0;
+static CPPPARSE_THREAD unsigned long g_matchVbentry = 0;
 
 static void parseOffset(const char* s)
 {
@@ -506,7 +531,7 @@ void (*cppparse_set_unexpected(void (*f)(void)))(void) { void (*old)(void) = g_u
    the exception with cppparse_catch_begin by then; an object's own cleanup pad, --eh=table, leaves it in flight):
    std::uncaught_exception() is true there and from the throw to the handler. The pad's frame is noted: an exception
    that leaves one of those destructors reaches it in dispatch, which calls terminate (C++98 15.5.1) */
-static __declspec(thread) struct cppparse_exception g_parked[CPPPARSE_UNWIND_DEPTH];   /* the exception in flight while the pad's destructor runs */
+static CPPPARSE_THREAD struct cppparse_exception g_parked[CPPPARSE_UNWIND_DEPTH];   /* the exception in flight while the pad's destructor runs */
 void cppparse_unwind_enter(void)
 {
     if (g_unwinding < CPPPARSE_UNWIND_DEPTH) {
@@ -642,7 +667,7 @@ static const char* functionStart(const void* p)
     return (const char*)p;
 }
 
-int cppparse_walk_frames(const void* stop, const void* counted, unsigned long long* ints, unsigned long long* xmms)
+int cppparse_walk_frames(const void* stop, const void* counted, DWORD64* ints, DWORD64* xmms)
 {
     CONTEXT ctx;
     int frames = 0, i;

@@ -1,5 +1,6 @@
 // X86.cpp - x86-64 MASM code generation.
 #include "X86.hpp"
+#include "CvNames.hpp"
 #include "EhClFunclets.hpp"
 #include "EhRegions.hpp"
 #include "EhSjlj.hpp"
@@ -9,6 +10,8 @@
 #include "Mangle.hpp"
 #include "Optimizer.hpp"
 #include "PathUtil.hpp"
+#include "TargetIntrinsics.hpp"
+#include "TargetTls.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -117,15 +120,6 @@ std::string replacedAllocationName(const std::string& irName)
     return std::string();
 }
 
-// the name a debugger shows for a function (its CodeView symbol): the IR name without the parameter list and the
-// qualifiers after it ("geom::Circle::area() const" -> "geom::Circle::area", "S::operator()(int)" -> "S::operator()")
-std::string displayName(const std::string& irName)
-{
-    size_t p = irName.find('(');
-    if (p != std::string::npos && p >= 8 && irName.compare(p - 8, 8, "operator") == 0 && p + 1 < irName.size() && irName[p + 1] == ')') p = irName.find('(', p + 2);
-    return p == std::string::npos ? irName : irName.substr(0, p);
-}
-
 } // namespace
 
 std::string X86Module::symbol(const std::string& irName)
@@ -181,7 +175,7 @@ namespace {
 
 class X86Function : private EhEmitter {
 public:
-    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false), m_firstSpills(0), m_tableEh(false), m_tableRegs(false), m_parityLabels(0), m_lastLine(-1), m_hotCount(0), m_openEnd(false),
+    X86Function(X86Module& m, const IrFunction& f, LowerStats& stats) : m_m(m), m_f(f), m_stats(stats), m_frameSize(0), m_throwSlot(0), m_outgoingArgs(0), m_prefixEnd(0), m_frameless(false), m_firstSpills(0), m_tableEh(false), m_tableRegs(false), m_parityLabels(0), m_lastLine(-1), m_debugScopeOut(-1), m_prologEndOut(false), m_hotCount(0), m_openEnd(false),
         m_cl(false), m_curFunclet(-1), m_unwindHelp(0), m_skipBr(false)
     { for (int p = 0; p < 4; ++p) m_lastParamLoad[p] = -1; }
     std::string run();
@@ -296,6 +290,25 @@ private:
     bool byteInMemory(int t) const { std::map<int, ByteTest>::const_iterator b = m_byteTest.find(t); return b != m_byteTest.end() && b->second.kind != 1; }   // tested in memory: no register of its own
     int                 m_parityLabels;   // the local labels of the setcc sequences of floating ==, != (_P1, _P2...)
     int                 m_lastLine;       // the source line of the last ;@line marker written (-1: none yet)
+    // -g (docs/design-codeview.md 5.4): the block scope of the code from the last ;@scope marker on (-1: the entry
+    // sequence, an epilogue, a funclet's entry), and whether ;@prologend is written
+    int                 m_debugScopeOut;
+    bool                m_prologEndOut;
+    bool debugMarks() const { return m_f.debugType != 0 && !m_f.sourceFile.empty(); }
+    void debugScope(int scope)
+    {
+        if (!debugMarks()) return;
+        if (scope >= 0 && !m_prologEndOut) { m_out << ";@prologend\n"; m_prologEndOut = true; }
+        if (scope != m_debugScopeOut) { m_out << ";@scope " << scope << "\n"; m_debugScopeOut = scope; }
+    }
+    void debugEpilog()   // the code from here on is an epilogue (outside every block)
+    {
+        if (!debugMarks()) return;
+        if (!m_prologEndOut) { m_out << ";@prologend\n"; m_prologEndOut = true; }
+        debugScope(-1);
+        m_out << ";@epilog\n";
+    }
+    void debugVariables();
     // a register parameter that is only read, by loads at the very start of the function (before anything can
     // overwrite its argument register), is used straight from that register and never stored to the frame
     void analyzeParams();
@@ -380,6 +393,7 @@ void X86Function::clEmitFunclets()
         const int owner = m_clf.owner(b);
         if (owner != m_curFunclet) {
             m_curFunclet = owner;
+            debugScope(-1);   // -g: rbp is the function's from the funclet's lea on (its first statement's ;@scope)
             m_clf.entry(static_cast<size_t>(owner), m_frameSize, m_openEnd, *this);
             m_openEnd = false;
         }
@@ -713,6 +727,7 @@ void X86Function::decideFrame()
 {
     m_frameless = false;
     if (m_cl) return;
+    if (m_f.keepsFrame) return;   // _AddressOfReturnAddress reads [rbp+8]: rbp must be this function's own (TargetIntrinsics)
     if (!m_calls.empty() || !m_clobbers.empty() || !m_usedIntRegs.empty() || !m_usedFloatRegs.empty()) return;
     for (std::map<int, Interval>::const_iterator it = m_intervals.begin(); it != m_intervals.end(); ++it)
         if (it->second.reg < 0) return;                                   // a spilled value lives in the frame
@@ -759,6 +774,8 @@ bool X86Function::writesArgReg(const IrInst& in, int p) const
     switch (in.op) {
     case IrInst::Call: case IrInst::VCall: case IrInst::Throw: case IrInst::TryBegin: case IrInst::TryEnd:
     case IrInst::CatchParam: case IrInst::CatchEnd:
+    case IrInst::AddrTls:   // its sequence reads _tls_index into ecx and the offset into edx
+    case IrInst::Intrinsic: // its operands are materialised in rdx and rcx (TargetIntrinsics)
         return true;
     case IrInst::Bin: {
         const std::string& s = in.sub;
@@ -1378,6 +1395,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
 {
     // the line table (a comment to ml64, read by the COFF writer): the source line of the code from here on
     if (!m_f.sourceFile.empty() && in.line > 0 && in.line != m_lastLine) { m_out << ";@line " << in.line << "\n"; m_lastLine = in.line; }
+    debugScope(in.scope);
     comment(in.str());
     bool dstFloat = in.dst >= 0 && tempIsFloat(in.dst);
     int spill = 0;
@@ -1469,6 +1487,38 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     }
     case IrInst::AddrLocal: { std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", " + localRef(in.args[0].id)); finish(in.dst, spill, false, rd); break; }
     case IrInst::AddrGlobal: { std::string rd = def(in.dst, false, "rax", spill); m_m.useGlobal(in.args[0].name); line("lea " + rd + ", " + m_m.globalSymbol(in.args[0].name)); finish(in.dst, spill, false, rd); break; }
+    case IrInst::Intrinsic: {
+        // an intrinsic of the target, inline (cppparse/target TargetIntrinsics, docs/design-selfhost.md 4.2): the address in
+        // a register (rdx when it is not in one), the second operand in ecx, the third in eax; the result comes in eax / rax
+        const TargetIntrinsics::Kind k = TargetIntrinsics::byName(in.sub);
+        std::string p, v, c;
+        if (k != TargetIntrinsics::AddressOfReturnAddress && !in.args.empty()) p = use(in.args[0], "rdx");
+        if ((k == TargetIntrinsics::Exchange || k == TargetIntrinsics::CompareExchange) && in.args.size() > 1) v = reg32(use(in.args[1], "rcx"));
+        if (k == TargetIntrinsics::CompareExchange && in.args.size() > 2) c = reg32(use(in.args[2], "rax"));
+        std::vector<std::string> seq;
+        TargetIntrinsics::sequence(k, p, v, c, seq);
+        for (size_t s = 0; s < seq.size(); ++s) line(seq[s]);
+        if (in.dst >= 0) {
+            std::string rd = def(in.dst, false, "rax", spill);
+            if (k == TargetIntrinsics::AddressOfReturnAddress) { if (rd != "rax") line("mov " + rd + ", rax"); }
+            else if (rd != "rax") line("mov " + reg32(rd) + ", eax");
+            finish(in.dst, spill, false, rd);
+        }
+        break;
+    }    case IrInst::AddrTls: {
+        // a thread-local's address in this thread (cppparse/target TargetTls, docs/design-selfhost.md 4.1): rcx and rdx are the
+        // sequence's scratch registers (writesArgReg says so), the sum is computed in the value's own register
+        std::string rd = def(in.dst, false, "rax", spill);
+        const std::string at = rd == "rcx" || rd == "rdx" ? std::string("rax") : rd;
+        m_m.useGlobal(in.args[0].name);
+        m_m.useTls();
+        std::vector<std::string> seq;
+        TargetTls::addressSequence(at, m_m.globalSymbol(in.args[0].name), seq);
+        for (size_t k = 0; k < seq.size(); ++k) line(seq[k]);
+        if (at != rd) line("mov " + rd + ", " + at);
+        finish(in.dst, spill, false, rd);
+        break;
+    }
     case IrInst::AddrField: {
         if (in.dst >= 0 && m_folded.count(in.dst)) break;   // the next load or store uses [base+offset] itself
         std::string rb = use(in.args[0], "rdx"); std::string rd = def(in.dst, false, "rax", spill); line("lea " + rd + ", [" + rb + "+" + intToString(static_cast<int>(in.extra)) + "]      ; " + in.sub); finish(in.dst, spill, false, rd); break; }
@@ -1802,7 +1852,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     case IrInst::Throw: {
         // cppparse_throw(object address, type descriptor, size): copies the object and sends it to the innermost
         // frame or landing pad (EhThrow knows the runtime's entries; the operands are materialised here)
-        if (in.sub == "@cleanupret") { m_clf.exit(static_cast<size_t>(m_curFunclet), std::string(), *this); break; }   // cl's model: a cleanup funclet's end
+        if (in.sub == "@cleanupret") { debugEpilog(); m_clf.exit(static_cast<size_t>(m_curFunclet), std::string(), *this); break; }   // cl's model: a cleanup funclet's end
         if (m_m.clExceptions()) {
             // cl's model: the operand is the address of the exception object, a temporary of this frame
             if (in.args.empty()) EhThrow::clRethrow(*this);
@@ -1846,6 +1896,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     case IrInst::CatchEnd:
         if (m_cl) {
             // cl's model: the handler returns to the runtime with the address to go on at (the branch that follows)
+            debugEpilog();
             m_clf.exit(static_cast<size_t>(m_curFunclet), label(m_f.blocks[static_cast<size_t>(blockIndex)].insts.back().args[0].id), *this);
             m_skipBr = true;
             break;
@@ -1937,6 +1988,39 @@ std::string X86Function::catchType(int hb) const
     return "...";
 }
 
+// -g (docs/design-codeview.md 5.4): the procedure's type and frame for S_FRAMEPROC (the bytes rsp is lowered by below
+// the pushed registers, the bytes of the pushed registers with rbp, the flags as cl sets them: the base of the locals
+// and of the parameters, RBP; "optimised for speed", which cl sets at /Od too; "marked inline"; "has EH" for a function
+// with exception regions); its blocks; then its variables, the parameters first in their order, then the locals in
+// the order they were declared: in the frame (;@local, the offset from rbp), or without a place (;@gone: a parameter
+// the function never reads is not stored at -O0; a function without a frame; until stage 3, every variable of an
+// optimised function); its static locals
+void X86Function::debugVariables()
+{
+    const int pushed = 8 * static_cast<int>(m_usedIntRegs.size());
+    unsigned long flags = 0x100000UL;                                   // CV_FRAMEPROC: OptSpeed
+    if (m_f.debugInline) flags |= 0x20UL;                               // InlSpec
+    if (m_f.hasTry) flags |= 0x10UL;                                    // HasEH
+    if (!m_frameless) flags |= (2UL << 14) | (2UL << 16);               // encoded local and parameter base: RBP
+    m_out << ";@proc T" << m_f.debugType << " " << (m_frameless ? 0 : m_frameSize - pushed) << " " << (m_frameless ? 0 : pushed + 8) << " " << flags << "\n";
+    for (size_t k = 0; k < m_f.debugBlocks.size(); ++k) m_out << ";@block " << (k + 1) << " " << m_f.debugBlocks[k] << "\n";
+    std::vector<std::pair<long, int> > order;   // the parameters by their place, then the locals as they were made
+    for (size_t l = 0; l < m_f.locals.size(); ++l)
+        if (m_f.locals[l].source) order.push_back(std::make_pair(m_f.locals[l].debugParam >= 0 ? static_cast<long>(m_f.locals[l].debugParam) : 1000000L + static_cast<long>(l), static_cast<int>(l)));
+    std::sort(order.begin(), order.end());
+    for (size_t k = 0; k < order.size(); ++k) {
+        const size_t l = static_cast<size_t>(order[k].second);
+        const IrLocal& v = m_f.locals[l];
+        const char kind = v.debugParam >= 0 ? 'p' : 'l';
+        bool placed = !m_frameless && !m_f.debugOptimized;
+        if (v.isParam && !m_f.variadic && static_cast<int>(l) < m_f.paramCount && !m_paramUsed[l]) placed = false;   // never read: not stored
+        if (placed) m_out << ";@local " << v.block << " T" << v.debugType << " [rbp" << (m_localOffset[l] > 0 ? "-" : "+") << (m_localOffset[l] > 0 ? m_localOffset[l] : -m_localOffset[l]) << "] " << kind << (v.byAddress ? "r" : "") << " " << v.debugName << "\n";
+        else m_out << ";@gone " << v.block << " T" << v.debugType << " " << kind << " " << v.debugName << "\n";
+    }
+    for (size_t s = 0; s < m_f.debugStatics.size(); ++s)
+        m_out << ";@static " << m_f.debugStatics[s].block << " T" << m_f.debugStatics[s].type << " " << m_m.globalSymbol(m_f.debugStatics[s].global) << " " << m_f.debugStatics[s].name << "\n";
+}
+
 void X86Function::emitBody()
 {
     if (m_f.linkOnce) m_out << ";@comdat any\n";   // read by the COFF writer: the function gets its own COMDAT section
@@ -1946,12 +2030,20 @@ void X86Function::emitBody()
     // With table-based try regions the unwind info also names the runtime's handler, followed by the ranges.
     if (m_cl) m_m.useExtern("__CxxFrameHandler3");
     else if (m_tableEh) m_m.useExtern("cppparse_eh_handler");
+    if (!m_frameless && (m_cl || m_tableEh)) m_m.useEhModel();   // a PROC with a handler: a construct of one model
     m_out << m_label << (m_frameless ? " PROC\n" : m_cl ? " PROC FRAME:__CxxFrameHandler3\n" : m_tableEh ? " PROC FRAME:cppparse_eh_handler\n" : " PROC FRAME\n");
     m_out << "        ; " << m_f.name << "\n";
     if (!m_f.sourceFile.empty()) {
         // CodeView, read by the COFF writer (comments to ml64): the function's source file and the name its symbol
-        // shows, then its own line at offset 0 (the prologue); emitInst marks every change of line after it
-        m_out << ";@debug \"" << m_f.sourceFile << "\" " << displayName(m_f.name) << "\n";
+        // shows (cl's spelling of it, which who made the function gave; else the IR name without its parameters),
+        // then its own line at offset 0 (the prologue); emitInst marks every change of line after it
+        m_out << ";@debug \"" << m_f.sourceFile << "\" " << (m_f.debugName.empty() ? CvNames::fromIrName(m_f.name) : m_f.debugName) << "\n";
+        if (m_f.debugType != 0) {
+            // -g (docs/design-codeview.md 5.4): the procedure's type by its number in the module's description, the
+            // frame's size and the bytes of the registers saved in it (for S_FRAMEPROC); then its static locals,
+            // each with its block (0: the function's), type, the object's symbol and its name
+            debugVariables();
+        }
         if (m_f.sourceLine > 0) { m_out << ";@line " << m_f.sourceLine << "\n"; m_lastLine = m_f.sourceLine; }
     }
     m_out << "        ; frame " << m_frameSize << " bytes";
@@ -1963,12 +2055,12 @@ void X86Function::emitBody()
     if (m_frameless) {
         // nothing lives in memory and nothing is called: no frame, the parameters stay in their registers
         for (size_t o = 0; o < m_order.size(); ++o) {
-            if (o == m_hotCount) { m_out << m_label << "_exit:\n"; line("ret"); }
+            if (o == m_hotCount) { m_out << m_label << "_exit:\n"; debugEpilog(); line("ret"); }
             const size_t b = static_cast<size_t>(m_order[o]);
             m_out << label(static_cast<int>(b)) << ":" << (m_f.blocks[b].label.empty() ? "" : "        ; " + m_f.blocks[b].label) << "\n";
             for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) emitInst(m_f.blocks[b].insts[i], static_cast<int>(b));
         }
-        if (m_hotCount >= m_order.size()) { m_out << m_label << "_exit:\n"; line("ret"); }
+        if (m_hotCount >= m_order.size()) { m_out << m_label << "_exit:\n"; debugEpilog(); line("ret"); }
         if (m_openEnd) line("int 3");
         m_out << m_label << " ENDP\n\n";
         return;
@@ -2040,6 +2132,7 @@ void X86Function::emitBody()
     if (m_cl) { m_clStack.clear(); m_clf.endStates(*this); }
     else if (m_tableEh) m_ranges.set(std::vector<long>(), *this);
     m_out << m_label << "_exit:\n";
+    debugEpilog();
     for (std::map<int, int>::iterator r = m_savedFloatOffset.begin(); r != m_savedFloatOffset.end(); ++r) line("movdqu xmm" + intToString(kFloatRegBase + r->first) + ", xmmword ptr [rbp-" + intToString(r->second) + "]");
     if (m_usedIntRegs.empty()) line("leave");
     else {
@@ -2155,7 +2248,7 @@ std::string X86Function::run()
 
 // ---- module ---------------------------------------------------------------------------------
 
-X86Module::X86Module(bool msvcNames) : m_msvc(msvcNames), m_eh(EhModelSjlj) {}
+X86Module::X86Module(bool msvcNames) : m_msvc(msvcNames), m_eh(EhModelSjlj), m_ehUsed(false), m_tlsUsed(false) {}
 
 namespace {
 
@@ -2237,7 +2330,7 @@ bool unreadValue(const IrInst& in, const IrFunction& g, const std::map<int, int>
     if (u != uses.end() && u->second > 0) return false;
     switch (in.op) {
     case IrInst::Const: case IrInst::FConst: case IrInst::StrConst: case IrInst::Copy: case IrInst::AddrLocal: case IrInst::AddrField:
-    case IrInst::AddrIndex: case IrInst::AddrGlobal: case IrInst::Un: case IrInst::Cmp: case IrInst::Conv:
+    case IrInst::AddrIndex: case IrInst::AddrGlobal: case IrInst::AddrTls: case IrInst::Un: case IrInst::Cmp: case IrInst::Conv:
         return true;
     case IrInst::Bin:
         return in.sub != "sdiv" && in.sub != "udiv" && in.sub != "srem" && in.sub != "urem";
@@ -2437,6 +2530,7 @@ bool splitAtCatchEnds(const IrFunction& f, IrFunction& out)
             IrInst br;
             br.op = IrInst::Br;
             br.line = from.back().line;
+            br.scope = from.back().scope;
             br.args.push_back(IrOperand::block(rest));
             from.push_back(br);
             break;
@@ -2625,7 +2719,7 @@ void X86Module::emitGlobals()
         int align = g.size >= 8 ? 8 : g.size >= 4 ? 4 : g.size >= 2 ? 2 : 1;
         if (g.align > align) align = g.align;
         // a COMDAT item is a section of its own: its alignment goes to the section (on the marker), not into padding
-        std::string& out = g.readOnly ? m_rdata : m_data;
+        std::string& out = g.threadLocal ? m_tls : g.readOnly ? m_rdata : m_data;
         if (g.linkOnce) out += ";@comdat any" + (align > 1 ? " align " + intToString(align) : std::string("")) + "\n";
         out += (g.internal ? std::string("") : "        PUBLIC " + sym + "\n");
         if (!g.linkOnce && align > 1) out += "        ALIGN " + intToString(align) + "\n";
@@ -2646,7 +2740,14 @@ std::string X86Module::finish()
     // read by the COFF writer (a comment to ml64): the object's linker directive. An exception cannot cross between
     // frames of cl's model and frames of the table or setjmp model (the runtime stops the program where it sees one
     // try): link refuses to put objects of the two families into one program
-    s << ";@drectve /FAILIFMISMATCH:\"cppparse_eh=" << (m_eh == EhModelCl ? "cl" : "cpp") << "\"\n";
+    // (only where the code has a construct of one model: an object without one is the same in every model, so it
+    // links with either family and carries no mark, as the runtime's own object; docs/design-selfhost.md 3.7)
+    // (a call of the runtime's model entries counts where the object does not define them: the runtime's own calls do not)
+    for (std::set<std::string>::iterator e = m_externs.begin(); e != m_externs.end() && !m_ehUsed; ++e)
+        if (!m_defined.count(*e) && ehModelSymbol(e->c_str())) m_ehUsed = true;
+    if (m_ehUsed) s << ";@drectve /FAILIFMISMATCH:\"cppparse_eh=" << (m_eh == EhModelCl ? "cl" : "cpp") << "\"\n";
+    // the source's linker directives (#pragma comment(linker, ...): /alternatename only, the preprocessor checks)
+    for (size_t d = 0; d < m_directives.size(); ++d) s << ";@drectve " << m_directives[d] << "\n";
     // cl's exception model: the FuncInfo tables are built by cppparse's own object writer from the ";@" lines, which
     // are comments to ml64; an ml64-built object would have frames an exception passes with nothing run. ml64 stops at
     // this line (the object writer skips it)
@@ -2659,8 +2760,11 @@ std::string X86Module::finish()
         s << ";@weak " << w->first << " " << w->second << "\n";
     for (std::set<std::string>::iterator g = m_globalsUsed.begin(); g != m_globalsUsed.end(); ++g) {
         std::string sym = globalSymbol(*g);
-        if (!m_defined.count(sym) && !startsWith(*g, "vtable@")) { s << "EXTERN " << sym << ":QWORD\n"; m_defined.insert(sym); }
+        // (a name declared EXTERN is not PUBLIC as well: ml64 refuses the pair, A2005)
+        if (!m_defined.count(sym) && !startsWith(*g, "vtable@")) { s << "EXTERN " << sym << ":QWORD\n"; m_defined.insert(sym); m_dataSymbols.insert(sym); }
     }
+    // a thread-local's access reads the C runtime's index of this module's block (docs/design-selfhost.md 4.1)
+    if (m_tlsUsed) s << "EXTERN " << TargetTls::indexSymbol() << ":DWORD\n";
     s << "\n.data\n" << m_data;
     s << "\n.const\n";
     s << "sign_mask DQ 8000000000000000h, 8000000000000000h\n";
@@ -2683,6 +2787,8 @@ std::string X86Module::finish()
         }
     }
     s << m_rdata;   // after the literals: sign_mask keeps the section's 16-byte alignment
+    // the thread-locals' initial values: .tls$, which the linker merges into the image's .tls (TargetTls)
+    if (!m_tls.empty()) s << "\n" << TargetTls::segmentBegin() << "\n" << m_tls << TargetTls::segmentEnd() << "\n";
     if (!m_initializers.empty() || !m_comdatInitializers.empty()) {
         // pointers to the dynamic initialisers of this module's globals: the CRT calls them before main; a COMDAT
         // variable's initialiser has an entry of its own in a COMDAT (after the module's: the COFF writer appends an

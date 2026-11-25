@@ -11,8 +11,9 @@ One extension of C++98 is used: `long long` (C99, C++11), which 64-bit constants
 sources name it only through `int64` and `uint64` (`cppparse/common/Int64.hpp`), the library headers only through
 `__cppparse_int64` and `__cppparse_uint64` (`include/__config`; `<climits>` keeps the C99 names `LLONG_MIN`,
 `LLONG_MAX` and `ULLONG_MAX` with their `LL` literals, usable in `#if`), and no `LL` literal is written elsewhere.
-`sandbox\scripts\strict98.ps1` checks it: clang's C++98 front end with `-pedantic` over the 39 own units against
-`include/` and `platform/` reports no diagnostic but `long long` at those two typedef pairs.
+`sandbox\scripts\strict98.ps1` checks it: clang's C++98 front end with `-pedantic` over the own units and the runtime
+(`runtime/cppparse_rt.cpp`, whose thread-locals it reads through a macro) against `include/` and `platform/` reports
+no diagnostic but `long long` at those two typedef pairs.
 
 ## Input
 
@@ -87,6 +88,10 @@ dashed box = base class not defined in the parsed files.
 --assemble       run ml64 on the .asm to produce the .obj (ml64 on PATH)
 --obj            write the .obj with cppparse's own COFF writer (version 5)
 --msvc-mangling  MSVC-compatible decorated names, so MSVC code links with plain C++ declarations
+-g               version 6 (--compile6): CodeView types and variables in the object (.debug$T, and the globals,
+                 constants, type names, parameters and locals in .debug$S) beside the line tables every object has, and
+                 <name>-cv6.txt; the code is the same bytes with and without it. Off by default (-g0);
+                 CPPPARSE_G=1 in the environment sets it (see "Debug information")
 -E               version 6: preprocess only and print the result (like cl /EP)
 --parse6         version 6: parse with the new front end (counts, syntax errors, <name>-ast6.txt)
 --sema6          version 6: --parse6 plus semantic analysis (<name>-sym6.txt)
@@ -225,6 +230,38 @@ so there is no 4-byte packing). Data is placed at its type's or declared alignme
 `#pragma pack` for members), at least the natural boundary of its size up to 8 bytes, as cl does. The map's
 sizes stay the encoded bytes; the padding shows as the gap before the next function.
 
+**Thread-locals** (row P1 stage 1, `docs/design-selfhost.md` 4.1; `cppparse/target/TargetTls`). `__declspec(thread)`,
+a documented extension beside `__declspec(align(N))`, is taken as cl takes it for C++98 code: on a variable of
+namespace scope, defined or declared `extern`, of a type with no constructor or destructor to run, with no
+initialiser or a constant one (an address constant among them), aligned to 16 bytes at most. Its initial value lies
+in the object's `.tls$` (a static one a static symbol there, an external one an external symbol, an address an
+ADDR64 relocation), which the linker merges into the image's `.tls`; `_tls_index` and `_tls_used` are the C
+runtime's (libcmt's `tlssup.obj`, GRIDE's `grtwin`). An access is cl's five instructions, `mov ecx, dword ptr
+[_tls_index]`, `mov r, qword ptr gs:[58h]`, `mov r, qword ptr [r+rcx*8]`, `mov edx, SECTIONREL v`, `add r, rdx`, and the
+address is reused within a function (the IR operation `addrtls` is pure). Everything else is the error S164 with its
+own words: a variable of block scope (a static local too), a class member, a function, a type, a typedef, a
+parameter, a redeclaration that adds or drops the attribute, a constructor, a destructor or an initialiser that
+needs code, an alignment over 16, a thread-local's address initialising a variable with static storage. With `-g` a
+thread-local is an S_GTHREAD32 or S_LTHREAD32. cl orders the variables in `.tls$` its own way and aligns the section
+by its contents; cppparse keeps the declaration order, as in `.data`, and the section's 16. `sandbox\scripts\target.ps1`
+(harness check `target`, `examples/sample-target/`) assembles the listing with ml64 against `--obj`, compares `.tls$`
+with cl's object symbol by symbol, runs eight threads at once and 64 one after another under both linkers and on
+GRIDE's runtime against cl's build, links cl's and cppparse's objects that share thread-locals either way round, and
+checks every refusal.
+
+**Intrinsics and the linker pragma** (row P1 stage 2, `docs/design-selfhost.md` 4.2, 4.5; `cppparse/target/TargetIntrinsics`).
+A function declared with C linkage and not defined, named `_InterlockedIncrement`, `_InterlockedDecrement`,
+`_InterlockedExchange`, `_InterlockedCompareExchange` (on `long volatile*`) or `_AddressOfReturnAddress`, with exactly
+the parameters of cl's `<intrin.h>` (`platform/intrin.h` declares them), is emitted inline where it is called by name:
+`lock xadd`, `xchg`, `lock cmpxchg`, `lea rax, [rbp+8]`. To the optimiser the interlocked ones are barriers as a call
+is; a function that calls `_AddressOfReturnAddress` keeps its frame at every level and is never inlined, so the
+value is its own return address's slot. Taking the address of an intrinsic is the error S165.
+`#pragma comment(linker, "/alternatename:<a>=<b>")` goes to the object's `.drectve`; any other text of
+`comment(linker)` is a warning and is dropped. `target.ps1` checks the layout of `platform/windows.h` against the
+SDK's, eight threads incrementing one counter, `_AddressOfReturnAddress` in a frameless candidate and a framed
+function, the runtime compiled by cppparse (no message, no model mark, its three `/alternatename` directives under
+both linkers on both runtimes) and eight threads throwing at once in the three models with either object.
+
 ### Link's `f` / `i` flags
 
 `link /MAP` marks symbols in its *Publics by Value* and *Static symbols* lists, and cppparse's map does the
@@ -314,8 +351,10 @@ this model too (cl's 106 lines at `-O0`..`-O3`), `ehx.ps1` the cross-compiler sa
 cppparse against the all-cl build, and the compiler builds itself in the model (`harness.ps1 -Eh cl` runs every
 check with it: the compiler reads its default model from the environment variable `CPPPARSE_EH`). The model needs
 `--obj` (ml64 cannot write its tables, `--assemble` is refused) and `--compile6`. Objects of this model and objects
-of the table or setjmp model do not go into one program: every object names its family in a `.drectve`
-`/FAILIFMISMATCH`, and link stops with LNK2038. `std::terminate`, `std::set_terminate` and
+of the table or setjmp model do not go into one program: every object that has a construct of one model (a try
+region, a throw or rethrow, a cleanup, a function with a handler) names its family in a `.drectve`
+`/FAILIFMISMATCH`, and link stops with LNK2038; an object without one is the same in every model and carries no
+mark (row P1 stage 2), as the runtime's own object. `std::terminate`, `std::set_terminate` and
 `std::uncaught_exception` are the C runtime's in every model, so a program of both compilers has one of each.
 `scripts/failnew.ps1` (about ten minutes, not in the harness) builds the compiler with itself in the table and the
 cl model, lets its operator new fail at chosen allocations and expects "cppparse: out of memory" (exit code 4)
@@ -370,26 +409,106 @@ associative COMDAT section per COMDAT function, each with an `S_GPROC32` (`S_LPR
 `S_END` symbol and a `DEBUG_S_LINES` table that maps every code offset where the source line changes to that line
 (the function's own line at offset 0, the prologue). The IR carries the source line of every instruction; the
 listing shows them as `;@debug "<file>" <name>` after a `PROC` and `;@line N` before the code of a new line
-(comments to ml64), which the COFF writer turns into the tables. Code inlined at `-O1` and up belongs to the
+(comments to ml64), which the COFF writer turns into the tables through the classes of `cppparse/cv/` (see
+"Source layout"). The name is the one cl's own record shows for the function, character for character
+(`Arr<int,4>::sum`, `std::vector<int>::vector<int>`, `Ops::operator __int64`, `` `anonymous namespace'::hg ``),
+so that a debugger lists cl's and cppparse's functions of one program alike. Code inlined at `-O1` and up belongs to the
 call's line. `link /DEBUG` puts the tables in the PDB, so Visual Studio, WinDbg and dbghelp map an address of
 cppparse's code to its file and line; without `/DEBUG` the linker drops the sections, and the map lists them as
 `DEBUG`. Test 18 builds `examples\sample-dbg\lines.cpp`, links it with `/DEBUG` and has
 `examples\sample-dbg-driver\dbgcheck.cpp` (cl, dbghelp: `SymGetLineFromAddr64`, `SymGetLineNext64`) read the
-lines of three functions back. Not provided: types, locals and parameters (`.debug$T`, `S_LOCAL`), inlinee line
-records, column numbers.
+lines of three functions back. Not provided: inlinee line records, column numbers.
+
+With `-g` (off by default; `-g0` is the default spelled out, and `CPPPARSE_G=1` in the environment sets `-g` for
+a run that names neither) an object also carries its types and its variables, as cl's `/Z7` objects do: stages 1
+and 2 of row M10's plan (docs/design-codeview.md). At `-O0` a debugger shows every parameter and local with its
+value; at `-O1` and up the variables are listed without a place until stage 3.
+
+- `.debug$T` holds the type records of every type the unit's functions and variables have: the fundamental types
+  by CodeView's own indices, `LF_MODIFIER` (`const`, `volatile`), `LF_POINTER` (pointers, references, pointers to
+  members in cl's representation and size), `LF_ARRAY`, `LF_PROCEDURE` and `LF_MFUNCTION` with their
+  `LF_ARGLIST`, `LF_ENUM` with its enumerators, and for a class, struct or union a forward reference and, where
+  the unit has the class complete, the definition: size, `LF_VTSHAPE`, and an `LF_FIELDLIST` of the bases at
+  their offsets, the virtual bases through the vbptr, the vfptr, the data members (a bit-field with width and
+  position; the members of an anonymous union or struct as members of the class), the static members and the
+  nested types. Every class and enumeration carries cl's display name and the type descriptor's decorated name
+  (`.?AVCircle@geom@@`) as its unique name, so that a linker makes one type of cl's record and cppparse's, and
+  two units' classes of one name in their unnamed namespaces stay two. Member functions are not listed yet
+  (the plan's stage 4).
+- `.debug$S` gets the procedure's type on its `S_GPROC32` / `S_LPROC32`, with `DbgStart` behind the entry
+  sequence (the parameters' copies into the frame, and a `this` put right in a function entered with an adjusted
+  one) and `DbgEnd` at its epilogue; `S_FRAMEPROC` (the frame's size and saved registers, RBP as the base of the
+  locals and parameters, cl's flags: optimised for speed, marked inline, has EH); its parameters and locals in one
+  of two forms: where every variable has its frame slot and every block scope that declares one is one piece of
+  code, cl's `/Od` form, `S_REGREL32` off RBP for each, `this` first, `__formal` for an unnamed parameter, nothing
+  for `...`, inner blocks as `S_BLOCK32` with their variables inside; otherwise cl's `/O2` form, an `S_LOCAL` per
+  variable, all in the procedure (dbghelp does not look into the blocks of such a procedure), each with its place:
+  the frame slot over the whole function (`S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE`) for the function's own
+  variables, the frame slot over its block's pieces of code (`S_DEFRANGE_REGISTER_REL` with the holes as gaps) for
+  a block's, none and the flag "optimised out" where there is no place. A block scope is the code IrGen generated
+  for its statements: every IR instruction carries the number of its block (`;@scope` in the listing), so handlers,
+  landing pads and funclets placed behind the function's `ret` are pieces of their block. A class passed by value
+  that the calling convention passes by address is listed as a reference to the class, so that every reader shows
+  the object. At `-O0` a parameter the function never reads is not stored and is listed without a place, as is
+  every variable of a function without a frame. An `S_LDATA32` for each static local; behind the procedures of the
+  module's section an `S_GDATA32` (`S_LDATA32` for internal linkage) for every variable of namespace scope and
+  every static member the object defines and one for each vftable (``Der::`vftable'``, as cl lists them), an
+  `S_CONSTANT` for a constant of integral type that has no storage, and an `S_UDT` for every class and enumeration
+  whose definition was written and for the typedef names of namespace scope. A COMDAT variable (a static member of
+  a class template's instantiation, a vftable) has its record in an associative `.debug$S` of its own, which goes
+  when the COMDAT goes.
+- `<name>-cv6.txt` is the description the records are written from (`CvModule`): every type, class, variable and
+  typedef name by number.
+
+The code is the same bytes with and without `-g`. A section `-g` adds comes behind every section the object has
+without it (`.drectve` included) and its section symbol behind every symbol, so no relocation of the code is
+renumbered; a debug record names only symbols the object defines, so the symbol table gains no external; the
+listing differs by marker lines alone (`;@proc T<n> <frame> <saved> <flags>` after `;@debug`, `;@block`,
+`;@local`, `;@gone`, `;@static` for the blocks and variables, `;@prologend`, `;@epilog` and `;@scope` among the
+code), which name types by their number in the description. `CvCheck` checks the records as they are about to be
+written (every type index a record holds is a fundamental type's or below the record's own; no record over FF00h
+bytes; a unique name on every class; a procedure's parameter records first and as many as its type says, never
+`S_REGREL32` and `S_LOCAL` in one procedure, every block inside its parent and apart from its siblings, a frame
+range inside the function, ascending, its gaps inside it and none over a prologue, a funclet's entry or an
+epilogue), and a violation is an internal error, not a debugger that shows nothing.
+Test 20 builds `examples\sample-dbg\types.cpp` and `types2.cpp`, one program whose first unit prints what it
+knows of its own types (sizes, member offsets measured in objects, bit-fields found by storing into them, base
+offsets, enumerators); `examples\sample-dbg-driver\dbgtypes.cpp` (cl, dbghelp: `SymEnumTypes`,
+`SymGetTypeInfo`) prints the same facts from the PDB, and every line of the program must be one of the driver's.
+The driver's whole description of those types must be the same text for cl `/Z7`'s build of the source, for the
+program mixed of cppparse's object and cl's, and from the PDB of GRIDE's link where GRIDE is found; the objects
+with `-g` are compared with those without by cvsame, the two units and all own sources. Test 21 is the value
+harness: `examples\sample-dbg\vars.cpp` has functions of every shape the design names (many parameters of every
+kind, references, classes by value in a register and by address, a parameter never read, an unnamed one, a
+variadic function, `this`, an override reached through a second base, destructors, sibling blocks of one name, a
+loop, a static local, a handler's variable, a destructor run while an exception passes, a `catch (...)` that
+resumes, floats, a `bool` and a `char`) call `checkpoint` (cl's `varsck.cpp`) with what their variables hold;
+`examples\sample-dbg-driver\dbgvars.cpp` (cl, dbghelp and the Win32 debug API) stops at every checkpoint and compares
+every variable the PDB gives a place for, in the caller, in the frames above it and at the first address of the
+caller's next line, in each exception model, through Microsoft's link and GRIDE's and the link variants
+(incremental, `/OPT:REF,ICF`, a static library); `diavars.cpp` (the DIA SDK) must give the same places, and
+gride-dbg's `dv` the same lines from both linkers' programs.
+
+The rule that debug information changes no code has its comparator, `sandbox\scripts\cvsame.ps1`: given two objects, or two
+folders of objects, it says whether the second is the first but for CodeView (the first one's sections and symbol
+table entries come first and are the same bytes outside `.debug$S`; anything added is a `.debug$T` or `.debug$S`
+behind them), with `-Listings` also whether the listings are the same lines without the markers of `-g`, with
+`-DebugOnly` whether nothing but the contents of `.debug$S` sections differs (`-Recurse` pairs two folder trees,
+`-DebugNames` leaves the `;@debug` lines out of the listings). Test 18 runs its `-SelfTest`:
+sixteen objects and listings with known answers, made from the object of `lines.cpp`.
 
 ## Building and testing
 
 ```
-powershell -ExecutionPolicy Bypass -File cpp\sandbox\build-cppparse.ps1 [-Config Release|Debug] [-NoTests]
+powershell -ExecutionPolicy Bypass -File cpp\sandbox\build-cppparse.ps1 [-Config Release|Debug] [-NoTests] [-Exe <compiler>] [-Linker ms|gride]
 ```
 
-Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend`, `eh`, `analyzer` and `analyzer/report` with MSVC at
+Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend`, `eh`, `cv`, `analyzer` and `analyzer/report` with MSVC at
 `/W4 /permissive-` (warnings fail the build). `-Config Release` (default)
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
-`obj/debug`. `-NoTests` stops after the build. The test groups (19) run
+`obj/debug`. `-NoTests` stops after the build. The test groups (21) run
 against whichever configuration was built. Test 17 holds the
 front-end regressions of `examples/sample-front/`: units that must be
 rejected with their diagnostics and no object, and programs whose output
@@ -405,7 +524,12 @@ processors) into `sandbox/out/self6`, the objects are linked with the
 exception runtime, and the program must compile `sample-opt` to the object
 and listings the compiler under test writes; so a change to the front end,
 the back end or a header that breaks the self-host fails the suite.
-`selfhost.ps1` stays the full check (any level, generation two).
+`selfhost.ps1` stays the full check (any level, generation two; with `-G`
+both generations compile with `-g`, in folders of their own). Test 20 is
+the check of `-g`: the types program of `examples/sample-dbg` read back
+through dbghelp, against cl `/Z7`'s build and mixed with it, and cvsame
+over its objects and over test 19's; test 21 the parameters and locals,
+the value harness (see "Debug information").
 
 A Visual Studio 2022 solution does the same build inside the IDE:
 `cpp\cppparse.sln` with the project `cppparse\cppparse.vcxproj` (x64,
@@ -422,6 +546,14 @@ newer Visual Studio retargets it on opening, and MSBuild builds it with
 msbuild cpp\cppparse.sln /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145
 ```
 
+**The self-host owns its runtime** (row P1 stage 3, level 1 of `docs/design-selfhost.md`). `selfhost.ps1` compiles
+`runtime/cppparse_rt.cpp` with the compiler of each generation, at the generation's `-O` and always `--eh=table` (the
+object has no construct of a model and so no mark), into the folder beside libcpp's object: every object of
+`cppparse-self.exe` is cppparse's, the script runs cl nowhere, and generation two's runtime object and listing must
+equal generation one's like every other unit's. cl still compiles the same source for programs that mix cl's
+objects (the tests' drivers); `Build-Runtime` (toolset.ps1) builds either. `scripts\ehbench.ps1` reports the throw
+path with cppparse's object against cl's (the median of five runs; not a gate).
+
 **Releases.** `cppparse --version` prints the release. Release 6.0 (2026-11-04): the version 6 pipeline compiles
 cppparse's own sources and the self-built compiler builds an identical third generation (`selfhost.ps1`), exceptions
 use the table model throughout, and the code-size plan of `docs/next-targets.md` is complete. `crc32.txt` at the
@@ -432,18 +564,63 @@ checkout against it and exits 1 on any difference,
 
 **Release gate.** `sandbox\scripts\harness.ps1` runs the release checks in order, each in its own PowerShell
 process, prints one `PASS` or `FAIL` line per check with its time (a failure also prints the end of its log; the
-logs are in `sandbox/out/harness/`) and exits 0 only when every check passed: the suite (`build-cppparse.ps1`),
-`selfhost.ps1 -Lvl 0` and `-Lvl 2`, the suite under the `-O2` self-built compiler (`build-cppparse.ps1 -Exe
+logs are in `sandbox/out/harness/`) and exits 0 only when every check that ran passed: the suite (`build-cppparse.ps1`),
+`selfhost.ps1 -Lvl 0` and `-Lvl 2`, each followed by the relink of its objects with GRIDE's link (`selfhost.ps1
+-Linker gride -Relink`, below), `selfhost.ps1 -Lvl 0 -G` (both generations with `-g`, generation two identical),
+the suite under the `-O2` self-built compiler as GRIDE's link made it and as
+Microsoft's did (`build-cppparse.ps1 -Exe out\selfhost-gride\cppparse-self.exe`, then `-Exe
 out\selfhost\cppparse-self.exe`), `mix.ps1`, `maps.ps1`, `cprog.ps1`, `matrix.ps1`, `strict98.ps1`, `lib.ps1` and `life.ps1` at
-`-Lvl 0` and `-Lvl 2`, `eh.ps1`, `mapcompare.ps1` and `crc32.ps1`. When the suite or a self-host check fails, the
+`-Lvl 0` and `-Lvl 2`, `eh.ps1` (twice: with cl's and with cppparse's object of the runtime), `target.ps1`, `replace.ps1`, `mapcompare.ps1` and `crc32.ps1`. When the suite or a self-host check fails, the
 checks after it are reported as not run. `-Quick` runs the suite and `selfhost.ps1 -Lvl 0` only (about 9
-minutes on 12 threads; the whole harness about 21). `sandbox\scripts\gate.ps1` is the gate before a release commit or tag:
+minutes on 12 threads; the whole harness about 21 before the checks under GRIDE's link, which add about five).
+`sandbox\scripts\gate.ps1` is the gate before a release commit or tag:
 the worktree must be clean (`git status --porcelain` empty) before and after the harness, and the harness must
-pass; it exits 0 only then (`-Quick` is passed on).
+pass; it exits 0 only then (`-Quick` and `-RequireGride` are passed on).
 
 ```
-powershell -ExecutionPolicy Bypass -File cpp\sandbox\scripts\gate.ps1 [-Quick]
+powershell -ExecutionPolicy Bypass -File cpp\sandbox\scripts\gate.ps1 [-Quick] [-RequireGride]
 ```
+
+**GRIDE's link** (row P1, `docs/design-selfhost.md`; stage 0a, 2026-11-20). Microsoft's link is the default of
+every script. `selfhost.ps1 -Linker gride` links both generations with GRIDE's link and `/timestamp:0`, into
+folders that carry the linker's name (`out\selfobj-gride`, `out\selfhost-gride`, `out\selfobj2-gride`,
+`out\selfhost2-gride`), so the default's stay as they are. Generation two's objects and listings must equal
+generation one's as before, and under GRIDE's link the two exes must be byte-identical as well: an image of
+GRIDE's link is a function of its input once the time stamp is given, where Microsoft's link stamps the time into
+it. `-Linker gride -Relink` compiles nothing: it takes both generations' objects as the default run of the same
+`-Lvl` left them, links each set with GRIDE's link and compares the exes, a matter of seconds, and that is what
+the harness runs (`selfhost-gride-O0`, `selfhost-gride-O2`); `suite-self-gride` then runs every test group under
+the GRIDE-linked compiler, which is where a linker's fault in the compiler's own binary would show. The scripts
+find GRIDE (`toolset.ps1`) through the environment variable `GRIDE_ROOT` (the folder that holds `link.exe` and
+`lib\x86_64-windows`, or the checkout of GRIDE3 above it; when it is set nothing else is looked at), else in the
+development tree `My Documents\GRIDE3`, else where GRIDE's Setup installed it (`InstallDir` in the registry). A
+check that uses GRIDE logs the folder, the SHA-256 of `link.exe` and of the runtime's libraries, and GRIDE3's
+commit. Where GRIDE is not found such a check is `SKIPPED`: named in the summary, not a pass, and the harness then
+says "every check that ran passed"; `harness.ps1 -RequireGride` makes a skip a failure, which is the gate on a
+machine that has GRIDE. What differs under GRIDE's link is printed and counted, not hidden (`not under GRIDE's
+link: ...` in a check's log, the count on its line and in the summary). Until 2026-11-24 that was a replaceable
+definition; GRIDE's link resolves it as Microsoft's since request G7 (GIT Test\GRIDE 4d4b834), and with a GRIDE of
+before then the following still applies. libcpp's eight allocation functions are weak externals of the alias kind, whose default Microsoft's
+link takes before it searches a library; GRIDE's link searches the libraries first, so a program linked by it gets
+the C runtime's `operator new` wherever it does not define its own, and a failed allocation is then not a
+`bad_alloc` cppparse's handlers catch. `replace.ps1` measures it case by case under both linkers
+(`examples/sample-replace/`: a default, its caller and a second definition in every order; a program that
+allocates and `sample-lib`'s newhandler, replacenew, replacepart and replacearray, with the map of each); under
+Microsoft's link every case must hold, and `replace.ps1 -Strict` requires them of GRIDE's link too, which is the
+exit test of the request to GRIDE (G7 of the design). The other search kind, "no library", is not a way out:
+Microsoft's link honours it only while no other object names the function.
+
+Since stage 0b (2026-11-24) every program the scripts link goes through `Link-Program` of `toolset.ps1` (or
+`Build-Program`, which is `cl /c` and then `Link-Program`, where a script had `cl ... /Fe`), and every script takes
+`-Linker ms|gride`, default Microsoft's link or the environment variable `CPPPARSE_LINKER`: `build-cppparse.ps1`
+(the compiler's own build and every test program and reference), `eh.ps1` with `ehx.ps1`, `mix.ps1`,
+`matrix.ps1`, `lib.ps1`, `life.ps1`, `cprog.ps1`, `failnew.ps1`, `maps.ps1`, `mapcompare.ps1`, `replace.ps1` and `target.ps1`
+(their references; their cases name both linkers and GRIDE's runtime) and `build.ps1`. Under `-Linker gride` a script prints the GRIDE it uses,
+or "skipped: GRIDE not found" with exit code 77, and the links that stay on Microsoft's link print "not under
+GRIDE's link: ..." and are counted on the script's last line: ehx.ps1's mixed-family link, which must fail with
+LNK2038 and which GRIDE's link does not refuse (request G5), ehx.ps1's `/DEBUG /INCREMENTAL` flavour, `maps.ps1`
+and `mapcompare.ps1`, which read link.exe's map format. Tests 20 and 21 link with both linkers by name, as before.
+`build-cppparse.ps1 -Linker gride` gives the results Microsoft's link gives, with no known difference.
 
 The scripts in `sandbox\scripts\` run the version 6 pipeline outside the
 test suite: `lib.ps1` and `life.ps1` (the library and lifetime samples
@@ -468,7 +645,7 @@ unwind tables, `examples/sample-eh/` with its driver and an ml64 entry function,
 itself as a folder input (cppparse parses and health-checks its own
 sources), `Vector.hpp` + `VectorTest.cpp` as plain files, and the broken
 folder `examples/sample-bad/`, which must produce every health code. Any C++98 compiler works for the sources themselves, e.g.
-`g++ -std=c++98 -pedantic -Wall -Icppparse/driver -Icppparse/common -Icppparse/frontend -Icppparse/middle -Icppparse/backend -Icppparse/eh -Icppparse/analyzer -Icppparse/analyzer/report -o cppparse cppparse/{driver,common,frontend,middle,backend,eh,analyzer,analyzer/report}/*.cpp` (on a host without Windows the worker pool runs the jobs one after another).
+`g++ -std=c++98 -pedantic -Wall -Icppparse/driver -Icppparse/common -Icppparse/frontend -Icppparse/middle -Icppparse/backend -Icppparse/eh -Icppparse/cv -Icppparse/analyzer -Icppparse/analyzer/report -o cppparse cppparse/{driver,common,frontend,middle,backend,eh,cv,analyzer,analyzer/report}/*.cpp` (on a host without Windows the worker pool runs the jobs one after another).
 
 ## How it works
 
@@ -698,7 +875,9 @@ compiler they belong to; every folder is an include directory of the build (`bui
   the preprocessor, sema, IrGen and the back end).
 - `frontend/`: `Pp` (preprocessor), `CxxAst`/`CxxParser` (syntax tree and parser), `Sema`/`SemaExpr`
   (semantic analysis).
-- `middle/`: `IrGen` (IR from the analysed tree), `Ir` (the intermediate representation), `Optimizer`, `Ssa`.
+- `middle/`: `IrGen` (IR from the analysed tree), `Ir` (the intermediate representation), `Optimizer`, `Ssa`,
+  `CvFromSema` (the symbols and types described for CodeView: cl's name of a function, and with `-g` the module's
+  types and variables).
 - `backend/`: `BackEnd` (the shared driver of the phases below), `Lower` (VM64), `X86` (x86-64 assembly),
   `Coff` (the object writer), `Mangle`/`MangleSema` (MSVC name decoration, part of the target's ABI).
 - `eh/`: exception handling, as classes the code generator and the object writer call: `EhModel` (the models of
@@ -711,6 +890,22 @@ compiler they belong to; every folder is an include directory of the build (`bui
   and `EhClFuncInfo` (the FuncInfo tables as bytes, with `EhClCheck`, the check of what cl's runtime takes for
   granted). The regions themselves and what a landing pad
   destroys are the language's semantics and stay in `IrGen`.
+- `cv/`: CodeView debug information, as classes the object writer calls: `CvRecord` (`CvBytes`, bytes with their
+  relocations: little-endian fields, names, padding, a symbol record), `CvSymbols` (the symbol records:
+  `S_OBJNAME`, `S_COMPILE3`, a procedure's `S_GPROC32` or `S_LPROC32` with its `S_END`), `CvLines` (a function's
+  `DEBUG_S_LINES` table), `CvFiles` (the module's file table: checksum entries and string table) and `CvSection`
+  (one `.debug$S`: the signature and its subsections), and `CvNames` (the names the records show, in cl's
+  spelling: a type inside a name, a template-id, a scope; cl's cut of a long name). For `-g`: `CvModule` (what
+  the module's types and variables are made from, free of the front end's classes: `CvType`, `CvClass`,
+  `CvVariable`, `CvTypedef`; its text is `<name>-cv6.txt`), `CvTypes` (the records of `.debug$T`: each once,
+  indices in the order of first use, a class by its forward reference inside records), `CvSymbols`' data records
+  (`S_GDATA32`, `S_LDATA32`, `S_CONSTANT`, `S_UDT`) and procedure records (`S_FRAMEPROC`, `S_REGREL32`,
+  `S_BLOCK32`, `S_LOCAL` and its places), `CvScopes` (a procedure's block scopes from the `;@scope` offsets, one
+  piece of code or several, the procedure's form and its variables' records) and `CvCheck` (the invariants of the
+  records, checked on the bytes about to be written, and the frame ranges against the code's prologues and
+  epilogues). Which sections an object has, where the ones `-g` adds go, and the code offsets of the `;@line` and
+  position markers are the object writer's and stay in `Coff`. The description itself is filled by
+  `middle/CvFromSema`, the one file that sees both the semantic analysis and `cv/`; it only reads Sema.
 - `analyzer/`: the version 1 to 5 pipeline: project reading and the old compile path kept until the version 6
   pipeline replaces it: `Lexer`, `Parser`, `Model`, `CodeBase`, `ProjectReader`, `Ast`, `BodyParser`, `TypeCheck`,
   `Types`, `Instantiate`, `IrBuilder` (old IR generation and class layouts) and `Compiler` (the old driver).
@@ -728,11 +923,15 @@ Everything that is not compiler source sits next to `cppparse/` in the `cpp` fol
   `__num_facets`...). What the headers need beyond C++98 is in one of these, `<__config>`: `__cppparse_noreturn`
   (abort, exit, terminate, unexpected) and `__cppparse_align(n)` (jmp_buf) are `__declspec` for cppparse and cl,
   the GNU attributes for gcc and clang outside MSVC compatibility, and empty for any other compiler.
-- `platform/`: the minimal Windows declarations cppparse's own sources use (`windows.h` for the worker pool,
-  `io.h`, `direct.h`, `sys/stat.h`, `sys/types.h` for the file helpers). They are not a Windows SDK: only the
+- `platform/`: the minimal Windows declarations cppparse's own sources and its runtime use (`windows.h` for the
+  worker pool and, written flat with the SDK's offsets, the unwind interface: `CONTEXT`, `EXCEPTION_RECORD`,
+  `RUNTIME_FUNCTION`, `DISPATCHER_CONTEXT`, the four `Rtl` functions; `eh.h` for the terminate state; `intrin.h`
+  for the five intrinsics; `io.h`, `direct.h`, `sys/stat.h`, `sys/types.h` for the file helpers). They are not a Windows SDK: only the
   self-build passes `-I platform` (`sandbox/scripts/toolset.ps1`), and each stops with `#error` when
   `_WIN32` is not defined.
-- `libcpp/` (`cout`, `cerr`, `cin`), `runtime/` (the exception runtime, built by cl for the Windows target),
+- `libcpp/` (`cout`, `cerr`, `cin`), `runtime/` (the exception runtime, built by cl or by cppparse for the
+  Windows target: one source, one object per compiler, without a model's mark; `Build-Runtime` in toolset.ps1 builds
+  it by cppparse where `CPPPARSE_RT=cppparse`, the harness's `eh-rtself` runs eh.ps1 so),
   `examples/` (the test inputs), `docs/`.
 
 ## Targets, predefined macros and platform code
@@ -969,7 +1168,9 @@ a function whose definition is a default. The code is defined as
 `<name>$default` and the name as a weak external that stands for it
 (`IMAGE_WEAK_EXTERN_SEARCH_ALIAS`), which the linker gives to a definition
 in any other object, and otherwise to the default before it searches the C
-runtime's libraries. The ones the program leaves call the ones it defines
+runtime's libraries (Microsoft's link; GRIDE's link searches the libraries
+first, see "GRIDE's link" above and `replace.ps1`). The ones the program
+leaves call the ones it defines
 (`sample-lib/replacenew.cpp`, `replacepart.cpp`, `replacearray.cpp`; row
 G17). A
 destructor stores its own class's vptrs on entry, as a constructor does
@@ -1250,9 +1451,16 @@ traits, Allocator>` (with `char_traits<char>` and `<wchar_t>`, named as cl
 names them), zero-terminated, up to 15 chars in the object and longer ones on the heap (MSVC's layout); `vector` keeps its elements in storage from `::operator new`, built with
 placement new and destroyed explicitly; it copy-constructs them into a new buffer and destroys the old ones, and
 `insert` and `erase` assign and destroy as 23.2.4 says (only arithmetic types and pointers are moved with `memcpy`
-and `memmove`; `sample-lib/vector.cpp` compares the counts of copies, assignments and destructions with cl's library); `map` and `set` share the AVL
+and `memmove`; `sample-lib/vector.cpp` compares the counts of copies, assignments and destructions with cl's library);
+the range constructor, `assign` and `insert` of `vector`, `deque` and `list`, the iterator members of `basic_string`
+(the constructor, `assign`, `append`, `insert`, `replace`) and the range constructor and `insert` of the associative
+containers are member templates over any input iterator: two arguments of one integral type are a count and a value
+(23.1.1/9), pointers to the element type are copied as a pointer range (`memcpy` for the bytewise types), a range of
+forward iterators is measured once and placed with one allocation, an input range is read element by element
+(`__range_kind` in `<__iterator>` chooses; `sample-lib/ranges.cpp` gives every member every kind of range and
+compares the output, the copies and the allocations with cl's library); `map`, `multimap`, `set` and `multiset` share the AVL
 tree of `__tree` (parent links, erase unlinks nodes so other iterators
-stay valid); the streams of `ios`, `streambuf`, `ostream`, `istream`,
+stay valid; a multimap and a multiset keep equal keys in the order they came); the streams of `ios`, `streambuf`, `ostream`, `istream`,
 `sstream`, `fstream` and `iostream` are the templates of clause 27
 (`basic_ostream<charT, traits>` and the others, with the char and
 wchar_t typedefs) over a `basic_streambuf`, with a locale (`<__locale>`:
@@ -1263,7 +1471,11 @@ others are objects defined in `libcpp/iostream.cpp`, which cppparse
 compiles and the program links (the global allocation functions and
 `std::set_new_handler` are defined there too); `complex`, `valarray`, `strstream` and
 `locale` complete the C++98 headers (what they leave out is in
-`docs/next-targets.md`, row C3).
+`docs/next-targets.md`, row C3). `std::locale("de-DE")`, and any other name the C runtime's
+`_create_locale` takes, is that locale of the C runtime: every facet of 22.2 reads it through the
+runtime's functions for a locale object (`_isctype_l`, `_strcoll_l`, `_strftime_l`, the lconv), a locale
+can be made of the categories of two, and `locale::global` sets the C library's locale as well
+(`sample-lib/namedlocale.cpp` compares four locales facet by facet with cl's library; row G28).
 To make that work across translation units, every inline function,
 template instantiation and implicit member is emitted in a COMDAT
 section of its own (selection "any") by the COFF writer, vtables

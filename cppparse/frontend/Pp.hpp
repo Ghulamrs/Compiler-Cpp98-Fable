@@ -89,6 +89,9 @@ public:
     const std::vector<std::string>&        files() const           { return m_files; }       // [0] is the main file
     const std::vector<std::string>&        includes() const        { return m_includes; }    // resolved, first inclusion order
     const std::vector<std::string>&        missingIncludes() const { return m_missing; }
+    // #pragma comment(linker, "/alternatename:<a>=<b>"): the directives the unit gives the linker, in order (row P1,
+    // docs/design-selfhost.md 4.5); any other text of comment(linker) is a warning and is dropped
+    const std::vector<std::string>&        linkerDirectives() const { return m_linker; }
     const std::vector<PpDiag>&             diagnostics() const     { return m_diags; }
     const std::map<std::string, PpMacro>&  macros() const          { return m_macros; }
     int                                    errorCount() const;
@@ -124,6 +127,8 @@ private:
     int                             m_pack;          // #pragma pack: the current value (0: the default)
     std::vector<std::pair<std::string, int> > m_packStack;   // push records: identifier (may be empty), value
     void packPragma(const std::vector<PpToken>& line, int fileIndex);
+    void commentPragma(const std::vector<PpToken>& line, int fileIndex);
+    std::vector<std::string>        m_linker;        // #pragma comment(linker, ...) passed on
     std::map<std::string, std::string> m_fileCache;
     std::map<int, std::pair<int, int> > m_lineMap;   // #line: per file, the line delta and the file index to report
     int                             m_errors;

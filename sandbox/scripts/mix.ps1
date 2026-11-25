@@ -2,8 +2,10 @@
 # objects share the library layout with cppparse's), the reference is linked and run, then one unit at a
 # time is replaced by cppparse's object (from out\selfobj, see selfhost.ps1) and the result is run.
 # Exit code 1 when a reference object does not compile or any build fails to link, times out or exits non-zero.
-param([string]$Stage = "all")
+# -Linker ms|gride: the linker of every build (toolset.ps1, Link-Program).
+param([string]$Stage = "all", [string]$Linker = "")
 . "$PSScriptRoot\toolset.ps1"
+Assert-Linker
 New-Item -ItemType Directory -Force "$Sandbox\out\refobj", "$Sandbox\out\mix" | Out-Null
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
@@ -19,14 +21,13 @@ if ($Stage -eq "all" -or $Stage -eq "ref") {
         if ($LASTEXITCODE -ne 0) { $bad++; Write-Host "cl FAILED on $n :"; Write-Host ($out.Split("`n") | Select-String -Pattern "error" | Select-Object -First 4 | ForEach-Object { $_.Line }) }
     }
     & $cl /nologo /c /EHsc /W3 /Od /X /I..\include "/Foout\refobj\iostream.obj" "..\libcpp\iostream.cpp" | Out-Null
-    & $cl /nologo /c /EHsc /W3 "/Foout\refobj\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" | Out-Null
+    $null = Build-Runtime "out\refobj\cppparse_rt.obj"   # cl's, or cppparse's with CPPPARSE_RT=cppparse (toolset.ps1)
     Write-Host "reference objects with cppparse's headers: $($units.Count - $bad) ok, $bad failed"
     $failures += $bad
 }
 function LinkAndRun([string]$name, [string[]]$objs) {
     $exe = "out\mix\$name.exe"
-    if (Test-Path $exe) { Remove-Item $exe }
-    $lo = & $link /nologo /SUBSYSTEM:CONSOLE "/OUT:$exe" @objs "out\refobj\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Out-String
+    $lo = Link-Program ($objs + @("out\refobj\cppparse_rt.obj")) $exe | Out-String
     if (-not (Test-Path $exe)) { return "link failed: " + (($lo.Split("`n") | Select-String -Pattern "error" | Select-Object -First 2 | ForEach-Object { $_.Line }) -join " | ") }
     $p = Start-Process -FilePath $exe -ArgumentList "--compile6 -O0 -q -I ..\include -o out\mix -n probe ..\examples\sample-opt\opt.cpp" -NoNewWindow -PassThru -RedirectStandardOutput "out\mix\$name.out" -RedirectStandardError "out\mix\$name.err"
     $null = $p.Handle   # keeps the process handle so that ExitCode is available after the exit

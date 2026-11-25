@@ -9,6 +9,8 @@
     "cppparse/middle",
     "cppparse/backend",
     "cppparse/eh",
+    "cppparse/cv",
+    "cppparse/target",
     "cppparse/analyzer",
     "cppparse/analyzer/report"
   ],
@@ -19,6 +21,8 @@
     "middle": ["cppparse/middle/*.cpp"],
     "backend": ["cppparse/backend/*.cpp"],
     "eh": ["cppparse/eh/*.cpp"],
+    "cv": ["cppparse/cv/*.cpp"],
+    "target": ["cppparse/target/*.cpp"],
     "analyzer": ["cppparse/analyzer/*.cpp"],
     "report": ["cppparse/analyzer/report/*.cpp"],
     "headers": [
@@ -26,7 +30,9 @@
       "cppparse/analyzer/report/*.hpp",
       "cppparse/backend/*.hpp",
       "cppparse/common/*.hpp",
+      "cppparse/cv/*.hpp",
       "cppparse/eh/*.hpp",
+      "cppparse/target/*.hpp",
       "cppparse/frontend/*.hpp",
       "cppparse/middle/*.hpp"
     ],
@@ -40,7 +46,7 @@
   },
   "build": {
     "target": "cppparse",
-    "groups": ["driver", "common", "frontend", "middle", "backend", "eh", "analyzer", "report"],
+    "groups": ["driver", "common", "frontend", "middle", "backend", "eh", "cv", "target", "analyzer", "report"],
     "args": ["--stdout", "sample.cpp"]
   }
 }

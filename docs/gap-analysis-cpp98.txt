@@ -5,14 +5,17 @@ cppparse release 6.0 (tag v6.0, 2026-11-04) plus the commits since: the review r
 docs/next-targets.md and their fixes up to fe28628 (2026-11-10), and the mending of 2026-11-12 (rows P2-P4, P6, P7,
 P9, P14, R5, M12b, B1 and G1-G7) with G8 (2026-11-13), the round of 2026-11-13 (rows G9-G19), the rows of
 2026-11-18 (G17, the rest of G14 and G15, G20-G22, and M7: cl's own exception model, --eh=cl) and the small lane of
-2026-11-19 and 20 (G23-G25, G29, G30), listed under FIXED below. The version stays 6.0. The state of every item below is kept
-in docs/next-targets.md under the row named in brackets; this file is the summary. The entries this file held before
-(2026-10-14 to 2026-10-23) are in git: git show b21067a~1:docs/gap-analysis-cpp98.txt.
+2026-11-19 and 20 (G23-G25, G28-G31), listed under FIXED below, and stage 0a of row P1 (2026-11-20; item 8). The
+version stays 6.0. The state of every item below is kept in docs/next-targets.md under the row named in brackets;
+this file is the summary. The entries this file held before (2026-10-14 to 2026-10-23) are in git: git show
+b21067a~1:docs/gap-analysis-cpp98.txt.
 
 WHAT HOLDS (verified on these commits in a clean worktree)
-- Self-hosting: the version 6 pipeline (--compile6) compiles cppparse's 47 own sources and libcpp, and the self-built
+- Self-hosting: the version 6 pipeline (--compile6) compiles cppparse's 58 own sources and libcpp, and the self-built
   compiler reproduces every object and listing byte for byte through generation two, at -O0 and at -O2 (selfhost.ps1
-  -Lvl 0 and -Lvl 2); the 18-group suite passes under the MSVC-built compiler and under the -O2 self-built one.
+  -Lvl 0 and -Lvl 2); the 21-group suite passes under the MSVC-built compiler and under the -O2 self-built one.
+  Linked by GRIDE's link in place of Microsoft's (selfhost.ps1 -Linker gride; row P1, stage 0a) the two generations
+  are one exe byte for byte at both levels, and the suite passes under that compiler as well.
 - The language: classes in every inheritance shape cl lays out (virtual bases, vtordisp and covariant thunks, pointers
   to members in cl's representations), templates (class, function and member templates, partial and explicit
   specialisations, explicit instantiation definitions, SFINAE, partial ordering, deduction from function types),
@@ -23,16 +26,19 @@ WHAT HOLDS (verified on these commits in a clean worktree)
   rules the samples cover; objects link with cl's at every layout and decorated name the samples cover.
 - The library: the 32 C++ headers of C++98 and <strstream>, the 18 <cxxx> headers, basic_string and wstring, the
   stream templates over basic_streambuf (narrow and wide, string and file streams), locale with ctype, numpunct,
-  num_put, num_get, collate, codecvt and the time, monetary and messages facets, complex, valarray, bitset, the containers and algorithms, nothrow new, bad_alloc,
+  num_put, num_get, collate, codecvt and the time, monetary and messages facets, for the classic locale and for the
+  C runtime's named ones, complex, valarray, bitset, the containers and algorithms, nothrow new, bad_alloc,
   set_new_handler, set_terminate and uncaught_exception.
 
 WHAT IS LEFT
-1. Valid C++98 refused with an error (never miscompiled): the range members of <vector> (constructor, assign,
-   insert) take pointer ranges only, so a range of another container's iterators, of reverse iterators or of stream
-   iterators is S107 (row G31, found 2026-11-20 by the compiler's own sources; 23.2.4.1 makes them member templates).
+1. Valid C++98 refused with an error: the associative containers have no constructor taking a comparison object,
+   no key_comp, value_comp or relational operators (row G34, found by row G31's probes; the range members of every
+   container take any iterator since row G31). Not refused but chosen wrongly: of several partial specialisations
+   that match, the first declared is taken, not the most specialised (row G32, 14.5.4.2; found by row G31).
    (Pointers to members convert along non-virtual bases between every pair of inheritance models; the conversions
    through a virtual base that stay S132 are ill-formed in C++98, 4.11/2, and cl's extension: memptr-refused.cpp.)
 2. Ill-formed code accepted without a diagnostic:
+   - static_cast of an integer to a pointer (row G33, 5.2.9; cl C2440), found by row G31.
    - access control leaves out what only one of cl and clang refuses: the member types in the signature of a function
      template (clang refuses, cl accepts), a thrown object with a private destructor (clang only), and every
      specialisation of a befriended function template name counts as a friend, as with cl. A class with a friend
@@ -55,21 +61,34 @@ WHAT IS LEFT
    probe) and the funclets' unwind records, equal ones written once and fewer cleanups with a frame (row G27: the
    other third), both measured against cl on 2026-11-19; in the default model an exception that reaches a cl-compiled
    frame with something to destroy or a handler stops with the runtime's message, as designed (M7); CodeView types
-   and locals (the line tables exist; M10: its design, docs/design-codeview.md, was written on 2026-11-19 on a
-   branch of its own and is under review); vftables stay static symbols in mixed links, by design (row 20); an
+   and locals (the line tables exist; M10: its design, docs/design-codeview.md of 2026-11-19, is reviewed and
+   has the go-ahead of 2026-11-20; of its stages, the CodeView code is in cppparse/cv and the comparator of "debug
+   information changes no code", scripts\cvsame.ps1, exists, a procedure's symbol shows cl's name for it, and with -g
+   an object has its types (.debug$T), its globals, static members and static locals, and since stage 2 (2026-11-24)
+   every function's parameters and locals, each in its place at -O0 (test 21, the value harness); at -O1 and up
+   they are listed without a place until the design's stage 3); vftables stay static symbols in mixed links, by
+   design (row 20); an
    exception edge from every call in the IR and the optimiser (design-table-exceptions.md section 7), the remaining
    code-size lever now that the plan's rows A to H are done or measured.
-6. Library: named locales other than "C" and "" are left out, and locale::global does not call setlocale (C3; the
-   facets of 22.2 are all there for the classic locale since 2026-11-18, row G22; the plan for the named ones, with
-   cl's reference values for four locales, is row G28). (<vector> copy-constructs, assigns and destroys as 23.2.4
-   says since P9; only arithmetic types and pointers are moved bytewise.)
+6. Library: messages has no catalogues under any locale name, and the wide file streams convert through the C
+   runtime rather than through the locale's codecvt (C3; the facets of 22.2 for the classic locale since 2026-11-18,
+   row G22; named locales, the C runtime's, since 2026-11-20, row G28, which also lists where the library follows
+   22.1 and 22.2 and not cl's). (<vector> copy-constructs, assigns and destroys as 23.2.4 says since P9; only
+   arithmetic types and pointers are moved bytewise.)
 7. The sources against strict C++98: clang -std=c++98 -pedantic reports nothing but long long in the two typedef
    pairs (common/Int64.hpp, include/__config; P4); sandbox/scripts/strict98.ps1 checks it and allows nothing else.
-8. Self-hosting boundary: the exception runtime runtime/cppparse_rt.cpp is compiled by cl in every self-host link
-   (it needs the SDK's unwind declarations and __declspec(thread), which the parser drops), and the linker and the C
-   runtime are MSVC's (P1: its design, docs/design-selfhost.md, was written on 2026-11-19 on a branch of its own
-   and is under review). The default command line still runs the version 1 to 5 pipeline; the complete compiler
-   needs --compile6 (P19).
+8. Self-hosting boundary: since 2026-11-24 (P1 stages 1 to 3, level 1) the exception runtime runtime/cppparse_rt.cpp
+   is compiled by the compiler under test in every self-host generation (__declspec(thread), five intrinsics, the
+   /alternatename pragma and the unwind declarations of platform/ are in the compiler; its object has no model mark),
+   and selfhost.ps1 runs cl nowhere; the linker and the C runtime are still MSVC's by default (P1: its design,
+   docs/design-selfhost.md of 2026-11-19, is reviewed and has the go-ahead of 2026-11-20). Stage 0a of it is done (2026-11-20): selfhost.ps1 -Linker gride links the self-host with GRIDE's
+   link, the two generations' exes byte-identical at -O0 and -O2, and the suite passes under the GRIDE-linked
+   compiler (harness checks selfhost-gride-O0, selfhost-gride-O2, suite-self-gride; skipped by name where GRIDE is
+   not found); Microsoft's link stays the default. GRIDE's link keeps libcpp's replaceable allocation functions
+   since 2026-11-24 (request G7 done in GRIDE3: replace.ps1 -Strict holds in both models); open there, request G8: a
+   folded static vftable with libcmt's bad_alloc member pulled in (newhandler at -O2 in cl's model).
+   GRIDE's runtime underneath (stage 4, with requests G1 and G2 to GRIDE3) and the rest of level 3 are to come. The default command line
+   still runs the version 1 to 5 pipeline; the complete compiler needs --compile6 (P19).
 9. Limits: a recursive value template 5000 deep fails at the 400-deep expression limit (cl fails too; M13); a class
    template instantiation nested 1000 deep is refused (S148, cl C2999).
 
@@ -217,6 +236,14 @@ FIXED SINCE THE PREVIOUS VERSION OF THIS FILE (2026-10-23)
   runtime searched the whole range table and walked the stack anew for every object's landing pad; now a frame's
   pads follow one another without a dispatch. The runtime alone changed, no object byte (eh.ps1 ehManyObjects;
   docs/design-table-exceptions.md, section 6).
+- G28 (2026-11-20): named locales. std::locale("de-DE") and every other name the C runtime's _create_locale takes
+  is that locale (every name but "C" and "" was a runtime_error): each facet of 22.2 reads the C runtime's locale
+  object of the name (ctype, numpunct, collate, moneypunct, time_put, time_get and codecvt, for char and wchar_t,
+  and the _byname facets), the constructors that make a locale of two take each category from its source, and
+  locale::global sets the C library's locale too (setlocale); the classic locale no longer reads the C locale. A
+  locale is made on the calling thread's own C locale, so no other thread sees it happen, in a sixth of the time
+  cl's library takes. Four locales are compared facet by facet with cl's library (sample-lib/namedlocale.cpp,
+  244 lines, test 15), and seven lines hold where the library follows 22.1 and 22.2 rather than cl's.
 - G29 (2026-11-19): the type of a handler. `catch (void ())` stopped the compiler (an access violation), a named
   `catch (int f(int))` declared a function, and `catch (int a[3])` was matched as an array, which nothing thrown
   is: an array or a function in an exception-declaration is the pointer now (15.3/2), in the handler's variable
@@ -232,6 +259,15 @@ FIXED SINCE THE PREVIOUS VERSION OF THIS FILE (2026-10-23)
   same size (eh.ps1 ehPadChain; the suite checks the pads' form and the runtime's source;
   docs/design-table-exceptions.md, section 6). No run under a shadow stack was possible on this machine (its
   processor has no CET).
+- G31 (2026-11-20): the range members of the containers. vector's assign and insert took pointer ranges only, deque
+  and list refused two ints as a count and a value, map had no range constructor or insert, multiset and multimap
+  did not exist: 82 of 253 probes (a container, a member, a kind of range) were refused where cl takes all. The
+  constructor, assign and insert of vector, deque and list, basic_string's five iterator members and the range
+  members of set, multiset, map and multimap are member templates over any input iterator, dispatched as 23.1.1/9
+  says; pointer ranges keep their code. Three faults of the compiler were in the way and are mended: the nearer of
+  two bases is the better conversion (13.3.3.2/4), a partial specialisation matches only what its pattern spells
+  (14.5.4.1), a nested template argument is deduced as it is (14.8.2.4). sample-lib/ranges.cpp against cl's library
+  (305 lines, test 15); front2.cpp partialexact::, baserank::, argdeduce::.
 - covariant-vbase.cpp (row G3) is compared with the build of Visual Studio's clang-cl as well as with the lines the
   standard requires; clang-cl crashes on covariant-variadic.cpp (row G7) and cl refuses it, so that one has no
   reference compiler.

@@ -2,15 +2,16 @@
 # of cppparse: A (sandbox\cppparse.exe, built by cl), B (out\selfhost\cppparse-self.exe, built by A) and C
 # (out\selfhost2\cppparse-self2.exe, built by B; see selfhost.ps1), each at -O0 and -O2. Every build runs in its
 # own folder under out\cprog; its output must equal the cl C++ build's, and the objects of A, B and C must be
-# identical byte for byte
+# identical byte for byte. -Linker ms|gride: the linker of every build (toolset.ps1, Link-Program)
+param([string]$Linker = "")
 . "$PSScriptRoot\toolset.ps1"
+Assert-Linker
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
 $srcDir = (Resolve-Path "..\examples\sample-c").Path
 $units = @(Get-ChildItem "$srcDir\*.cpp" | ForEach-Object { $_.BaseName })
 $out = "$Sandbox\out\cprog"
 New-Item -ItemType Directory -Force $out | Out-Null
-$libs = @("libucrt.lib", "libvcruntime.lib", "libcmt.lib", "kernel32.lib", "legacy_stdio_definitions.lib")
 & $cl /nologo /c /EHsc /W3 "/Fo$out\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" | Out-Null
 $failed = 0
 
@@ -37,7 +38,8 @@ foreach ($mode in @(@("cl-c", "/TC"), @("cl-cpp", "/TP"))) {
     $files = @(); foreach ($u in $units) { $files += "$srcDir\$u.cpp" }
     # "/Fo<dir>\\": a single backslash before the closing quote would escape the quote on a path with spaces;
     # _CRT_SECURE_NO_WARNINGS: the standard functions strcpy, sprintf, fopen... are what the sample is about
-    $o = & $cl /nologo $mode[1] /W4 /O2 /D_CRT_SECURE_NO_WARNINGS "/Fo$dir\\" "/Fe$dir\cprog.exe" @files 2>&1 | Out-String
+    $cobjs = @(); foreach ($u in $units) { $cobjs += "$dir\$u.obj" }
+    $o = Build-Program (@($mode[1], "/W4", "/O2", "/D_CRT_SECURE_NO_WARNINGS", "/Fo$dir\\") + $files) $cobjs "$dir\cprog.exe" | Out-String
     if (-not (Test-Path "$dir\cprog.exe")) { Write-Host "$($mode[0]) build failed:"; Write-Host $o; $failed++; continue }
     if ($o -match "warning") { Write-Host "$($mode[0]) warnings:"; Write-Host $o }
     $results[$mode[0]] = RunBuild $mode[0] "$dir\cprog.exe"
@@ -59,8 +61,7 @@ foreach ($lvl in @("0", "2")) {
             $objs += "$dir\${u}6.obj"
         }
         if ($bad) { $failed++; continue }
-        [System.IO.File]::Delete("$dir\cprog.exe")
-        $o = & $link /nologo /SUBSYSTEM:CONSOLE "/OUT:$dir\cprog.exe" @objs "$out\cppparse_rt.obj" @libs 2>&1 | Out-String
+        $o = Link-Program ($objs + @("$out\cppparse_rt.obj")) "$dir\cprog.exe" | Out-String
         if (-not (Test-Path "$dir\cprog.exe")) { Write-Host "$name link failed:"; Write-Host $o; $failed++; continue }
         $results[$name] = RunBuild $name "$dir\cprog.exe"
     }

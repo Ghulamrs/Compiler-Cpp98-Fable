@@ -19,6 +19,12 @@
     <Filter Include="eh">
       <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A0D}</UniqueIdentifier>
     </Filter>
+    <Filter Include="cv">
+      <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A0E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="target">
+      <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A0F}</UniqueIdentifier>
+    </Filter>
     <Filter Include="analyzer">
       <UniqueIdentifier>{3A1F6C20-5D4B-4E8A-9B71-0C2D8E4F1A06}</UniqueIdentifier>
     </Filter>
@@ -60,6 +66,12 @@
     <ClCompile Include="eh\*.cpp">
       <Filter>eh</Filter>
     </ClCompile>
+    <ClCompile Include="cv\*.cpp">
+      <Filter>cv</Filter>
+    </ClCompile>
+    <ClCompile Include="target\*.cpp">
+      <Filter>target</Filter>
+    </ClCompile>
     <ClCompile Include="analyzer\*.cpp">
       <Filter>analyzer</Filter>
     </ClCompile>
@@ -82,6 +94,12 @@
     </ClInclude>
     <ClInclude Include="eh\*.hpp">
       <Filter>eh</Filter>
+    </ClInclude>
+    <ClInclude Include="cv\*.hpp">
+      <Filter>cv</Filter>
+    </ClInclude>
+    <ClInclude Include="target\*.hpp">
+      <Filter>target</Filter>
     </ClInclude>
     <ClInclude Include="analyzer\*.hpp">
       <Filter>analyzer</Filter>

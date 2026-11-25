@@ -53,6 +53,9 @@ extern "C" {
     int      fwprintf(FILE* f, const wchar_t* format, ...);
     int      wscanf(const wchar_t* format, ...);
     int      fwscanf(FILE* f, const wchar_t* format, ...);
+    // Microsoft's: wcscoll and wcsxfrm in a locale of the C runtime (<clocale>)
+    int      _wcscoll_l(const wchar_t* a, const wchar_t* b, _locale_t locale);
+    size_t   _wcsxfrm_l(wchar_t* dst, const wchar_t* src, size_t n, _locale_t locale);
 
     // inline, as the UCRT's own headers define them: its library exports neither wmemcmp nor wmemchr, its import
     // library none of the five

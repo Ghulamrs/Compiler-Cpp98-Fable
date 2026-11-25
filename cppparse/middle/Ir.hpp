@@ -13,6 +13,9 @@
 //   loadlocal / storelocal    t = local[i]   /  local[i] = t
 //   addrlocal                 t = &local[i]
 //   loadglobal / storeglobal / addrglobal      (by name)
+//   addrtls                   t = the address of a thread-local in this thread (by name; cppparse/target TargetTls)
+//   intrinsic (sub: name)     t = an intrinsic of the target emitted inline (cppparse/target TargetIntrinsics): the
+//                             interlocked ones read and write *args[0] and are barriers as a call is
 //   loadmem / storemem        t = *addr  /  *addr = t
 //   addrfield                 t = base + offset        (sub = field name)
 //   addrindex                 t = base + index * size
@@ -64,7 +67,7 @@ struct IrOperand {
 struct IrInst {
     enum Op { Const, FConst, StrConst, Copy, LoadLocal, StoreLocal, AddrLocal, LoadGlobal, StoreGlobal, AddrGlobal,
               LoadMem, StoreMem, AddrField, AddrIndex, Bin, Un, Cmp, Conv, Call, VCall, Br, CondBr, Ret, Throw,
-              TryBegin, TryEnd, CatchParam, CatchEnd, Unreachable, Nop, Phi };
+              TryBegin, TryEnd, CatchParam, CatchEnd, Unreachable, Nop, Phi, AddrTls, Intrinsic };
     Op                     op;
     std::string            sub;    // sub-operation, callee name, field name
     int                    dst;    // result temp or -1
@@ -75,8 +78,12 @@ struct IrInst {
     bool                   nothrow;   // a call that cannot throw: a function with C linkage (cl /EHsc), a runtime entry
     bool                   variadic;  // a call to a variadic function, or through a pointer of unknown type: a floating-point
                                       // argument also goes to its integer register, where such a callee reads it
+    int                    scope;     // -g: the innermost block scope that declares a variable and holds the statement this
+                                      // was generated for (IrFunction::debugBlocks; 0: the function's own; -1: the entry
+                                      // sequence, before the first statement). Set with 'line' and copied with it; no pass
+                                      // reads it to decide anything (docs/design-codeview.md 5.4)
 
-    IrInst() : op(Nop), dst(-1), type(0), line(0), extra(0), nothrow(false), variadic(false) {}
+    IrInst() : op(Nop), dst(-1), type(0), line(0), extra(0), nothrow(false), variadic(false), scope(0) {}
     bool pure() const;             // result-only, no side effects, no memory read
     bool readsMemory() const;
     bool isTerminator() const { return op == Br || op == CondBr || op == Ret || op == Throw || op == Unreachable; }
@@ -104,7 +111,24 @@ struct IrLocal {
     bool        nonNull;     // a parameter that always holds a valid address: this, a reference, an object passed by
                              // address, the hidden result pointer (loads through it cannot fault)
     bool        ehFlag;      // a constructed flag: 1 while its object lives, read by the function's unwind handler
-    IrLocal() : type(0), size(8), align(8), addressTaken(false), isParam(false), isThis(false), nonNull(false), ehFlag(false) {}
+    // -g (docs/design-codeview.md 5.4): a variable of the source as a debugger lists it. No pass reads these
+    bool        source;      // a parameter or a local the source declares (not one of the compiler's own slots)
+    std::string debugName;   // the name it is listed by ("__formal" for an unnamed parameter)
+    int         debugType;   // its type, a number in the module's CvModule (0: none)
+    int         debugParam;  // a parameter: its place among the declared ones (0: "this" or the first); -1: a local
+    int         block;       // the block scope that declares it (IrFunction::debugBlocks; 0: the function's)
+    bool        byAddress;   // a class parameter passed by address: listed as a reference to the class
+    IrLocal() : type(0), size(8), align(8), addressTaken(false), isParam(false), isThis(false), nonNull(false), ehFlag(false),
+                source(false), debugType(0), debugParam(-1), block(0), byAddress(false) {}
+};
+
+// -g: a static local of a function, for the S_LDATA32 in the function's symbols
+struct IrDebugStatic {
+    std::string name;        // as the source names it
+    std::string global;      // the IR name of the module's global that it is
+    int         type;        // a number in the module's CvModule
+    int         block;       // the block scope that declares it (0: the function's)
+    IrDebugStatic() : type(0), block(0) {}
 };
 
 struct IrFunction {
@@ -126,8 +150,19 @@ struct IrFunction {
     std::map<int, const Type*> tempTypes;
     std::string              sourceFile; // the definition's source file (an absolute Windows path) and line, for the
     int                      sourceLine; // CodeView line table; empty / 0 when unknown (the version 3 pipeline)
+    std::string              debugName;  // the name its CodeView symbol shows, in cl's spelling (CvFromSema); empty: the
+                                         // IR name without its parameter list (CvNames::fromIrName)
+    // -g (docs/design-codeview.md 5.4). No pass reads these to decide anything: debug information changes no code
+    int                      debugType;  // the function's type, a number in the module's CvModule (0: none)
+    std::vector<IrDebugStatic> debugStatics;   // its static locals, in declaration order
+    std::vector<int>         debugBlocks;  // its block scopes that declare a variable: the parent of block k (1, 2, ...) at
+                                           // [k - 1], 0 for the function's own; numbered in the order IrGen meets them
+    bool                     debugInline;  // declared inline (S_FRAMEPROC's "marked inline", as cl sets it)
+    bool                     debugOptimized; // the optimiser ran on it (-O1 and up): until stage 3 its variables have no place
+    bool                     keepsFrame; // it calls _AddressOfReturnAddress (TargetIntrinsics): it keeps its frame at every level and
+                                         // is never inlined, so [rbp+8] is its own return address
 
-    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false), internal(false), replaceable(false), variadic(false), sourceLine(0) {}
+    IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false), internal(false), replaceable(false), variadic(false), sourceLine(0), debugType(0), debugInline(false), debugOptimized(false), keepsFrame(false) {}
     int  newTemp(const Type* t) { tempTypes[nextTemp] = t; return nextTemp++; }
     int  newBlock(const std::string& label);
     void computeCfg();

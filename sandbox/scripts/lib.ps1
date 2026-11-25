@@ -1,7 +1,9 @@
 # compiles examples\sample-lib\*.cpp and libcpp\iostream.cpp with the version 6 pipeline, links the native
-# driver with cl and runs it: the standard-library check outside the test suite
-param([string]$Lvl = "0")
+# driver with cl and runs it: the standard-library check outside the test suite. -Linker ms|gride: the linker
+# (toolset.ps1, Link-Program)
+param([string]$Lvl = "0", [string]$Linker = "")
 . "$PSScriptRoot\toolset.ps1"
+Assert-Linker
 New-Item -ItemType Directory -Force "$Sandbox\out\lib" | Out-Null
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
@@ -13,7 +15,7 @@ foreach ($unit in @("examples\sample-lib\lib1.cpp", "examples\sample-lib\lib2.cp
     $objs += "out\lib\${name}6.obj"
 }
 & $cl /nologo /c /EHsc /W3 "/Foout\lib\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" | Out-Null
-& $cl /nologo /EHsc /W3 "/Foout\lib\driver-lib.obj" "/Feout\lib\libdriver$Lvl.exe" "..\examples\sample-lib-driver\driver-lib.cpp" @objs "out\lib\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | ForEach-Object { "$_" }
+Build-Program @("/EHsc", "/W3", "/Foout\lib\driver-lib.obj", "..\examples\sample-lib-driver\driver-lib.cpp") (@("out\lib\driver-lib.obj") + $objs + @("out\lib\cppparse_rt.obj")) "out\lib\libdriver$Lvl.exe" | ForEach-Object { "$_" }
 if (-not (Test-Path "out\lib\libdriver$Lvl.exe")) { Write-Host "link failed"; exit 1 }
 & "out\lib\libdriver$Lvl.exe" 2>&1 | ForEach-Object { "$_" }
 Write-Host "driver exit code $LASTEXITCODE"

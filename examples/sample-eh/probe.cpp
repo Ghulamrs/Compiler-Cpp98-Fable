@@ -700,3 +700,96 @@ int ehDeepHandlers(int n)
     catch (int e) { r = e; if (n < 40) r += ehDeepHandlers(n + 1); }
     return r;
 }
+
+// ---- many objects alive in one frame (row G24): in the table model the landing pad of each sends the exception on
+// to the pad of the object built before it, in the same frame, without a new walk of the stack. The order of the
+// destructors, a destructor that throws and catches on its own between two of them (its walk passes other frames),
+// objects of an inner block and a value the handler reads ----
+static unsigned g_stepLog = 0;
+struct Step { int id; Step(int i) : id(i) {} ~Step(); };
+static void stepThrow(int v) { Step inner(v + 100); throw v; }
+Step::~Step()
+{
+    g_stepLog = g_stepLog * 31u + static_cast<unsigned>(id);
+    g_destroyed += id;
+    if (id == 5) { try { stepThrow(50); } catch (int e) { g_stepLog += static_cast<unsigned>(e); } }
+}
+static void stepMaybe(int k) { Step s(30); if (k == 3) throw k * 11; }
+int ehManyObjects(int k)
+{
+    g_stepLog = 0;
+    int kept = k * 7 + 1;
+    try {
+        Step a1(1); Step a2(2); Step a3(3); Step a4(4); Step a5(5); Step a6(6); Step a7(7); Step a8(8);
+        if (k > 1) { Step b9(9); Step b10(10); if (k == 2) throw k; kept += b9.id; }
+        Step a11(11); Step a12(12); Step a13(13); Step a14(14); Step a15(15); Step a16(16);
+        if (k == 1) throw kept;
+        stepMaybe(k);
+        Step a17(17); Step a18(18);
+        if (k == 4) throw a18.id + a1.id;
+        kept += a17.id;
+    }
+    catch (int e) { return static_cast<int>((g_stepLog ^ static_cast<unsigned>(e + kept)) & 0x7FFFFFFFu); }
+    return static_cast<int>((g_stepLog + static_cast<unsigned>(kept)) & 0x7FFFFFFFu);
+}
+
+// ---- a handler declared as an array or as a function (row G29): its type is the pointer (15.3/2), so it takes a
+// thrown pointer to the element and a thrown pointer to function, and its variable is that pointer ----
+static int adjTwice(int v) { return 2 * v; }
+static int adjPlus3(int v) { return v + 3; }
+int ehAdjustedHandlers(int k)
+{
+    static int values[3] = { 5, 7, 11 };
+    try {
+        if (k == 0) throw values;                                 // the array is thrown as int* (15.1/3)
+        if (k == 1) throw &adjTwice;
+        if (k == 2) throw adjPlus3;                               // the function as a pointer to it
+        if (k == 3) throw static_cast<const int*>(values);
+        throw 1.5;
+    }
+    catch (int a[3]) { return a[0] + a[2]; }
+    catch (int f(int)) { return f(k * 10); }
+    catch (const int a[]) { return a[1]; }
+    catch (...) { return -1; }
+}
+
+// ---- the landing pads of one frame follow one another by a jump of the generated code (row G30; the runtime writes
+// no return address). The chain of pads ends in catch (...), or in clauses of which none matches (the exception goes
+// on at the pads of the try block around, then to the caller), passes a pad that is more than one destructor call
+// (an array, a temporary built under a condition), runs again in each turn of a loop, and a handler's own object
+// is destroyed by the handler's "throw;" ----
+struct Link { int id; Link(int i = 77) : id(i) {} ~Link() { g_stepLog = g_stepLog * 37u + static_cast<unsigned>(id); g_destroyed += id; } };
+static int linkPass(const Link& l, int k) { if (k == 6) throw l.id; return l.id; }
+static int linkInner(int k)
+{
+    Link a(1); Link b(2);
+    try {
+        Link c(3);
+        Link arr[2];
+        Link d(6);
+        if (k == 1) throw 1.5;          // no clause matches: on to the pads of b and a, then to the caller
+        if (k == 2) throw k;
+        Link e(k > 3 ? 7 : 8);
+        if (k == 3) throw 'c';
+        return b.id + arr[1].id + e.id;
+    }
+    catch (int v) { return v + a.id; }
+    catch (char) { Link f(9); throw; }
+}
+int ehPadChain(int k)
+{
+    g_stepLog = 0;
+    int r = 0;
+    for (int i = 0; i < 3; ++i) {
+        Link outer(10 + i);
+        try {
+            Link m(20 + i);
+            r += k >= 4 && i == 1 ? linkPass(Link(30), k) : linkPass(Link(31), 0);
+            Link n(40 + i);
+            r += linkInner(i == 2 ? k : 0);
+            if (k == 5 && i == 1) throw n.id;
+        }
+        catch (...) { r += 1000; }
+    }
+    return static_cast<int>((g_stepLog ^ static_cast<unsigned>(r)) & 0x7FFFFFFFu);
+}

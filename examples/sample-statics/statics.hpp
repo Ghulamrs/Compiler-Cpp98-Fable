@@ -95,6 +95,20 @@ catch (int) { return 0; }
 
 // cppparse's side
 void cpp_konstK(KonstSeen& s);
+// a static local in a member function of a local class: the class has no linkage (9.8), yet the copies of an inline
+// function's body that the two compilers make (cl /O2 inlines its copy into the driver) must count on one object.
+// cl emits the member functions of such a class and their statics as COMDATs under their decorated names, and so
+// does cppparse; in an ordinary function the class's members stay internal on both sides
+STATICS_INLINE int localClassCount()
+{
+    struct L {
+        static int next() { static int n = 0; return ++n; }
+        int base() { static int first = g_ctorCalls * 0 + 500; return first++; }
+    };
+    L l;
+    return L::next() * 1000 + l.base();
+}
+int cpp_localClassCount();
 void cpp_konstF(KonstFold& s);
 const Counted* cpp_tryN(int a);
 void cpp_nestedN(int k, NestedSeen& n);

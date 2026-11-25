@@ -1,8 +1,9 @@
 # gate.ps1 - the release gate: the worktree must be clean (git status --porcelain prints nothing: no change, no
 # untracked file that is not ignored) before and after harness.ps1, and every check of harness.ps1 must pass.
-# Exit code 0 only then. -Quick is passed on to harness.ps1 (the suite and selfhost -Lvl 0).
-# Usage: powershell -ExecutionPolicy Bypass -File cpp\sandbox\scripts\gate.ps1 [-Quick]
-param([switch]$Quick)
+# Exit code 0 only then. -Quick is passed on to harness.ps1 (the suite and selfhost -Lvl 0), -RequireGride as well
+# (a check skipped because GRIDE is not found then fails the gate; the gate of a machine that has GRIDE).
+# Usage: powershell -ExecutionPolicy Bypass -File cpp\sandbox\scripts\gate.ps1 [-Quick] [-RequireGride]
+param([switch]$Quick, [switch]$RequireGride)
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 
@@ -23,7 +24,7 @@ if ($dirty.Count -ne 0) {
 }
 Write-Host "PASS    clean worktree"
 
-$harnessArgs = @(); if ($Quick) { $harnessArgs += "-Quick" }
+$harnessArgs = @(); if ($Quick) { $harnessArgs += "-Quick" }; if ($RequireGride) { $harnessArgs += "-RequireGride" }
 & powershell -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot\harness.ps1" @harnessArgs
 $harnessCode = $LASTEXITCODE
 

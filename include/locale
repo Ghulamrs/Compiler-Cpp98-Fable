@@ -1,8 +1,12 @@
-// locale - cppparse's C++98 library: locales (22.1) as far as the streams use them. locale, its facets and ids,
-// use_facet and has_facet, ctype<char>, ctype<wchar_t>, numpunct and collate are in <__locale> (every stream includes
-// it), num_put and num_get in <__num_facets> (every stream includes it too); this header adds the convenience functions
-// of 22.1.3, the facets the streams do not use themselves (<__facets>: codecvt, the time, monetary and messages
-// facets) and the _byname facets, which know the "C" locale only. Not provided: named locales other than "C" and "".
+// locale - cppparse's C++98 library: locales (22.1). locale, its facets and ids, use_facet and has_facet, ctype<char>,
+// ctype<wchar_t>, numpunct and collate are in <__locale> (every stream includes it), num_put and num_get in
+// <__num_facets> (every stream includes it too); this header adds the convenience functions of 22.1.3, the facets the
+// streams do not use themselves (<__facets>: codecvt, the time, monetary and messages facets), the _byname facets
+// and the named locales: std::locale("de-DE") and any other name the C runtime's _create_locale takes ("" is the
+// user's locale) is that locale of the C runtime, each facet reading it through the runtime's functions for a locale
+// object (_isctype_l, _strcoll_l, _strftime_l, the lconv). locale(other, name, categories) and locale(other, one,
+// categories) take each category's facets from their source, and locale::global makes a named locale the C library's
+// too (setlocale). messages has no catalogues under any name.
 #ifndef CPPPARSE_LOCALE
 #define CPPPARSE_LOCALE
 
@@ -32,7 +36,10 @@ template <class charT> bool isgraph(charT c, const locale& loc) { return use_fac
 template <class charT> charT toupper(charT c, const locale& loc) { return use_facet<ctype<charT> >(loc).toupper(c); }
 template <class charT> charT tolower(charT c, const locale& loc) { return use_facet<ctype<charT> >(loc).tolower(c); }
 
-// the named facets: the "C" (or "") locale's (__check_locale_name is <__facets>')
+// ---- the named facets (22.2.1.2, 22.2.1.4, 22.2.3.2, 22.2.4.2): those of the C runtime's locale of the name
+// (<__facets> has what they are made of, __named_locale, and the time and monetary ones); "C" names the classic facet
+
+// ctype_byname of another character type than char and wchar_t: the classic facet under any name a locale takes
 template <class charT>
 class ctype_byname : public ctype<charT> {
 public:
@@ -41,32 +48,318 @@ public:
 protected:
     virtual ~ctype_byname() {}
 };
+
+// ctype_byname<char>: the classes and the case of the characters of the locale's code page, read once into tables
+// (_isctype_l with the bits of ctype_base, _toupper_l, _tolower_l): is() and the streams' scans read the table as they
+// do the classic one
 template <>
 class ctype_byname<char> : public ctype<char> {
 public:
-    explicit ctype_byname(const char* name, size_t refs = 0) : ctype<char>(0, false, refs) { __check_locale_name(name); }
+    explicit ctype_byname(const char* name, size_t refs = 0) : ctype<char>(m_masks, false, refs) { __named_ref nl(name); __init(nl.get()); }
+    ctype_byname(const __named_ref& nl, size_t refs) : ctype<char>(m_masks, false, refs) { __init(nl.get()); }
 protected:
     virtual ~ctype_byname() {}
+    virtual char do_toupper(char c) const { return m_upper[static_cast<unsigned char>(c)]; }
+    virtual const char* do_toupper(char* low, const char* high) const { for (; low < high; ++low) *low = m_upper[static_cast<unsigned char>(*low)]; return high; }
+    virtual char do_tolower(char c) const { return m_lower[static_cast<unsigned char>(c)]; }
+    virtual const char* do_tolower(char* low, const char* high) const { for (; low < high; ++low) *low = m_lower[static_cast<unsigned char>(*low)]; return high; }
+private:
+    void __init(const __named_locale* nl)
+    {
+        const mask* classic = nl ? 0 : classic_table();
+        for (int c = 0; c < 256; ++c) {
+            const mask m = nl ? static_cast<mask>(_isctype_l(c, 0x1FF, nl->handle)) : classic[c];
+            m_masks[c] = m;
+            if (nl) {
+                m_upper[c] = static_cast<char>((m & lower) ? _toupper_l(c, nl->handle) : c);
+                m_lower[c] = static_cast<char>((m & upper) ? _tolower_l(c, nl->handle) : c);
+            } else {
+                m_upper[c] = static_cast<char>(c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c);
+                m_lower[c] = static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+            }
+        }
+    }
+    mask m_masks[256];
+    char m_upper[256], m_lower[256];
 };
 
+// ctype_byname<wchar_t>: the classes of wide characters are the C runtime's, one for every locale (the classic
+// facet's); the case conversions are the locale's (_towupper_l, _towlower_l, see __wide_upper), and widen and narrow
+// convert between the locale's code page and Unicode (_mbstowcs_l over the 255 characters at once, _wctomb_s_l): a
+// byte that is no character alone widens to WEOF, a wide character the code page lacks narrows to the default
+template <>
+class ctype_byname<wchar_t> : public ctype<wchar_t> {
+public:
+    explicit ctype_byname(const char* name, size_t refs = 0) : ctype<wchar_t>(refs), m_nl(name) { __init(); }
+    ctype_byname(const __named_ref& nl, size_t refs) : ctype<wchar_t>(refs), m_nl(nl) { __init(); }
+protected:
+    virtual ~ctype_byname() {}
+    virtual wchar_t do_toupper(wchar_t c) const { return m_nl.get() ? __wide_upper(c, m_nl.handle()) : ctype<wchar_t>::do_toupper(c); }
+    virtual const wchar_t* do_toupper(wchar_t* low, const wchar_t* high) const { for (; low < high; ++low) *low = do_toupper(*low); return high; }
+    virtual wchar_t do_tolower(wchar_t c) const { return m_nl.get() ? __wide_lower(c, m_nl.handle()) : ctype<wchar_t>::do_tolower(c); }
+    virtual const wchar_t* do_tolower(wchar_t* low, const wchar_t* high) const { for (; low < high; ++low) *low = do_tolower(*low); return high; }
+    virtual wchar_t do_widen(char c) const { return m_wide[static_cast<unsigned char>(c)]; }
+    virtual const char* do_widen(const char* low, const char* high, wchar_t* to) const { for (; low < high; ++low, ++to) *to = m_wide[static_cast<unsigned char>(*low)]; return high; }
+    virtual char do_narrow(wchar_t c, char dfault) const
+    {
+        if (c < 0x80) return static_cast<char>(c);
+        if (!m_nl.get()) return ctype<wchar_t>::do_narrow(c, dfault);
+        char bytes[8];
+        int count = 0;
+        return _wctomb_s_l(&count, bytes, sizeof bytes, c, m_nl.handle()) == 0 && count == 1 ? bytes[0] : dfault;
+    }
+    virtual const wchar_t* do_narrow(const wchar_t* low, const wchar_t* high, char dfault, char* to) const { for (; low < high; ++low, ++to) *to = do_narrow(*low, dfault); return high; }
+private:
+    void __init()
+    {
+        for (int c = 0; c < 256; ++c) m_wide[c] = static_cast<wchar_t>(c);
+        if (!m_nl.get()) return;
+        char bytes[256];
+        for (int c = 1; c < 256; ++c) bytes[c - 1] = static_cast<char>(c);
+        bytes[255] = 0;
+        if (_mbstowcs_l(m_wide + 1, bytes, 255, m_nl.handle()) == 255) return;
+        // a code page with characters of two bytes: one at a time
+        for (int c = 1; c < 256; ++c) {
+            wchar_t w = 0;
+            m_wide[c] = _mbtowc_l(&w, bytes + c - 1, 1, m_nl.handle()) == 1 ? w : static_cast<wchar_t>(0xFFFF);
+        }
+    }
+    __named_ref m_nl;
+    wchar_t     m_wide[256];
+};
+
+// numpunct_byname: the locale's lconv (its decimal point, thousands separator and grouping; the wide members for
+// wchar_t); the names of true and false are the classic ones
 template <class charT>
 class numpunct_byname : public numpunct<charT> {
 public:
     typedef charT               char_type;
     typedef basic_string<charT> string_type;
-    explicit numpunct_byname(const char* name, size_t refs = 0) : numpunct<charT>(refs) { __check_locale_name(name); }
+    explicit numpunct_byname(const char* name, size_t refs = 0) : numpunct<charT>(refs) { __named_ref nl(name); __init(nl.get()); }
+    numpunct_byname(const __named_ref& nl, size_t refs) : numpunct<charT>(refs) { __init(nl.get()); }
 protected:
     virtual ~numpunct_byname() {}
+    virtual char_type do_decimal_point() const { return m_point; }
+    virtual char_type do_thousands_sep() const { return m_sep; }
+    virtual string    do_grouping() const { return m_grouping; }
+private:
+    void __init(const __named_locale* nl)
+    {
+        if (!nl) { m_point = static_cast<charT>('.'); m_sep = static_cast<charT>(','); return; }
+        m_point = __lc_text<charT>::one(nl->point, nl->wpoint);
+        m_sep = __lc_text<charT>::one(nl->sep, nl->wsep);
+        m_grouping = nl->grouping;
+    }
+    charT  m_point, m_sep;
+    string m_grouping;
 };
 
+// a range of characters as a string that ends with a null character, which the C runtime's functions need (short
+// ones without an allocation)
+template <class charT>
+class __terminated {
+public:
+    __terminated(const charT* low, const charT* high) : m_size(static_cast<size_t>(high - low)), m_p(m_short)
+    {
+        if (m_size >= static_cast<size_t>(__short)) m_p = new charT[m_size + 1];
+        for (size_t i = 0; i < m_size; ++i) m_p[i] = low[i];
+        m_p[m_size] = charT();
+    }
+    ~__terminated() { if (m_p != m_short) delete[] m_p; }
+    const charT* begin() const { return m_p; }
+    const charT* end() const { return m_p + m_size; }
+private:
+    __terminated(const __terminated&);
+    void operator=(const __terminated&);
+    enum { __short = 96 };
+    size_t m_size;
+    charT* m_p;
+    charT  m_short[__short];
+};
+
+// collate_byname: the order of the locale (_strcoll_l, _wcscoll_l) and its sort keys (_strxfrm_l, _wcsxfrm_l). The
+// C runtime's functions end at a null character: a range that holds some is compared piece by piece, and its
+// key is the keys of the pieces with a null character between them. A piece the C runtime cannot order (it holds
+// what is no character of the locale's code page) comes after those it can, by its characters' values: the order
+// stays one order, and the keys say the same (each piece's key begins with 1 or with 2). hash is that of the key,
+// so strings that compare equal hash alike (22.2.4.1.2/3)
 template <class charT>
 class collate_byname : public collate<charT> {
 public:
     typedef basic_string<charT> string_type;
-    explicit collate_byname(const char* name, size_t refs = 0) : collate<charT>(refs) { __check_locale_name(name); }
+    explicit collate_byname(const char* name, size_t refs = 0) : collate<charT>(refs), m_nl(name) {}
+    collate_byname(const __named_ref& nl, size_t refs) : collate<charT>(refs), m_nl(nl) {}
 protected:
     virtual ~collate_byname() {}
+    virtual int do_compare(const charT* low1, const charT* high1, const charT* low2, const charT* high2) const
+    {
+        if (!m_nl.get()) return collate<charT>::do_compare(low1, high1, low2, high2);
+        const __terminated<charT> a(low1, high1), b(low2, high2);
+        const charT* p = a.begin();
+        const charT* q = b.begin();
+        for (;;) {
+            int r = __lc_call<charT>::coll(p, q, m_nl.handle());
+            if (r == __failed) r = __unordered(p, q);
+            if (r != 0) return r < 0 ? -1 : 1;
+            while (*p != charT()) ++p;
+            while (*q != charT()) ++q;
+            if (p == a.end() || q == b.end()) return q != b.end() ? -1 : p != a.end() ? 1 : 0;
+            ++p;
+            ++q;
+        }
+    }
+    virtual string_type do_transform(const charT* low, const charT* high) const
+    {
+        if (!m_nl.get()) return collate<charT>::do_transform(low, high);
+        const __terminated<charT> text(low, high);
+        string_type key;
+        for (const charT* p = text.begin(); ; ++p) {
+            const charT* piece = p;
+            while (*p != charT()) ++p;
+            const size_t length = __lc_call<charT>::xfrm(0, piece, 0, m_nl.handle());
+            if (length >= static_cast<size_t>(__failed)) {
+                key += static_cast<charT>(2);
+                key.append(piece, static_cast<size_t>(p - piece));
+            } else {
+                key += static_cast<charT>(1);
+                const size_t at = key.size();
+                key.resize(at + length + 1);
+                __lc_call<charT>::xfrm(&key[at], piece, length + 1, m_nl.handle());
+                key.resize(at + length);
+            }
+            if (p == text.end()) break;
+            key += charT();
+        }
+        return key;
+    }
+    virtual long do_hash(const charT* low, const charT* high) const
+    {
+        if (!m_nl.get()) return collate<charT>::do_hash(low, high);
+        const string_type key = do_transform(low, high);
+        return collate<charT>::do_hash(key.data(), key.data() + key.size());
+    }
+private:
+    enum { __failed = 0x7FFFFFFF };   // what the C runtime's functions return for strings they cannot order
+    // the order of two strings the C runtime has not compared
+    int __unordered(const charT* p, const charT* q) const
+    {
+        const bool a = __lc_call<charT>::xfrm(0, p, 0, m_nl.handle()) < static_cast<size_t>(__failed);
+        const bool b = __lc_call<charT>::xfrm(0, q, 0, m_nl.handle()) < static_cast<size_t>(__failed);
+        if (a != b) return a ? -1 : 1;
+        const charT* pe = p;
+        const charT* qe = q;
+        while (*pe != charT()) ++pe;
+        while (*qe != charT()) ++qe;
+        return collate<charT>::do_compare(p, pe, q, qe);
+    }
+    __named_ref m_nl;
 };
+
+// ---- named locales and locales made of two (22.1.1.2) ----
+
+// the locale of a name the C runtime knows (_create_locale's names: "de-DE", "German_Germany.1252", ...; "" is the
+// user's): the classic locale with the named facets above and <__facets>' in place of the classic ones. An unknown
+// name is a runtime_error. The locale is named as it was asked for, as in cl's library
+inline locale::__imp* locale::__named_imp(const char* name)
+{
+    const __named_ref nl(name);
+    locale made(__copy(__classic_imp()));
+    __imp* imp = made.m_imp;
+    imp->name = name;
+    __install(imp, new std::ctype_byname<char>(nl, 0), std::ctype<char>::id.__index());
+    __install(imp, new std::ctype_byname<wchar_t>(nl, 0), std::ctype<wchar_t>::id.__index());
+    __install(imp, new numpunct_byname<char>(nl, 0), numpunct<char>::id.__index());
+    __install(imp, new numpunct_byname<wchar_t>(nl, 0), numpunct<wchar_t>::id.__index());
+    __install(imp, new collate_byname<char>(nl, 0), std::collate<char>::id.__index());
+    __install(imp, new collate_byname<wchar_t>(nl, 0), std::collate<wchar_t>::id.__index());
+    __install(imp, new moneypunct_byname<char, false>(nl, 0), moneypunct<char, false>::id.__index());
+    __install(imp, new moneypunct_byname<char, true>(nl, 0), moneypunct<char, true>::id.__index());
+    __install(imp, new moneypunct_byname<wchar_t, false>(nl, 0), moneypunct<wchar_t, false>::id.__index());
+    __install(imp, new moneypunct_byname<wchar_t, true>(nl, 0), moneypunct<wchar_t, true>::id.__index());
+    __install(imp, new time_get_byname<char>(nl, 0), time_get<char>::id.__index());
+    __install(imp, new time_get_byname<wchar_t>(nl, 0), time_get<wchar_t>::id.__index());
+    __install(imp, new time_put_byname<char>(nl, 0), time_put<char>::id.__index());
+    __install(imp, new time_put_byname<wchar_t>(nl, 0), time_put<wchar_t>::id.__index());
+    __install(imp, new codecvt_byname<wchar_t, char, mbstate_t>(nl, 0), codecvt<wchar_t, char, mbstate_t>::id.__index());
+    cppparse_interlocked_increment(&imp->refs);
+    return imp;
+}
+
+// the facets of the categories cats from one (or from the locale named), the rest stay other's: every facet of
+// 22.1.1.1.1's table for the category, as the source locale has it (its own, the program's, or none where every
+// locale uses the library's)
+inline void locale::__take(__imp* to, const __imp* from, category cats)
+{
+    if (cats & collate) {
+        __carry(to, from, std::collate<char>::id.__index());
+        __carry(to, from, std::collate<wchar_t>::id.__index());
+    }
+    if (cats & ctype) {
+        __carry(to, from, std::ctype<char>::id.__index());
+        __carry(to, from, std::ctype<wchar_t>::id.__index());
+        __carry(to, from, codecvt<char, char, mbstate_t>::id.__index());
+        __carry(to, from, codecvt<wchar_t, char, mbstate_t>::id.__index());
+    }
+    if (cats & monetary) {
+        __carry(to, from, moneypunct<char, false>::id.__index());
+        __carry(to, from, moneypunct<char, true>::id.__index());
+        __carry(to, from, moneypunct<wchar_t, false>::id.__index());
+        __carry(to, from, moneypunct<wchar_t, true>::id.__index());
+        __carry(to, from, money_get<char>::id.__index());
+        __carry(to, from, money_get<wchar_t>::id.__index());
+        __carry(to, from, money_put<char>::id.__index());
+        __carry(to, from, money_put<wchar_t>::id.__index());
+    }
+    if (cats & numeric) {
+        __carry(to, from, numpunct<char>::id.__index());
+        __carry(to, from, numpunct<wchar_t>::id.__index());
+        __carry(to, from, num_get<char>::id.__index());
+        __carry(to, from, num_get<wchar_t>::id.__index());
+        __carry(to, from, num_put<char>::id.__index());
+        __carry(to, from, num_put<wchar_t>::id.__index());
+    }
+    if (cats & time) {
+        __carry(to, from, time_get<char>::id.__index());
+        __carry(to, from, time_get<wchar_t>::id.__index());
+        __carry(to, from, time_put<char>::id.__index());
+        __carry(to, from, time_put<wchar_t>::id.__index());
+    }
+    if (cats & messages) {
+        __carry(to, from, std::messages<char>::id.__index());
+        __carry(to, from, std::messages<wchar_t>::id.__index());
+    }
+}
+
+// the name of a locale made of other's facets and the categories cats of one's. 22.1.1.2 says only when it has a
+// name: when both have. Which name is the implementation's choice, and this is cl's library's: the name of the
+// locale the categories come from, whichever and however few they are, and other's when there are none (so a
+// locale with the numbers of "de-DE" alone is named "de-DE", compares equal to that locale and, made global, sets the
+// C library's whole locale to it)
+inline string locale::__combined_name(const __imp* other, const __imp* one, category cats)
+{
+    if ((cats & all) == 0) return other->name;
+    if (other->name == "*" || one->name == "*") return string("*");
+    return one->name;
+}
+
+inline locale::locale(const locale& other, const char* name, category cats) : m_imp(0)
+{
+    const locale named(name);
+    locale made(__copy(other.m_imp));
+    __take(made.m_imp, named.m_imp, cats);
+    made.m_imp->name = __combined_name(other.m_imp, named.m_imp, cats);
+    m_imp = made.m_imp;
+    cppparse_interlocked_increment(&m_imp->refs);
+}
+
+inline locale::locale(const locale& other, const locale& one, category cats) : m_imp(0)
+{
+    locale made(__copy(other.m_imp));
+    __take(made.m_imp, one.m_imp, cats);
+    made.m_imp->name = __combined_name(other.m_imp, one.m_imp, cats);
+    m_imp = made.m_imp;
+    cppparse_interlocked_increment(&m_imp->refs);
+}
 
 }
 

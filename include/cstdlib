@@ -28,6 +28,12 @@ extern "C" {
     char*         getenv(const char* name);
     int           system(const char* command);
     void          qsort(void* base, size_t count, size_t size, int (*compare)(const void*, const void*));
+    // Microsoft's: the conversions in a locale of the C runtime (<clocale>); _wctomb_s_l gives the number of bytes
+    // written through count and returns 0, or an error number for a character the locale's code page lacks
+    int           _mbtowc_l(wchar_t* out, const char* s, size_t n, _locale_t locale);
+    size_t        _mbstowcs_l(wchar_t* dst, const char* src, size_t n, _locale_t locale);
+    int           _wctomb_s_l(int* count, char* out, size_t size, wchar_t c, _locale_t locale);
+    int           ___mb_cur_max_l_func(_locale_t locale);   // (MB_CUR_MAX of a locale: the bytes of its longest character)
 }
 
 #define EXIT_SUCCESS 0

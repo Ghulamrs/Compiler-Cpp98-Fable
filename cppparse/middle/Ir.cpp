@@ -38,6 +38,7 @@ bool IrInst::pure() const
     switch (op) {
     case Const: case FConst: case StrConst: case Copy: case AddrLocal: case AddrGlobal: case AddrField: case AddrIndex:
     case Bin: case Un: case Cmp: case Conv: case Phi:
+    case AddrTls:   // the thread's block plus an offset: no memory the program writes (docs/design-selfhost.md 4.1)
         return true;
     default:
         return false;
@@ -84,6 +85,8 @@ const char* opName(IrInst::Op op)
     case IrInst::CatchEnd: return "catchend";
     case IrInst::Unreachable: return "unreachable";
     case IrInst::Phi: return "phi";
+    case IrInst::AddrTls: return "addrtls";
+    case IrInst::Intrinsic: return "intrinsic";
     default: return "nop";
     }
 }
@@ -190,10 +193,22 @@ std::string printIr(const IrFunction& f)
 {
     std::ostringstream s;
     s << "function " << f.name << (f.retType ? "  -> " + f.retType->str() : "") << "\n";
+    // -g (the function has a type in the module's description): the debug fields as well (docs/design-codeview.md 5.6)
+    const bool debug = f.debugType != 0;
     for (size_t i = 0; i < f.locals.size(); ++i) {
         const IrLocal& l = f.locals[i];
         s << "  local" << i << ": " << (l.type ? l.type->str() : "?") << " " << l.name << "  size " << l.size
-          << (l.isParam ? "  (parameter)" : "") << (l.addressTaken ? "  address-taken" : "") << "\n";
+          << (l.isParam ? "  (parameter)" : "") << (l.addressTaken ? "  address-taken" : "");
+        if (debug && l.source)
+            s << "  [-g " << l.debugName << " T" << l.debugType << " block " << l.block
+              << (l.debugParam >= 0 ? " parameter " + intToString(l.debugParam) : std::string()) << (l.byAddress ? " by address" : "") << "]";
+        s << "\n";
+    }
+    if (debug) {
+        s << "  -g: type T" << f.debugType << (f.debugInline ? ", inline" : "");
+        for (size_t k = 0; k < f.debugBlocks.size(); ++k) s << (k ? ", " : "; blocks ") << (k + 1) << " in " << f.debugBlocks[k];
+        for (size_t k = 0; k < f.debugStatics.size(); ++k) s << (k ? ", " : "; static ") << f.debugStatics[k].name << " T" << f.debugStatics[k].type << " block " << f.debugStatics[k].block;
+        s << "\n";
     }
     for (size_t i = 0; i < f.notes.size(); ++i) s << "  note: " << f.notes[i] << "\n";
     for (size_t b = 0; b < f.blocks.size(); ++b) {
@@ -203,7 +218,7 @@ std::string printIr(const IrFunction& f)
         s << "\n";
         for (size_t k = 0; k < blk.insts.size(); ++k) {
             const IrInst& in = blk.insts[k];
-            s << "    " << padRight(in.str(), 60) << (in.line ? " ; L" + intToString(in.line) : "") << "\n";
+            s << "    " << padRight(in.str(), 60) << (in.line ? " ; L" + intToString(in.line) : "") << (debug ? " @" + intToString(in.scope) : "") << "\n";
         }
     }
     return s.str();

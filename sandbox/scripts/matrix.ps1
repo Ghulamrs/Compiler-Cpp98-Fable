@@ -6,9 +6,11 @@
 #      oracle-clang-cpp98.txt and oracle-cl.txt next to the driver; otherwise they are compared with those files
 #   3. compiles matrix.cpp and solver.cpp with cppparse --compile6 --msvc-mangling at -O0..-O3, links them with
 #      the cl-built driver and the exception runtime, and requires the output to equal both oracles
-param([switch]$UpdateOracle, [string]$Compiler = "")
+# -Linker ms|gride: the linker of every program, the references' too (toolset.ps1, Link-Program)
+param([switch]$UpdateOracle, [string]$Compiler = "", [string]$Linker = "")
 . "$PSScriptRoot\toolset.ps1"
 if ($Compiler -ne "") { $Exe = (Resolve-Path $Compiler).Path }
+Assert-Linker
 Set-Location $Sandbox
 $ErrorActionPreference = "Continue"
 $clang = "$VsRoot\VC\Tools\Llvm\x64\bin\clang++.exe"
@@ -49,14 +51,22 @@ foreach ($f in $lib + $driver) {
 Write-Host "=== reference builds ==="
 $outputs = @{}
 foreach ($lvl in @("O0", "O2")) {
-    $msg = & $clang @c98 "-$lvl" @lib $driver -o "$out\matrix-clang-$lvl.exe" 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { Report "clang -$lvl build" $false $msg; continue }
+    # each unit by clang -c, the objects by Link-Program
+    $msg = ""; $cobjs = @(); $rc = 0
+    foreach ($f in $lib + $driver) {
+        $cobj = "$out\" + [IO.Path]::GetFileNameWithoutExtension($f) + "-clang-$lvl.obj"
+        $msg += & $clang @c98 "-$lvl" -c $f -o $cobj 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+        $cobjs += $cobj
+    }
+    if ($rc -eq 0) { $msg += Link-Program $cobjs "$out\matrix-clang-$lvl.exe" | Out-String; $rc = $LASTEXITCODE }
+    if ($rc -ne 0) { Report "clang -$lvl build" $false $msg; continue }
     $r = Run "$out\matrix-clang-$lvl.exe"
     Report "clang -$lvl build runs, ALL OK" ($r.Code -eq 0 -and $r.Text -match 'ALL OK') $r.Text
     $outputs["clang-$lvl"] = $r.Text
 }
 foreach ($lvl in @("Od", "O2")) {
-    $msg = & $cl /nologo /EHsc /W4 /WX "/$lvl" /I.. /I..\examples\sample-matrix "/Fo$out\" "/Fe$out\matrix-cl-$lvl.exe" @lib $driver 2>&1 | Out-String
+    $msg = Build-Program (@("/EHsc", "/W4", "/WX", "/$lvl", "/I..", "/I..\examples\sample-matrix", "/Fo$out\") + $lib + @($driver)) @("$out\matrix.obj", "$out\solver.obj", "$out\driver-matrix.obj") "$out\matrix-cl-$lvl.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Report "cl /$lvl build" $false $msg; continue }
     $r = Run "$out\matrix-cl-$lvl.exe"
     Report "cl /$lvl build runs, ALL OK" ($r.Code -eq 0 -and $r.Text -match 'ALL OK') $r.Text
@@ -90,7 +100,7 @@ foreach ($lvl in 0..3) {
         $objs += "$out\${name}6.obj"
     }
     if (-not $ok) { continue }
-    $msg = & $link /nologo /SUBSYSTEM:CONSOLE "/OUT:$out\matrix-cppparse-O$lvl.exe" "$out\driver-matrix.obj" @objs "$out\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Out-String
+    $msg = Link-Program (@("$out\driver-matrix.obj") + $objs + @("$out\cppparse_rt.obj")) "$out\matrix-cppparse-O$lvl.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Report "cppparse -O$lvl link" $false $msg; continue }
     $r = Run "$out\matrix-cppparse-O$lvl.exe"
     Report "cppparse -O${lvl}: runs, ALL OK (exit $($r.Code))" ($r.Code -eq 0 -and $r.Text -match 'ALL OK') $r.Text

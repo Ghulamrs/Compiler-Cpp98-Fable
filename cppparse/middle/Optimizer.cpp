@@ -89,7 +89,7 @@ int  log2of(long v) { int n = 0; while (v > 1) { v >>= 1; ++n; } return n; }
 std::string instKey(const IrInst& in)
 {
     // addresses are the same whatever the constness of the pointee type
-    bool addr = in.op == IrInst::AddrField || in.op == IrInst::AddrIndex || in.op == IrInst::AddrLocal || in.op == IrInst::AddrGlobal;
+    bool addr = in.op == IrInst::AddrField || in.op == IrInst::AddrIndex || in.op == IrInst::AddrLocal || in.op == IrInst::AddrGlobal || in.op == IrInst::AddrTls;
     std::string k = intToString(static_cast<int>(in.op)) + "|" + in.sub + "|" + intToString(static_cast<int>(in.extra)) + "|" + (in.type && !addr ? in.type->str() : "") + "|";
     for (size_t a = 0; a < in.args.size(); ++a) k += operandKey(in.args[a]) + ",";   // floating constants by their bits
     return k;
@@ -334,7 +334,7 @@ int Optimizer::constantFold(IrFunction& f)
                     double r = foldFloat(in.sub, x, y, ok, isCmp, c);
                     if (!ok) continue;
                     if (!isCmp && in.type && in.type->kind == Type::Float) r = static_cast<double>(static_cast<float>(r));
-                    IrInst n; n.dst = in.dst; n.line = in.line; n.type = in.type;
+                    IrInst n; n.dst = in.dst; n.line = in.line; n.scope = in.scope; n.type = in.type;
                     if (isCmp) { n.op = IrInst::Const; n.args.push_back(IrOperand::imm(c, in.type)); }
                     else { n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(r, in.type)); }
                     in = n; ++changes;
@@ -344,19 +344,19 @@ int Optimizer::constantFold(IrFunction& f)
                     if (in.op == IrInst::Bin && isWideInt(in.type)) ok = foldWideInt(in.sub, in.args[0].ival, in.args[1].ival, r);
                     else r = foldInt(in.sub, in.args[0].ival, in.args[1].ival, ok);
                     if (!ok) continue;
-                    IrInst n; n.op = IrInst::Const; n.dst = in.dst; n.line = in.line; n.type = in.type;
+                    IrInst n; n.op = IrInst::Const; n.dst = in.dst; n.line = in.line; n.scope = in.scope; n.type = in.type;
                     n.args.push_back(IrOperand::imm(r, in.type));
                     in = n; ++changes;
                 }
             } else if (in.op == IrInst::Un && in.args.size() == 1 && in.args[0].isConst()) {
-                IrInst n; n.dst = in.dst; n.line = in.line; n.type = in.type;
+                IrInst n; n.dst = in.dst; n.line = in.line; n.scope = in.scope; n.type = in.type;
                 if (in.sub == "neg" && in.args[0].kind == IrOperand::Imm) { n.op = IrInst::Const; n.args.push_back(IrOperand::imm(-in.args[0].ival, in.type)); }
                 else if (in.sub == "fneg" && in.args[0].kind == IrOperand::FImm) { n.op = IrInst::FConst; n.args.push_back(IrOperand::fimm(-in.args[0].fval, in.type)); }
                 else if (in.sub == "not" && in.args[0].kind == IrOperand::Imm) { n.op = IrInst::Const; n.args.push_back(IrOperand::imm(~in.args[0].ival, in.type)); }
                 else continue;
                 in = n; ++changes;
             } else if (in.op == IrInst::Conv && in.args.size() == 1 && in.args[0].isConst() && in.type) {
-                IrInst n; n.dst = in.dst; n.line = in.line; n.type = in.type;
+                IrInst n; n.dst = in.dst; n.line = in.line; n.scope = in.scope; n.type = in.type;
                 const IrOperand& o = in.args[0];
                 if (in.type->isFloating()) {
                     double d = o.kind == IrOperand::FImm ? o.fval : static_cast<double>(o.ival);
@@ -499,7 +499,7 @@ int Optimizer::copyPropagation(IrFunction& f)
                 } else if (in.dst >= 0) mem[in.args[0].id] = IrOperand::temp(in.dst, in.type);
                 continue;
             }
-            if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::CatchParam || in.op == IrInst::StoreGlobal) mem.clear();
+            if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Intrinsic || in.op == IrInst::CatchParam || in.op == IrInst::StoreGlobal) mem.clear();
         }
     }
     for (size_t b = 0; b < f.blocks.size(); ++b) {
@@ -527,7 +527,7 @@ int Optimizer::algebraic(IrFunction& f)
             IrOperand& y = in.args[1];
             const std::string& s = in.sub;
             bool yImm = y.kind == IrOperand::Imm, xImm = x.kind == IrOperand::Imm;
-            IrInst n; n.dst = in.dst; n.line = in.line; n.type = in.type;
+            IrInst n; n.dst = in.dst; n.line = in.line; n.scope = in.scope; n.type = in.type;
             if ((s == "add" || s == "sub" || s == "or" || s == "xor" || s == "shl" || s == "ashr" || s == "lshr") && yImm && y.ival == 0) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
             if ((s == "add" || s == "or" || s == "xor") && xImm && x.ival == 0) { n.op = IrInst::Copy; n.args.push_back(y); in = n; ++changes; continue; }
             if ((s == "mul" || s == "sdiv" || s == "udiv") && yImm && y.ival == 1) { n.op = IrInst::Copy; n.args.push_back(x); in = n; ++changes; continue; }
@@ -559,7 +559,7 @@ int Optimizer::localCse(IrFunction& f)
             std::string key = instKey(in);
             std::map<std::string, int>::iterator it = seen.find(key);
             if (it == seen.end()) { seen[key] = in.dst; continue; }
-            IrInst n; n.op = IrInst::Copy; n.dst = in.dst; n.type = in.type; n.line = in.line;
+            IrInst n; n.op = IrInst::Copy; n.dst = in.dst; n.type = in.type; n.line = in.line; n.scope = in.scope;
             n.args.push_back(IrOperand::temp(it->second, in.type));
             in = n;
             ++changes;
@@ -617,7 +617,7 @@ int Optimizer::deadStores(IrFunction& f)
             }
             if (in.op == IrInst::LoadLocal && !in.args.empty()) lastStore.erase(in.args[0].id);
             if (in.op == IrInst::AddrLocal && !in.args.empty()) lastStore.erase(in.args[0].id);
-            if (in.op == IrInst::Call || in.op == IrInst::VCall || in.isTerminator()) lastStore.clear();
+            if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Intrinsic || in.isTerminator()) lastStore.clear();
             kept.push_back(in);
         }
         std::vector<IrInst> clean;
@@ -932,7 +932,7 @@ int Optimizer::licm(IrFunction& f)
                 const IrInst& in = blk.insts[i];
                 if (in.dst >= 0) loopTemps.insert(in.dst);
                 if ((in.op == IrInst::StoreLocal || in.op == IrInst::AddrLocal) && !in.args.empty() && in.args[0].kind == IrOperand::Local) modifiedLocals.insert(in.args[0].id);
-                if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Throw || in.op == IrInst::TryBegin ||
+                if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Intrinsic || in.op == IrInst::Throw || in.op == IrInst::TryBegin ||
                     in.op == IrInst::TryEnd || in.op == IrInst::CatchParam || in.op == IrInst::CatchEnd) hasCall = true;
                 if ((in.op == IrInst::StoreMem || in.op == IrInst::StoreGlobal ||
                      (in.op == IrInst::StoreLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local && f.locals[static_cast<size_t>(in.args[0].id)].addressTaken)) &&
@@ -1006,6 +1006,29 @@ int loweredSize(const IrFunction& g)
     return n;
 }
 
+// a function that does nothing but pass its arguments on to one call, with at most one argument more (the member
+// templates of the library's containers: insert(pos, first, last) is insertRange(pos, first, last, tag)). Inlining it
+// puts a call in the place of a call, so its size is no measure: with five arguments it is over the limit of the small
+// functions, and is the cheapest inlining there is
+bool forwardsToOneCall(const IrFunction& g)
+{
+    int calls = 0;
+    size_t callArgs = 0;
+    for (size_t b = 0; b < g.blocks.size(); ++b)
+        for (size_t i = 0; i < g.blocks[b].insts.size(); ++i) {
+            const IrInst& in = g.blocks[b].insts[i];
+            switch (in.op) {
+            case IrInst::Nop: case IrInst::Phi: case IrInst::Br: case IrInst::Ret: break;
+            case IrInst::LoadLocal:
+                if (in.args.empty() || in.args[0].kind != IrOperand::Local || !promotableLocal(g, in.args[0].id)) return false;
+                break;
+            case IrInst::Call: ++calls; callArgs = in.args.size(); break;
+            default: return false;
+            }
+        }
+    return calls == 1 && callArgs <= static_cast<size_t>(g.paramCount) + 1;
+}
+
 } // namespace
 
 int Optimizer::inlineCalls(IrFunction& f, int maxInsts, int maxInstsInLoop)
@@ -1050,8 +1073,9 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts, int maxInstsInLoop)
             if (it == m_functions.end()) continue;
             const IrFunction& g = *it->second;
             if (g.replaceable) continue;   // the program may define the function that is called: this body is only the default
+            if (g.keepsFrame) continue;    // _AddressOfReturnAddress names the function's own frame (TargetIntrinsics)
             const bool hot = b < inLoop.size() && inLoop[b];
-            if (&g == &f || g.name == f.name || g.hasTry || loweredSize(g) > (hot ? maxInstsInLoop : maxInsts)) continue;
+            if (&g == &f || g.name == f.name || g.hasTry || (loweredSize(g) > (hot ? maxInstsInLoop : maxInsts) && !forwardsToOneCall(g))) continue;
             if (changes >= maxPerCaller || f.instCount() + g.instCount() > growthLimit) continue;
             if (g.blocks.empty()) continue;
             bool hasUnreachable = false;
@@ -1071,12 +1095,12 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts, int maxInstsInLoop)
 
             // new locals for the callee's locals
             int localBase = static_cast<int>(f.locals.size());
-            for (size_t l = 0; l < g.locals.size(); ++l) { IrLocal nl = g.locals[l]; nl.name = g.name + "." + nl.name; nl.isParam = false; nl.isThis = false; f.locals.push_back(nl); }
+            for (size_t l = 0; l < g.locals.size(); ++l) { IrLocal nl = g.locals[l]; nl.name = g.name + "." + nl.name; nl.isParam = false; nl.isThis = false; nl.source = false; nl.block = 0; nl.debugType = 0; nl.debugParam = -1; f.locals.push_back(nl); }
             int resultLocal = -1;
             if (call.dst >= 0) { IrLocal rl; rl.name = g.name + ".result"; rl.type = call.type; rl.size = 8; rl.align = 8; f.locals.push_back(rl); resultLocal = static_cast<int>(f.locals.size() - 1); }
             // argument stores
             for (size_t a = 0; a < call.args.size(); ++a) {
-                IrInst st; st.op = IrInst::StoreLocal; st.type = g.locals[a].type; st.line = call.line;
+                IrInst st; st.op = IrInst::StoreLocal; st.type = g.locals[a].type; st.line = call.line; st.scope = call.scope;
                 st.args.push_back(IrOperand::local(localBase + static_cast<int>(a), g.locals[a].type));
                 st.args.push_back(call.args[a]);
                 f.blocks[b].insts.push_back(st);
@@ -1102,14 +1126,15 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts, int maxInstsInLoop)
                     // the copied code belongs to the call's line in the line table (the callee may be in another file;
                     // without inlinee records a debugger steps the call as one line, as cl's /Ob0 user sees it)
                     in.line = call.line;
+                    in.scope = call.scope;
                     if (in.op == IrInst::Ret) {
                         if (resultLocal >= 0 && !in.args.empty()) {
-                            IrInst st; st.op = IrInst::StoreLocal; st.type = call.type; st.line = call.line;
+                            IrInst st; st.op = IrInst::StoreLocal; st.type = call.type; st.line = call.line; st.scope = call.scope;
                             st.args.push_back(IrOperand::local(resultLocal, call.type));
                             st.args.push_back(in.args[0]);
                             dst.insts.push_back(st);
                         }
-                        IrInst br; br.op = IrInst::Br; br.line = call.line; br.args.push_back(IrOperand::block(contId));
+                        IrInst br; br.op = IrInst::Br; br.line = call.line; br.scope = call.scope; br.args.push_back(IrOperand::block(contId));
                         dst.insts.push_back(br);
                         continue;
                     }
@@ -1117,10 +1142,10 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts, int maxInstsInLoop)
                 }
             }
             // jump into the clone; load the result in the continuation
-            IrInst jmp; jmp.op = IrInst::Br; jmp.line = call.line; jmp.args.push_back(IrOperand::block(blockBase));
+            IrInst jmp; jmp.op = IrInst::Br; jmp.line = call.line; jmp.scope = call.scope; jmp.args.push_back(IrOperand::block(blockBase));
             f.blocks[b].insts.push_back(jmp);
             if (resultLocal >= 0) {
-                IrInst ld; ld.op = IrInst::LoadLocal; ld.dst = call.dst; ld.type = call.type; ld.line = call.line;
+                IrInst ld; ld.op = IrInst::LoadLocal; ld.dst = call.dst; ld.type = call.type; ld.line = call.line; ld.scope = call.scope;
                 ld.args.push_back(IrOperand::local(resultLocal, call.type));
                 f.blocks[static_cast<size_t>(contId)].insts.insert(f.blocks[static_cast<size_t>(contId)].insts.begin(), ld);
             }
@@ -1169,7 +1194,7 @@ int Optimizer::unrollLoops(IrFunction& f, int maxTrip, int maxBody)
             bodyInsts += static_cast<int>(blk.insts.size());
             for (size_t i = 0; i < blk.insts.size(); ++i) {
                 const IrInst& in = blk.insts[i];
-                if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::TryBegin || in.op == IrInst::Throw) { stores = 99; break; }
+                if (in.op == IrInst::Call || in.op == IrInst::VCall || in.op == IrInst::Intrinsic || in.op == IrInst::TryBegin || in.op == IrInst::Throw) { stores = 99; break; }
                 if (in.op == IrInst::StoreLocal && in.args[0].id == ivar) {
                     ++stores;
                     if (in.args[1].kind != IrOperand::Temp) { stores = 99; break; }

@@ -19,18 +19,24 @@ extern "C" {
     size_t     strftime(char* buffer, size_t n, const char* format, const struct tm* t);
     double     _difftime64(time_t a, time_t b);
     time_t     _mktime64(struct tm* t);
+    // Microsoft's: strftime and wcsftime in a locale of the C runtime (<clocale>)
+    size_t     _strftime_l(char* buffer, size_t n, const char* format, const struct tm* t, _locale_t locale);
+    size_t     _wcsftime_l(wchar_t* buffer, size_t n, const wchar_t* format, const struct tm* t, _locale_t locale);
+
+    // the five functions of 64-bit time_t under their standard names: inline, as the UCRT's own header defines them
+    // (functions, not macros: a macro time would rename every time there is, std::locale::time among them)
+    inline time_t     time(time_t* out) { return _time64(out); }
+    inline struct tm* localtime(const time_t* t) { return _localtime64(t); }
+    inline struct tm* gmtime(const time_t* t) { return _gmtime64(t); }
+    inline double     difftime(time_t a, time_t b) { return _difftime64(a, b); }
+    inline time_t     mktime(struct tm* t) { return _mktime64(t); }
 }
 
 #define CLOCKS_PER_SEC 1000
-#define time      _time64
-#define localtime _localtime64
-#define gmtime    _gmtime64
-#define difftime  _difftime64
-#define mktime    _mktime64
 
 namespace std {
     using ::clock_t; using ::time_t; using ::tm;
-    using ::clock; using ::strftime;
+    using ::clock; using ::strftime; using ::time; using ::localtime; using ::gmtime; using ::difftime; using ::mktime;
 }
 
 #endif

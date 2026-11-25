@@ -115,6 +115,15 @@ int main(int argc, char**)
     expect("flakyY attempts", g_flakyAttempts[1], 2);
     expect("flakyY built", g_flakyBuilt[1], 1);
     }
+    // the statics of a local class's member functions: one of each for cl's inlined copy and cppparse's
+    int lc1 = localClassCount();
+    int lc2 = cpp_localClassCount();
+    int lc3 = localClassCount();
+    int lc4 = cpp_localClassCount();
+    expect("local class static: cl", lc1, 1500);
+    expect("local class static: cppparse", lc2, 2501);
+    expect("local class static: cl again", lc3, 3502);
+    expect("local class static: cppparse", lc4, 4503);
     if (failures == 0) printf("ALL OK\n");
     return failures == 0 ? 0 : 1;
 }

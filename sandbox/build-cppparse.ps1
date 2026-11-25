@@ -20,10 +20,15 @@
 #   -NoTests          build only
 #   -Exe <path>       no build: run the tests with that compiler, e.g. the self-built
 #                     sandbox\out\selfhost\cppparse-self.exe (see scripts\selfhost.ps1)
+#   -Linker ms|gride  the linker of every program the build and the tests link (scripts\toolset.ps1, Link-Program):
+#                     Microsoft's link (the default, or the environment variable CPPPARSE_LINKER) or GRIDE's link.
+#                     Under gride what is known to differ is printed "not under GRIDE's link: ..." and counted at
+#                     the end (docs\design-selfhost.md 4.6); where GRIDE is not found the script exits with 77
 param(
     [ValidateSet("Release", "Debug")] [string] $Config = "Release",
     [switch] $NoTests,
-    [string] $Exe = ""
+    [string] $Exe = "",
+    [string] $Linker = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,7 +36,7 @@ $ErrorActionPreference = "Stop"
 $Sandbox = $PSScriptRoot
 $Src     = Split-Path $Sandbox -Parent
 # cppparse's source folders (see scripts\toolset.ps1): each is an include folder of the build as well
-$SourceDirs = @("driver", "common", "frontend", "middle", "backend", "eh", "analyzer", "analyzer\report")
+$SourceDirs = @("driver", "common", "frontend", "middle", "backend", "eh", "cv", "target", "analyzer", "analyzer\report")
 $sourceIncludes = @(); foreach ($d in $SourceDirs) { $sourceIncludes += "/I..\cppparse\$d" }
 
 # PowerShell names are case-insensitive, so $Exe is also the $exe the tests run
@@ -57,8 +62,15 @@ $cl = "$Msvc\bin\Hostx64\x64\cl.exe"
 New-Item -ItemType Directory -Force "$Sandbox\out\tmp" | Out-Null
 $env:TMP  = "$Sandbox\out\tmp"
 $env:TEMP = "$Sandbox\out\tmp"
+# the linker setting, Link-Program and Build-Program, and where GRIDE is (toolset.ps1 sets $Exe to its default: the
+# one given here is kept)
+$exeGiven = $Exe
+. "$Sandbox\scripts\toolset.ps1"
+$Exe = $exeGiven
+Assert-Linker
 
 Write-Host "=== Toolset: MSVC $MsvcVer, Windows SDK $SdkVer ==="
+if ($Linker -eq "gride") { Write-Host "=== Linker: GRIDE's link, $GrideLink ===" }
 
 Push-Location $Sandbox
 try {
@@ -75,8 +87,10 @@ try {
         $exe = "$exeDir\cppparse.exe"
         Write-Host "=== Building cppparse.exe ($Config) ==="
         $sources = @(); foreach ($d in $SourceDirs) { $sources += @(Get-ChildItem "..\cppparse\$d\*.cpp" | ForEach-Object { "..\cppparse\$d\" + $_.Name }) }
-        $linkFlags = @(); if ($Config -eq "Debug") { $linkFlags = @("/link", "/DEBUG") }
-        $output = & $cl /nologo /EHsc /W4 /permissive- @cflags @sourceIncludes "/Fo$objDir\" "/Fe$exe" "/Fd$objDir\cppparse.pdb" @sources @linkFlags 2>&1 | Out-String
+        # (Debug: /MTd's objects name the debug C runtime themselves, so the link adds no library of its own)
+        $linkFlags = @(); $linkLibs = $null; if ($Config -eq "Debug") { $linkFlags = @("/DEBUG"); $linkLibs = @() }
+        $objects = @($sources | ForEach-Object { "$objDir\" + [IO.Path]::GetFileNameWithoutExtension($_) + ".obj" })
+        $output = Build-Program (@("/EHsc", "/W4", "/permissive-") + $cflags + $sourceIncludes + @("/Fo$objDir\", "/Fd$objDir\cppparse.pdb") + $sources) $objects $exe $linkFlags $linkLibs | Out-String
         Write-Host $output
         if ($LASTEXITCODE -ne 0) { throw "cppparse failed to compile (exit code $LASTEXITCODE)" }
         if ($output -match "warning C") { throw "cppparse compiled with warnings (W4 must be clean)" }
@@ -375,16 +389,17 @@ try {
     New-Item -ItemType Directory -Force "out\x64" | Out-Null
     $failed = 0
     # version 5: the exception runtime, linked with every driver
-    $rtOut = & $cl /nologo /c /EHsc /W3 "/Foout\x64\cppparse_rt.obj" "..\runtime\cppparse_rt.cpp" 2>&1 | Out-String
+    # cl's object of the runtime, or the compiler under test's with CPPPARSE_RT=cppparse (toolset.ps1 Build-Runtime, row P1 stage 3)
+$rtOut = Build-Runtime "out\x64\cppparse_rt.obj"
     if ($LASTEXITCODE -ne 0) { Write-Host $rtOut; throw "cppparse_rt.cpp failed to compile" }
-    Write-Host "  ok   runtime cppparse_rt.cpp compiled"
+    Write-Host "  ok   runtime cppparse_rt.cpp compiled$(if ($env:CPPPARSE_RT -eq 'cppparse') { ' by cppparse' })"
     foreach ($lvl in @(0, 2, 3)) {
         $asmPath = "out\opt\opt$lvl.asm"
         if (-not (Test-Path $asmPath)) { Write-Host "  FAIL missing $asmPath"; $failed++; continue }
         $mlOut = & $ml64 /nologo /c "/Foout\x64\opt$lvl.obj" $asmPath 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL ml64 rejected opt$lvl.asm:"; Write-Host $mlOut; $failed++; continue }
         Write-Host "  ok   ml64 assembled opt$lvl.asm"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\driver$lvl.exe" "..\examples\sample-opt-driver\driver.cpp" "out\x64\opt$lvl.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-opt-driver\driver.cpp") @("out\x64\driver.obj", "out\x64\opt$lvl.obj", "out\x64\cppparse_rt.obj") "out\x64\driver$lvl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with opt$lvl.obj:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\driver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   driver$lvl.exe: all results correct (-O$lvl)" }
@@ -432,7 +447,7 @@ try {
         $ErrorActionPreference = $eap
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path "out\x64\$nm.obj")) { Write-Host "  FAIL --obj at -O$lvl $($variant[1]):"; Write-Host $out; $failed++; continue }
         Write-Host "  ok   own COFF writer produced $nm.obj (-O$lvl $($variant[1]))"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\${nm}driver.exe" "..\examples\sample-opt-driver\driver.cpp" "out\x64\$nm.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-opt-driver\driver.cpp") @("out\x64\driver.obj", "out\x64\$nm.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}driver.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of driver with $nm.obj:"; Write-Host $clOut; $failed++; continue }
         Write-Host "  ok   linked $nm.obj with the MSVC-compiled driver"
         $run = & ".\out\x64\${nm}driver.exe" 2>&1 | Out-String
@@ -494,7 +509,7 @@ try {
         $missing = @($clSyms | Where-Object { $ourSyms -notcontains $_ })
         if ($missing.Count -eq 0) { Write-Host "  ok   all $($clSyms.Count) function names cl produced are spelled identically by cppparse" }
         else { Write-Host "  FAIL $($missing.Count) of $($clSyms.Count) decorated names differ:"; $missing | ForEach-Object { Write-Host "    cl: $_" }; $ourSyms | Select-Object -First 40 | ForEach-Object { Write-Host "    ours: $_" }; $failed++ }
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\nativedriver.exe" "..\examples\sample-opt-driver\driver-native.cpp" "out\x64\msvc.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-opt-driver\driver-native.cpp") @("out\x64\driver-native.obj", "out\x64\msvc.obj", "out\x64\cppparse_rt.obj") "out\x64\nativedriver.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the native-declaration driver:"; Write-Host $clOut; $failed++ }
         else {
             Write-Host "  ok   linked driver-native.cpp (plain C++ declarations) with msvc.obj"
@@ -607,7 +622,7 @@ try {
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 at -O$lvl :"; Write-Host $c6; $failed++; continue }
         Write-Host "  ok   version 6 pipeline produced $obj (-O$lvl)"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\v6driver$lvl.exe" "..\examples\sample-opt-driver\driver-native.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-opt-driver\driver-native.cpp") @("out\x64\driver-native.obj", $obj, "out\x64\cppparse_rt.obj") "out\x64\v6driver$lvl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the native driver with the version 6 object:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\v6driver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   v6driver$lvl.exe: all results correct (-O$lvl, version 6 front end)" }
@@ -633,7 +648,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n "align$lvl" "..\examples\sample-align\align.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\align${lvl}6.obj")) { Write-Host "  FAIL sample-align at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\aligndriver$lvl.exe" /I..\examples\sample-align "..\examples\sample-align-driver\driver-align.cpp" "out\x64\align${lvl}6.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "/I..\examples\sample-align", "..\examples\sample-align-driver\driver-align.cpp") @("out\x64\driver-align.obj", "out\x64\align${lvl}6.obj", "out\x64\cppparse_rt.obj") "out\x64\aligndriver$lvl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the alignment driver (-O$lvl):"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\aligndriver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   aligndriver$lvl.exe: pack and align layouts equal cl's, globals read and aligned (-O$lvl)" }
@@ -651,7 +666,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n "layout$lvl" "..\examples\sample-layout\layout.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\layout${lvl}6.obj") -or $c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL sample-layout at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\layoutdriver$lvl.exe" /I..\examples\sample-layout "..\examples\sample-layout-driver\driver-layout.cpp" "out\x64\layout${lvl}6.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "/I..\examples\sample-layout", "..\examples\sample-layout-driver\driver-layout.cpp") @("out\x64\driver-layout.obj", "out\x64\layout${lvl}6.obj", "out\x64\cppparse_rt.obj") "out\x64\layoutdriver$lvl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the layout driver (-O$lvl):"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\layoutdriver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   layoutdriver$lvl.exe: class layouts equal cl's, shared objects read back (-O$lvl)" }
@@ -664,7 +679,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n "abi$lvl" "..\examples\sample-abi\abi.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\abi${lvl}6.obj") -or $c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL sample-abi at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\abidriver$lvl.exe" /I..\examples\sample-abi "..\examples\sample-abi-driver\driver-abi.cpp" "out\x64\abi${lvl}6.obj" "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "/I..\examples\sample-abi", "..\examples\sample-abi-driver\driver-abi.cpp") @("out\x64\driver-abi.obj", "out\x64\abi${lvl}6.obj", "out\x64\cppparse_rt.obj") "out\x64\abidriver$lvl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the calling-convention driver (-O$lvl):"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\abidriver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   abidriver$lvl.exe: class arguments and results cross cl and cppparse both ways (-O$lvl)" }
@@ -682,7 +697,7 @@ try {
         foreach ($order in @("cppparse-first", "cl-first")) {
             $objs = if ($order -eq "cl-first") { @("out\x64\driver-statics.obj", "out\x64\statics${lvl}6.obj") } else { @("out\x64\statics${lvl}6.obj", "out\x64\driver-statics.obj") }
             $sexe = "out\x64\staticsdriver$lvl-$order.exe"
-            $lo = & $cl /nologo "/Fe$sexe" @objs "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+            $lo = Link-Program ($objs + @("out\x64\cppparse_rt.obj")) $sexe | Out-String
             if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the statics driver (-O$lvl, $order):"; Write-Host $lo; $failed++; continue }
             $sargs = @(); if ($order -eq "cl-first") { $sargs = @("cl-copies") }
             $run = & ".\$sexe" @sargs 2>&1 | Out-String
@@ -744,7 +759,7 @@ try {
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 of sample-life at -O$lvl :"; Write-Host $c6; $failed++; continue }
         if ($c6 -match 'sema: 0 error') { Write-Host "  ok   sample-life analysed without errors (-O$lvl)" } else { Write-Host "  FAIL sample-life has semantic errors:"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo /EHsc /W3 "/DLIFE_NRVO=$([int]($lvl -ge 1))" "/Foout\x64\" "/Feout\x64\lifedriver$lvl.exe" "..\examples\sample-life-driver\driver-life.cpp" $obj "out\x64\cppparse_rt.obj" 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/DLIFE_NRVO=$([int]($lvl -ge 1))", "/Foout\x64\", "..\examples\sample-life-driver\driver-life.cpp") @("out\x64\driver-life.obj", $obj, "out\x64\cppparse_rt.obj") "out\x64\lifedriver$lvl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the lifetime driver:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\lifedriver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   lifedriver$lvl.exe: all 24 lifetime checks correct (-O$lvl)" }
@@ -775,7 +790,7 @@ try {
         }
         if ($objs.Count -ne 5) { continue }
         Write-Host "  ok   the library samples and libcpp/iostream.cpp compile without errors (-O$lvl)"
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\libdriver$lvl.exe" "..\examples\sample-lib-driver\driver-lib.cpp" @objs "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-lib-driver\driver-lib.cpp") (@("out\x64\driver-lib.obj") + $objs + @("out\x64\cppparse_rt.obj")) "out\x64\libdriver$lvl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the library driver (COMDAT objects from four units):"; Write-Host $clOut; $failed++; continue }
         Write-Host "  ok   four objects link: inline functions and template instantiations are COMDAT"
         $run = & ".\out\x64\libdriver$lvl.exe" 2>&1 | Out-String
@@ -867,9 +882,13 @@ try {
     # and asks for storage no allocation function can give (row G11); replacenew.cpp, replacepart.cpp and replacearray.cpp
     # define allocation functions of their own, which replace libcpp's when the program is linked: operator new and
     # operator delete, operator new alone, the array forms alone (row G17); facets.cpp uses codecvt and the time, monetary
-    # and messages facets of the classic locale (row G22)
-    foreach ($prog in @("strings", "wstreams", "streambuf", "complex", "valarray", "strstream", "locale", "threads", "buffers", "complexf", "numfacets", "bigfile", "cheaders", "vector", "newhandler", "replacenew", "replacepart", "replacearray", "facets")) {
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\${prog}_cl.exe" "..\examples\sample-lib\$prog.cpp" 2>&1 | Out-String
+    # and messages facets of the classic locale (row G22); namedlocale.cpp the locales "de-DE", "German_Germany.1252",
+    # "en-US" and "French_France.1252" facet by facet, the locales made of two, locale::global and eight threads making
+    # locales at once (row G28; a name the C runtime of the machine lacks is reported and left out by both builds);
+    # ranges.cpp gives the range members of the containers and of basic_string every kind of iterator, input iterators
+    # among them, and counts the copies and the allocations a forward range costs (row G31)
+    foreach ($prog in @("strings", "wstreams", "streambuf", "complex", "valarray", "strstream", "locale", "threads", "buffers", "complexf", "numfacets", "bigfile", "cheaders", "vector", "newhandler", "replacenew", "replacepart", "replacearray", "facets", "namedlocale", "ranges")) {
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-lib\$prog.cpp") @("out\x64\$prog.obj") "out\x64\${prog}_cl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-lib\$prog.cpp" }
         $want = & ".\out\x64\${prog}_cl.exe" 2>&1 | Out-String
         foreach ($lvl in @(0, 2)) {
@@ -878,12 +897,32 @@ try {
             $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-lib\$prog.cpp" 2>&1 | Out-String
             $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
             if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-lib\$prog.cpp at -O$lvl :"; Write-Host ($c6 -split "`n" | Select-Object -First 20); $failed++; continue }
-            $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\iostreamL${lvl}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+            $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\iostreamL${lvl}6.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
             if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
             $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
             if ($LASTEXITCODE -eq 0 -and $got -eq $want) { Write-Host "  ok   $prog.cpp (-O$lvl) prints what cl's build with its own headers prints ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
             else { Write-Host "  FAIL $prog.cpp (-O$lvl, exit $LASTEXITCODE) differs from cl's build:"; Write-Host "  cl:"; Write-Host $want; Write-Host "  cppparse:"; Write-Host $got; $failed++ }
         }
+    }
+    # namedlocale.cpp with the argument own prints what cppparse's library does on purpose where cl's does otherwise
+    # (row G28), so these lines are checked for cppparse's builds alone: a German date read with its dots, a range
+    # with a null character compared beyond it, the C runtime's classes of wide characters, a bad name refused by a
+    # facet and whatever the categories, a locale made of one without a name, the C locale that global sets, and
+    # the C locale of the other threads left alone while eight threads make locales
+    $ownWant = @(
+        "own: get_date of %x 98-2-3 fail 0, wide 98-2-3 fail 0",
+        "own: collate with a null character -1 1, by the keys -1",
+        "own: wide print of a tab 0, of U+00A0 0",
+        "own: bad names throw 2",
+        "own: (a locale without a name, de-DE, numeric) is named *",
+        "own: global of (classic, de-DE, numeric) makes the C locale de-DE",
+        "own: 800 locales made on 8 threads, the C locale of a thread disturbed 0 times")
+    foreach ($lvl in @(0, 2)) {
+        if (-not (Test-Path ".\out\x64\namedlocale$lvl.exe")) { continue }
+        $own = @(& ".\out\x64\namedlocale$lvl.exe" own 2>&1 | ForEach-Object { "$_".TrimEnd() } | Where-Object { $_ })
+        if ($LASTEXITCODE -eq 0 -and $own.Count -eq 1 -and $own[0] -match '^own: the C runtime has no locale ') { Write-Host "  ok   namedlocale.cpp (-O$lvl) own part left out: $($own[0])" }
+        elseif ($LASTEXITCODE -eq 0 -and ($own -join "`n") -ceq ($ownWant -join "`n")) { Write-Host "  ok   namedlocale.cpp (-O$lvl) own: the $($ownWant.Count) lines where the library follows C++98 and not cl's library" }
+        else { Write-Host "  FAIL namedlocale.cpp (-O$lvl, exit $LASTEXITCODE) own part:"; $own | ForEach-Object { Write-Host "    $_" }; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed standard library check(s) failed" }
 
@@ -897,7 +936,7 @@ try {
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path $obj)) { Write-Host "  FAIL --compile6 of sample-self at -O$lvl :"; Write-Host $c6; $failed++; continue }
         if ($c6 -notmatch 'sema: 0 error') { Write-Host "  FAIL sample-self has semantic errors:"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\selfdriver$lvl.exe" "..\examples\sample-self-driver\driver-self.cpp" $obj "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-self-driver\driver-self.cpp") @("out\x64\driver-self.obj", $obj, "out\x64\cppparse_rt.obj") "out\x64\selfdriver$lvl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of the self-hosting driver:"; Write-Host $clOut; $failed++; continue }
         $run = & ".\out\x64\selfdriver$lvl.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $run -match 'ALL OK') { Write-Host "  ok   selfdriver$lvl.exe: all 25 self-hosting checks correct (-O$lvl)" }
@@ -984,7 +1023,7 @@ try {
     $c6 = & $exe --compile6 -O0 --obj --msvc-mangling -I ..\include -o out\x64 -n front-deep "..\examples\sample-front\deep-nesting.cpp" 2>&1 | Out-String
     $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
     if ($rc -eq 0 -and (Test-Path "out\x64\front-deep6.obj")) {
-        $null = & $cl /nologo "/Foout\x64\" "/Feout\x64\front-deep.exe" "out\x64\front-deep6.obj" "out\x64\cppparse_rt.obj" 2>&1
+        $null = Link-Program @("out\x64\front-deep6.obj", "out\x64\cppparse_rt.obj") "out\x64\front-deep.exe"
         & "out\x64\front-deep.exe" | Out-Null
         if ($LASTEXITCODE -eq 0) { Write-Host "  ok   deep-nesting.cpp: 3000 nested blocks and 5000 nested parentheses compile and run" }
         else { Write-Host "  FAIL deep-nesting.cpp runs with exit code $LASTEXITCODE"; $failed++ }
@@ -1016,7 +1055,7 @@ try {
     if ($want.Count -ge 20 -and $diff.Count -eq 0) { Write-Host "  ok   vbase-layout.cpp: sizes and vbtables of $(($want | Where-Object { $_ -match ' size ' }).Count) classes as cl lays them out" }
     else { Write-Host "  FAIL vbase-layout.cpp layout differs from cl's:"; $diff | ForEach-Object { Write-Host "    $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
     # front.cpp: built by cl (the reference) and by cppparse at -O0 and -O2; the programs must print the same lines
-    $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\front_cl.exe" "..\examples\sample-front\front.cpp" 2>&1 | Out-String
+    $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-front\front.cpp") @("out\x64\front.obj") "out\x64\front_cl.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\front.cpp" }
     $want = & ".\out\x64\front_cl.exe" 2>&1 | Out-String
     foreach ($lvl in @(0, 2)) {
@@ -1025,7 +1064,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\front.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\front.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
         $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $got -eq $want) { Write-Host "  ok   front.cpp (-O$lvl) prints what cl's build prints ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
@@ -1070,6 +1109,13 @@ try {
     $calls = if ($m.Success) { ([regex]::Matches($m.Value, 'call \?sameSize@inl@@')).Count } else { -1 }
     if ($calls -eq 0) { Write-Host "  ok   front.cpp (-O2): inl::sameSize is inlined into inl::countSame's loop" }
     else { Write-Host "  FAIL front.cpp (-O2) inlining: $calls call(s) to inl::sameSize left in inl::countSame"; $failed++ }
+    # and a function that only passes its arguments on to one call is inlined whatever their count (row G31): fwd::use
+    # calls fwd::work, not fwd::pass (five arguments and a sixth: over the limit of the small functions by its size)
+    $m = [regex]::Match($asm2, "(?s)\?use@fwd@@\S* PROC.*?ENDP")
+    $calls = if ($m.Success) { ([regex]::Matches($m.Value, 'call \?pass@fwd@@')).Count } else { -1 }
+    $direct = if ($m.Success) { ([regex]::Matches($m.Value, 'call \?work@fwd@@')).Count } else { -1 }
+    if ($calls -eq 0 -and $direct -eq 1) { Write-Host "  ok   front.cpp (-O2): fwd::pass, which only passes its five arguments on, is inlined into fwd::use" }
+    else { Write-Host "  FAIL front.cpp (-O2) inlining of a forwarding function: $calls call(s) to fwd::pass and $direct to fwd::work in fwd::use"; $failed++ }
     # a call to a function with C linkage cannot throw (A1): nothrowc::lenOf and before call only C functions while their
     # Buf lives, so they get no unwind handler and no range at -O0; cppBetween calls a C++ function meanwhile and keeps
     # them at -O0, and loses them at -O2, where that call is inlined away
@@ -1232,7 +1278,7 @@ try {
     # local and /O2 builds it in the result (NRVO): -O0 must print what cl /Od's build prints, -O2 what cl /O2's does
     foreach ($lvl in @(0, 2)) {
         $clOpt = if ($lvl -eq 0) { "/Od" } else { "/O2" }
-        $clOut = & $cl /nologo /EHsc /W3 $clOpt "/Foout\x64\" "/Feout\x64\copies_cl$lvl.exe" "..\examples\sample-front\copies.cpp" 2>&1 | Out-String
+        $clOut = Build-Program @("/EHsc", "/W3", $clOpt, "/Foout\x64\", "..\examples\sample-front\copies.cpp") @("out\x64\copies.obj") "out\x64\copies_cl$lvl.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\copies.cpp" }
         $want = & ".\out\x64\copies_cl$lvl.exe" 2>&1 | Out-String
         $nm = "copies$lvl"
@@ -1240,7 +1286,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\copies.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\copies.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
         $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $got -eq $want) { Write-Host "  ok   copies.cpp (-O$lvl) logs the copies and destructions of cl $clOpt ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
@@ -1248,7 +1294,7 @@ try {
     }
     # alttok.cpp: the alternative tokens, digraphs and trigraphs of C++98 (2.5, 2.3) mean their primary tokens, and
     # # keeps the spelling written; cl reads them with /permissive- and /Zc:trigraphs
-    $clOut = & $cl /nologo /EHsc /W3 /permissive- /Zc:trigraphs "/Foout\x64\" "/Feout\x64\alttok_cl.exe" "..\examples\sample-front\alttok.cpp" 2>&1 | Out-String
+    $clOut = Build-Program @("/EHsc", "/W3", "/permissive-", "/Zc:trigraphs", "/Foout\x64\", "..\examples\sample-front\alttok.cpp") @("out\x64\alttok.obj") "out\x64\alttok_cl.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\alttok.cpp" }
     $want = & ".\out\x64\alttok_cl.exe" 2>&1 | Out-String
     foreach ($lvl in @(0, 2)) {
@@ -1257,7 +1303,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\alttok.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\alttok.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
         $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $got -eq $want -and $want -match 'str a and b\|x<:1:>\|%: y' -and $want -match 'strlit 1') { Write-Host "  ok   alttok.cpp (-O$lvl): alternative tokens, digraphs and trigraphs as cl /permissive- /Zc:trigraphs reads them, # keeps their spelling" }
@@ -1268,7 +1314,7 @@ try {
     # the symbol); in literals: the code units cl gives (code page 1252 in narrow literals, UTF-16 in wide ones)
     $clOut = & $cl /nologo /c /EHsc /W3 /permissive- /DUCN_OTHER "/Foout\x64\ucn_other.obj" "..\examples\sample-front\ucn.cpp" 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\ucn.cpp (UCN_OTHER)" }
-    $clOut = & $cl /nologo /EHsc /W3 /permissive- "/Foout\x64\ucn_cl.obj" "/Feout\x64\ucn_cl.exe" "..\examples\sample-front\ucn.cpp" "out\x64\ucn_other.obj" 2>&1 | Out-String
+    $clOut = Build-Program @("/EHsc", "/W3", "/permissive-", "/Foout\x64\ucn_cl.obj", "..\examples\sample-front\ucn.cpp") @("out\x64\ucn_cl.obj", "out\x64\ucn_other.obj") "out\x64\ucn_cl.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\ucn.cpp" }
     $want = & ".\out\x64\ucn_cl.exe" 2>&1 | Out-String
     foreach ($lvl in @(0, 2)) {
@@ -1277,7 +1323,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\ucn.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\ucn.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\ucn_other.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\ucn_other.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj with cl's ucn_other.obj:"; Write-Host $clOut; $failed++; continue }
         $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $got -eq $want -and $want -match 'names 343374' -and $want -match 'n2 2: 80 00' -and $want -match '#if: a narrow') { Write-Host "  ok   ucn.cpp (-O$lvl): universal character names in identifiers (linked with cl's object) and in literals as cl reads them" }
@@ -1291,7 +1337,7 @@ try {
     if ($p.ExitCode -eq 0 -and $missingPp.Count -eq 0) { Write-Host "  ok   ucn.cpp: -E and # keep the universal character names as written" }
     else { Write-Host "  FAIL -E of sample-front\ucn.cpp (exit $($p.ExitCode)), missing: $($missingPp -join ' | ')"; $failed++ }
     # front2.cpp: built by cl (the reference) and by cppparse at -O0 and -O2; the programs must print the same lines
-    $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\front2_cl.exe" "..\examples\sample-front\front2.cpp" 2>&1 | Out-String
+    $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-front\front2.cpp") @("out\x64\front2.obj") "out\x64\front2_cl.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\front2.cpp" }
     $want = & ".\out\x64\front2_cl.exe" 2>&1 | Out-String
     foreach ($lvl in @(0, 2)) {
@@ -1300,7 +1346,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\front2.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\front2.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
         $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $got -eq $want -and $want -match 'explorder named 28 32 2 2 20 10 2 4' -and $want -match 'friends 7 7 8 9 14 21 2 8 6 5 5' -and $want -match 'protected 15 14 26 5 5 5 4' -and $want -match 'tiarray \.\$\$BY02H\|\.\$\$BY114H\|\.\$\$BY01\$\$CBH\|' -and $want -match 'tiarray \.PEAY02\$\$CBH\|\.PEAY112H\|' -and $want -match 'explorder 24 9 8 31 192151 322 4' -and $want -match 'newarr V new\[\] 104' -and $want -match 'newarr C delete\[\] placement 124 9' -and $want -match 'newarr live 0' -and $want -match 'mpdown VW2 fw\[16\] 0 0 fs\[16\] 0 8 fs2\[16\] 0 4' -and $want -match 'mpdown K2 nv\[12\] 48 40 0 s\[12\] 0 40 4' -and $want -match 'elab 4 5 1 6' -and $want -match 'deducecv 4 7 3 4 25 3' -and $want -match 'deducecv 1 0 1 0 1' -and $want -match 'arrparm 249' -and $want -match 'qualdeduce 11 3 12 8 20 72' -and $want -match 'qualdeduce 1 2 105 203 8 16 9 3\.5' -and $want -match 'protstatic 32 64 15' -and $want -match 'specconst 2 13 20 2' -and $want -match 'newhide 7 7 7 4' -and $want -match 'opaccess 161 109 -21 42' -and $want -match 'typeaccess 11 8 19 42' -and $want -match 'dtoraccess 1 134' -and $want -match 'friendtmpl 35 36 14 1 0' -and $want -match 'baseaccess 14 2 7 7 5 16 10' -and $want -match 'fnarr 4 2 8 4 4 15 11 0 0 9 31' -and $want -match 'fnref 41 2 8 2 10 14' -and $want -match 'accessrest 12 13 9 6 8 7 17' -and $want -match 'fnarr2 20 20 1 4 7 2 10 100 60') { Write-Host "  ok   front2.cpp (-O$lvl) prints what cl's build prints ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
@@ -1339,8 +1385,10 @@ try {
         if (Test-Path $clangCl) {
             $copt = if ($lvl -eq 0) { "/Od" } else { "/O2" }
             $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-            $ccOut = & $clangCl /nologo /EHsc $copt "/Foout\x64\${nm}_clang.obj" "/Feout\x64\${nm}_clang.exe" "..\examples\sample-front\covariant-vbase.cpp" 2>&1 | Out-String
-            $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+            $ccOut = & $clangCl /nologo /c /EHsc $copt "/Foout\x64\${nm}_clang.obj" "..\examples\sample-front\covariant-vbase.cpp" 2>&1 | Out-String
+            $rc = $LASTEXITCODE
+            if ($rc -eq 0) { $ccOut += Link-Program @("out\x64\${nm}_clang.obj") "out\x64\${nm}_clang.exe" | Out-String; $rc = $LASTEXITCODE }
+            $ErrorActionPreference = $eap
             if ($rc -ne 0) { Write-Host "  FAIL clang-cl $copt of sample-front\covariant-vbase.cpp:"; Write-Host $ccOut; $failed++; continue }
             $refCov = ((& ".\out\x64\${nm}_clang.exe" 2>&1 | Out-String) -replace "`r", "")
             if ($LASTEXITCODE -ne 0 -or $refCov -ne $wantCov) { Write-Host "  FAIL covariant-vbase.cpp: clang-cl $copt does not print the lines the standard requires (exit $LASTEXITCODE):"; Write-Host $refCov; $failed++; continue }
@@ -1349,7 +1397,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\covariant-vbase.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\covariant-vbase.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
         $got = ((& ".\out\x64\${nm}.exe" 2>&1 | Out-String) -replace "`r", "")
         if ($LASTEXITCODE -eq 0 -and $got -eq $refCov) { Write-Host "  ok   covariant-vbase.cpp (-O$lvl): the overrider in another virtual base returns the adjusted pointer (4 lines, as clang-cl's build and the standard's)" }
@@ -1365,7 +1413,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\covariant-variadic.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\covariant-variadic.cpp at -O$lvl :"; Write-Host $c6; $failed++; continue }
-        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
         $got = ((& ".\out\x64\${nm}.exe" 2>&1 | Out-String) -replace "`r", "")
         if ($LASTEXITCODE -eq 0 -and $got -eq $wantVar) { Write-Host "  ok   covariant-variadic.cpp (-O$lvl): the overridden slots return the adjusted pointer and reference, the two bodies share their static locals (5 lines)" }
@@ -1385,7 +1433,7 @@ try {
     # MatrixTest.cpp (Matrix.hpp, Vector.hpp; asserts and streams) against cl: member templates of class templates,
     # injected class names with arguments, a function template declared before its definition. std::cout comes
     # from the libcpp/iostream.cpp objects of test 15
-    $clOut = & $cl /nologo /EHsc /W3 /I.. "/Foout\x64\" "/Feout\x64\matrixtest_cl.exe" "..\MatrixTest.cpp" 2>&1 | Out-String
+    $clOut = Build-Program @("/EHsc", "/W3", "/I..", "/Foout\x64\", "..\MatrixTest.cpp") @("out\x64\MatrixTest.obj") "out\x64\matrixtest_cl.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile MatrixTest.cpp" }
     $want = & ".\out\x64\matrixtest_cl.exe" 2>&1 | Out-String
     foreach ($lvl in @(0, 2)) {
@@ -1394,7 +1442,7 @@ try {
         $c6 = & $exe --compile6 "-O$lvl" --obj --msvc-mangling -I ..\include -I .. -o out\x64 -n $nm "..\MatrixTest.cpp" 2>&1 | Out-String
         $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
         if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of MatrixTest.cpp at -O$lvl :"; Write-Host ($c6 -split "`n" | Select-Object -First 20); $failed++; continue }
-        $clOut = & $cl /nologo "/Feout\x64\${nm}.exe" "out\x64\${nm}6.obj" "out\x64\iostreamL${lvl}6.obj" "out\x64\cppparse_rt.obj" legacy_stdio_definitions.lib 2>&1 | Out-String
+        $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\iostreamL${lvl}6.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
         $got = & ".\out\x64\${nm}.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and $got -eq $want) { Write-Host "  ok   MatrixTest.cpp (-O$lvl) runs and prints what cl's build prints ($(($want -split "`n" | Where-Object { $_.Trim() }).Count) lines)" }
@@ -1409,8 +1457,7 @@ try {
     # function's start (SymGetLineFromAddr64) and the lines that follow in it (SymGetLineNext64): the start is the
     # function's own line, every line lies in its body, and the statement lines expected at that level are there
     $failed = 0
-    $linkExe = "$Msvc\bin\Hostx64\x64\link.exe"
-    $clOut = & $cl /nologo /EHsc /W3 "/Foout\x64\" "/Feout\x64\dbgcheck.exe" "..\examples\sample-dbg-driver\dbgcheck.cpp" 2>&1 | Out-String
+    $clOut = Build-Program @("/EHsc", "/W3", "/Foout\x64\", "..\examples\sample-dbg-driver\dbgcheck.cpp") @("out\x64\dbgcheck.obj") "out\x64\dbgcheck.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg-driver\dbgcheck.cpp" }
     $ranges = @{ twice = @(6, 11); main = @(24, 30); "Acc::add" = @(16, 21) }
     foreach ($lvl in @(0, 2)) {
@@ -1422,7 +1469,7 @@ try {
         $hdr = & $dumpbin /nologo /headers "out\x64\${nm}6.obj" | Out-String
         $dbg = ([regex]::Matches($hdr, '\.debug\$S name')).Count
         if ($dbg -ge 3) { Write-Host "  ok   ${nm}6.obj has $dbg .debug`$S sections (the functions of .text, one per COMDAT function)" } else { Write-Host "  FAIL ${nm}6.obj has $dbg .debug`$S section(s)"; $failed++ }
-        $lo = & $linkExe /nologo /DEBUG /SUBSYSTEM:CONSOLE "/OUT:out\x64\$nm.exe" "out\x64\${nm}6.obj" "out\x64\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Out-String
+        $lo = Link-Program @("out\x64\${nm}6.obj", "out\x64\cppparse_rt.obj") "out\x64\$nm.exe" @("/DEBUG") | Out-String
         if ($LASTEXITCODE -ne 0 -or $lo -match 'warning') { Write-Host "  FAIL link /DEBUG of ${nm}6.obj:"; Write-Host $lo; $failed++; continue }
         $run = & ".\out\x64\$nm.exe" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0 -or $run -notmatch 'total 20') { Write-Host "  FAIL $nm.exe:"; Write-Host $run; $failed++; continue }
@@ -1468,6 +1515,16 @@ try {
         }
         if ($bad.Count -eq 0) { Write-Host "  ok   $nm.exe (-O$lvl): all $records line records of twice, main and Acc::add lie on instruction starts" }
         else { Write-Host "  FAIL $nm.exe (-O$lvl) line record offsets: $($bad -join '; ')"; Write-Host $offs; $failed++ }
+    }
+    # the comparator of "debug information changes no code" (scripts\cvsame.ps1, docs\design-codeview.md 5.5/1) on
+    # cases with known answers, made from lines06.obj: it has to find every change outside the debug sections and to
+    # let pass what -g may add
+    if (Test-Path "out\x64\lines06.obj") {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $st = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -SelfTest -A "out\x64\lines06.obj" -B "out\x64\cvsame-selftest" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -eq 0 -and $st -match '(\d+) cases with known answers, 0 wrong') { Write-Host "  ok   cvsame.ps1 gives the expected verdict on $($Matches[1]) objects and listings made from lines06.obj" }
+        else { Write-Host "  FAIL cvsame.ps1 -SelfTest (exit $rc):"; Write-Host $st; $failed++ }
     }
     if ($failed -ne 0) { throw "$failed CodeView check(s) failed" }
 
@@ -1520,9 +1577,8 @@ try {
         $failed++
     }
     if ($failed -eq 0) {
-        $linkExe = "$Msvc\bin\Hostx64\x64\link.exe"
         $selfObjs = @(); foreach ($j in $selfJobs) { $selfObjs += "$selfDir\$($j.Name)6.obj" }
-        $lo = & $linkExe /nologo /SUBSYSTEM:CONSOLE "/OUT:$selfDir\cppparse-s6.exe" @selfObjs "out\x64\cppparse_rt.obj" libucrt.lib libvcruntime.lib libcmt.lib kernel32.lib legacy_stdio_definitions.lib 2>&1 | Out-String
+        $lo = Link-Program ($selfObjs + @("out\x64\cppparse_rt.obj")) "$selfDir\cppparse-s6.exe" | Out-String
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$selfDir\cppparse-s6.exe")) { Write-Host "  FAIL link of the self-compiled objects:"; Write-Host $lo; $failed++ }
         else {
             Write-Host "  ok   $($selfObjs.Count) objects, the exception runtime and the C runtime link to out\self6\cppparse-s6.exe"
@@ -1543,6 +1599,284 @@ try {
     if ($failed -ne 0) { throw "$failed self-compile check(s) failed" }
 
     Write-Host ""
+    Write-Host "=== Test 20: CodeView types and globals (-g): .debug`$T and the data symbols read back through dbghelp ==="
+    # row M10, docs\design-codeview.md stage 1. sample-dbg\types.cpp and types2.cpp, one program of two units, built with
+    # -g at -O0 and -O2:
+    #   - the objects with -g against the objects without: cvsame.ps1 (debug information changes no code)
+    #   - linked with /DEBUG by Microsoft's link and, where GRIDE is found, by GRIDE's: no message from either
+    #   - the program prints what it knows of its own types (sizes, member offsets measured in objects, bit-fields found
+    #     by storing into them, base offsets, enumerators, the sizes of its variables); sample-dbg-driver\dbgtypes.cpp
+    #     (cl, dbghelp) prints the same facts from the PDB: every line of the program must be one of the driver's
+    #   - the driver's lines about the program's types and variables are the same from both linkers' PDBs
+    #   - the same source by cl /Z7 (cppparse's headers, /X): the driver's description of the program's types, every
+    #     member with its type, is the same text for cl's build and for cppparse's
+    #   - mixed: types.cpp by cppparse -g and types2.cpp by cl /Z7 in one program (the classes of types.h are then in the
+    #     PDB from both compilers): the facts hold as before
+    #   - llvm-pdbutil (where Visual Studio has it) dumps the -g objects without an error
+    # and at -O0 the self-compiled objects of test 19 against the same sources compiled with -g: cvsame over all of them
+    $failed = 0
+    $tdir = "$Sandbox\out\dbgtypes"
+    New-Item -ItemType Directory -Force $tdir | Out-Null
+    Get-ChildItem $tdir -File -Recurse | Remove-Item
+    $linkExe = "$Msvc\bin\Hostx64\x64\link.exe"
+    $gride = & { . "$Sandbox\scripts\toolset.ps1"; ,@($GrideRoot, $GrideLink) }
+    $grideLink = $gride[1]
+    $pdbutil = "$VsRoot\VC\Tools\Llvm\x64\bin\llvm-pdbutil.exe"
+    $libs = @("libucrt.lib", "libvcruntime.lib", "libcmt.lib", "kernel32.lib", "legacy_stdio_definitions.lib")
+    # (an object file name, not a folder: "/Fo<folder>\" ends in \" when the path has a space, which cl reads as a quote)
+    $clOut = Build-Program @("/EHsc", "/W3", "/Fo$tdir\dbgtypes.obj", "..\examples\sample-dbg-driver\dbgtypes.cpp") @("$tdir\dbgtypes.obj") "$tdir\dbgtypes.exe" | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg-driver\dbgtypes.cpp" }
+    foreach ($u in "types", "types2") {
+        $clOut = & $cl /nologo /c /EHsc /W3 /Od /Z7 /X /I..\include "/Fo$tdir\$u-cl.obj" "..\examples\sample-dbg\$u.cpp" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg\$u.cpp" }
+    }
+    # the driver's lines about what the program reports: the types of its "size" and "enumerator" lines, its variables
+    function Select-About([string[]]$own, [string[]]$driver) {
+        $names = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($l in $own) {
+            if ($l -match '^(?:size|global) (.+) \d+$') { $null = $names.Add($Matches[1]) }
+            elseif ($l -match '^enumerator (.+) \S+ -?\d+$') { $null = $names.Add($Matches[1]) }
+        }
+        $out = New-Object System.Collections.ArrayList
+        foreach ($l in $driver) {
+            $sp = $l.IndexOf(' '); if ($sp -lt 0) { continue }
+            $rest = $l.Substring($sp + 1)
+            foreach ($n in $names) { if ($rest -eq $n -or $rest.StartsWith("$n ")) { $null = $out.Add($l); break } }
+        }
+        return ,@($out | Sort-Object)
+    }
+    # links one build of the program, runs it and the driver; returns the program's lines and the driver's
+    function Test-TypesBuild([string]$what, [string]$linker, [string[]]$objs, [string]$exeName) {
+        $texe = "$tdir\$exeName.exe"
+        $lo = & $linker /nologo /DEBUG /INCREMENTAL:NO /SUBSYSTEM:CONSOLE "/OUT:$texe" @objs "out\x64\cppparse_rt.obj" @libs 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $texe) -or $lo.Trim() -ne "") { Write-Host "  FAIL $what, link /DEBUG (it has to say nothing):"; Write-Host $lo; return $null }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $own = @(& $texe 2>&1 | ForEach-Object { "$_".TrimEnd() }); $rc = $LASTEXITCODE
+        $drv = @(& "$tdir\dbgtypes.exe" $texe -types -local localSizes s_local -local localSizesOther s_local 2>&1 | ForEach-Object { "$_".TrimEnd() }); $drc = $LASTEXITCODE
+        $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or $own.Count -lt 100) { Write-Host "  FAIL ${what}: the program exits with $rc and prints $($own.Count) lines"; return $null }
+        $set = New-Object 'System.Collections.Generic.HashSet[string]'; foreach ($l in $drv) { $null = $set.Add($l) }
+        $missing = @($own | Where-Object { -not $set.Contains($_) })
+        if ($drc -ne 0 -or $missing.Count -ne 0) {
+            Write-Host "  FAIL ${what}: dbgtypes exit $drc; $($missing.Count) of the program's $($own.Count) facts are not what the PDB says:"
+            $missing | Select-Object -First 8 | ForEach-Object { Write-Host "         $_" }
+            return $null
+        }
+        return @{ Own = $own; About = (Select-About $own $drv) }
+    }
+    $clBuild = Test-TypesBuild "cl /Z7's build" $linkExe @("$tdir\types-cl.obj", "$tdir\types2-cl.obj") "types-cl"
+    if ($null -eq $clBuild) { $failed++ }
+    foreach ($lvl in @(0, 2)) {
+        $plain = "$tdir\plain$lvl"; $withG = "$tdir\g$lvl"
+        New-Item -ItemType Directory -Force $plain, $withG | Out-Null
+        $bad = @()
+        foreach ($u in "types", "types2") {
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $null = & $exe --compile6 "-O$lvl" -g0 --obj --msvc-mangling -q -I ..\include -o $plain -n $u "..\examples\sample-dbg\$u.cpp" 2>&1
+            $c6 = & $exe --compile6 "-O$lvl" -g --obj --msvc-mangling -q -I ..\include -o $withG -n $u "..\examples\sample-dbg\$u.cpp" 2>&1 | Out-String
+            $ErrorActionPreference = $eap
+            if (-not (Test-Path "$plain\${u}6.obj") -or -not (Test-Path "$withG\${u}6.obj")) { $bad += $u; Write-Host $c6 }
+        }
+        if ($bad.Count) { Write-Host "  FAIL --compile6 -O$lvl of sample-dbg\$($bad -join ', ')"; $failed++; continue }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $same = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -A $plain -B $withG -Listings 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -eq 0 -and $same -match '2 pair\(s\): 0 the same \(listings too\), 2 differ in debug information only, 0 violate') { Write-Host "  ok   -O${lvl}: with -g the two objects and listings are what they are without it but for CodeView (cvsame)" }
+        else { Write-Host "  FAIL -O${lvl}: cvsame on the objects without and with -g (exit $rc):"; Write-Host $same; $failed++ }
+        $hdr = & $dumpbin /nologo /headers "$withG\types6.obj" | Out-String
+        if ($hdr -notmatch '\.debug\$T name') { Write-Host "  FAIL -O${lvl}: types6.obj has no .debug`$T"; $failed++ }
+        $objs = @("$withG\types6.obj", "$withG\types26.obj")
+        $ms = Test-TypesBuild "-O$lvl, Microsoft's link" $linkExe $objs "types$lvl-ms"
+        if ($null -eq $ms) { $failed++; continue }
+        Write-Host "  ok   -O${lvl}: link /DEBUG says nothing; all $($ms.Own.Count) facts the program prints of its types and variables are the PDB's (dbghelp)"
+        if ($null -ne $clBuild) {
+            $d = @(Compare-Object $clBuild.About $ms.About)
+            if ($d.Count -eq 0) { Write-Host "  ok   -O${lvl}: dbghelp's description of the program's types ($($ms.About.Count) lines: members with their types, bases, enumerators) is the one of cl /Z7's build" }
+            else { Write-Host "  FAIL -O${lvl}: $($d.Count) lines of the type description differ from cl /Z7's build:"; $d | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
+        }
+        $mixed = Test-TypesBuild "-O$lvl, types.cpp by cppparse and types2.cpp by cl" $linkExe @("$withG\types6.obj", "$tdir\types2-cl.obj") "types$lvl-mixed-ms"
+        if ($null -eq $mixed) { $failed++ }
+        elseif (@(Compare-Object $ms.About $mixed.About).Count -eq 0) { Write-Host "  ok   -O${lvl}: mixed with cl /Z7's object of types2.cpp, the facts hold and the description is the same" }
+        else { Write-Host "  FAIL -O${lvl}: mixed with cl's object the description differs"; $failed++ }
+        if ($grideLink -ne "") {
+            $gr = Test-TypesBuild "-O$lvl, GRIDE's link" $grideLink $objs "types$lvl-gr"
+            $grMixed = Test-TypesBuild "-O$lvl, mixed, GRIDE's link" $grideLink @("$withG\types6.obj", "$tdir\types2-cl.obj") "types$lvl-mixed-gr"
+            if ($null -eq $gr -or $null -eq $grMixed) { $failed++ }
+            elseif (@(Compare-Object $ms.About $gr.About).Count -eq 0 -and @(Compare-Object $ms.About $grMixed.About).Count -eq 0) { Write-Host "  ok   -O${lvl}: GRIDE's link says nothing, and its PDB gives the driver the same $($gr.About.Count) lines, mixed too" }
+            else { Write-Host "  FAIL -O${lvl}: the driver's lines differ between Microsoft's PDB and GRIDE's"; Compare-Object $ms.About $gr.About | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
+        } else { Write-Host "  note -O${lvl}: GRIDE not found, its link is not tried" }
+        if (Test-Path $pdbutil) {
+            $perr = @()
+            foreach ($o in $objs) {
+                $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+                $dump = @(& $pdbutil dump -types -symbols $o 2>&1 | ForEach-Object { "$_" }); $prc = $LASTEXITCODE
+                $ErrorActionPreference = $eap
+                # the tool's own complaints (the word "error" alone may be part of a name)
+                $perr += @($dump | Where-Object { $_ -match '(?i)^\s*error\b|: error:|llvm-pdbutil(\.exe)?:|corrupt|invalid (type|record|leaf)|unknown (leaf|record|symbol)' } | Select-Object -First 2)
+                if ($prc -ne 0) { $perr += "exit $prc on $o" }
+                if ($dump.Count -lt 50) { $perr += "only $($dump.Count) lines for $o" }
+            }
+            if ($perr.Count -eq 0) { Write-Host "  ok   -O${lvl}: llvm-pdbutil dumps the types and symbols of both objects without an error" }
+            else { Write-Host "  FAIL -O${lvl}: llvm-pdbutil: $($perr -join ' | ')"; $failed++ }
+        }
+    }
+    # invariant 1 on the compiler's own sources: test 19's objects (-O0, out\self6) and the same units with -g
+    if ($env:CPPPARSE_G -eq "1") { Write-Host "  note CPPPARSE_G=1: test 19's objects have -g already, the own sources are not compared" }
+    elseif (Test-Path "$Sandbox\out\self6\main6.obj") {
+        $gdir = "$Sandbox\out\self6g"
+        New-Item -ItemType Directory -Force $gdir | Out-Null
+        Get-ChildItem $gdir -File | Remove-Item
+        $gJobs = New-Object System.Collections.ArrayList
+        foreach ($j in $selfJobs) { $null = $gJobs.Add(@{ Name = $j.Name; Args = ($j.Args -replace [regex]::Escape("-o `"$selfDir`""), "-g -o `"$gdir`"") }) }
+        $gStart = Get-Date
+        $running = New-Object System.Collections.ArrayList
+        $next = 0; $gBad = @()
+        while ($next -lt $gJobs.Count -or $running.Count -gt 0) {
+            while ($next -lt $gJobs.Count -and $running.Count -lt $slots) {
+                $job = $gJobs[$next]; $next++
+                $proc = Start-Process -FilePath $exe -ArgumentList $job.Args -WorkingDirectory $Sandbox -NoNewWindow -PassThru -RedirectStandardOutput "$gdir\$($job.Name).out" -RedirectStandardError "$gdir\$($job.Name).err"
+                $null = $proc.Handle
+                $null = $running.Add(@{ Job = $job; Proc = $proc })
+            }
+            $null = $running[0].Proc.WaitForExit(250)
+            foreach ($r in @($running)) {
+                if (-not $r.Proc.HasExited) { continue }
+                $running.Remove($r)
+                if ($r.Proc.ExitCode -ne 0 -or -not (Test-Path "$gdir\$($r.Job.Name)6.obj")) { $gBad += "$($r.Job.Name) (exit $($r.Proc.ExitCode))" }
+            }
+        }
+        if ($gBad.Count -ne 0) { Write-Host "  FAIL with -g $($gBad.Count) own unit(s) are not compiled: $($gBad -join ', ')"; Get-Content "$gdir\$(($gBad[0] -split ' ')[0]).err" -ErrorAction SilentlyContinue | Select-Object -First 4 | ForEach-Object { Write-Host "    $_" }; $failed++ }
+        else {
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $same = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -A $selfDir -B $gdir -Listings -Quiet 2>&1 | Out-String
+            $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+            $sizeA = (Get-ChildItem "$selfDir\*.obj" | Measure-Object Length -Sum).Sum; $sizeB = (Get-ChildItem "$gdir\*.obj" | Measure-Object Length -Sum).Sum
+            if ($rc -eq 0 -and $same -match "$($gJobs.Count) pair\(s\): 0 the same \(listings too\), $($gJobs.Count) differ in debug information only, 0 violate") {
+                Write-Host ("  ok   the {0} own sources and libcpp with -g ({1:N0} s): every object and listing is what it is without it but for CodeView (cvsame); {2:N0} bytes of objects without -g, {3:N0} with ({4:P0} more)" -f $selfUnits, ((Get-Date) - $gStart).TotalSeconds, $sizeA, $sizeB, ($sizeB / $sizeA - 1))
+            } else { Write-Host "  FAIL cvsame on the own sources without and with -g (exit $rc):"; Write-Host $same; $failed++ }
+        }
+    }
+    if ($failed -ne 0) { throw "$failed CodeView type check(s) failed" }
+
+    Write-Host ""
+    Write-Host "=== Test 21: CodeView variables (-g): the value harness, read back through dbghelp and DIA ==="
+    # row M10, docs\design-codeview.md stage 2. sample-dbg\vars.cpp (functions of every shape the design names) by -g -O0
+    # in each exception model, with sample-dbg-driver\varsck.cpp (cl: checkpoint, ckPush, ckPop), linked with /DEBUG:
+    #   - with -g the object and listing are what they are without it but for CodeView (cvsame)
+    #   - dbgvars.exe (cl, dbghelp, the Win32 debug API) stops at every checkpoint and compares every variable the PDB gives
+    #     a place for with what the program says it holds: in the checkpoint's caller, in the frames above it that
+    #     announced themselves, and at the first address of the caller's next line; every declared parameter listed in
+    #     order, a parameter the function never reads listed without a place
+    #   - diavars.exe (cl, the DIA SDK of Visual Studio, where there is one) gives the same variables the same places at
+    #     each checkpoint's caller
+    #   - the table model's objects through the link variants: /DEBUG alone (incremental), /DEBUG /OPT:REF,ICF and from a
+    #     static library, by Microsoft's link and by GRIDE's where it is found; gride-dbg's dv at eight checkpoint lines
+    #     is the same from both linkers' programs
+    $failed = 0
+    $vdir = "$Sandbox\out\dbgvars"
+    New-Item -ItemType Directory -Force $vdir | Out-Null
+    Get-ChildItem $vdir -File -Recurse | Remove-Item
+    $linkExe = "$Msvc\bin\Hostx64\x64\link.exe"
+    $libExe = "$Msvc\bin\Hostx64\x64\lib.exe"
+    $gride = & { . "$Sandbox\scripts\toolset.ps1"; ,@($GrideRoot, $GrideLink) }
+    $grideLink = $gride[1]
+    $libs = @("libucrt.lib", "libvcruntime.lib", "libcmt.lib", "kernel32.lib", "legacy_stdio_definitions.lib")
+    $drv = "..\examples\sample-dbg-driver"
+    $clOut = Build-Program @("/EHsc", "/W3", "/Fo$vdir\dbgvars.obj", "$drv\dbgvars.cpp") @("$vdir\dbgvars.obj") "$vdir\dbgvars.exe" | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg-driver\dbgvars.cpp" }
+    $clOut = & $cl /nologo /c /Od /W3 "/Fo$vdir\varsck.obj" "$drv\varsck.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg-driver\varsck.cpp" }
+    $diaSdk = "$VsRoot\DIA SDK"
+    $diaExe = ""
+    if (Test-Path "$diaSdk\include\dia2.h") {
+        $clOut = Build-Program @("/EHsc", "/W3", "/I$diaSdk\include", "/Fo$vdir\diavars.obj", "$drv\diavars.cpp") @("$vdir\diavars.obj", "diaguids.lib", "ole32.lib", "oleaut32.lib", "advapi32.lib") "$vdir\diavars.exe" @("/LIBPATH:$diaSdk\lib\amd64") | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg-driver\diavars.cpp" }
+        $diaExe = "$vdir\diavars.exe"
+    }
+    # links one build and runs dbgvars on it (and DIA with -Dia); returns the program's path or "" after a failure
+    function Test-VarsBuild([string]$what, [string]$linker, [string[]]$inputs, [string[]]$opts, [string]$exeName, [switch]$Dia) {
+        $vexe = "$vdir\$exeName.exe"
+        $lo = & $linker /nologo @opts /SUBSYSTEM:CONSOLE "/OUT:$vexe" @inputs "out\x64\cppparse_rt.obj" @libs 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $vexe) -or $lo.Trim() -ne "") { Write-Host "  FAIL ${what}: link $($opts -join ' ') (it has to say nothing):"; Write-Host $lo; return "" }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $got = & "$vdir\dbgvars.exe" $vexe -places "$vdir\$exeName.places.txt" 2>&1 | Out-String; $rc = $LASTEXITCODE
+        $ErrorActionPreference = $eap
+        $sum = [regex]::Match($got, 'dbgvars: (\d+) checkpoints, (\d+) next lines, (\d+) values compared, (\d+) failures')
+        if ($rc -ne 0 -or -not $sum.Success -or [int]$sum.Groups[1].Value -lt 19 -or [int]$sum.Groups[2].Value -ne [int]$sum.Groups[1].Value) { Write-Host "  FAIL ${what}: dbgvars (exit $rc):"; ($got -split "`n") | Where-Object { $_ -match 'FAIL|dbgvars:' } | Select-Object -First 12 | ForEach-Object { Write-Host "       $($_.Trim())" }; return "" }
+        Write-Host "  ok   ${what}: $($sum.Groups[1].Value) checkpoints, $($sum.Groups[3].Value) values right in the caller, the frames above and at the next line (dbghelp)"
+        if ($Dia -and $diaExe -ne "") {
+            # DIA at the same addresses: the same variables with the same places (dbghelp lists "this" as a local, DIA as
+            # the object pointer: its kind is not compared)
+            $mine = [ordered]@{}; $cur = $null
+            foreach ($l in Get-Content "$vdir\$exeName.places.txt") { if ($l -match '^@(\w+) ') { $cur = $Matches[1]; $mine[$cur] = @() } elseif ($cur) { $mine[$cur] += ($l.Trim() -replace '^[PL] this ', 'X this ') } }
+            $diaOut = & $diaExe "$diaSdk\bin\amd64\msdia140.dll" $vexe -rva @($mine.Keys) 2>&1
+            $theirs = @{}; $cur = $null
+            foreach ($l in $diaOut) { if ("$l" -match '^@(\w+) ') { $cur = $Matches[1]; $theirs[$cur] = @() } elseif ($cur -and "$l".Trim() -notmatch '^S ') { $theirs[$cur] += ("$l".Trim() -replace '^[PL] this ', 'X this ') } }
+            $differ = @()
+            foreach ($k in $mine.Keys) { if (-not $theirs.ContainsKey($k) -or @(Compare-Object @($mine[$k] | Sort-Object) @($theirs[$k] | Sort-Object)).Count -ne 0) { $differ += $k } }
+            if ($differ.Count -eq 0) { Write-Host "  ok   ${what}: DIA gives the same variables the same places at all $($mine.Count) checkpoint callers" }
+            else { Write-Host "  FAIL ${what}: DIA differs from dbghelp at $($differ.Count) address(es): $($differ -join ', ')"; return "" }
+        }
+        return $vexe
+    }
+    $grideExe = ""; $msExe = ""
+    foreach ($eh in "table", "sjlj", "cl") {
+        $plain = "$vdir\plain-$eh"; $withG = "$vdir\g-$eh"
+        New-Item -ItemType Directory -Force $plain, $withG | Out-Null
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $null = & $exe --compile6 -O0 -g0 "--eh=$eh" --obj --msvc-mangling -q -I ..\include -o $plain -n vars "..\examples\sample-dbg\vars.cpp" 2>&1
+        $c6 = & $exe --compile6 -O0 -g "--eh=$eh" --obj --msvc-mangling -q -I ..\include -o $withG -n vars "..\examples\sample-dbg\vars.cpp" 2>&1 | Out-String
+        $ErrorActionPreference = $eap
+        if (-not (Test-Path "$plain\vars6.obj") -or -not (Test-Path "$withG\vars6.obj")) { Write-Host "  FAIL --compile6 -O0 --eh=$eh of sample-dbg\vars.cpp:"; Write-Host $c6; $failed++; continue }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $same = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -A $plain -B $withG -Listings 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -eq 0 -and $same -match '1 pair\(s\): 0 the same \(listings too\), 1 differ in debug information only, 0 violate') { Write-Host "  ok   --eh=${eh}: with -g the object and listing are what they are without it but for CodeView (cvsame)" }
+        else { Write-Host "  FAIL --eh=${eh}: cvsame on the object without and with -g (exit $rc):"; Write-Host $same; $failed++ }
+        $inputs = @("$withG\vars6.obj", "$vdir\varsck.obj")
+        $r = Test-VarsBuild "--eh=$eh, Microsoft's link" $linkExe $inputs @("/DEBUG", "/INCREMENTAL:NO") "vars-$eh-ms" -Dia
+        if ($r -eq "") { $failed++ } elseif ($eh -eq "table") { $msExe = $r }
+        if ($eh -ne "table") { continue }
+        # the link variants, on the table model's object
+        $lo = & $libExe /nologo "/OUT:$vdir\vars.lib" "$withG\vars6.obj" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL lib of vars6.obj:"; Write-Host $lo; $failed++ }
+        foreach ($v in @(@("/DEBUG", "incremental"), @("/DEBUG /OPT:REF,ICF", "optref"), @("/DEBUG /INCREMENTAL:NO", "lib"))) {
+            $vin = if ($v[1] -eq "lib") { @("$vdir\vars.lib", "$vdir\varsck.obj") } else { $inputs }
+            $what = if ($v[1] -eq "lib") { "the object from a static library" } else { $v[0] }
+            if ((Test-VarsBuild "--eh=table, Microsoft's link, $what" $linkExe $vin @($v[0] -split ' ') "vars-$eh-ms-$($v[1])") -eq "") { $failed++ }
+        }
+        if ($grideLink -ne "") {
+            $grideExe = Test-VarsBuild "--eh=table, GRIDE's link" $grideLink $inputs @("/DEBUG", "/INCREMENTAL:NO") "vars-$eh-gr" -Dia
+            if ($grideExe -eq "") { $failed++ }
+            foreach ($v in @(@("/DEBUG /OPT:REF,ICF", "optref"), @("/DEBUG", "lib"))) {
+                $vin = if ($v[1] -eq "lib") { @("$vdir\vars.lib", "$vdir\varsck.obj") } else { $inputs }
+                $what = if ($v[1] -eq "lib") { "the object from a static library" } else { $v[0] }
+                if ((Test-VarsBuild "--eh=table, GRIDE's link, $what" $grideLink $vin @($v[0] -split ' ') "vars-$eh-gr-$($v[1])") -eq "") { $failed++ }
+            }
+        } else { Write-Host "  note GRIDE not found, its link is not tried" }
+    }
+    # gride-dbg (GRIDE's debugger, dbghelp's reader) on the programs of both linkers: the same answers to dv
+    $grideDbg = if ($gride[0] -ne "") { "$($gride[0])\gride-dbg.exe" } else { "" }
+    if ($grideDbg -ne "" -and (Test-Path $grideDbg) -and $grideExe -ne "" -and $msExe -ne "") {
+        $vlines = @(Get-Content "..\examples\sample-dbg\vars.cpp")
+        $bps = @(); for ($k = 0; $k -lt $vlines.Count; ++$k) { if ($vlines[$k] -match '^\s+checkpoint\("fn=(refs|params|sum|Both::get|blocks|handler|floats)') { $bps += ($k + 1) } }
+        $cmds = @(); foreach ($l in $bps) { $cmds += "bp ``vars.cpp:$l``" }; foreach ($l in $bps) { $cmds += "g"; $cmds += "dv /t /V" }
+        $answers = @{}
+        foreach ($pe in $msExe, $grideExe) {
+            $in = "$pe.dbg.in.txt"; $out = "$pe.dbg.out.txt"
+            [IO.File]::WriteAllText($in, (($cmds + "q") -join "`n") + "`n", (New-Object System.Text.ASCIIEncoding))
+            $p = Start-Process -FilePath $grideDbg -ArgumentList "`"$pe`"" -WorkingDirectory $vdir -RedirectStandardInput $in -RedirectStandardOutput $out -RedirectStandardError "$pe.dbg.err.txt" -NoNewWindow -PassThru
+            if (-not $p.WaitForExit(120000)) { $p.Kill() }
+            $answers[$pe] = @(Get-Content $out | ForEach-Object { $_ -replace '[0-9a-f]{8}`[0-9a-f]{8}', 'ADDR' -replace '\+0x[0-9a-f]+:', '+OFF:' -replace '^vars-table-(ms|gr)!', 'vars!' })
+        }
+        $hits = @($answers[$msExe] | Where-Object { $_ -match '^Breakpoint \d+ hit' }).Count
+        $vals = @($answers[$msExe] | Where-Object { $_ -match '^ADDR @rbp' }).Count
+        if ($hits -eq $bps.Count -and $vals -gt 30 -and @(Compare-Object $answers[$msExe] $answers[$grideExe]).Count -eq 0) { Write-Host "  ok   gride-dbg stops at $hits checkpoint lines and dv lists $vals variables in the frame, the same lines from both linkers' programs" }
+        else { Write-Host "  FAIL gride-dbg: $hits of $($bps.Count) breakpoints hit, $vals variables in the frame; from the two linkers' programs:"; Compare-Object $answers[$msExe] $answers[$grideExe] | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
+    } elseif ($grideLink -ne "") { Write-Host "  note gride-dbg not found, it is not tried" }
+    if ($failed -ne 0) { throw "$failed CodeView variable check(s) failed" }
+    Write-Host ""
+    if ($KnownDifferences -ne 0) { Write-Host "=== $KnownDifferences known difference(s) under GRIDE's link, each printed above (docs\design-selfhost.md 4.6) ===" }
     Write-Host "=== cppparse: build and all tests succeeded ==="
     Write-Host "Reports: $Sandbox\out\sample\Sample-report.{txt,html,pdf}, Sample-diagram.{svg,dot}, Sample-health.txt"
     $global:LASTEXITCODE = 0

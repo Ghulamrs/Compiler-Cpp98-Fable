@@ -10,6 +10,8 @@
 # MSVC has no /std:c++98 switch; its oldest mode is C++14 (the default).
 # The sources are strict C++98, a subset of that, so they compile unchanged.
 # /permissive- enforces standard conformance, /W4 enables most warnings.
+# -Linker ms|gride: the linker of the two programs (scripts\toolset.ps1, Build-Program).
+param([string]$Linker = "")
 
 $ErrorActionPreference = "Stop"
 
@@ -28,6 +30,8 @@ $env:INCLUDE = "$Msvc\include;$SdkRoot\Include\$SdkVer\ucrt;$SdkRoot\Include\$Sd
 $env:LIB     = "$Msvc\lib\x64;$SdkRoot\Lib\$SdkVer\ucrt\x64;$SdkRoot\Lib\$SdkVer\um\x64"
 
 $cl = "$Msvc\bin\Hostx64\x64\cl.exe"
+. "$Sandbox\scripts\toolset.ps1"
+Assert-Linker
 
 Write-Host "=== Toolset ==="
 Write-Host "MSVC $MsvcVer, Windows SDK $SdkVer"
@@ -40,7 +44,7 @@ Push-Location $Sandbox
 try {
     function Build-Test([string]$name) {
         Write-Host "=== Building $name ==="
-        & $cl /nologo /EHsc /W4 /permissive- /I.. /Fo.\ "/Fe.\$name.exe" "..\$name.cpp"
+        Build-Program @("/EHsc", "/W4", "/permissive-", "/I..", "/Fo.\", "..\$name.cpp") @(".\$name.obj") ".\$name.exe" | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "$name failed to compile (exit code $LASTEXITCODE)" }
         Write-Host ""
     }

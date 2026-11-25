@@ -1,7 +1,10 @@
 // vector - cppparse's C++98 library: a contiguous array with pointer iterators. Elements live
 // in storage from ::operator new (bad_alloc when there is none) and are built with placement new
-// and destroyed explicitly. The range constructor and insert take pointer ranges (the iterators of
-// string and vector).
+// and destroyed explicitly.
+// The range constructor, assign and insert are member templates over any input iterator (23.2.4.1); two arguments of
+// one integral type are a count and a value (23.1.1/9). __range_kind (<__iterator>) chooses the worker: pointers to T
+// (the iterators of vector<T>) are copied as before, a forward range is measured once and placed with one allocation,
+// an input range is read element by element (insert reads it into a vector of its own first).
 // Elements are copy-constructed into a new buffer and the old ones destroyed; insert and erase assign over the
 // elements they keep and destroy what is left over (23.2.4.3, 23.2.4.4). Only the types of __is_bytewise (the
 // arithmetic types and the pointers) are moved with memcpy and memmove instead.
@@ -40,18 +43,14 @@ public:
         try { resize(n); } catch (...) { destroyAll(); ::operator delete(m_data); throw; }
     }
     vector(size_t n, const T& v) : m_data(0), m_size(0), m_cap(0) { if (n) rebuild(n, 0, n, &v, 0, Bytewise()); }
-    vector(const T* first, const T* last) : m_data(0), m_size(0), m_cap(0)
-    {
-        if (first != last) rebuild(static_cast<size_t>(last - first), 0, static_cast<size_t>(last - first), first, 1, Bytewise());
-    }
-    // any other iterator pair, or "n copies of v" when both arguments are integers
-    template <class It> vector(It first, It last) : m_data(0), m_size(0), m_cap(0) { initRange(first, last, typename __is_integer<It>::type()); }
+    // a range of any iterators, or "n copies of v" when both arguments are integers
+    template <class It> vector(It first, It last) : m_data(0), m_size(0), m_cap(0) { initRange(first, last, static_cast<typename __range_kind<It, T>::type*>(0)); }
     vector(const vector& o) : m_data(0), m_size(0), m_cap(0) { if (o.m_size) rebuild(o.m_size, 0, o.m_size, o.m_data, 1, Bytewise()); }
     ~vector() { destroyAll(); ::operator delete(m_data); }
 
     vector& operator=(const vector& o)
     {
-        if (this != &o) assign(o.m_data, o.m_data + o.m_size);
+        if (this != &o) assignRange(o.m_data, o.m_data + o.m_size, static_cast<__pointer_range_tag*>(0));
         return *this;
     }
 
@@ -107,13 +106,7 @@ public:
         if (n > m_cap) grow(n);
         while (m_size < n) { new (m_data + m_size) T(v); ++m_size; }
     }
-    void assign(const T* first, const T* last)
-    {
-        size_t n = static_cast<size_t>(last - first);
-        destroyAll();
-        if (n > m_cap) grow(n);
-        while (m_size < n) { new (m_data + m_size) T(first[m_size]); ++m_size; }
-    }
+    template <class It> void assign(It first, It last) { assignRange(first, last, static_cast<typename __range_kind<It, T>::type*>(0)); }
 
     // the inserted value is copied first where the elements it may be one of are assigned over
     iterator insert(iterator pos, const T& v)
@@ -132,17 +125,7 @@ public:
         else if (n == 1 && at == m_size) { new (m_data + m_size) T(v); ++m_size; }
         else { T copy(v); spread(at, n, &copy, 0, Bytewise()); }
     }
-    void insert(iterator pos, const T* first, const T* last)
-    {
-        size_t at = static_cast<size_t>(pos - m_data);
-        size_t n = static_cast<size_t>(last - first);
-        if (n == 0) return;
-        if (m_size + n > m_cap) rebuild(m_size + n, at, n, first, 1, Bytewise());
-        else if (first >= m_data && first < m_data + m_size) {
-            vector copy(first, last);
-            spread(at, n, copy.m_data, 1, Bytewise());
-        } else spread(at, n, first, 1, Bytewise());
-    }
+    template <class It> void insert(iterator pos, It first, It last) { insertRange(pos, first, last, static_cast<typename __range_kind<It, T>::type*>(0)); }
     iterator erase(iterator pos) { return erase(pos, pos + 1); }
     iterator erase(iterator first, iterator last)
     {
@@ -165,14 +148,76 @@ private:
     size_t m_size;
     size_t m_cap;
 
-    template <class It> void initRange(It first, It last, __false_type)
+    // The workers of the member templates, chosen by __range_kind: pointers to T, two integers (a count and a value),
+    // a range of forward iterators, a range of input iterators.
+    void initRange(const T* first, const T* last, __pointer_range_tag*)
     {
-        try { for (; first != last; ++first) push_back(*first); } catch (...) { destroyAll(); ::operator delete(m_data); throw; }
+        if (first != last) rebuild(static_cast<size_t>(last - first), 0, static_cast<size_t>(last - first), first, 1, Bytewise());
     }
-    template <class N> void initRange(N n, N v, __true_type)
+    template <class N> void initRange(N n, N v, __true_type*)
     {
         T x = static_cast<T>(v);
         if (n) rebuild(static_cast<size_t>(n), 0, static_cast<size_t>(n), &x, 0, Bytewise());
+    }
+    template <class It> void initRange(It first, It last, forward_iterator_tag*)
+    {
+        size_t n = static_cast<size_t>(std::distance(first, last));
+        if (n) rebuildRange(n, 0, n, first, Bytewise());
+    }
+    template <class It> void initRange(It first, It last, input_iterator_tag*)
+    {
+        try { for (; first != last; ++first) push_back(*first); } catch (...) { destroyAll(); ::operator delete(m_data); throw; }
+    }
+
+    void assignRange(const T* first, const T* last, __pointer_range_tag*)
+    {
+        size_t n = static_cast<size_t>(last - first);
+        destroyAll();
+        if (n > m_cap) grow(n);
+        while (m_size < n) { new (m_data + m_size) T(first[m_size]); ++m_size; }
+    }
+    template <class N> void assignRange(N n, N v, __true_type*) { assign(static_cast<size_t>(n), static_cast<T>(v)); }
+    template <class It> void assignRange(It first, It last, forward_iterator_tag*)
+    {
+        size_t n = static_cast<size_t>(std::distance(first, last));
+        destroyAll();
+        if (n > m_cap) grow(n);
+        for (; first != last; ++first) { new (m_data + m_size) T(*first); ++m_size; }
+    }
+    template <class It> void assignRange(It first, It last, input_iterator_tag*)
+    {
+        destroyAll();
+        for (; first != last; ++first) push_back(*first);
+    }
+
+    void insertRange(iterator pos, const T* first, const T* last, __pointer_range_tag*)
+    {
+        size_t at = static_cast<size_t>(pos - m_data);
+        size_t n = static_cast<size_t>(last - first);
+        if (n == 0) return;
+        if (m_size + n > m_cap) rebuild(m_size + n, at, n, first, 1, Bytewise());
+        else if (first >= m_data && first < m_data + m_size) {
+            vector copy(first, last);
+            spread(at, n, copy.m_data, 1, Bytewise());
+        } else spread(at, n, first, 1, Bytewise());
+    }
+    template <class N> void insertRange(iterator pos, N n, N v, __true_type*) { insert(pos, static_cast<size_t>(n), static_cast<T>(v)); }
+    template <class It> void insertRange(iterator pos, It first, It last, forward_iterator_tag*)
+    {
+        size_t at = static_cast<size_t>(pos - m_data);
+        size_t n = static_cast<size_t>(std::distance(first, last));
+        if (n == 0) return;
+        if (m_size + n > m_cap) rebuildRange(m_size + n, at, n, first, Bytewise());
+        else spreadRange(at, n, first, last, Bytewise());
+    }
+    // the range can be read once only: into a vector of its own, which is then inserted as pointers. An exception
+    // of the iterator leaves this vector as it was (23.2.4.3)
+    template <class It> void insertRange(iterator pos, It first, It last, input_iterator_tag*)
+    {
+        size_t at = static_cast<size_t>(pos - m_data);
+        vector read;
+        for (; first != last; ++first) read.push_back(*first);
+        insertRange(m_data + at, read.m_data, read.m_data + read.m_size, static_cast<__pointer_range_tag*>(0));
     }
 
     static T* allocate(size_t n) { return static_cast<T*>(::operator new(n * sizeof(T))); }
@@ -232,6 +277,59 @@ private:
     {
         if (at < m_size) memmove(m_data + at + n, m_data + at, (m_size - at) * sizeof(T));
         for (size_t i = 0; i < n; ++i) m_data[at + i] = src[i * step];
+        m_size += n;
+    }
+    // rebuild and spread for a range of forward iterators that is not of this vector's elements: the n new
+    // elements are *first, *++first, ...
+    template <class It> void rebuildRange(size_t cap, size_t at, size_t n, It first, __false_type)
+    {
+        T* d = allocate(cap);
+        size_t k = 0;
+        try {
+            for (; k < at; ++k) new (d + k) T(m_data[k]);
+            for (; k < at + n; ++k, ++first) new (d + k) T(*first);
+            for (; k < m_size + n; ++k) new (d + k) T(m_data[k - n]);
+        } catch (...) {
+            while (k > 0) { --k; d[k].~T(); }
+            ::operator delete(d);
+            throw;
+        }
+        for (k = m_size; k > 0; ) { --k; m_data[k].~T(); }
+        ::operator delete(m_data);
+        m_data = d;
+        m_size += n;
+        m_cap = cap;
+    }
+    template <class It> void rebuildRange(size_t cap, size_t at, size_t n, It first, __true_type)
+    {
+        T* d = allocate(cap);
+        try { for (size_t i = 0; i < n; ++i, ++first) d[at + i] = *first; } catch (...) { ::operator delete(d); throw; }
+        if (at) memcpy(d, m_data, at * sizeof(T));
+        if (at < m_size) memcpy(d + at + n, m_data + at, (m_size - at) * sizeof(T));
+        ::operator delete(m_data);
+        m_data = d;
+        m_size += n;
+        m_cap = cap;
+    }
+    template <class It> void spreadRange(size_t at, size_t n, It first, It last, __false_type)
+    {
+        size_t old = m_size, tail = old - at, i;
+        if (n > tail) {
+            It mid = first;
+            std::advance(mid, static_cast<typename iterator_traits<It>::difference_type>(tail));
+            for (It s = mid; s != last; ++s) { new (m_data + m_size) T(*s); ++m_size; }
+            for (i = at; i < old; ++i) { new (m_data + m_size) T(m_data[i]); ++m_size; }
+            for (i = 0; i < tail; ++i, ++first) m_data[at + i] = *first;
+        } else {
+            for (i = old - n; i < old; ++i) { new (m_data + m_size) T(m_data[i]); ++m_size; }
+            for (i = old - n; i > at; --i) m_data[i + n - 1] = m_data[i - 1];
+            for (i = 0; i < n; ++i, ++first) m_data[at + i] = *first;
+        }
+    }
+    template <class It> void spreadRange(size_t at, size_t n, It first, It, __true_type)
+    {
+        if (at < m_size) memmove(m_data + at + n, m_data + at, (m_size - at) * sizeof(T));
+        for (size_t i = 0; i < n; ++i, ++first) m_data[at + i] = *first;
         m_size += n;
     }
     // erases the n elements from at: the later ones are assigned down, the last n destroyed (23.2.4.3)

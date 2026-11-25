@@ -1,5 +1,8 @@
 // list - cppparse's C++98 library: a doubly linked list (23.2.2) with a sentinel node and bidirectional
 // iterators; splice, remove, unique, merge, reverse and sort (a merge sort) as the standard's.
+// The range constructor, assign and insert are member templates over any input iterator (23.2.2.1); two arguments of
+// one integral type are a count and a value (23.1.1/9). insert of a count or a range builds its nodes apart and
+// splices them in, so that an exception leaves the list as it was (23.2.2.3).
 #ifndef CPPPARSE_LIST
 #define CPPPARSE_LIST
 
@@ -80,7 +83,8 @@ public:
     list() : m_size(0) { m_end.prev = m_end.next = &m_end; }
     explicit list(size_t n) : m_size(0) { m_end.prev = m_end.next = &m_end; resize(n); }
     list(size_t n, const T& v) : m_size(0) { m_end.prev = m_end.next = &m_end; assign(n, v); }
-    template <class It> list(It first, It last) : m_size(0) { m_end.prev = m_end.next = &m_end; initRange(first, last, typename __is_integer<It>::type()); }
+    // a range of any iterators, or "n copies of v" when both arguments are integers
+    template <class It> list(It first, It last) : m_size(0) { m_end.prev = m_end.next = &m_end; insertRange(end(), first, last, static_cast<typename __range_category<It>::type*>(0)); }
     list(const list& o) : m_size(0) { m_end.prev = m_end.next = &m_end; assign(o.begin(), o.end()); }
     ~list() { clear(); }
     list& operator=(const list& o) { if (this != &o) assign(o.begin(), o.end()); return *this; }
@@ -116,8 +120,13 @@ public:
         ++m_size;
         return iterator(n);
     }
-    void insert(iterator pos, size_t n, const T& v) { for (size_t i = 0; i < n; ++i) insert(pos, v); }
-    template <class It> void insert(iterator pos, It first, It last) { for (; first != last; ++first) insert(pos, *first); }
+    void insert(iterator pos, size_t n, const T& v)
+    {
+        list t;
+        for (size_t i = 0; i < n; ++i) t.push_back(v);
+        splice(pos, t);
+    }
+    template <class It> void insert(iterator pos, It first, It last) { insertRange(pos, first, last, static_cast<typename __range_category<It>::type*>(0)); }
     iterator erase(iterator pos)
     {
         __list_node_base* n = pos.node();
@@ -133,7 +142,7 @@ public:
     void resize(size_t n) { while (m_size > n) pop_back(); while (m_size < n) push_back(T()); }
     void resize(size_t n, const T& v) { while (m_size > n) pop_back(); while (m_size < n) push_back(v); }
     void assign(size_t n, const T& v) { clear(); insert(end(), n, v); }
-    template <class It> void assign(It first, It last) { clear(); insert(end(), first, last); }
+    template <class It> void assign(It first, It last) { assignRange(first, last, static_cast<typename __range_category<It>::type*>(0)); }
     void swap(list& o)
     {
         list t; t.splice(t.end(), *this);
@@ -205,8 +214,17 @@ public:
 
 private:
     struct __less { bool operator()(const T& a, const T& b) const { return a < b; } };
-    template <class It> void initRange(It first, It last, __false_type) { insert(end(), first, last); }
-    template <class N> void initRange(N n, N v, __true_type) { assign(static_cast<size_t>(n), static_cast<T>(v)); }
+    // The workers of the member templates, chosen by __range_category: two integers (a count and a value) or a range
+    // of iterators, read element by element whatever their category.
+    template <class N> void insertRange(iterator pos, N n, N v, __true_type*) { insert(pos, static_cast<size_t>(n), static_cast<T>(v)); }
+    template <class It> void insertRange(iterator pos, It first, It last, input_iterator_tag*)
+    {
+        list t;
+        for (; first != last; ++first) t.push_back(*first);
+        splice(pos, t);
+    }
+    template <class N> void assignRange(N n, N v, __true_type*) { assign(static_cast<size_t>(n), static_cast<T>(v)); }
+    template <class It> void assignRange(It first, It last, input_iterator_tag*) { clear(); insertRange(end(), first, last, static_cast<input_iterator_tag*>(0)); }
     // the nodes [first, last) move before pos (no sizes touched)
     static void transfer(__list_node_base* pos, __list_node_base* first, __list_node_base* last)
     {

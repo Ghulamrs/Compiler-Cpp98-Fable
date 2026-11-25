@@ -7,6 +7,12 @@
 // (a sequence of assign, which is =); comparisons, lengths and searches go through traits. The members cppparse's own
 // sources use most (append, push_back, +=, compare, find, c_str, size, the copies) do their work in place rather than
 // through other members, since every call is a real call in a -O0 build.
+// The members over two iterators (the constructor, append, assign, insert, replace) take any input iterator; two
+// arguments of one integral type are a count and a character (21.3.1, 23.1.1/9). __range_kind (<__iterator>) chooses the
+// worker: pointers to charT (the iterators of basic_string) are a pointer and a length, copied with memcpy and memmove;
+// a forward range is measured once, and the constructor, assign and append place its characters with one allocation
+// (insert and replace through a string of the range, which is what 21.3.5.4 and 21.3.5.6 define them as); an input
+// range is read character by character into a string of its own.
 #ifndef CPPPARSE_STRING
 #define CPPPARSE_STRING
 
@@ -57,16 +63,8 @@ public:
     basic_string(size_type n, charT c) { __initFill(n, c); }
     basic_string(size_type n, charT c, const Allocator&) { __initFill(n, c); }
     // any iterator range, or "n copies of c" when both arguments are integers
-    template <class InputIterator> basic_string(InputIterator first, InputIterator last) : m_size(0), m_cap(__local - 1)
-    {
-        m_bx.buf[0] = charT();
-        assignDispatch(first, last, typename __is_integer<InputIterator>::type());
-    }
-    template <class InputIterator> basic_string(InputIterator first, InputIterator last, const Allocator&) : m_size(0), m_cap(__local - 1)
-    {
-        m_bx.buf[0] = charT();
-        assignDispatch(first, last, typename __is_integer<InputIterator>::type());
-    }
+    template <class InputIterator> basic_string(InputIterator first, InputIterator last) { __initRange(first, last, static_cast<typename __range_kind<InputIterator, charT>::type*>(0)); }
+    template <class InputIterator> basic_string(InputIterator first, InputIterator last, const Allocator&) { __initRange(first, last, static_cast<typename __range_kind<InputIterator, charT>::type*>(0)); }
     ~basic_string() { if (m_cap >= __local) __release(m_bx.ptr, m_cap); }
 
     basic_string& operator=(const basic_string& o) { if (this != &o) assign(o.m_cap < __local ? o.m_bx.buf : o.m_bx.ptr, o.m_size); return *this; }
@@ -151,7 +149,7 @@ public:
         p[m_size] = charT();
         return *this;
     }
-    template <class InputIterator> basic_string& append(InputIterator first, InputIterator last) { return appendDispatch(first, last, typename __is_integer<InputIterator>::type()); }
+    template <class InputIterator> basic_string& append(InputIterator first, InputIterator last) { return __appendRange(first, last, static_cast<typename __range_kind<InputIterator, charT>::type*>(0)); }
     void push_back(charT c)
     {
         const size_type n = m_size;
@@ -191,7 +189,7 @@ public:
     }
     basic_string& assign(const charT* s) { return assign(s, (__is_char_traits<traits>::value ? strlen(reinterpret_cast<const char*>(s)) : traits::length(s))); }
     basic_string& assign(size_type n, charT c) { clear(); return append(n, c); }
-    template <class InputIterator> basic_string& assign(InputIterator first, InputIterator last) { return assignDispatch(first, last, typename __is_integer<InputIterator>::type()); }
+    template <class InputIterator> basic_string& assign(InputIterator first, InputIterator last) { return __assignRange(first, last, static_cast<typename __range_kind<InputIterator, charT>::type*>(0)); }
 
     basic_string& insert(size_type pos, const basic_string& o) { return replace(pos, 0, o.m_cap < __local ? o.m_bx.buf : o.m_bx.ptr, o.m_size); }
     basic_string& insert(size_type pos1, const basic_string& o, size_type pos2, size_type n)
@@ -211,7 +209,7 @@ public:
     }
     iterator insert(iterator p) { return insert(p, charT()); }   // insert(p, c = charT()): the default argument as an overload
     void insert(iterator p, size_type n, charT c) { replace(static_cast<size_type>(p - begin()), 0, n, c); }
-    template <class InputIterator> void insert(iterator p, InputIterator first, InputIterator last) { replaceDispatch(p, p, first, last, typename __is_integer<InputIterator>::type()); }
+    template <class InputIterator> void insert(iterator p, InputIterator first, InputIterator last) { __replaceRange(p, p, first, last, static_cast<typename __range_kind<InputIterator, charT>::type*>(0)); }
 
     basic_string& erase(size_type pos = 0, size_type n = npos)
     {
@@ -287,7 +285,7 @@ public:
     basic_string& replace(iterator i1, iterator i2, const charT* s, size_type n) { return replace(static_cast<size_type>(i1 - begin()), static_cast<size_type>(i2 - i1), s, n); }
     basic_string& replace(iterator i1, iterator i2, const charT* s) { return replace(static_cast<size_type>(i1 - begin()), static_cast<size_type>(i2 - i1), s, (__is_char_traits<traits>::value ? strlen(reinterpret_cast<const char*>(s)) : traits::length(s))); }
     basic_string& replace(iterator i1, iterator i2, size_type n, charT c) { return replace(static_cast<size_type>(i1 - begin()), static_cast<size_type>(i2 - i1), n, c); }
-    template <class InputIterator> basic_string& replace(iterator i1, iterator i2, InputIterator j1, InputIterator j2) { return replaceDispatch(i1, i2, j1, j2, typename __is_integer<InputIterator>::type()); }
+    template <class InputIterator> basic_string& replace(iterator i1, iterator i2, InputIterator j1, InputIterator j2) { return __replaceRange(i1, i2, j1, j2, static_cast<typename __range_kind<InputIterator, charT>::type*>(0)); }
 
     size_type copy(charT* s, size_type n, size_type pos = 0) const
     {
@@ -551,28 +549,80 @@ private:
         m_cap = cap;
         m_size = size + n;
     }
-    // the iterator members: integers are a count and a character (21.3/6), other types a range
-    template <class InputIterator> basic_string& appendDispatch(InputIterator n, InputIterator c, __true_type) { return append(static_cast<size_type>(n), static_cast<charT>(c)); }
-    template <class InputIterator> basic_string& appendDispatch(InputIterator first, InputIterator last, __false_type)
+    // The workers of the iterator members, chosen by __range_kind: pointers to charT, two integers (a count and a
+    // character), a range of forward iterators, a range of input iterators.
+    void __initRange(const charT* first, const charT* last, __pointer_range_tag*) { __init(first, __dist(first, last)); }
+    template <class N> void __initRange(N n, N c, __true_type*) { __initFill(static_cast<size_type>(n), static_cast<charT>(c)); }
+    template <class It> void __initRange(It first, It last, forward_iterator_tag*)
     {
-        basic_string t;
-        for (; first != last; ++first) t.push_back(*first);
+        const size_type n = static_cast<size_type>(std::distance(first, last));
+        charT* p;
+        if (n < __local) { m_cap = __local - 1; p = m_bx.buf; }
+        else { m_cap = n; p = __allocate(n); m_bx.ptr = p; }
+        // (a constructor that throws has no destructor to clean up after it)
+        try { for (size_type i = 0; i < n; ++i, ++first) p[i] = *first; } catch (...) { if (m_cap >= __local) __release(p, m_cap); throw; }
+        p[n] = charT();
+        m_size = n;
+    }
+    template <class It> void __initRange(It first, It last, input_iterator_tag*)
+    {
+        m_size = 0;
+        m_cap = __local - 1;
+        m_bx.buf[0] = charT();
+        try { for (; first != last; ++first) push_back(*first); } catch (...) { if (m_cap >= __local) __release(m_bx.ptr, m_cap); throw; }
+    }
+
+    basic_string& __appendRange(const charT* first, const charT* last, __pointer_range_tag*) { return append(first, __dist(first, last)); }
+    template <class N> basic_string& __appendRange(N n, N c, __true_type*) { return append(static_cast<size_type>(n), static_cast<charT>(c)); }
+    // the characters are written past the end, in a new buffer when this one is too small; the old characters stand
+    // until all are read, so the range may be of this string's own (append(basic_string(first, last)), 21.3.5.2)
+    template <class It> basic_string& __appendRange(It first, It last, forward_iterator_tag*)
+    {
+        const size_type n = static_cast<size_type>(std::distance(first, last));
+        const size_type size = m_size;
+        charT* p = m_cap < __local ? m_bx.buf : m_bx.ptr;
+        if (n <= m_cap - size) {
+            try { for (size_type i = 0; i < n; ++i, ++first) p[size + i] = *first; } catch (...) { p[size] = charT(); throw; }
+        } else {
+            const size_type cap = __newCapacity(size + n);
+            charT* d = __allocate(cap);
+            try { for (size_type i = 0; i < n; ++i, ++first) d[size + i] = *first; } catch (...) { __release(d, cap); throw; }
+            memcpy(d, p, size * sizeof(charT));
+            if (m_cap >= __local) __release(p, m_cap);
+            m_bx.ptr = d;
+            m_cap = cap;
+            p = d;
+        }
+        p[size + n] = charT();
+        m_size = size + n;
+        return *this;
+    }
+    template <class It> basic_string& __appendRange(It first, It last, input_iterator_tag*)
+    {
+        const basic_string t(first, last);
         return append(t.data(), t.m_size);
     }
-    template <class InputIterator> basic_string& assignDispatch(InputIterator n, InputIterator c, __true_type) { return assign(static_cast<size_type>(n), static_cast<charT>(c)); }
-    template <class InputIterator> basic_string& assignDispatch(InputIterator first, InputIterator last, __false_type)
+
+    basic_string& __assignRange(const charT* first, const charT* last, __pointer_range_tag*) { return assign(first, __dist(first, last)); }
+    template <class N> basic_string& __assignRange(N n, N c, __true_type*) { return assign(static_cast<size_type>(n), static_cast<charT>(c)); }
+    // forward or input: the range may be of this string's own characters, so the new string is built before this one
+    // is touched (assign(basic_string(first, last)), 21.3.5.3), and then taken over
+    template <class It> basic_string& __assignRange(It first, It last, input_iterator_tag*)
     {
-        basic_string t;
-        for (; first != last; ++first) t.push_back(*first);
+        basic_string t(first, last);
         swap(t);
         return *this;
     }
-    template <class InputIterator> basic_string& replaceDispatch(iterator i1, iterator i2, InputIterator n, InputIterator c, __true_type) { return replace(i1, i2, static_cast<size_type>(n), static_cast<charT>(c)); }
-    template <class InputIterator> basic_string& replaceDispatch(iterator i1, iterator i2, InputIterator first, InputIterator last, __false_type)
+
+    basic_string& __replaceRange(iterator i1, iterator i2, const charT* first, const charT* last, __pointer_range_tag*)
     {
-        basic_string t;
-        for (; first != last; ++first) t.push_back(*first);
-        return replace(i1, i2, t.data(), t.m_size);
+        return replace(static_cast<size_type>(i1 - begin()), static_cast<size_type>(i2 - i1), first, __dist(first, last));
+    }
+    template <class N> basic_string& __replaceRange(iterator i1, iterator i2, N n, N c, __true_type*) { return replace(i1, i2, static_cast<size_type>(n), static_cast<charT>(c)); }
+    template <class It> basic_string& __replaceRange(iterator i1, iterator i2, It first, It last, input_iterator_tag*)
+    {
+        const basic_string t(first, last);
+        return replace(static_cast<size_type>(i1 - begin()), static_cast<size_type>(i2 - i1), t.data(), t.m_size);
     }
 };
 

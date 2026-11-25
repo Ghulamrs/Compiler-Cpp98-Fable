@@ -52,7 +52,8 @@ struct IrGlobal {
     bool        linkOnce;    // a static local of an inline function: every unit emits it, one copy survives (COMDAT)
     bool        internal;    // internal linkage: a static variable at namespace scope or a static local of an internal function
     int         align;       // the type's alignment or a larger __declspec(align(N)); 0: from the size only
-    IrGlobal() : size(8), isFloat(false), readOnly(false), linkOnce(false), internal(false), align(0) {}
+    bool        threadLocal; // __declspec(thread): its initial value in .tls$ (cppparse/target TargetTls)
+    IrGlobal() : size(8), isFloat(false), readOnly(false), linkOnce(false), internal(false), align(0), threadLocal(false) {}
 };
 
 class X86Module {
@@ -81,6 +82,8 @@ public:
     void        addVtordispexThunk(const std::string& irName, const std::string& target, int vbptrOffset, int entryOffset, int nonVirtual);
     void        addGlobal(const IrGlobal& g) { m_globals.push_back(g); }
     void        addInitializer(const std::string& irName) { m_initializers.push_back(irName); }   // run by the CRT before main
+    // a linker directive of the source (#pragma comment(linker, "/alternatename:a=b"), docs/design-selfhost.md 4.5): .drectve
+    void        addLinkerDirective(const std::string& text) { m_directives.push_back(text); }
     // the dynamic initializer of a COMDAT variable (a static data member of a class template instantiation): its .CRT$XCU
     // entry is a COMDAT of its own under entrySymbol, so that one unit's initializer runs for the program, as cl's does
     void        addComdatInitializer(const std::string& irName, const std::string& entrySymbol, const std::string& globalName);
@@ -136,6 +139,12 @@ private:
     std::string stringLabel(const std::string& text);
     void        useGlobal(const std::string& name) { Lock l(m_mutex); m_globalsUsed.insert(name); }
     void        useExtern(const std::string& name) { Lock l(m_mutex); if (!m_defined.count(name)) m_externs.insert(name); }
+    void        useEhModel() { Lock l(m_mutex); m_ehUsed = true; }   // a PROC with a handler: the object carries the model mark
+    bool        m_ehUsed;                   // the code has a construct of one exception model (docs/design-selfhost.md 3.7)
+    std::vector<std::string> m_directives;   // the source's linker directives (#pragma comment(linker), /alternatename only)
+    void        useTls() { Lock l(m_mutex); m_tlsUsed = true; }   // an access to a thread-local names _tls_index
+    std::string m_tls;                          // the thread-locals' definitions, emitted in .tls$
+    bool        m_tlsUsed;
     friend class X86Function;
 };
 

@@ -231,7 +231,8 @@ struct Symbol {
     bool          hasConstValue;
     int64         constValue;             // the value in its type: the low 32 bits sign-extended for a type of 4 bytes or less, all 64 bits of a 64-bit type
     int           declAlign;              // __declspec(align(N)) on a variable or field (0: none)
-    int           bitWidth, bitOffset;    // bit-field: its width (-1: not a bit-field) and first bit in the unit at offset
+    bool          isThread;               // __declspec(thread): a thread-local variable of namespace scope (docs/design-selfhost.md 4.1)
+    int           bitWidth, bitOffset;   // bit-field: its width (-1: not a bit-field) and first bit in the unit at offset
     // a member of an anonymous union or struct, seen as a member of the enclosing class: the unnamed member
     // holding the anonymous object and the member of it this symbol names (offset = anonHost's + anonOf's)
     Symbol*       anonHost;
@@ -510,6 +511,7 @@ private:
     static bool anyMemberArg(const std::vector<Symbol*>& syms);
     bool   derivesFrom(Symbol* derived, Symbol* base, int* offset, int depth = 0);
     int    baseSubobjects(Symbol* derived, Symbol* base);   // subobjects of base in derived (C2594 / C2385 when > 1)
+    int    compareBaseConversions(const Conversion& a, const Conversion& b);   // 13.3.3.2/4: the nearer base is the better one
 
     // expressions
     const Type* expr(cxx::Expr* e, Scope* in);
@@ -554,6 +556,7 @@ private:
     Symbol* instantiateBoundFunctionTemplate(Symbol* tmpl, std::map<std::string, const Type*>& bind, std::map<std::string, int64>& ints);
     bool   matchFunctionTemplate(Symbol* tmpl, cxx::Declarator* dcl, const Type* ft, Scope* in, std::map<std::string, const Type*>& bind, std::map<std::string, int64>& ints);
     bool   atLeastAsSpecialized(Symbol* a, Symbol* b);   // 14.5.5.2: b's parameters deduce from a's with a's parameters unique types
+    bool   patternIsArguments(Symbol* spec, const std::map<std::string, const Type*>& bind, const std::map<std::string, int64>& ibind, const std::vector<const Type*>& types);   // 14.5.4.1
     static bool typeHasError(const Type* t);
     void   declareFunctionSpecialization(cxx::Decl* d, cxx::Decl* inner, cxx::Declarator* dcl, Scope* in, cxx::Access access);
     bool   deduce(const cxx::Param* p, const Type* argType, Scope* tscope, std::map<std::string, const Type*>& bindings, std::map<std::string, int64>& ints);
@@ -595,6 +598,7 @@ private:
     std::set<std::string>      m_fixedTemplateParams;   // the template parameters given explicitly on the call being deduced (not deduced, converted)
     std::map<std::string, Symbol*> m_boundMembers;      // the pointer-to-member arguments given explicitly to the function template being instantiated, by parameter
     bool                       m_strictDeduce;          // partial ordering: a const in the parameter needs a const in the argument
+    bool                       m_argDeduce;             // a partial specialisation's pattern against a template argument: the type as it is, top-level qualifiers too
     int                        m_instantiationDepth;    // class template instantiations nested (cl stops at 1000: C2999)
     bool                       m_instantiationOverflow; // the limit was reported once
     std::map<Symbol*, std::set<Symbol*> > m_uses;          // function (0: namespace scope) -> functions it refers to

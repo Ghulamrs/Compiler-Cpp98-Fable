@@ -2,6 +2,7 @@
 // Expressions and statements are in SemaExpr.cpp.
 #include "Sema.hpp"
 #include "PathUtil.hpp"
+#include "TargetTls.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -308,7 +309,7 @@ Symbol::Symbol()
       isVirtual(false), isPureVirtual(false), isStatic(false), isExtern(false), isInline(false), isExplicit(false), isConstructor(false),
       isDestructor(false), isConversion(false), isOperator(false), isFriendDecl(false), hasBody(false), isExternC(false),
       definition(0), declAst(0), body(0), vtableSlot(-1), thisAdjust(0), vfptrOffset(0), vfptrVbase(0), overrides(0), ownerClass(0), offset(0), index(0), isMember(false), isParam(false), declaredArray(false),
-      isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), bitWidth(-1), bitOffset(0),
+      isLocal(false), isMutable(false), init(0), initCtor(0), hasConstValue(false), constValue(0), declAlign(0), isThread(false), bitWidth(-1), bitOffset(0),
       anonHost(0), anonOf(0), templateAst(0), instantiatedFrom(0), memberArg(0),
       isDependentContext(false), isImplicitInstantiation(false), isLazyInstantiation(false), instantiationFailed(false), isExplicitInstantiation(false), instantiationUsed(false), specOrder(0), isImplicit(false), requiredParams(0), hasUserCtor(false), hasCopyCtor(false), hasDtor(false),
       hasCopyAssign(false), hasDefaultCtor(false), memberPointerUnspecified(false), defOrder(0), friendsUnknown(false), nonPublicBases(false), isUsed(false), isNoreturn(false), isReplaceable(false) {}
@@ -382,7 +383,7 @@ Scope* Program::newScope(Scope::Kind k, Scope* parent, Symbol* owner)
 
 Sema::Sema(TypeTable& types, Program& program)
     : m_types(types), m_prog(program), m_currentFunction(0), m_currentClass(0), m_qualifierTrace(0), m_typeAccess(false), m_delayTypeAccess(false), m_loopDepth(0), m_switchDepth(0), m_depth(0),
-      m_classOrder(0), m_bodyOrder(-1), m_specOrder(0), m_bodySpecOrder(0x7FFFFFFF), m_definingDepth(0), m_hasGoto(false), m_strictDeduce(false), m_instantiationDepth(0), m_instantiationOverflow(false), m_externalArena(0) {}
+      m_classOrder(0), m_bodyOrder(-1), m_specOrder(0), m_bodySpecOrder(0x7FFFFFFF), m_definingDepth(0), m_hasGoto(false), m_strictDeduce(false), m_argDeduce(false), m_instantiationDepth(0), m_instantiationOverflow(false), m_externalArena(0) {}
 
 void Sema::queueBody(PendingBody pb)
 {
@@ -1059,6 +1060,7 @@ const Type* Sema::applyDeclarator(const Type* base, const cxx::Declarator& d, Sc
             for (size_t k = 0; k < p.params.size(); ++k) {
                 const cxx::Param* pa = p.params[k];
                 const Type* pt = typeOf(pa->spec, in);
+                if (pa->spec.thread && params) error(pa->loc, TargetTls::code(), TargetTls::message(TargetTls::Parameter, pa->decl && !pa->decl->name.parts.empty() ? pa->decl->name.text() : std::string("(unnamed)")));
                 // which parameters of the function types inside a declared function's parameter were written as
                 // arrays (Symbol::nestedArrays): a parameter of the function itself (params) gets a list of its own;
                 // inside one, each parameter takes its place in the list before what is inside its own type. The
@@ -1155,10 +1157,15 @@ void Sema::declare(cxx::Decl* d, Scope* in, cxx::Access access)
     }
     case cxx::Decl::Class:
         d->semaSym = declareClass(d->classDef, in, access, 0);
+        // "__declspec(thread) struct S { ... };": the attribute names no variable (docs/design-selfhost.md 4.1)
+        if (d->spec.thread) error(d->spec.loc, TargetTls::code(), TargetTls::message(TargetTls::Type, d->semaSym ? d->semaSym->name : std::string("(unnamed)")));
         // "union { int i; double d; };" in a class: an unnamed member whose members belong to the class
         if (in->kind == Scope::Class && d->classDef->name.parts.empty() && d->classDef->isDefinition) declareAnonymousMember(d->semaSym, in, access);
         break;
-    case cxx::Decl::Enum: d->semaSym = declareEnum(d->enumDef, in, access); break;
+    case cxx::Decl::Enum:
+        d->semaSym = declareEnum(d->enumDef, in, access);
+        if (d->spec.thread) error(d->spec.loc, TargetTls::code(), TargetTls::message(TargetTls::Type, d->semaSym ? d->semaSym->name : std::string("(unnamed)")));
+        break;
     case cxx::Decl::Simple: declareSimple(d, in, access); break;
     case cxx::Decl::Function: {
         // the member types a definition at namespace scope names are checked once its function is known (11/5)
@@ -1677,7 +1684,11 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
         namedType(d->spec.name, in, d->spec.elaborated, d->spec.loc);
         return;
     }
-    if (d->declarators.empty()) return;
+    if (d->declarators.empty()) {
+        // "__declspec(thread) struct S { ... };": the attribute names no variable (docs/design-selfhost.md 4.1)
+        if (d->spec.thread) error(d->spec.loc, TargetTls::code(), TargetTls::message(TargetTls::Type, defined ? defined->name : d->spec.text()));
+        return;
+    }
     // the member types a declaration at namespace scope names are checked once the function or the static member it
     // declares is known (11/5: as in the member's class; a friend's own declaration may name them): held back while
     // the specifiers and the declarators are typed, checked after the declarators
@@ -1711,12 +1722,14 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
         if (delay) { m_typeAccess = savedTypeAccess; m_delayTypeAccess = false; }
         const std::string& name = dcl->name.parts.empty() ? std::string("") : dcl->name.parts.back().ident;
         if (d->spec.isTypedef) {
+            if (d->spec.thread) error(dcl->loc, TargetTls::code(), TargetTls::message(TargetTls::Typedef, name));
             Symbol* td = m_prog.newSymbol(Symbol::Typedef, name, in);
             td->type = t; td->loc = dcl->loc; td->access = access; dcl->semaSym = td;
             td->nestedArrays = typeArrays;
             continue;
         }
         if (t->kind == Type::Function) {
+            if (d->spec.thread) error(dcl->loc, TargetTls::code(), TargetTls::message(TargetTls::Function, name));
             Symbol* fn = declareFunction(d, dcl, d->spec, in, access, t, params);
             if (fn && fn->nestedArrays.empty()) fn->nestedArrays = typeArrays;
             if (fn && id.pureVirtual) { fn->isPureVirtual = true; fn->isVirtual = true; }
@@ -1746,6 +1759,9 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
         // variable, field or static member
         Scope* target = in;
         Symbol* var = 0;
+        // __declspec(thread): a variable of namespace scope only (docs/design-selfhost.md 4.1)
+        const bool threadHere = d->spec.thread && in->isNamespaceLike() && dcl->name.parts.size() <= 1;
+        if (d->spec.thread && !threadHere) error(dcl->loc, TargetTls::code(), TargetTls::message(TargetTls::Member, dcl->name.text()));
         if (dcl->name.parts.size() > 1) {
             // out-of-line definition of a static data member
             Scope* q = scopeForQualifier(dcl->name, in);
@@ -1757,9 +1773,13 @@ void Sema::declareSimple(cxx::Decl* d, Scope* in, cxx::Access access)
             // "extern int x;" after "int x;" refers to the same variable
             const std::vector<Symbol*>* v = target->find(name);
             if (v && target->isNamespaceLike()) for (size_t k = 0; k < v->size() && !var; ++k) if ((*v)[k]->kind == Symbol::Variable) var = (*v)[k];
+            // a redeclaration keeps the first declaration's storage: one with the attribute, one without, is an error
+            if (var && var->isThread != threadHere && target->isNamespaceLike())
+                error(dcl->loc, TargetTls::code(), TargetTls::message(threadHere ? TargetTls::Added : TargetTls::Dropped, var->qualifiedName()));
             if (!var) {
                 var = m_prog.newSymbol(Symbol::Variable, name, target);
                 var->type = t; var->loc = dcl->loc; var->access = access;
+                var->isThread = threadHere;
                 var->isStatic = d->spec.isStatic; var->isExtern = d->spec.isExtern; var->isMutable = d->spec.isMutable;
                 var->isMember = target->kind == Scope::Class;
                 var->ownerClass = var->isMember ? target->owner : 0;
@@ -3042,6 +3062,74 @@ const Type* Sema::instantiateClassTemplate(Symbol* tmpl, const std::vector<cxx::
     return instantiateClassFor(tmpl, types, ints, syms, key, loc, 0);
 }
 
+namespace {
+
+// the written type has an expression in it that is more than a literal: a template argument ("Arr<T, N>",
+// "Flag<C, I>") or an array bound ("T[N]")
+bool isLiteralExpr(const cxx::Expr* e) { return e && (e->kind == cxx::Expr::IntLit || e->kind == cxx::Expr::CharLit || e->kind == cxx::Expr::BoolLit); }
+bool declaratorHasExprArg(const cxx::Declarator* d);
+bool specHasExprArg(const cxx::DeclSpec& spec)
+{
+    if (spec.kind != cxx::DeclSpec::Named) return false;
+    for (size_t p = 0; p < spec.name.parts.size(); ++p)
+        for (size_t k = 0; k < spec.name.parts[p].templateArgs.size(); ++k) {
+            const cxx::TemplateArg& ta = spec.name.parts[p].templateArgs[k];
+            if (ta.expr && !isLiteralExpr(ta.expr)) return true;
+            if (ta.type && (specHasExprArg(ta.type->spec) || declaratorHasExprArg(ta.type->decl))) return true;
+        }
+    return false;
+}
+bool declaratorHasExprArg(const cxx::Declarator* d)
+{
+    if (!d) return false;
+    for (size_t i = 0; i < d->parts.size(); ++i) {
+        if (d->parts[i].kind == cxx::DeclaratorPart::Array && d->parts[i].arraySize && !isLiteralExpr(d->parts[i].arraySize)) return true;
+        for (size_t k = 0; k < d->parts[i].params.size(); ++k)
+            if (d->parts[i].params[k] && (specHasExprArg(d->parts[i].params[k]->spec) || declaratorHasExprArg(d->parts[i].params[k]->decl))) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+// 14.5.4.1: a partial specialisation matches an argument list when its pattern, with the arguments deduced for its
+// parameters put in, is that list. Deduction alone finds the parameters; this says whether the rest agrees: a type the
+// pattern spells out ("X<T, int>" is not X<char, long>), a qualifier ("X<const T*>" is not X<int*>). A pattern
+// whose type cannot be formed here, or with a parameter left without an argument, is taken as matching; so is an
+// argument of the pattern that writes a value which is no literal ("X<Arr<T, N> >", "X<T[N]>"): the values deduction
+// compared already, and the pattern's expressions keep what they were analysed as the first time.
+bool Sema::patternIsArguments(Symbol* spec, const std::map<std::string, const Type*>& bind, const std::map<std::string, int64>& ibind, const std::vector<const Type*>& types)
+{
+    Scope* s = m_prog.newScope(Scope::Instantiation, spec->scope->kind == Scope::TemplateParams ? spec->scope->parent : spec->scope, spec);
+    for (size_t i = 0; i < spec->templateParams.size(); ++i) {
+        const std::string& pn = spec->templateParams[i]->name;
+        std::map<std::string, const Type*>::const_iterator bt = bind.find(pn);
+        std::map<std::string, int64>::const_iterator bi = ibind.find(pn);
+        if (bt == bind.end() && bi == ibind.end()) return true;
+        if (bt != bind.end() && bt->second->kind == Type::Class && bt->second->decl && bt->second->decl->kind == Symbol::ClassTemplate) {
+            Symbol* b = m_prog.newSymbol(Symbol::ClassTemplate, pn, s);
+            b->instantiatedFrom = bt->second->decl; b->isDependentContext = true;
+            continue;
+        }
+        Symbol* b = m_prog.newSymbol(bt != bind.end() ? Symbol::Typedef : Symbol::Enumerator, pn, s);
+        if (bt != bind.end()) b->type = bt->second;
+        else { b->type = valueParamType(spec->templateParams[i]); b->hasConstValue = true; b->constValue = bi->second; }
+    }
+    const size_t diagMark = m_diags.size();
+    bool same = true;
+    for (size_t i = 0; i < types.size() && i < spec->patternArgs.size() && same; ++i) {
+        const cxx::TemplateArg& pa = spec->patternArgs[i];
+        if (!pa.type || !types[i] || specHasExprArg(pa.type->spec) || declaratorHasExprArg(pa.type->decl)) continue;
+        const Type* pt = typeOf(pa.type->spec, s);
+        if (pa.type->decl) pt = applyDeclarator(pt, *pa.type->decl, s, 0);
+        if (!pt || typeHasError(pt) || pt->kind == Type::Dependent || typeHasError(types[i])) continue;
+        if (pt != types[i]) same = false;
+    }
+    const bool hadErrors = m_diags.size() != diagMark;
+    m_diags.resize(diagMark);
+    return same || hadErrors;
+}
+
 const Type* Sema::instantiateClassFor(Symbol* tmpl, const std::vector<const Type*>& types, const std::vector<int64>& ints, const std::vector<Symbol*>& syms, const std::string& key, const cxx::Loc& loc, Symbol* into)
 {
     const size_t nparams = tmpl->templateParams.size();
@@ -3060,6 +3148,8 @@ const Type* Sema::instantiateClassFor(Symbol* tmpl, const std::vector<const Type
         if (ps->kind != Symbol::ClassTemplate || ps->patternArgs.size() != types.size() || anyMemberArg(syms)) continue;   // a pointer-to-member argument: the primary
         std::map<std::string, const Type*> b; std::map<std::string, int64> ib;
         bool ok = true;
+        const bool savedArg = m_argDeduce;
+        m_argDeduce = true;
         for (size_t i = 0; i < types.size() && ok; ++i) {
             const cxx::TemplateArg& pa = ps->patternArgs[i];
             if (pa.type) {
@@ -3074,6 +3164,8 @@ const Type* Sema::instantiateClassFor(Symbol* tmpl, const std::vector<const Type
                 else { int64 v; if (!constantValue(pa.expr, v) || exprConstantIn(pa.expr, valueParamType(tmpl->templateParams[i])) != ints[i]) ok = false; }
             }
         }
+        m_argDeduce = savedArg;
+        if (ok && !patternIsArguments(ps, b, ib, types)) ok = false;
         if (ok) { chosen = ps; bind = b; ibind = ib; break; }
     }
     // the instantiation scope binds the parameters: a type to a typedef, a value to a constant, a template (the

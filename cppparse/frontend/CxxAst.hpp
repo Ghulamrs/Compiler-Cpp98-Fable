@@ -74,6 +74,7 @@ struct DeclSpec {                   // decl-specifier-seq
     int           align;            // __declspec(align(N)) among the specifiers (0: none)
     bool          noreturn;         // __declspec(noreturn)
     bool          replaceable;      // __declspec(replaceable): the function's definition is a default the program may replace
+    bool          thread;           // __declspec(thread): a thread-local variable (cppparse/target, docs/design-selfhost.md 4.1)
     DeclSpec();
     bool hasType() const { return kind != None; }
     std::string text() const;       // "const unsigned int", "std::vector<int>"

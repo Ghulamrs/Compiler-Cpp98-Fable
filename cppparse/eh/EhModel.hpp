@@ -29,6 +29,20 @@ enum EhModel { EhModelSjlj, EhModelTable, EhModelCl };
 
 inline const char* ehModelName(EhModel m) { return m == EhModelSjlj ? "sjlj" : m == EhModelTable ? "table" : "cl"; }
 
+// a symbol the code of one model names: the runtime's entries of the table and setjmp models (a throw, a rethrow, a
+// handler's begin and end, a frame, a cleanup's walk, terminate for an exception specification) and cl's throw. An
+// object whose code names one, or that has a PROC with a handler, carries the model mark (the linker directive
+// /FAILIFMISMATCH:cppparse_eh=...); one without is the same in every model and carries none (docs/design-selfhost.md 3.7)
+inline bool ehModelSymbol(const char* s)
+{
+    static const char* const names[] = { "cppparse_catch_begin", "cppparse_catch_end", "cppparse_catch_unwind", "cppparse_match",
+        "cppparse_pop_frame", "cppparse_push_frame", "cppparse_rethrow", "cppparse_throw", "cppparse_throw_owned", "cppparse_unwind_destroy",
+        "cppparse_unwind_destroy_next", "cppparse_unwind_enter", "cppparse_unwind_leave", "cppparse_terminate", "cppparse_eh_handler",
+        "_CxxThrowException", "__CxxFrameHandler3", 0 };
+    for (int i = 0; names[i]; ++i) { const char* a = names[i]; const char* b = s; while (*a && *a == *b) { ++a; ++b; } if (!*a && !*b) return true; }
+    return false;
+}
+
 } // namespace cppparse
 
 #endif

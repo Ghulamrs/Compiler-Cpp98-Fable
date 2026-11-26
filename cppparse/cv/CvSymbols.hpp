@@ -23,6 +23,8 @@
 //     S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE (1144h) {offset from the frame's base}: wherever its scope is
 //     S_DEFRANGE_REGISTER_REL (1145h) {register, flags 0, offset, range (offset, section, length), gaps (start from the
 //                           range's offset, length)}: in the frame over a range of code, a block in pieces
+//     S_DEFRANGE_REGISTER (1141h) {register, attributes 0, range (offset, section, length), gaps}: in that register
+//                           (CvRegisters: the part of it that holds the value) over a range of code, -O1 and up
 // Without -g a procedure has DbgStart 0, DbgEnd the code's length and type 0 (T_NOTYPE); with it the LF_PROCEDURE or
 // LF_MFUNCTION record of the function's type (CvTypes), DbgStart behind the entry sequence, DbgEnd at the epilogue.
 //
@@ -56,6 +58,8 @@ public:
     // gaps: {start relative to 'start', length}
     void addRegisterRel(int reg, long offset, const std::string& fn, unsigned long start, unsigned long length,
                         const std::vector<std::pair<unsigned long, unsigned long> >& gaps);
+    void addRegister(int reg, const std::string& fn, unsigned long start, unsigned long length,
+                     const std::vector<std::pair<unsigned long, unsigned long> >& gaps);
     // S_GDATA32 / S_LDATA32 of the variable with symbol 'symbol'
     void addData(const std::string& symbol, const std::string& display, unsigned long typeIndex, bool internal, bool thread = false);   // thread: S_GTHREAD32 / S_LTHREAD32 (1113h / 1112h)
     void addConstant(const std::string& display, unsigned long typeIndex, int64 value);

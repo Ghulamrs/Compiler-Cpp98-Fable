@@ -7,8 +7,13 @@
 #                linked by GRIDE's link with /timestamp:0; the two exes byte-identical (needs GRIDE)
 #   selfhost-g-O0  selfhost.ps1 -Lvl 0 -G: both generations compile with -g (CodeView types and variables, row M10),
 #                generation two identical; in folders of their own
+#   selfhost-g2-O0  selfhost.ps1 -Lvl 0 -G2: the same with -g2 (the member functions in the classes too), generation two
+#                identical
 #   selfhost-O2  selfhost.ps1 -Lvl 2: the same at -O2 (leaves the -O2 compiler in out\selfhost and out\selfhost2,
 #                which the following checks use)
+#   selfhost-g-O2  selfhost.ps1 -Lvl 2 -G: both generations compile with -g at -O2, where the variables' places are
+#                register and frame ranges that the object writer checks against the code (CvCheck); generation two
+#                identical
 #   selfhost-gride-O2  the same relink at -O2 (leaves the GRIDE-linked -O2 compiler in out\selfhost-gride; needs GRIDE)
 #   suite-self-gride   build-cppparse.ps1 -Exe out\selfhost-gride\cppparse-self.exe: all test groups under the
 #                self-built compiler as GRIDE's link made it (needs GRIDE). It runs before suite-self, so that the
@@ -54,7 +59,9 @@ $checks = @(
     @{ Name = "selfhost-O0"; Script = "scripts\selfhost.ps1";   Args = "-Lvl 0 -Linker ms";                  Stop = $true; Want = "bootstrap: generation two is identical to generation one" },
     @{ Name = "selfhost-gride-O0"; Script = "scripts\selfhost.ps1"; Args = "-Lvl 0 -Linker gride -Relink";   Gride = $true; Want = "GRIDE's link: cppparse-self.exe and cppparse-self2.exe are byte-identical" },
     @{ Name = "selfhost-g-O0"; Script = "scripts\selfhost.ps1"; Args = "-Lvl 0 -Linker ms -G";            Want = "bootstrap: generation two is identical to generation one" },
+    @{ Name = "selfhost-g2-O0"; Script = "scripts\selfhost.ps1"; Args = "-Lvl 0 -Linker ms -G2";          Want = "bootstrap: generation two is identical to generation one" },
     @{ Name = "selfhost-O2"; Script = "scripts\selfhost.ps1";   Args = "-Lvl 2 -Linker ms";                  Stop = $true; Want = "bootstrap: generation two is identical to generation one" },
+    @{ Name = "selfhost-g-O2"; Script = "scripts\selfhost.ps1"; Args = "-Lvl 2 -Linker ms -G";            Want = "bootstrap: generation two is identical to generation one" },
     @{ Name = "selfhost-gride-O2"; Script = "scripts\selfhost.ps1"; Args = "-Lvl 2 -Linker gride -Relink";   Gride = $true; Want = "GRIDE's link: cppparse-self.exe and cppparse-self2.exe are byte-identical" },
     @{ Name = "suite-self-gride"; Script = "build-cppparse.ps1"; Args = "-Exe `"$Sandbox\out\selfhost-gride\cppparse-self.exe`""; After = "selfhost-gride-O2"; Want = "build and all tests succeeded" },
     @{ Name = "suite-self";  Script = "build-cppparse.ps1";     Args = "-Exe `"$Sandbox\out\selfhost\cppparse-self.exe`""; Want = "build and all tests succeeded" },

@@ -67,6 +67,10 @@ struct Renamer {
     std::map<int, int>              alias;            // load temp -> value temp
     std::map<int, int>              phiLocal;         // phi dst temp -> local
     std::vector<IrInst>             undefInsts;       // zero constants for reads without a reaching store
+    // -g (docs/design-codeview.md 5.4): the locals whose one store is their one definition, and what that store
+    // gave each: the candidates of IrFunction::debugTemps
+    std::set<int>                   oneStore;
+    std::map<int, IrDebugTemp>      stored;
 
     Renamer(IrFunction& fn, const std::vector<int>& dom) : f(fn), idom(dom) {}
 
@@ -82,6 +86,7 @@ struct Renamer {
         IrInst c;
         c.op = t && t->isFloating() ? IrInst::FConst : IrInst::Const;
         c.type = t; c.line = line;
+        c.scope = -1;   // -g: it is put at the function's start, in the entry sequence
         c.dst = f.newTemp(t);
         c.sub = "undefined " + f.locals[static_cast<size_t>(local)].name;
         if (c.op == IrInst::FConst) c.args.push_back(IrOperand::fimm(0.0, t)); else c.args.push_back(IrOperand::imm(0, t));
@@ -126,6 +131,14 @@ struct Renamer {
                     c.args.push_back(in.args[1]);
                     kept.push_back(c);
                     value = c.dst;
+                }
+                if (oneStore.count(local)) {
+                    // exact when the value is defined right here: a constant, or the result of the instruction before
+                    // the store (not a load of another promoted local, which is that local's value from elsewhere)
+                    IrDebugTemp d;
+                    d.temp = value;
+                    d.exact = in.args[1].kind != IrOperand::Temp || (value == in.args[1].id && i > 0 && blk.insts[i - 1].dst == value);
+                    stored[local] = d;
                 }
                 stacks[local].push_back(value);
                 pushed.push_back(std::make_pair(local, static_cast<size_t>(1)));
@@ -188,18 +201,33 @@ void toSsa(IrFunction& f, SsaStats& stats)
     R.children.assign(f.blocks.size(), std::vector<int>());
     for (size_t b = 1; b < f.blocks.size(); ++b) if (idom[b] >= 0 && idom[b] != static_cast<int>(b)) R.children[static_cast<size_t>(idom[b])].push_back(static_cast<int>(b));
 
+    // -g: the variables a debugger lists, and the local a named result is reached through. Their one definition is
+    // recorded beside the code (IrFunction::debugTemps); nothing below reads it
+    std::vector<bool> listed(f.locals.size(), false);
+    if (f.debugType != 0) {
+        for (size_t l = 0; l < f.locals.size(); ++l) listed[l] = f.locals[l].source;
+        for (size_t a = 0; a < f.debugAliases.size(); ++a)
+            if (f.debugAliases[a].local >= 0 && static_cast<size_t>(f.debugAliases[a].local) < listed.size()) listed[static_cast<size_t>(f.debugAliases[a].local)] = true;
+    }
     for (size_t l = 0; l < f.locals.size(); ++l) {
         if (!promotable(f, static_cast<int>(l))) continue;
         std::set<int> defBlocks;
+        int stores = 0, storeScope = 0;
         for (size_t b = 0; b < f.blocks.size(); ++b)
             for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
                 const IrInst& in = f.blocks[b].insts[i];
-                if (in.op == IrInst::StoreLocal && in.args.size() == 2 && in.args[0].id == static_cast<int>(l)) defBlocks.insert(static_cast<int>(b));
+                if (in.op == IrInst::StoreLocal && in.args.size() == 2 && in.args[0].id == static_cast<int>(l)) { defBlocks.insert(static_cast<int>(b)); ++stores; storeScope = in.scope; }
             }
         bool param = f.locals[l].isParam;
         if (param) defBlocks.insert(0);
         if (defBlocks.empty()) continue;
         ++stats.promotedLocals;
+        f.locals[l].promoted = true;
+        // one definition: a local's one store; a parameter's incoming value, or the one store of the entry sequence
+        // that puts it right (an adjusted "this": the store runs once, before the first statement)
+        // (not when a store to it was removed before: the variable then had another value ahead of this store, where
+        // a temporary defined earlier, or moved there, is live already)
+        if (listed[l] && stores == 1 && !f.locals[l].staleStores && (!param || storeScope == -1)) R.oneStore.insert(static_cast<int>(l));
         std::set<int> hasPhi;
         std::vector<int> work(defBlocks.begin(), defBlocks.end());
         while (!work.empty()) {
@@ -213,6 +241,7 @@ void toSsa(IrFunction& f, SsaStats& stats)
                 phi.dst = f.newTemp(phi.type);
                 phi.sub = f.locals[l].name;
                 phi.line = f.blocks[static_cast<size_t>(*y)].insts.empty() ? 0 : f.blocks[static_cast<size_t>(*y)].insts[0].line;
+                phi.scope = f.blocks[static_cast<size_t>(*y)].insts.empty() ? 0 : f.blocks[static_cast<size_t>(*y)].insts[0].scope;   // (-g: with the line)
                 f.blocks[static_cast<size_t>(*y)].insts.insert(f.blocks[static_cast<size_t>(*y)].insts.begin(), phi);
                 R.phiLocal[phi.dst] = static_cast<int>(l);
                 ++stats.phisInserted;
@@ -225,11 +254,14 @@ void toSsa(IrFunction& f, SsaStats& stats)
             ld.op = IrInst::LoadLocal;
             ld.type = f.locals[l].type;
             ld.line = 0;
+            ld.scope = -1;   // -g: the entry sequence (DbgStart lies behind it)
             ld.dst = f.newTemp(ld.type);
             ld.sub = "param";
             ld.args.push_back(IrOperand::local(static_cast<int>(l), ld.type));
             f.blocks[0].insts.insert(f.blocks[0].insts.begin(), ld);
             R.stacks[static_cast<int>(l)].push_back(ld.dst);
+            // (an entry dead store elimination recorded stays: the one store of the entry sequence, an adjusted "this")
+            if (listed[l] && stores == 0 && !f.locals[l].staleStores && !f.debugTemps.count(static_cast<int>(l))) { IrDebugTemp d; d.temp = ld.dst; d.exact = true; f.debugTemps[static_cast<int>(l)] = d; }
         }
     }
     // the parameter loads were inserted after any phi of the entry block: move phis first
@@ -243,6 +275,13 @@ void toSsa(IrFunction& f, SsaStats& stats)
     R.visit(0);
     f.blocks[0].insts.insert(f.blocks[0].insts.begin(), R.undefInsts.begin(), R.undefInsts.end());
     rewriteAliases(f, R.alias);
+    // -g: an entry recorded before SSA (dead store elimination) may name the load of a local promoted here: the value
+    // is that local's, a temporary defined elsewhere (not exact any more)
+    for (std::map<int, IrDebugTemp>::iterator d = f.debugTemps.begin(); d != f.debugTemps.end(); ++d) {
+        int guard = 0;
+        for (std::map<int, int>::const_iterator a = R.alias.find(d->second.temp); a != R.alias.end() && guard++ < 1000; a = R.alias.find(d->second.temp)) { d->second.temp = a->second; d->second.exact = false; }
+    }
+    for (std::map<int, IrDebugTemp>::const_iterator d = R.stored.begin(); d != R.stored.end(); ++d) f.debugTemps[d->first] = d->second;
     // parameter loads marked "param" are real loads from the incoming slots; drop the marker
     for (size_t i = 0; i < f.blocks[0].insts.size(); ++i) if (f.blocks[0].insts[i].sub == "param") f.blocks[0].insts[i].sub.clear();
     f.computeCfg();
@@ -343,6 +382,9 @@ void fromSsa(IrFunction& f, SsaStats& stats)
             if (f.blocks[static_cast<size_t>(pr)].succs.size() < 2) continue;
             int nb = f.newBlock("edge " + intToString(pr) + "->" + intToString(static_cast<int>(b)));
             IrInst j; j.op = IrInst::Br; j.args.push_back(IrOperand::block(static_cast<int>(b)));
+            // -g: the edge's code belongs to the block scope of the branch it comes from (docs/design-codeview.md risk 7:
+            // code without a scope would cut every block around it into pieces)
+            j.scope = f.blocks[static_cast<size_t>(pr)].insts.back().scope;
             f.blocks[static_cast<size_t>(nb)].insts.push_back(j);
             IrInst& term = f.blocks[static_cast<size_t>(pr)].insts.back();
             for (size_t a = 0; a < term.args.size(); ++a) if (term.args[a].kind == IrOperand::Block && term.args[a].id == static_cast<int>(b)) term.args[a].id = nb;
@@ -371,13 +413,14 @@ void fromSsa(IrFunction& f, SsaStats& stats)
         }
         for (std::map<int, std::vector<std::pair<IrOperand, int> > >::iterator it = perPred.begin(); it != perPred.end(); ++it) {
             IrBlock& pred = f.blocks[static_cast<size_t>(it->first)];
+            const int scope = pred.insts.empty() ? 0 : pred.insts.back().scope;   // -g: the copies stand in the predecessor's block scope
             std::vector<IrInst> copies;
             // two phases: sources into fresh temporaries, then into the phi results (handles swaps)
             std::vector<int> tmps;
             for (size_t k = 0; k < it->second.size(); ++k) {
                 const IrOperand& src = it->second[k].first;
                 const Type* t = src.type ? src.type : f.typeOf(it->second[k].second);
-                IrInst c; c.type = t; c.line = 0;
+                IrInst c; c.type = t; c.line = 0; c.scope = scope;
                 if (src.kind == IrOperand::Temp) { c.op = IrInst::Copy; c.args.push_back(src); }
                 else { c.op = src.kind == IrOperand::FImm ? IrInst::FConst : IrInst::Const; c.args.push_back(src); }
                 c.dst = f.newTemp(t);
@@ -385,7 +428,7 @@ void fromSsa(IrFunction& f, SsaStats& stats)
                 copies.push_back(c);
             }
             for (size_t k = 0; k < it->second.size(); ++k) {
-                IrInst c; c.op = IrInst::Copy; c.dst = it->second[k].second; c.type = f.typeOf(c.dst); c.line = 0;
+                IrInst c; c.op = IrInst::Copy; c.dst = it->second[k].second; c.type = f.typeOf(c.dst); c.line = 0; c.scope = scope;
                 c.args.push_back(IrOperand::temp(tmps[k], c.type));
                 copies.push_back(c);
             }

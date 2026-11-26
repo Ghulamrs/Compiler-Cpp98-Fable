@@ -100,6 +100,23 @@ std::string CvNames::text(const CvTypeText& t)
     return t.function ? t.left + "__cdecl" + t.right : t.left + t.right;
 }
 
+std::string CvNames::declaredBasic(const std::string& cxxName, bool isConst, bool isVolatile)
+{
+    const std::string name = cxxName == "long long" ? std::string("__int64") : cxxName == "unsigned long long" ? std::string("unsigned __int64") : cxxName;
+    return std::string(isVolatile ? "volatile " : "") + (isConst ? "const " : "") + name;
+}
+
+std::string CvNames::declaredNamed(const std::string& key, const std::string& qualifiedName, bool isConst, bool isVolatile)
+{
+    return std::string(isVolatile ? "volatile " : "") + (isConst ? "const " : "") + key + " " + qualifiedName;
+}
+
+std::string CvNames::declaredPointer(const std::string& to, bool isConst)
+{
+    const bool star = !to.empty() && to[to.size() - 1] == '*';
+    return to + (star ? "*" : " *") + (isConst ? "const" : "");
+}
+
 std::string CvNames::templateId(const std::string& name, const std::vector<std::string>& args)
 {
     std::string s = name + "<";

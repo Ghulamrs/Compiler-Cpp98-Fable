@@ -178,8 +178,73 @@ double foldFloat(const std::string& sub, double x, double y, bool& ok, bool& isC
     return 0;
 }
 
+// -g (docs/design-codeview.md 5.4): the passes put the operand 'to' in the place of temporary 'from'. A variable
+// whose one definition was 'from' is then 'to', a temporary of equal value at that point but defined elsewhere (no
+// longer exact: the verifier decides); a constant is no place at all
+void renameDebugTemp(IrFunction& f, int from, const IrOperand& to)
+{
+    for (std::map<int, IrDebugTemp>::iterator d = f.debugTemps.begin(); d != f.debugTemps.end();) {
+        if (d->second.temp != from) { ++d; continue; }
+        if (to.kind != IrOperand::Temp) { f.debugTemps.erase(d++); continue; }
+        d->second.temp = to.id;
+        d->second.exact = false;
+        ++d;
+    }
+}
+
+// is block b on a cycle of the function: can its code run again once it has run? (succ: every block's branch and
+// handler targets, taken from the instructions; the function's own lists are left as they are)
+bool onCycle(const std::vector<std::vector<int> >& succ, int b)
+{
+    std::vector<bool> seen(succ.size(), false);
+    std::vector<int> work(succ[static_cast<size_t>(b)]);
+    while (!work.empty()) {
+        const int x = work.back(); work.pop_back();
+        if (x == b) return true;
+        if (x < 0 || static_cast<size_t>(x) >= seen.size() || seen[static_cast<size_t>(x)]) continue;
+        seen[static_cast<size_t>(x)] = true;
+        work.insert(work.end(), succ[static_cast<size_t>(x)].begin(), succ[static_cast<size_t>(x)].end());
+    }
+    return false;
+}
+
+// -g, after the last pass (docs/design-codeview.md 5.4, risk 2): an entry of debugTemps stays only if its temporary
+// is defined exactly once (a pass that removed it, or SSA destruction's copies into a phi's result, end the entry),
+// and, where a pass put a temporary of equal value in the first one's place, only if that definition cannot run
+// again: computed a second time, it would differ from the variable, which is assigned elsewhere
+void verifyDebugTemps(IrFunction& f)
+{
+    if (f.debugTemps.empty()) return;
+    std::map<int, int> count, block;
+    std::vector<std::vector<int> > succ(f.blocks.size());
+    for (size_t b = 0; b < f.blocks.size(); ++b)
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = f.blocks[b].insts[i];
+            if (in.dst >= 0) { ++count[in.dst]; block[in.dst] = static_cast<int>(b); }
+            if (in.op != IrInst::Br && in.op != IrInst::CondBr && in.op != IrInst::TryBegin) continue;
+            for (size_t a = 0; a < in.args.size(); ++a) if (in.args[a].kind == IrOperand::Block) succ[b].push_back(in.args[a].id);
+        }
+    // an exception enters a handler from any block of its region, not from the block of the trybegin alone, and a
+    // handler that resumes closes a cycle no branch shows (a retry loop). Which blocks a region holds is not asked:
+    // every block gets every handler as a successor, which can only find more cycles
+    std::vector<int> handlers;
+    for (size_t b = 0; b < f.blocks.size(); ++b)
+        for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+            const IrInst& in = f.blocks[b].insts[i];
+            if (in.op != IrInst::TryBegin) continue;
+            for (size_t a = 0; a < in.args.size(); ++a) if (in.args[a].kind == IrOperand::Block) handlers.push_back(in.args[a].id);
+        }
+    if (!handlers.empty()) for (size_t b = 0; b < succ.size(); ++b) succ[b].insert(succ[b].end(), handlers.begin(), handlers.end());
+    for (std::map<int, IrDebugTemp>::iterator d = f.debugTemps.begin(); d != f.debugTemps.end();) {
+        const std::map<int, int>::const_iterator c = count.find(d->second.temp);
+        const bool keep = c != count.end() && c->second == 1 && (d->second.exact || !onCycle(succ, block[d->second.temp]));
+        if (keep) ++d; else f.debugTemps.erase(d++);
+    }
+}
+
 void replaceTempUses(IrFunction& f, int from, const IrOperand& to)
 {
+    if (!f.debugTemps.empty()) renameDebugTemp(f, from, to);
     for (size_t b = 0; b < f.blocks.size(); ++b)
         for (size_t i = 0; i < f.blocks[b].insts.size(); ++i)
             for (size_t a = 0; a < f.blocks[b].insts[i].args.size(); ++a) {
@@ -601,6 +666,17 @@ int Optimizer::deadStores(IrFunction& f)
             const IrInst& in = f.blocks[b].insts[i];
             if ((in.op == IrInst::LoadLocal || in.op == IrInst::AddrLocal) && !in.args.empty() && in.args[0].kind == IrOperand::Local) loaded[static_cast<size_t>(in.args[0].id)] = true;
         }
+    // -g (docs/design-codeview.md 5.4): the stores of each local, for the variables whose one store goes below
+    std::vector<int> stores;
+    if (f.debugType != 0) {
+        stores.assign(f.locals.size(), 0);
+        for (size_t b = 0; b < f.blocks.size(); ++b)
+            for (size_t i = 0; i < f.blocks[b].insts.size(); ++i) {
+                const IrInst& in = f.blocks[b].insts[i];
+                if (in.op == IrInst::StoreLocal && in.args.size() == 2 && in.args[0].kind == IrOperand::Local && in.args[0].id >= 0 &&
+                    static_cast<size_t>(in.args[0].id) < stores.size()) ++stores[static_cast<size_t>(in.args[0].id)];
+            }
+    }
     for (size_t b = 0; b < f.blocks.size(); ++b) {
         std::vector<IrInst> kept;
         std::map<int, size_t> lastStore;   // local -> index in kept of the last store without a load since
@@ -608,9 +684,24 @@ int Optimizer::deadStores(IrFunction& f)
             const IrInst& in = f.blocks[b].insts[i];
             if (in.op == IrInst::StoreLocal && in.args.size() == 2 && in.args[0].kind == IrOperand::Local) {
                 int local = in.args[0].id;
-                if (!loaded[static_cast<size_t>(local)] && !f.locals[static_cast<size_t>(local)].addressTaken) { ++changes; continue; }
+                if (!loaded[static_cast<size_t>(local)] && !f.locals[static_cast<size_t>(local)].addressTaken) {
+                    // -g: every read of the variable took the stored value itself (store-to-load forwarding), so the
+                    // variable lives on as that temporary. When this store is the variable's one definition (its only
+                    // store, none removed before; a parameter's only in the entry sequence, which puts "this" right)
+                    // the pair is recorded as Ssa.cpp records it at a promotion: exact when the instruction before the
+                    // store defines the value
+                    const IrLocal& l = f.locals[static_cast<size_t>(local)];
+                    if (!stores.empty() && l.source && !l.staleStores && stores[static_cast<size_t>(local)] == 1 && in.args[1].kind == IrOperand::Temp &&
+                        (!l.isParam || in.scope == -1) && !f.debugTemps.count(local)) {
+                        IrDebugTemp d;
+                        d.temp = in.args[1].id;
+                        d.exact = i > 0 && f.blocks[b].insts[i - 1].dst == d.temp;
+                        f.debugTemps[local] = d;
+                    }
+                    IrInst gone = in; f.removeStore(gone); ++changes; continue;
+                }
                 std::map<int, size_t>::iterator ls = lastStore.find(local);
-                if (ls != lastStore.end() && !f.locals[static_cast<size_t>(local)].addressTaken) { kept[ls->second].op = IrInst::Nop; ++changes; }
+                if (ls != lastStore.end() && !f.locals[static_cast<size_t>(local)].addressTaken) { f.removeStore(kept[ls->second]); ++changes; }
                 lastStore[local] = kept.size();
                 kept.push_back(in);
                 continue;
@@ -849,7 +940,7 @@ int Optimizer::removeDeadRegions(IrFunction& f)
             const int l = in.args[0].id;
             if (l < 0 || static_cast<size_t>(l) >= flagIndex.size() || flagIndex[static_cast<size_t>(l)] < 0 || reads[static_cast<size_t>(l)] != 0) continue;
             if (in.args[1].kind == IrOperand::Temp) freed.insert(in.args[1].id);
-            in.op = IrInst::Nop; in.args.clear();
+            f.removeStore(in);
         }
     if (!freed.empty()) {
         std::map<int, int> uses;
@@ -1095,7 +1186,10 @@ int Optimizer::inlineCalls(IrFunction& f, int maxInsts, int maxInstsInLoop)
 
             // new locals for the callee's locals
             int localBase = static_cast<int>(f.locals.size());
-            for (size_t l = 0; l < g.locals.size(); ++l) { IrLocal nl = g.locals[l]; nl.name = g.name + "." + nl.name; nl.isParam = false; nl.isThis = false; nl.source = false; nl.block = 0; nl.debugType = 0; nl.debugParam = -1; f.locals.push_back(nl); }
+            // (-g, docs/design-codeview.md 5.4: until the inlinee row the callee's variables are not listed, so its locals
+            // lose what marks them as the source's, and its debugTemps and debugAliases stay behind: nothing of them is
+            // copied. The copied instructions get the call's line and scope below)
+            for (size_t l = 0; l < g.locals.size(); ++l) { IrLocal nl = g.locals[l]; nl.name = g.name + "." + nl.name; nl.isParam = false; nl.isThis = false; nl.source = false; nl.block = 0; nl.debugType = 0; nl.debugParam = -1; nl.byAddress = false; nl.staleStores = false; nl.promoted = false; f.locals.push_back(nl); }
             int resultLocal = -1;
             if (call.dst >= 0) { IrLocal rl; rl.name = g.name + ".result"; rl.type = call.type; rl.size = 8; rl.align = 8; f.locals.push_back(rl); resultLocal = static_cast<int>(f.locals.size() - 1); }
             // argument stores
@@ -1517,6 +1611,7 @@ void Optimizer::runSsa(IrFunction& f, std::vector<std::string>& log, std::string
         log.push_back("    SSA skipped: a catch handler resumes the normal code");
     }
     level1(f, log);
+    verifyDebugTemps(f);
     int after = f.instCount();
     log.push_back("    result: " + intToString(before) + " -> " + intToString(after) + " instructions in the final phase, " + intToString(static_cast<int>(f.blocks.size())) + " blocks");
 }

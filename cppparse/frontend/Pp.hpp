@@ -70,12 +70,22 @@ struct PpDiag {
     PpDiag() : severity(Error), line(0) {}
 };
 
+// told of every file the preprocessor reads, once a file, with the path it was opened by and its bytes as they are on
+// disk (a byte order mark included). With -g the driver takes each source file's checksum from them, so that the
+// checksum is of the very bytes that were compiled
+class PpFileObserver {
+public:
+    virtual ~PpFileObserver() {}
+    virtual void fileRead(const std::string& path, const std::string& bytes) = 0;
+};
+
 struct PpOptions {
     std::vector<std::string> includeDirs;
     std::vector<std::string> defines;      // "NAME" or "NAME=value"
     std::vector<std::string> undefines;
     const Target*            target;       // its macros are predefined; 0: the default target
-    PpOptions() : target(0) {}
+    PpFileObserver*          observer;     // 0: none
+    PpOptions() : target(0), observer(0) {}
 };
 
 class Preprocessor {
@@ -114,6 +124,7 @@ private:
     void checkUniversalNames(const PpToken& t, int fileIndex);
     bool conditionsActive(const std::vector<Cond>& conds) const;
     int  addFile(const std::string& path);
+    bool readSource(const std::string& path, std::string& text);   // the file's text; the observer is told of its bytes
     void predefine(const std::string& def);
 
     PpOptions                       m_opt;

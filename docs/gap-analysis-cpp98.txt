@@ -11,9 +11,9 @@ this file is the summary. The entries this file held before (2026-10-14 to 2026-
 b21067a~1:docs/gap-analysis-cpp98.txt.
 
 WHAT HOLDS (verified on these commits in a clean worktree)
-- Self-hosting: the version 6 pipeline (--compile6) compiles cppparse's 58 own sources and libcpp, and the self-built
+- Self-hosting: the version 6 pipeline (--compile6) compiles cppparse's 62 own sources and libcpp, and the self-built
   compiler reproduces every object and listing byte for byte through generation two, at -O0 and at -O2 (selfhost.ps1
-  -Lvl 0 and -Lvl 2); the 21-group suite passes under the MSVC-built compiler and under the -O2 self-built one.
+  -Lvl 0 and -Lvl 2); the 22-group suite passes under the MSVC-built compiler and under the -O2 self-built one.
   Linked by GRIDE's link in place of Microsoft's (selfhost.ps1 -Linker gride; row P1, stage 0a) the two generations
   are one exe byte for byte at both levels, and the suite passes under that compiler as well.
 - The language: classes in every inheritance shape cl lays out (virtual bases, vtordisp and covariant thunks, pointers
@@ -37,6 +37,15 @@ WHAT IS LEFT
    that match, the first declared is taken, not the most specialised (row G32, 14.5.4.2; found by row G31).
    (Pointers to members convert along non-virtual bases between every pair of inheritance models; the conversions
    through a virtual base that stay S132 are ill-formed in C++98, 4.11/2, and cl's extension: memptr-refused.cpp.)
+   Found by row G45's probes and review (2026-11-26), each reproduced against cl, none begun. Wrong code: a covariant
+   override with a slot of its own that a further derived class overrides again (row G46); two signatures that
+   differ only in a class or an enumeration parameter with a top-level const are one (such overloads are refused,
+   S110), a conversion function is known by its written name, a constructor can pass for an overrider (row G49); a
+   using-declaration that names a base's virtual function (row G50); operator() called through a dereferenced
+   pointer or a reference to a base is bound statically (row G51). Not cl's tables or layout, so not to be mixed
+   with cl's objects: a moving covariant override beside a polymorphic virtual base (row G47), the vbptr of a class
+   whose primary base is not the first non-virtual base named (row G48). (Rows G42 to G44, from row M10's stage 4:
+   a member function's volatile, two forms of conversion function, the unnamed namespace in qualified lookup.)
 2. Ill-formed code accepted without a diagnostic:
    - static_cast of an integer to a pointer (row G33, 5.2.9; cl C2440), found by row G31.
    - access control leaves out what only one of cl and clang refuses: the member types in the signature of a function
@@ -65,8 +74,14 @@ WHAT IS LEFT
    has the go-ahead of 2026-11-20; of its stages, the CodeView code is in cppparse/cv and the comparator of "debug
    information changes no code", scripts\cvsame.ps1, exists, a procedure's symbol shows cl's name for it, and with -g
    an object has its types (.debug$T), its globals, static members and static locals, and since stage 2 (2026-11-24)
-   every function's parameters and locals, each in its place at -O0 (test 21, the value harness); at -O1 and up
-   they are listed without a place until the design's stage 3); vftables stay static symbols in mixed links, by
+   every function's parameters and locals, each in its place at -O0 (test 21, the value harness); at -O1 and up,
+   since stage 3 (2026-11-25), the variables that live in memory and those with one definition have their place, a
+   register or a frame slot over the code where the value lives, and the others are listed as optimised out (test
+   21 reads the values back at -O1, -O2 and -O3 in the three exception models: none wrong); with -g2, since stage 4,
+   the classes list their member functions; since stage 5 (2026-11-26) the file table of a -g object names every
+   file the unit read with its SHA-256, as cl's does (test 22 reads the checksums back through dbghelp from both
+   linkers' PDBs), and the row is closed. Left as rows of their own: inlinee records, value tracking for scalars
+   assigned more than once, the source lines of types); vftables stay static symbols in mixed links, by
    design (row 20); an
    exception edge from every call in the IR and the optimiser (design-table-exceptions.md section 7), the remaining
    code-size lever now that the plan's rows A to H are done or measured.
@@ -268,6 +283,14 @@ FIXED SINCE THE PREVIOUS VERSION OF THIS FILE (2026-10-23)
   two bases is the better conversion (13.3.3.2/4), a partial specialisation matches only what its pattern spells
   (14.5.4.1), a nested template argument is deduced as it is (14.8.2.4). sample-lib/ranges.cpp against cl's library
   (305 lines, test 15); front2.cpp partialexact::, baserank::, argdeduce::.
+- G45 (2026-11-26): a class that names a virtual base before the polymorphic base whose function it overrides
+  (struct J2 : virtual VR, P1 { int r(); }, or a first base whose only vfptr is its virtual base's) overrides in
+  P1's table too. The slot at offset 0 was left to P1::r, so a call through P1* reached the base's function, a
+  class overriding a pure function there was "abstract" (S151), and cl's code called the function with another
+  this than cppparse compiled it for. Sema looked for the overridden function in the order the bases are named and
+  knew the primary table's slot only by the first one found; it searches that table itself now. Every call and
+  222 vftables are cl's (sample-front/vbase-first.cpp, test 17, in the three exception models; sample-layout
+  FV..FW across the compilers, test 13; the -g2 record, test 20). The rows it found are under WHAT IS LEFT, 1.
 - covariant-vbase.cpp (row G3) is compared with the build of Visual Studio's clang-cl as well as with the lines the
   standard requires; clang-cl crashes on covariant-variadic.cpp (row G7) and cl refuses it, so that one has no
   reference compiler.

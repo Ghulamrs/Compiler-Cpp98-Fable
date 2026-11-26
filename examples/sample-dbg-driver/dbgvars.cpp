@@ -1,6 +1,6 @@
 // dbgvars.cpp - the driver of the value harness (row M10, docs/design-codeview.md section 6), built by cl, dbghelp.
 //
-//   dbgvars <program.exe> [-places <file>]
+//   dbgvars <program.exe> [-places <file>] [-optimized]
 //
 // Runs the program (sample-dbg\vars.cpp with varsck.cpp) under the Win32 debug API with a breakpoint on checkpoint().
 // At each checkpoint it reads the caller's text (see vars.cpp), walks the stack (StackWalk64) and asks dbghelp for the
@@ -13,6 +13,12 @@
 //     where the text says it has none, or whose value differs;
 //   - a variable with a place that the text does not name (a reader would show a value nobody checked).
 // A record without a place whose name the text does not give is a block's variable out of its range: noted, not wrong.
+// -optimized (a program built at -O1 and up): a variable of the text may be listed without a place where the text
+// gives a value (its value is in no place the compiler vouches for there), unless the text marks it with "+": those
+// are the minimum, the variables that must have a place at that checkpoint; and a variable the text marks as never
+// stored may have a place. Everything else stands: every declared parameter listed in order, no value wrong, no
+// place for a variable the text does not name. A variable in a register is read from the frame's context (the
+// part of the register its record names), in the frames above from the unwound one.
 // -places writes, for each checkpoint's caller, the address (relative to the image) and every variable with its place,
 // in the form diavars.exe prints, so that DIA's reading can be compared.
 // Output: one line per checkpoint and per failure, then "dbgvars: <n> checkpoints, <v> values compared, <f> failures";
@@ -36,7 +42,7 @@ namespace {
 // cvconst.h's BasicType, as far as it is asked for here
 enum { btChar = 2, btWChar = 3, btInt = 6, btUInt = 7, btFloat = 8, btBool = 10, btLong = 13, btULong = 14 };
 
-struct Expect { std::string name, member; bool unplaced; std::string value; };
+struct Expect { std::string name, member; bool unplaced, required; std::string value; };
 struct Text { std::string fn; std::vector<std::string> params; std::vector<Expect> vars; bool ok; };
 
 Text parseText(const std::string& s)
@@ -46,9 +52,11 @@ Text parseText(const std::string& s)
     while (at <= s.size()) {
         size_t semi = s.find(';', at);
         if (semi == std::string::npos) semi = s.size();
-        const std::string item = s.substr(at, semi - at);
+        std::string item = s.substr(at, semi - at);
         at = semi + 1;
         if (item.empty()) { if (semi == s.size()) break; continue; }
+        const bool required = item[0] == '+';      // "+name=value": has a place at every level
+        if (required) item = item.substr(1);
         const size_t eq = item.find('=');
         if (item.compare(0, 3, "fn=") == 0) t.fn = item.substr(3);
         else if (item.compare(0, 2, "P=") == 0) {
@@ -56,10 +64,10 @@ Text parseText(const std::string& s)
             size_t p = 0;
             while (p < list.size()) { size_t c = list.find(',', p); if (c == std::string::npos) c = list.size(); if (c > p) t.params.push_back(list.substr(p, c - p)); p = c + 1; }
         }
-        else if (item[0] == '-') { Expect e; e.name = item.substr(1); e.unplaced = true; t.vars.push_back(e); }
-        else if (item[0] == '~') { Expect e; e.name = item.substr(1); e.unplaced = false; e.value = "~"; t.vars.push_back(e); }
+        else if (item[0] == '-') { Expect e; e.name = item.substr(1); e.unplaced = true; e.required = false; t.vars.push_back(e); }
+        else if (item[0] == '~') { Expect e; e.name = item.substr(1); e.unplaced = false; e.required = false; e.value = "~"; t.vars.push_back(e); }
         else if (eq != std::string::npos) {
-            Expect e; e.unplaced = false; e.value = item.substr(eq + 1);
+            Expect e; e.unplaced = false; e.required = required; e.value = item.substr(eq + 1);
             std::string n = item.substr(0, eq);
             size_t dot = n.find("->"), len = 2;
             if (dot == std::string::npos) { dot = n.find('.'); len = 1; }
@@ -75,7 +83,8 @@ Text parseText(const std::string& s)
 
 HANDLE g_proc = 0;
 DWORD64 g_base = 0;
-int g_failures = 0, g_compared = 0;
+int g_failures = 0, g_compared = 0, g_absent = 0;
+bool g_optimized = false;
 FILE* g_places = 0;
 
 void fail(const std::string& where, const std::string& what)
@@ -100,8 +109,8 @@ std::string readString(DWORD64 addr)
 
 struct Var {
     std::string name;
-    bool param, placed, isStatic;
-    ULONG reg; LONG64 offset; DWORD64 address;   // a register and an offset, or a static's address
+    bool param, placed, isStatic, inReg;
+    ULONG reg; LONG64 offset; DWORD64 address;   // a register and an offset (inReg: the value is in the register), or a static's address
     ULONG type;
 };
 
@@ -113,6 +122,7 @@ BOOL CALLBACK collect(PSYMBOL_INFO s, ULONG, PVOID user)
     v.param = (s->Flags & SYMFLAG_PARAMETER) != 0;
     v.reg = s->Register; v.offset = static_cast<LONG64>(s->Address); v.address = s->Address; v.type = s->TypeIndex;
     v.isStatic = false;
+    v.inReg = (s->Flags & SYMFLAG_REGISTER) != 0;
     v.placed = (s->Flags & (SYMFLAG_REGREL | SYMFLAG_FRAMEREL | SYMFLAG_REGISTER)) != 0;
     if (s->Flags & SYMFLAG_FRAMEREL) v.reg = 334;   // (our frames: S_FRAMEPROC names RBP)
     if (!v.placed && s->Address != 0 && !(s->Flags & SYMFLAG_NULL)) { v.placed = true; v.isStatic = true; }
@@ -133,10 +143,54 @@ DWORD64 regValue(const CONTEXT& c, ULONG reg)
     return 0;
 }
 
+// CodeView's numbers of the parts of the x64 registers a variable's value can be in (cvconst.h's CV_AMD64_*): the
+// 64-bit register (or the xmm register) each belongs to and the bytes of the value. False: not one of them
+bool registerPart(ULONG reg, int& family, int& size)
+{
+    static const int b8[16]  = { 1, 2, 3, 4, 327, 326, 324, 325, 344, 345, 346, 347, 348, 349, 350, 351 };      // al cl dl bl spl bpl sil dil r8b..
+    static const int b16[16] = { 9, 10, 11, 12, 13, 14, 15, 16, 352, 353, 354, 355, 356, 357, 358, 359 };      // ax cx dx bx sp bp si di r8w..
+    static const int b32[16] = { 17, 18, 19, 20, 21, 22, 23, 24, 360, 361, 362, 363, 364, 365, 366, 367 };     // eax ecx edx ebx esp ebp esi edi r8d..
+    static const int b64[16] = { 328, 330, 331, 329, 335, 334, 332, 333, 336, 337, 338, 339, 340, 341, 342, 343 };   // rax rcx rdx rbx rsp rbp rsi rdi r8..
+    for (int r = 0; r < 16; ++r) {
+        if (static_cast<int>(reg) == b8[r]) { family = r; size = 1; return true; }
+        if (static_cast<int>(reg) == b16[r]) { family = r; size = 2; return true; }
+        if (static_cast<int>(reg) == b32[r]) { family = r; size = 4; return true; }
+        if (static_cast<int>(reg) == b64[r]) { family = r; size = 8; return true; }
+    }
+    for (int x = 0; x < 16; ++x) {
+        const int f32 = x < 8 ? 162 + 4 * x : 260 + 4 * (x - 8), f64 = x < 8 ? 194 + x : 292 + (x - 8);   // XMMn_0, XMMnL
+        if (static_cast<int>(reg) == f32) { family = 16 + x; size = 4; return true; }
+        if (static_cast<int>(reg) == f64) { family = 16 + x; size = 8; return true; }
+    }
+    return false;
+}
+
+// the bytes of that part in a frame's context
+bool registerBytes(const CONTEXT& c, ULONG reg, unsigned char* out, int& size)
+{
+    int family = 0;
+    if (!registerPart(reg, family, size)) return false;
+    if (family >= 16) { memcpy(out, &(&c.Xmm0)[family - 16], static_cast<size_t>(size)); return true; }
+    const DWORD64 all[16] = { c.Rax, c.Rcx, c.Rdx, c.Rbx, c.Rsp, c.Rbp, c.Rsi, c.Rdi, c.R8, c.R9, c.R10, c.R11, c.R12, c.R13, c.R14, c.R15 };
+    memcpy(out, &all[family], static_cast<size_t>(size));
+    return true;
+}
+
+// a register as diavars names it: the 64-bit ones by name, any other by its number
+std::string registerName(ULONG r)
+{
+    switch (r) {
+    case 334: return "rbp"; case 335: return "rsp"; case 328: return "rax"; case 329: return "rbx";
+    case 330: return "rcx"; case 331: return "rdx"; case 332: return "rsi"; case 333: return "rdi";
+    }
+    char b[16]; sprintf_s(b, "reg%lu", r); return b;
+}
+
 std::string placeText(const Var& v)
 {
     if (!v.placed) return "none";
     if (v.isStatic) return "static";
+    if (v.inReg) return "reg:" + registerName(v.reg);
     char b[64];
     const char* r = v.reg == 334 ? "rbp" : v.reg == 335 ? "rsp" : "reg";
     sprintf_s(b, "%s%s%lld", r, v.offset < 0 ? "-" : "+", v.offset < 0 ? -v.offset : v.offset);
@@ -175,22 +229,38 @@ bool member(ULONG type, DWORD64 addr, const std::string& name, DWORD64& at, ULON
     return false;
 }
 
-// the value at addr of 'type' as text (a reference read through); false: not a value that can be compared
-bool valueText(ULONG type, DWORD64 addr, std::string& out, int depth = 0)
+// where a value is: in the program's memory at addr, or the n bytes of a register's part
+struct Loc {
+    bool inReg; DWORD64 addr; unsigned char bytes[8]; int n;
+    Loc() : inReg(false), addr(0), n(0) { memset(bytes, 0, sizeof(bytes)); }
+    static Loc memory(DWORD64 a) { Loc l; l.addr = a; return l; }
+};
+
+// (a value in a register is read whole: a record that names a part of another size than the type's is wrong)
+bool readLoc(const Loc& l, void* out, size_t n)
+{
+    if (!l.inReg) return readMem(l.addr, out, n);
+    if (static_cast<size_t>(l.n) != n) return false;
+    memcpy(out, l.bytes, n);
+    return true;
+}
+
+// the value at 'at' of 'type' as text (a reference read through); false: not a value that can be compared
+bool valueText(ULONG type, const Loc& at, std::string& out, int depth = 0)
 {
     const DWORD tag = tagOf(type);
-    if (tag == SymTagTypedef && depth < 4) return valueText(innerOf(type), addr, out, depth + 1);
+    if (tag == SymTagTypedef && depth < 4) return valueText(innerOf(type), at, out, depth + 1);
     if (tag == SymTagPointerType) {
         DWORD64 p = 0;
-        if (!readMem(addr, &p, 8)) return false;
+        if (!readLoc(at, &p, 8)) return false;
         BOOL isRef = FALSE; SymGetTypeInfo(g_proc, g_base, type, TI_GET_IS_REFERENCE, &isRef);
-        if (isRef && depth < 4) return valueText(innerOf(type), p, out, depth + 1);
+        if (isRef && depth < 4) return valueText(innerOf(type), Loc::memory(p), out, depth + 1);
         char b[32]; sprintf_s(b, "%llu", p); out = b; return true;
     }
     if (tag != SymTagBaseType && tag != SymTagEnum) return false;
     const ULONG64 n = lengthOf(type);
     unsigned char bytes[8] = { 0 };
-    if (n == 0 || n > 8 || !readMem(addr, bytes, static_cast<size_t>(n))) return false;
+    if (n == 0 || n > 8 || !readLoc(at, bytes, static_cast<size_t>(n))) return false;
     DWORD bt = 0; SymGetTypeInfo(g_proc, g_base, type, TI_GET_BASETYPE, &bt);
     char b[64];
     if (tag == SymTagBaseType && bt == btFloat) {
@@ -252,19 +322,29 @@ void compare(const Text& t, const CONTEXT& c, DWORD64 scopeAddr, const std::stri
         bool listed = false;
         for (size_t i = 0; i < vars.size(); ++i) if (vars[i].name == x.name) { listed = true; if (vars[i].placed && !v) v = &vars[i]; }
         if (!listed) { fail(where, x.name + " is not listed"); continue; }
-        if (x.unplaced) { if (v) fail(where, x.name + " has a place (" + placeText(*v) + "), the function never stores it"); continue; }
-        if (!v) { fail(where, x.name + " is listed without a place"); continue; }
+        if (x.unplaced) { if (v && !g_optimized) fail(where, x.name + " has a place (" + placeText(*v) + "), the function never stores it"); continue; }
+        if (!v) {
+            if (!g_optimized || x.required) fail(where, x.name + " is listed without a place");
+            else if (x.member.empty()) ++g_absent;
+            continue;
+        }
         if (x.value == "?") continue;
-        DWORD64 addr = v->isStatic ? v->address : regValue(c, v->reg) + static_cast<DWORD64>(v->offset);
+        Loc at = Loc::memory(v->isStatic ? v->address : regValue(c, v->reg) + static_cast<DWORD64>(v->offset));
+        if (v->inReg) {
+            at.inReg = true;
+            if (!registerBytes(c, v->reg, at.bytes, at.n)) { fail(where, x.name + " is in register " + registerName(v->reg) + ", which the driver does not know"); continue; }
+        }
         ULONG type = v->type;
         if (!x.member.empty()) {
             // through a reference or a pointer to the class
             DWORD tag = tagOf(type);
-            if (tag == SymTagPointerType) { DWORD64 p = 0; readMem(addr, &p, 8); addr = p; type = innerOf(type); }
-            if (!member(type, addr, x.member, addr, type)) { fail(where, x.name + " has no member " + x.member); continue; }
+            if (tag == SymTagPointerType) { DWORD64 p = 0; if (!readLoc(at, &p, 8)) { fail(where, x.name + ": its pointer cannot be read at " + placeText(*v)); continue; } at = Loc::memory(p); type = innerOf(type); }
+            DWORD64 addr = at.addr;
+            if (at.inReg || !member(type, addr, x.member, addr, type)) { fail(where, x.name + " has no member " + x.member); continue; }
+            at = Loc::memory(addr);
         }
         std::string got;
-        if (!valueText(type, addr, got)) { fail(where, x.name + (x.member.empty() ? "" : "." + x.member) + ": a value of a type the driver does not read"); continue; }
+        if (!valueText(type, at, got)) { fail(where, x.name + (x.member.empty() ? "" : "." + x.member) + ": a value of a type the driver does not read at " + placeText(*v)); continue; }
         ++g_compared;
         if (!sameValue(got, x.value)) fail(where, x.name + (x.member.empty() ? "" : "." + x.member) + " = " + got + ", the program says " + x.value);
     }
@@ -321,7 +401,8 @@ void clearBp(Breakpoint& b)
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) { fprintf(stderr, "usage: dbgvars <program.exe> [-places <file>] | -scope <program.exe> <rva>...\n"); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: dbgvars <program.exe> [-places <file>] [-optimized] | -scope <program.exe> <rva>...\n"); return 2; }
+    for (int a = 2; a < argc; ++a) if (strcmp(argv[a], "-optimized") == 0) g_optimized = true;
     if (strcmp(argv[1], "-scope") == 0 && argc >= 4) {
         // without running the program: what dbghelp lists at each address (relative to the image)
         g_proc = GetCurrentProcess();
@@ -473,6 +554,6 @@ int main(int argc, char** argv)
         ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, status);
     }
     if (g_places) fclose(g_places);
-    printf("dbgvars: %d checkpoints, %d next lines, %d values compared, %d failures; the program exited with %lu\n", checkpoints, nextLines, g_compared, g_failures, exitCode);
+    printf("dbgvars: %d checkpoints, %d next lines, %d values compared, %d failures; %d times a variable without a place; the program exited with %lu\n", checkpoints, nextLines, g_compared, g_failures, g_absent, exitCode);
     return g_failures == 0 && checkpoints > 0 && exitCode == 0 ? 0 : 1;
 }

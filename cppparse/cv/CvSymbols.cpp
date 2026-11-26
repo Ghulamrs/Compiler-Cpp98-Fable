@@ -89,6 +89,16 @@ void CvSymbols::addRegisterRel(int reg, long offset, const std::string& fn, unsi
     m_records.symbolRecord(0x1145, b);
 }
 
+void CvSymbols::addRegister(int reg, const std::string& fn, unsigned long start, unsigned long length,
+                            const std::vector<std::pair<unsigned long, unsigned long> >& gaps)
+{
+    CvBytes b;
+    b.put16(static_cast<unsigned long>(reg)); b.put16(0);   // reg; attr: not "maybe"
+    b.secRel(fn, start); b.section(fn); b.put16(length);
+    for (size_t g = 0; g < gaps.size(); ++g) { b.put16(gaps[g].first); b.put16(gaps[g].second); }
+    m_records.symbolRecord(0x1141, b);
+}
+
 void CvSymbols::endProcedure()
 {
     m_records.symbolRecord(0x0006, CvBytes());       // S_END

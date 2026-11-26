@@ -52,6 +52,7 @@
 #include "IrGen.hpp"
 #include "CvFromSema.hpp"
 #include "CvModule.hpp"
+#include "CvSha256.hpp"
 #include "Mangle.hpp"
 #include "BackEnd.hpp"
 #include "Report.hpp"
@@ -72,6 +73,23 @@ namespace {
 
 const char* const kVersion = "6.0";   // the release: --version prints it, crc32.txt at the repository root lists the files of it
 const char* const kUsageLine = "cppparse 6.0 - C++98 project reader and report generator\n\nusage: cppparse [options] <input>...\n";
+
+// -g: the preprocessor tells of every file it reads; each one's SHA-256, of those very bytes, goes into the module's
+// description under the name a line table gives the file, and from there into the object's file table (CvFiles)
+class SourceChecksums : public PpFileObserver {
+public:
+    virtual void fileRead(const std::string& path, const std::string& bytes)
+    {
+        CvSource s;
+        s.name = debugPath(path);
+        s.checksum = CvSha256::of(bytes);
+        m_sources.push_back(s);
+    }
+    const std::vector<CvSource>& sources() const { return m_sources; }
+
+private:
+    std::vector<CvSource> m_sources;
+};
 
 // no input, or an unknown option: the usage line and where the options are, as cl and gcc answer; -h has the full text
 void shortUsage()
@@ -121,9 +139,19 @@ void usage()
         "                   With --obj an input <name>.asm (a listing in cppparse's MASM subset) is assembled\n"
         "                   by the COFF writer alone into <name>6.obj\n"
         "  -g               version 6 (--compile6): CodeView types and variables in the object, beside the line tables\n"
-        "                   every object has: the types in .debug$T, the globals, constants and type names in .debug$S\n"
-        "                   (and <name>-cv6.txt, the description they are written from). The code is the same bytes\n"
-        "                   with and without it. -g0: none (the default); CPPPARSE_G=1 in the environment: -g\n"
+        "                   every object has: the types in .debug$T; in .debug$S the globals, constants and type names\n"
+        "                   and every function's parameters and locals, at -O0 each in its place, at -O1 and up where\n"
+        "                   the value is (a frame slot or a register) or listed as optimised out; in the file table\n"
+        "                   every source file the unit read with its SHA-256, as cl's /Z7 objects have it, which a\n"
+        "                   debugger holds against the file it shows (and <name>-cv6.txt, the description the\n"
+        "                   records are written from). The code is the same bytes with and without it. -g0: none\n"
+        "                   (the default); CPPPARSE_G=1 in the environment: -g\n"
+        "  -g2              -g, and every class lists the member functions it declares (overloads, static and virtual\n"
+        "                   ones with their vftable slots, constructors, operators), as cl's /Z7 types do, and the\n"
+        "                   classes their types name are described: about a quarter more object bytes than -g on\n"
+        "                   the compiler's own sources. CPPPARSE_G=2 in the environment: -g2\n"
+        "  --sha256         print the SHA-256 of each input file's bytes (\"<64 digits>  <file>\") and exit: the checksum\n"
+        "                   -g records of a source, to hold a file against the one a program was built from\n"
         "  -I <dir>         version 6: include directory for the preprocessor (also -Idir)\n"
         "  -D NAME[=value]  version 6: predefine a macro (also -DNAME=value); -U NAME undefines one\n"
         "  --target NAME    version 6: x86_64-windows (default; COFF objects, MSVC ABI) or x86_64-linux\n"
@@ -273,7 +301,7 @@ int cppparseMain(int argc, char* argv[])
     int threads = hardwareThreads();
     bool threadsGiven = false;
     bool ok0 = true;
-    bool preprocessOnly = false, parse6 = false, sema6 = false, compile6 = false;
+    bool preprocessOnly = false, parse6 = false, sema6 = false, compile6 = false, sha256Only = false;
     PpOptions ppOpt;
     CompileOptions copt;
     ReportOptions opt;
@@ -292,7 +320,9 @@ int cppparseMain(int argc, char* argv[])
 #endif
     // -g when the command line has none: CPPPARSE_G=1 in the environment, so that a test script's objects can be had
     // both ways and compared (scripts\cvsame.ps1: debug information changes no code)
-    bool debugInfo = debugFromEnvironment && std::string(debugFromEnvironment) == "1";
+    // (2: -g2, the member functions in the classes too)
+    bool debugMembers = debugFromEnvironment && std::string(debugFromEnvironment) == "2";
+    bool debugInfo = debugMembers || (debugFromEnvironment && std::string(debugFromEnvironment) == "1");
     if (const char* model = ehFromEnvironment) {
         const std::string m = model;
         if (m == "sjlj") copt.eh = EhModelSjlj;
@@ -331,8 +361,10 @@ int cppparseMain(int argc, char* argv[])
         else if (a == "--assemble") assemble = true;
         else if (a == "--obj") obj = true;
         else if (a == "--msvc-mangling") copt.msvcNames = true;
-        else if (a == "-g") debugInfo = true;
-        else if (a == "-g0") debugInfo = false;
+        else if (a == "-g") { debugInfo = true; debugMembers = false; }
+        else if (a == "-g2") debugInfo = debugMembers = true;
+        else if (a == "-g0") debugInfo = debugMembers = false;
+        else if (a == "--sha256") sha256Only = true;
         else if (a == "--eh=table") copt.eh = EhModelTable;
         else if (a == "--eh=sjlj") copt.eh = EhModelSjlj;
         else if (a == "--eh=cl") { copt.eh = EhModelCl; ehClAsked = true; }
@@ -365,6 +397,17 @@ int cppparseMain(int argc, char* argv[])
         }
     }
     if (inputs.empty()) { shortUsage(); return 2; }
+    if (sha256Only) {
+        // the SHA-256 of each input file's bytes as they are on disk, which is what -g records of a source in the
+        // object's file table: "<64 digits>  <file>" a line
+        int rc = ok0 ? 0 : 1;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            std::string sum;
+            if (CvSha256::ofFile(inputs[i], sum)) std::cout << CvSha256::hex(sum) << "  " << inputs[i] << "\n";
+            else { std::cerr << "error: cannot read " << inputs[i] << "\n"; rc = 1; }
+        }
+        return rc;
+    }
     if (assemble && copt.eh == EhModelCl && (compile6 || ehClAsked)) {
         std::cerr << "error: --eh=cl needs cppparse's own object writer (--obj): ml64 (--assemble) cannot write the exception tables\n";
         return 2;
@@ -406,8 +449,12 @@ int cppparseMain(int argc, char* argv[])
                 }
                 continue;
             }
+            // -g: the checksum of every source file, taken from the bytes the preprocessor reads
+            SourceChecksums sourceChecksums;
+            ppOpt.observer = compile6 && debugInfo ? &sourceChecksums : 0;
             Preprocessor pp(ppOpt);
             pp.run(inputs[i]);
+            ppOpt.observer = 0;   // (every file is read by now; the observer does not outlive this input)
             // the preprocessor's diagnostics (an unterminated comment or #if, a bad #if expression, #error) count as
             // errors of the unit like the parser's
             int ppErrors = 0;
@@ -509,6 +556,8 @@ int cppparseMain(int argc, char* argv[])
                     CvModule cvModule;
                     CvFromSema cvFromSema(types, cvModule);
                     if (debugInfo) gen.setDebugInfo(&cvFromSema);
+                    for (size_t k = 0; k < sourceChecksums.sources().size(); ++k) cvModule.add(sourceChecksums.sources()[k]);
+                    cvFromSema.setMemberFunctions(debugMembers);   // -g2: the classes list their member functions
                     std::vector<IrFunction*> functions;
                     X86Module x86(copt.msvcNames);
                     x86.setEhModel(copt.eh);

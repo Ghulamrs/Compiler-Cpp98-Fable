@@ -23,6 +23,33 @@ void mergePieces(std::vector<std::pair<unsigned long, unsigned long> >& p)
     p.swap(out);
 }
 
+// the pieces as records' ranges: each a start, a length of at most 65,535 bytes (the field is 16 bits) and the holes
+// between the pieces it spans as gaps {from the start, length}; a piece longer than a range goes on in the next
+struct Span { unsigned long start, length; std::vector<std::pair<unsigned long, unsigned long> > gaps; };
+
+void spansOf(const std::vector<std::pair<unsigned long, unsigned long> >& p, std::vector<Span>& out)
+{
+    size_t i = 0;
+    unsigned long from = p.empty() ? 0 : p[0].first;
+    while (i < p.size()) {
+        Span s;
+        s.start = from;
+        unsigned long end = s.start;
+        while (i < p.size()) {
+            const unsigned long b = p[i].first > s.start ? p[i].first : s.start;
+            if (b - s.start >= 0xFFFFUL) break;
+            if (b > end && end > s.start) s.gaps.push_back(std::make_pair(end - s.start, b - end));
+            const unsigned long e = p[i].second - s.start > 0xFFFFUL ? s.start + 0xFFFFUL : p[i].second;
+            end = e;
+            if (e < p[i].second) { from = e; break; }   // a piece longer than a range: the rest starts the next
+            ++i;
+            if (i < p.size()) from = p[i].first;
+        }
+        s.length = end - s.start;
+        out.push_back(s);
+    }
+}
+
 } // namespace
 
 CvScopes::CvScopes(const CvProcedureMarks& marks, unsigned long codeSize, bool hasFrame)
@@ -64,6 +91,7 @@ CvScopes::CvScopes(const CvProcedureMarks& marks, unsigned long codeSize, bool h
     for (size_t v = 0; v < marks.variables.size(); ++v) {
         const CvFrameVariable& var = marks.variables[v];
         const size_t b = var.block >= 0 && static_cast<size_t>(var.block) <= n ? static_cast<size_t>(var.block) : 0;
+        if (var.ranged >= 0) m_ranged = true;          // a place over ranges of the code
         if (b != 0 && m_pieces[b].empty()) continue;   // a block without code: not described
         if (!var.placed || !m_hasFrame || m_pieces[b].size() != 1) m_ranged = true;
     }
@@ -73,6 +101,87 @@ CvScopes::CvScopes(const CvProcedureMarks& marks, unsigned long codeSize, bool h
             const size_t b = var.block >= 0 && static_cast<size_t>(var.block) <= n ? static_cast<size_t>(var.block) : 0;
             if (var.placed && m_hasFrame && b != 0) m_offsetRanges.insert(m_offsetRanges.end(), m_pieces[b].begin(), m_pieces[b].end());
         }
+    placeRanges();
+}
+
+// the code each ;@var variable is in its place over: from a ;@loc marker that names a place to the variable's next
+// marker (or the end of the code), cut to the pieces of the variable's block (a variable is listed in its block only);
+// neighbours in one place joined
+void CvScopes::placeRanges()
+{
+    m_ranges.assign(m_marks.variables.size(), std::vector<CvPlaceRange>());
+    std::vector<int> varOf;                       // ;@var's number -> the variable's index
+    for (size_t v = 0; v < m_marks.variables.size(); ++v) {
+        const int id = m_marks.variables[v].ranged;
+        if (id < 0) continue;
+        if (static_cast<size_t>(id) >= varOf.size()) varOf.resize(static_cast<size_t>(id) + 1, -1);
+        varOf[static_cast<size_t>(id)] = static_cast<int>(v);
+    }
+    if (varOf.empty()) return;
+    std::vector<CvPlaceRange> open(varOf.size());   // end 1: a place is open from 'start'
+    for (size_t i = 0; i <= m_marks.positions.size(); ++i) {
+        const bool last = i == m_marks.positions.size();
+        int id = -1;
+        std::string place;
+        if (!last) {
+            const std::string& text = m_marks.positions[i].second;
+            if (text.compare(0, 6, ";@loc ") != 0) continue;
+            const size_t sp = text.find(' ', 6);
+            id = atoi(text.c_str() + 6);
+            place = sp == std::string::npos ? std::string("-") : text.substr(sp + 1);
+            if (id < 0 || static_cast<size_t>(id) >= varOf.size() || varOf[static_cast<size_t>(id)] < 0) continue;
+        }
+        const unsigned long at = last || m_marks.positions[i].first > m_codeSize ? m_codeSize : m_marks.positions[i].first;
+        for (size_t k = 0; k < open.size(); ++k) {
+            if (!last && static_cast<int>(k) != id) continue;
+            CvPlaceRange& o = open[k];
+            if (o.end == 1 && at > o.start && varOf[k] >= 0) {
+                CvPlaceRange r = o;
+                r.end = at;
+                m_ranges[static_cast<size_t>(varOf[k])].push_back(r);
+            }
+            o.end = 0;
+        }
+        if (last || place == "-") continue;
+        CvPlaceRange& o = open[static_cast<size_t>(id)];
+        if (place.compare(0, 4, "[rbp") == 0 && place.size() > 5) { o.reg = 0; o.offset = (place[4] == '-' ? -1 : 1) * atol(place.c_str() + 5); }
+        else {
+            const size_t sp = place.find(' ');
+            o.reg = sp == std::string::npos ? 0 : CvRegisters::number(CvRegisters::family(place.substr(0, sp)), atoi(place.c_str() + sp + 1));
+            o.offset = 0;
+            if (o.reg == 0) continue;             // not a register of the table: no place
+        }
+        o.start = at;
+        o.end = 1;
+    }
+    for (size_t v = 0; v < m_ranges.size(); ++v) {
+        std::vector<CvPlaceRange>& rs = m_ranges[v];
+        if (rs.empty()) continue;
+        const CvFrameVariable& var = m_marks.variables[v];
+        const size_t b = var.block >= 0 && static_cast<size_t>(var.block) < m_pieces.size() ? static_cast<size_t>(var.block) : 0;
+        std::vector<CvPlaceRange> cut;
+        for (size_t r = 0; r < rs.size(); ++r) {
+            if (rs[r].reg == 0 && !m_hasFrame) continue;
+            if (rs[r].start < m_dbgStart) rs[r].start = m_dbgStart;   // (the entry sequence is no part of any range)
+            if (rs[r].start >= rs[r].end) continue;
+            if (b == 0) { cut.push_back(rs[r]); continue; }
+            for (size_t p = 0; p < m_pieces[b].size(); ++p) {
+                CvPlaceRange c = rs[r];
+                if (m_pieces[b][p].first > c.start) c.start = m_pieces[b][p].first;
+                if (m_pieces[b][p].second < c.end) c.end = m_pieces[b][p].second;
+                if (c.start < c.end) cut.push_back(c);
+            }
+        }
+        rs.clear();
+        for (size_t r = 0; r < cut.size(); ++r) {
+            if (!rs.empty() && rs.back().end == cut[r].start && rs.back().reg == cut[r].reg && rs.back().offset == cut[r].offset) rs.back().end = cut[r].end;
+            else rs.push_back(cut[r]);
+        }
+        for (size_t r = 0; r < rs.size(); ++r) {
+            if (rs[r].reg == 0) m_offsetRanges.push_back(std::make_pair(rs[r].start, rs[r].end));
+            else { CvRegisterRange g; g.start = rs[r].start; g.end = rs[r].end; g.reg = rs[r].reg; m_registerRanges.push_back(g); }
+        }
+    }
 }
 
 int CvScopes::recordOf(int block) const
@@ -102,30 +211,33 @@ void CvScopes::writeScope(CvSymbols& out, CvTypes& types, const std::string& fn,
         const unsigned long type = types.symbolIndex(var.type);
         if (!m_ranged) { out.addRegRel(var.offset, type, kRbp, var.name); continue; }
         const int param = var.param ? 1 : 0;
+        if (var.ranged >= 0) {
+            // in its temporary's place over the ranges its markers gave: the runs of ranges in one place, each as
+            // records with the holes as gaps
+            const std::vector<CvPlaceRange>& rs = m_ranges[v];
+            out.addLocal(type, (rs.empty() ? 0x100 : 0) | param, var.name);
+            for (size_t r = 0; r < rs.size();) {
+                Pieces run;
+                size_t e = r;
+                while (e < rs.size() && rs[e].reg == rs[r].reg && rs[e].offset == rs[r].offset) { run.push_back(std::make_pair(rs[e].start, rs[e].end)); ++e; }
+                std::vector<Span> spans;
+                spansOf(run, spans);
+                for (size_t s = 0; s < spans.size(); ++s) {
+                    if (rs[r].reg == 0) out.addRegisterRel(kRbp, rs[r].offset, fn, spans[s].start, spans[s].length, spans[s].gaps);
+                    else out.addRegister(rs[r].reg, fn, spans[s].start, spans[s].length, spans[s].gaps);
+                }
+                r = e;
+            }
+            continue;
+        }
         if (!var.placed || !m_hasFrame) { out.addLocal(type, 0x100 | param, var.name); continue; }
         out.addLocal(type, param, var.name);
         if (b == 0) { out.addFramePointerFullScope(var.offset); continue; }
         // a block's variable: over the block's pieces, the hull of each group of pieces that fits a range (65,535
         // bytes), the holes as gaps
-        const Pieces& p = m_pieces[static_cast<size_t>(b)];
-        size_t i = 0;
-        unsigned long from = p.empty() ? 0 : p[0].first;
-        while (i < p.size()) {
-            const unsigned long start = from;
-            std::vector<std::pair<unsigned long, unsigned long> > gaps;
-            unsigned long end = start;
-            while (i < p.size()) {
-                const unsigned long s = p[i].first > start ? p[i].first : start;
-                if (s - start >= 0xFFFFUL) break;
-                if (s > end && end > start) gaps.push_back(std::make_pair(end - start, s - end));
-                const unsigned long e = p[i].second - start > 0xFFFFUL ? start + 0xFFFFUL : p[i].second;
-                end = e;
-                if (e < p[i].second) { from = e; break; }   // a piece longer than a range: the rest starts the next
-                ++i;
-                if (i < p.size()) from = p[i].first;
-            }
-            out.addRegisterRel(kRbp, var.offset, fn, start, end - start, gaps);
-        }
+        std::vector<Span> spans;
+        spansOf(m_pieces[static_cast<size_t>(b)], spans);
+        for (size_t s = 0; s < spans.size(); ++s) out.addRegisterRel(kRbp, var.offset, fn, spans[s].start, spans[s].length, spans[s].gaps);
     }
     for (size_t s = 0; s < m_marks.statics.size(); ++s)
         if (recordOf(m_marks.statics[s].block) == scope && defined.count(m_marks.statics[s].symbol))

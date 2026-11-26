@@ -8,11 +8,14 @@ namespace {
 
 enum {
     LfVtShape = 0x000A, LfModifier = 0x1001, LfPointer = 0x1002, LfProcedure = 0x1008, LfMFunction = 0x1009, LfArgList = 0x1201,
-    LfFieldList = 0x1203, LfBitfield = 0x1205, LfBClass = 0x1400, LfVBClass = 0x1401, LfIVBClass = 0x1402, LfIndex = 0x1404,
+    LfFieldList = 0x1203, LfBitfield = 0x1205, LfMethodList = 0x1206, LfBClass = 0x1400, LfVBClass = 0x1401, LfIVBClass = 0x1402, LfIndex = 0x1404,
     LfVFuncTab = 0x1409, LfEnumerate = 0x1502, LfArray = 0x1503, LfClass = 0x1504, LfStructure = 0x1505, LfUnion = 0x1506,
-    LfEnum = 0x1507, LfMember = 0x150D, LfStMember = 0x150E, LfNestType = 0x1510
+    LfEnum = 0x1507, LfMember = 0x150D, LfStMember = 0x150E, LfMethod = 0x150F, LfNestType = 0x1510, LfOneMethod = 0x1511
 };
-enum { PropConstructor = 0x2, PropNested = 0x8, PropHasNested = 0x10, PropForward = 0x80, PropScoped = 0x100, PropUniqueName = 0x200, PropSealed = 0x400 };
+enum {
+    PropConstructor = 0x2, PropOperator = 0x4, PropNested = 0x8, PropHasNested = 0x10, PropAssignment = 0x20, PropConversion = 0x40,
+    PropForward = 0x80, PropScoped = 0x100, PropUniqueName = 0x200, PropSealed = 0x400
+};
 const unsigned long kFirstIndex = 0x1000;
 const unsigned long kMaxRecord = 0xFF00;       // a record's bytes: its length field has 16 bits
 const unsigned long kPointer64 = 0x1000C;      // LF_POINTER's attributes: a 64-bit pointer of 8 bytes
@@ -22,6 +25,18 @@ std::string fieldBytes(CvBytes& b)
 {
     b.padLeaf();
     return b.bytes();
+}
+
+// a member function's attributes in its class's list: the access and what kind of member it is (CV_fldattr_t)
+unsigned long methodAttributes(const CvMethod& fn)
+{
+    return static_cast<unsigned long>(fn.access) | (static_cast<unsigned long>(fn.kind) << 2);
+}
+
+// it brings a slot of its own: the slot's offset in the vftable follows its type
+bool introduces(const CvMethod& fn)
+{
+    return fn.kind == CvMethod::IntroVirtual || fn.kind == CvMethod::PureIntroVirtual;
 }
 
 } // namespace
@@ -102,14 +117,14 @@ unsigned long CvTypes::index(int number)
         break;
     case CvType::Procedure: {
         const unsigned long result = index(t.to), args = argList(t);
-        b.put32(result); b.put8(0); b.put8(0); b.put16(static_cast<unsigned long>(t.params.size()) + (t.variadic ? 1 : 0)); b.put32(args);
+        b.put32(result); b.put8(0); b.put8(t.attributes); b.put16(static_cast<unsigned long>(t.params.size()) + (t.variadic ? 1 : 0)); b.put32(args);
         idx = record(LfProcedure, b);
         break;
     }
     case CvType::MemberFunction: {
         const unsigned long result = index(t.to), cls = index(t.ofClass), self = index(t.thisType), args = argList(t);
-        b.put32(result); b.put32(cls); b.put32(self); b.put8(0); b.put8(0);
-        b.put16(static_cast<unsigned long>(t.params.size()) + (t.variadic ? 1 : 0)); b.put32(args); b.put32(0);
+        b.put32(result); b.put32(cls); b.put32(self); b.put8(0); b.put8(t.attributes);
+        b.put16(static_cast<unsigned long>(t.params.size()) + (t.variadic ? 1 : 0)); b.put32(args); b.put32(static_cast<unsigned long>(t.thisAdjust) & 0xFFFFFFFFUL);
         idx = record(LfMFunction, b);
         break;
     }
@@ -225,9 +240,34 @@ unsigned long CvTypes::definition(int classNumber)
                 members.push_back(fieldBytes(m));
             }
         }
+        // the class's member count: the bases and the vfptr so far, then the members, each function of an overloaded
+        // name counted (cl: 9 for one data member and eight functions of five names)
+        size_t count = members.size();
         for (size_t i = 0; i < c.members.size(); ++i) {
             const CvMember& mem = c.members[i];
             CvBytes m;
+            if (mem.kind == CvMember::Method) {
+                if (mem.methods.empty()) continue;
+                count += mem.methods.size();
+                if (mem.methods.size() == 1) {
+                    const CvMethod& fn = mem.methods[0];
+                    m.put16(LfOneMethod); m.put16(methodAttributes(fn)); m.put32(index(fn.type));
+                    if (introduces(fn)) m.put32(static_cast<unsigned long>(fn.vftableOffset));
+                    m.name(mem.name);
+                }
+                else {
+                    CvBytes list;
+                    for (size_t f = 0; f < mem.methods.size(); ++f) {
+                        const CvMethod& fn = mem.methods[f];
+                        list.put16(methodAttributes(fn)); list.put16(0); list.put32(index(fn.type));
+                        if (introduces(fn)) list.put32(static_cast<unsigned long>(fn.vftableOffset));
+                    }
+                    m.put16(LfMethod); m.put16(static_cast<unsigned long>(mem.methods.size() > 0xFFFF ? 0xFFFF : mem.methods.size())); m.put32(record(LfMethodList, list)); m.name(mem.name);
+                }
+                members.push_back(fieldBytes(m));
+                continue;
+            }
+            ++count;
             unsigned long type = index(mem.type);
             if (mem.kind == CvMember::Data) {
                 if (mem.bitWidth >= 0) { CvBytes bf; bf.put32(type); bf.put8(mem.bitWidth); bf.put8(mem.bitPosition); type = record(LfBitfield, bf); }
@@ -239,8 +279,9 @@ unsigned long CvTypes::definition(int classNumber)
         }
         const unsigned long fields = fieldList(members);
         CvBytes b;
-        b.put16(static_cast<unsigned long>(members.size() > 0xFFFF ? 0xFFFF : members.size()));
-        b.put16(properties(c) | (c.hasNested ? PropHasNested : 0) | (c.hasConstructor ? PropConstructor : 0) | (c.kind == CvClass::Union ? PropSealed : 0));
+        b.put16(static_cast<unsigned long>(count > 0xFFFF ? 0xFFFF : count));
+        b.put16(properties(c) | (c.hasNested ? PropHasNested : 0) | (c.hasConstructor ? PropConstructor : 0) | (c.kind == CvClass::Union ? PropSealed : 0)
+                | (c.hasOperator ? PropOperator : 0) | (c.hasAssignment ? PropAssignment : 0) | (c.hasConversion ? PropConversion : 0));
         b.put32(fields);
         if (c.kind != CvClass::Union) { b.put32(0); b.put32(shape); }
         b.numeric(static_cast<int64>(c.size), true);

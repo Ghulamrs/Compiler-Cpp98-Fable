@@ -531,18 +531,35 @@ void findSourceFiles(const std::string& dir, std::vector<std::string>& headers, 
     if (hasHeader) dirsWithHeaders.push_back(base);
 }
 
-bool readFile(const std::string& p, std::string& out)
+bool readFileBytes(const std::string& p, std::string& out)
 {
     std::ifstream in(p.c_str(), std::ios::in | std::ios::binary);
     if (!in) return false;
     std::ostringstream oss;
     oss << in.rdbuf();
     out = oss.str();
-    // drop a UTF-8 byte order mark
-    if (out.size() >= 3 && static_cast<unsigned char>(out[0]) == 0xEF &&
-        static_cast<unsigned char>(out[1]) == 0xBB && static_cast<unsigned char>(out[2]) == 0xBF)
-        out.erase(0, 3);
     return true;
+}
+
+void dropByteOrderMark(std::string& text)
+{
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF)
+        text.erase(0, 3);
+}
+
+bool readFile(const std::string& p, std::string& out)
+{
+    if (!readFileBytes(p, out)) return false;
+    dropByteOrderMark(out);
+    return true;
+}
+
+std::string debugPath(const std::string& p)
+{
+    std::string path = normalizePath(absolutePath(p));
+    for (size_t k = 0; k < path.size(); ++k) if (path[k] == '/') path[k] = '\\';
+    return path;
 }
 
 bool writeFile(const std::string& p, const std::string& content)

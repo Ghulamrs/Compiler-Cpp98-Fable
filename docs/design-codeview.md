@@ -1,9 +1,15 @@
 # Design: CodeView types and variables (row M10, 2026-11-19)
 
-Status: in development; stages 0 and 1 of section 6 are done (2026-11-20), stage 2 (2026-11-24): with `-g` an object
-carries its types in `.debug$T` and in `.debug$S` its variables with static storage and every function's parameters
-and locals, at `-O0` each in its place. At `-O1` and up the parameters and locals are listed without a place until
-stage 3.
+Status: done, stages 0 to 5 of section 6 (stages 0 and 1 on 2026-11-20, stage 2 on 2026-11-24, stages 3 and 4 on
+2026-11-25, stage 5 on 2026-11-26); row M10 is closed. With `-g` an object carries its types in `.debug$T` and in `.debug$S` its variables with static storage
+and every function's parameters and locals, at `-O0` each in its place. At `-O1` and up a variable that stays in
+memory is at its slot and one with one definition is where that value is, a register or a spill slot, over the code
+where it lives; the others are listed without a place. With `-g2` every class also lists the member functions it
+declares, as cl's types do; they are an option of their own by stage 4's size criterion (the own sources' `-g`
+objects grow by 26.9 % with them at `-O0`). With either option the object's file table names every source file
+the unit read with its SHA-256, as cl's /Z7 objects do; a debugger holds a source against it (stage 5). What the
+options cost (objects, PDB, compile and link time, the self-host) is the table in stage 5's entry below, and what
+is left, as rows of their own and as sessions by hand, stands behind it.
 The independent review of the first text (commits 60f813e and 5dfd7f8) is folded in; its findings and what was
 done about each are section 11. The user's go-ahead of 2026-11-20 is on the recommended answers to the twelve
 questions of section 8. The order is the one of M7 (docs/design-cl-exceptions.md): the text, an independent
@@ -166,6 +172,258 @@ The stages as they were done:
   - by hand, not done here: a session in Visual Studio's debugger on vars.exe (the Locals pane, a watch with a member
     access and a cast to a template's name, the call stack's frames, the two sibling blocks of one name in
     `blocks`, the never-read parameters of `params`, an object passed by address shown as a reference in `refs`).
+- Stage 3 (2026-11-25), in three parts:
+  - The optimiser's tables (5.4). `IrFunction::debugTemps` holds, for a variable of the source that has one
+    definition, the temporary that is that definition; `IrLocal::promoted` and `IrLocal::staleStores` say why a
+    frame slot is no place (Ssa.cpp made the local temporaries; a pass removed a store to it);
+    `IrFunction::debugAliases` names a result built in the caller's object and the local that holds the hidden result
+    pointer. The pair is recorded where the variable leaves memory: at Ssa.cpp's promotion, and where dead store
+    elimination removes the one store of a variable whose every read took the stored value itself, which is how most
+    single-assignment locals go, before SSA is built. `replaceTempUses` renames an entry when a pass puts one temporary
+    in another's place, a constant ends it, and a verifier after the last pass keeps an entry only if its temporary is
+    defined exactly once and, where it is not the temporary the variable was assigned from, if that definition lies
+    on no cycle of the function. A store to a local leaves the code through `IrFunction::removeStore` alone. The
+    tables are kept under `-g` only and nothing reads them to decide anything; the IR dump prints them. What differs
+    from 5.4 is section 11's note of 2026-11-25. Measured: cvsame `-Listings` over the own sources, libcpp and the
+    example units without and with `-g` at `-O1`, `-O2`, `-O3`, `-O2 --eh=cl` and `-O2 --eh=sjlj`: 735 pairs, none
+    violates; vars.cpp's tables at `-O2`, read in the IR dump: every parameter that is not assigned has its entry
+    (the incoming value; in `Both::get` the adjusted `this`), `sum`, `total`, `r`, `w`, `mine`, `got`, `half`,
+    `twice`, `flag` theirs from the dead store, `changed`, `top`, `observed` and the loop's `s` and `i` none.
+  - The places (5.3, 5.4). X86.cpp lists a variable of an optimised function in one of three ways: in the frame
+    (`;@local`) when the code keeps it there (not promoted, no store removed, and stored: not a parameter the
+    function never reads or reads from its register alone); by its one definition (`;@var`, with `;@loc` markers
+    among the code) when `debugTemps` has it and the temporary has a place and holds a value of the variable's size
+    and kind; else without a place (`;@gone`). A named result is listed by address at the hidden result pointer's
+    place. `placeOf` answers "where is this temporary" for `use()`, `def()` and the markers alike: its interval's
+    register or its spill slot, for its whole life. A place is announced from behind the defining instruction (at a
+    block's start when the temporary is live into the block) to the last instruction of the block that reads it:
+    before that instruction, behind a call instruction itself for a callee-saved register, behind the instruction for
+    a slot; a volatile register never over a call, a throw or a try operation; nothing in an epilogue, a funclet's
+    entry or the stubs behind the blocks. `CvScopes` turns the markers into `S_LOCAL` with `S_DEFRANGE_REGISTER`
+    (the part of the register that holds the value: `CvRegisters`, a table per register) or
+    `S_DEFRANGE_REGISTER_REL` for a spill slot, cut to the variable's block, the holes as gaps; a function without
+    a frame has its variables in registers and no `S_FRAMEPROC`. `CvCheck` (b) holds every register against the
+    table and the variable's type; (c) holds every register range against what the encoder recorded: the registers
+    each instruction writes (`writtenRegisters`, beside `Encoder::instruction`; a call writes every volatile
+    register, a mnemonic it does not name writes them all) and the prologue and epilogue code. What differs from
+    5.3 and 5.4 is section 11's second note of 2026-11-25. Measured (the compiler built by cl from this commit):
+    cvsame `-Listings` over the own sources, libcpp and the example units (148 that compile alone) without and
+    with `-g` at `-O1`, `-O2`, `-O3`, `-O2 --eh=cl` and `-O2 --eh=sjlj`: 740 pairs, none violates invariant 1; no
+    unit has an internal error or a `CvCheck` message, so every register range of the 740 objects passes (c);
+    llvm-pdbutil reads all 740 `-g` objects without an error. Against the compiler of the first part, the same 148
+    units: the objects and listings at `-O0` with `-g`, and at `-O2` and `-O2 --eh=cl` without, are the same bytes
+    (888 files), so nothing changed but the debug information of optimised code. `selfhost.ps1 -G -Lvl 2`:
+    generation two's objects and listings are generation one's (506 s beside a running harness). Test 21 compiles
+    vars.cpp at `-O1`, `-O2` and `-O3` with `-g`: cvsame, the compiler's own check silent, 66 places in a register in
+    the listing, 48 `S_DEFRANGE_REGISTER` records read by llvm-pdbutil. The own sources' objects grow with `-g` by
+    25.1 % at `-O2` (stage 2: 19.1 %), 30.1 % at `-O1`, 18.6 % at `-O3`. A function without a frame (`int
+    mulAdd(int a, int b) { int product = a * b; return product + a; }`): no `S_FRAMEPROC`, `a` in ECX over its life,
+    `b` and `product`, each consumed by the instruction behind its definition, optimised out.
+  - The exit tests (section 6, row 3), measured (the compiler built by cl from this commit; cl 19.52, GRIDE's link
+    and gride-dbg as the harness finds them):
+    - the value harness (test 21). vars.cpp has 28 checkpoints now: beside stage 2's shapes a named result,
+      an `int`, a `bool`, a `char` and a `short` that live across the call (ebx, sil, dil, r12w), ten values of
+      which three are spilled, a `float` and a `double` seen from the frame above (xmm7, xmm6), a value whose last
+      use is the argument of the call that is on the stack, a variable that is another's value, a variable assigned
+      once in a loop from one that changes in every round, the same in a loop that only an exception closes (a
+      handler that resumes), an adjusted `this` needed behind the checkpoint. Every
+      function asks for its return address (`_AddressOfReturnAddress`), which keeps it out of line at every level:
+      the driver finds a checkpoint's caller by name, and an inlined function's variables are not listed. A text
+      marks with `+` the variables that must have a place at `-O1` and up. At `-O0`: 222 values right in the
+      three models. At `-O1`, `-O2` and `-O3` in each model (nine builds, `dbgvars -optimized`): every declared
+      parameter listed in order, no value wrong in the caller, in the frames above it and at the next line, every
+      marked variable in its place; 129 values read back (131 in cl's model), a variable without a place 96
+      times; no place for a variable the program does not name. DIA gives the same variables the same places at
+      all 25 checkpoint callers of each build. The `-O2` program through the link variants (Microsoft's link: `/DEBUG`
+      incremental, `/DEBUG /OPT:REF,ICF`, the object from a static library; GRIDE's: `/DEBUG`, `/OPT:REF,ICF`, a
+      static library): the same result, no linker says anything. gride-dbg's `dv` at eleven checkpoint lines of
+      the `-O2` program: the same lines from both linkers' PDBs (a variable in a register shows as `@reg`, section
+      10's D4 to D6).
+    - counted on the own sources (62 units with libcpp, the listings' markers; `-O2`): 20,860 procedures with a
+      type, 58,259 variables of the source: 6,218 in the frame, 41,653 in their temporary's place over some of
+      the code, 10,388 without a place: 82.2 % have a place (3.6's upper bound was 88 %), 90.8 % of the 40,113
+      parameters and 63.1 % of the 18,146 locals. At `-O1` 82.5 %, at `-O3` 81.3 %; at `-O0` 96.3 % (the 2,183
+      parameters that are never read have none).
+    - blocks in pieces (risk 7), the own sources at `-O2`: of 6,370 block scopes with code 3,539 were in
+      more than four pieces as the second part left them (the most: 251). The cause was SSA destruction:
+      the copies it puts on an edge, the edge's own block and a phi that becomes a copy carried no scope, so each
+      cut the blocks around it. They now take the scope of the branch they stand at (fromSsa) and of the block's
+      first instruction (a phi); of 6,375, 1,323 blocks are left in more than four pieces (the most: 29),
+      5,031 in more than one: what is left is the layout (handlers, landing pads and cold blocks behind
+      the function's `ret`; the blocks an inlined call adds, which are numbered behind the caller's and placed by
+      their numbers, so that the code of neighbouring scopes alternates: at `-O1`, without inlining, none of the
+      6,370 is in more than four pieces, where 2,238 were; at `-O3` 2,161 are, where 4,156 were) and code of the
+      enclosing scope between a block's statements. That is the code's order, which `-g` does not touch; a
+      variable of such a block is listed over each piece. No code changes with the scopes (cvsame).
+    - invariant 1, cvsame `-Listings` over the own sources, libcpp and the example units without and with `-g`:
+      at `-O0`, `-O1`, `-O2`, `-O3`, `-O2 --eh=cl` and `-O2 --eh=sjlj`, 888 pairs, none violates; no unit has an
+      internal error or a `CvCheck` message at any of them, so every register range of 888 objects passes
+      `CvCheck` (c); llvm-pdbutil reads all of the `-g` objects without an error. The suite's scripts
+      (build-cppparse.ps1, lib.ps1 and life.ps1 at `-Lvl 2`, eh.ps1, matrix.ps1) once more with `CPPPARSE_G=1`:
+      every script passes and no compilation has a `CvCheck` message.
+    - invariant 2: `selfhost.ps1 -G -Lvl 2`, generation two's objects and listings are generation one's
+      (506 s beside a running harness), the harness's new check `selfhost-g-O2`; test 21 compiles vars.cpp at
+      `-O2 -g` with `-j 1` and `-j 4`: the same object, listing and description. The suite under the compiler
+      that `selfhost.ps1 -G -Lvl 2` built: every test group passes.
+    - cost: with `-g` the own sources' objects grow by 24.5 % at `-O2` (stage 2: 19.1 %), 29.7 % at `-O1`,
+      17.8 % at `-O3`; the examples' by 22.6 % at `-O2`.
+    - by hand, not done here: the session in Visual Studio's debugger on the `-O2` program (test 21 leaves it as
+      `sandbox\out\dbgvars\vars-table-O2-ms.exe`): the Locals pane in `regs`, `floats`, `spill` and `makeBig`
+      (`out` as the object), `this` and its members in `Both::get`, the frames of `outer` and `above` selected in
+      the call stack while `leaf` and `leaf2` are stopped (`mine`, `p`, `keep`, `part`; `w` of `lastUse` not
+      available), `rounds` (`cur`; `once`, `kept`, `i` optimised away), the two `x` of `blocks`, a step over a
+      checkpoint line; and stage 2's session at `-O0`.
+- Stage 4 (2026-11-25): the member functions in the types, behind `-g2`. Measured first what cl 19.52 writes (three
+  probes of 60 classes; section 11's note of this stage has the facts): the field list's order, `LF_ONEMETHOD`,
+  `LF_METHOD` with its `LF_METHODLIST`, the kinds and vftable slots, the type of `this`, the function attributes
+  and the this adjustment of `LF_MFUNCTION`, a conversion function's name, what cl lists of its own. Then:
+  `CvFromSema` lists the functions a complete class declares when it completes the class (`CvMethod` in the
+  `CvModule`: type, access, kind, slot), `CvTypes` writes them among the class's members in declaration order,
+  `CvCheck` (a) holds each listed function's attributes, its type and an overloaded name's list. A procedure's own
+  type keeps the this adjustment 0; the type its class lists says cl's number. Where the code differs from the
+  text is section 11's note. The exit tests, measured (the compiler built from this commit by devenv Release|x64
+  and by the suite's cl /W4; cl 19.52, the DIA SDK, GRIDE's link as the harness finds them):
+  - the tree (test 20). types.cpp has namespace `mem`, 18 classes (one a template with two instances) with every
+    kind of member function: overloads, static functions, virtual ones that introduce a slot and that override,
+    pure ones (introducing and overriding), const functions, constructors (one of a class with virtual bases)
+    and a destructor, eleven operator functions, `new` and `delete` among them, five conversion functions, a variadic function, the members of a class
+    template's two instances and of a class nested in it, a union's, overrides first reached through a second
+    base's table and through a virtual base's (the this adjustment), a covariant override, class results from
+    static and non-static functions. The program calls them and checks the sum (125). The driver
+    examples\sample-dbg-driver\diatypes.cpp reads the PDB through DIA and prints every member function of the
+    program's classes with its access, kind, vftable slot, type, type of `this`, this adjustment and attributes:
+    97 lines, the same for cl /Z7's build and for cppparse `-g2`'s at `-O0` and `-O2`, what cl marks as
+    compiler-generated left out; the same 97 from GRIDE's PDB and from the programs mixed of cppparse's types.cpp
+    and cl's types2.cpp by either linker; no linker says anything. With `-g` DIA lists none, llvm-pdbutil finds
+    no member function in the two objects (101 with `-g2`), and dbghelp's description of the types (411 lines;
+    202 facts of the program) is the same for `-g`, `-g2` and cl. The `-g2` listing is `-g`'s byte for byte.
+    (Since 2026-11-26, with `mem::RunV`, `RunP` and `RunJ` of next-targets' row G45: 21 classes, the sum 138, 102
+    lines from DIA, 106 functions in the two objects, 427 lines and 208 facts from dbghelp.)
+  - the records themselves, once, by a scratch script that resolves the type indices of llvm-pdbutil's dumps to
+    text: the three probes (as far as cppparse's front end takes them) compiled by cl /Z7 and by cppparse `-g2`,
+    one line per listed function with its attributes, slot, result, parameters, class, type of `this`, this
+    adjustment and function attributes. cl's objects have 184 lines of functions it did not generate, in 53
+    classes, cppparse's 186; 173 are the same in both. The others are the cases section 11 names: three volatile
+    member functions (a line of each compiler), eight conversion functions to a template's instance (cl alone),
+    two `operator=` that are no copy assignment (cppparse alone), and eight functions of three classes that only
+    cppparse's object defines (a class cl leaves a forward reference, an instance cl does not make).
+    The independent review compared nine more probes the same way.
+  - the size, objects in bytes (`.debug$T` in brackets), the own sources with libcpp (62 units) and
+    examples\sample-lib (4 units):
+
+    | | no option | `-g` | `-g2` | `-g2` over `-g` |
+    |---|---|---|---|---|
+    | own sources, `-O0` | 28,565,597 | 35,621,365 (4,027,780) | 45,191,713 (13,096,724) | +26.9 % |
+    | own sources, `-O2` | 31,718,273 | 39,456,045 (4,027,612) | 49,026,529 (13,096,692) | +24.3 % |
+    | sample-lib, `-O0` | 1,384,297 | 1,635,997 (110,776) | 1,773,853 (244,616) | +8.4 % |
+    | sample-lib, `-O2` | 1,220,937 | 1,505,701 (110,776) | 1,643,557 (244,616) | +9.2 % |
+
+    The criterion of row 4: with the member functions the own sources' objects grow by more than a quarter at
+    `-O0`, so they are `-g2` and `-g` stays without them. Most of the growth is not the functions' own records
+    but the classes their types name, which are described as cl describes them (section 11, (h) and (9)). The
+    66 objects' classes list 138,690 member functions in all (77,942 alone, 60,748 in the lists of 24,780 overloaded
+    names: every object repeats the classes of its headers), beside 22,224 procedures. Compile time is not changed by
+    either option beyond the run-to-run difference (the 62 units, four processes: 33 s, 34 s and 33 s at `-O0`,
+    69 s, 67 s and 69 s at `-O2`).
+  - invariant 1. Without an option the objects and listings are the bytes the compiler of the commit before
+    (7397c96) writes: the own sources, libcpp and the 74 example units that compile alone (136 of 170 units), the
+    objects and the listings at `-O0`, `-O2` and `-O2 --eh=cl`: 816 files, none differs, none is written by one
+    compiler only. cvsame over the own sources, libcpp and
+    sample-lib without an option against `-g` and against `-g2`, at `-O0` and `-O2`: 264 pairs, every one differs in debug information only, none violates; test 20
+    repeats it with the listings for the types program at both levels and for the own sources at `-O0`, with
+    `-g` and with `-g2`. llvm-pdbutil reads all 264 `-g` and `-g2` objects of these without an error, and no unit has a `CvCheck` message.
+  - invariant 2: `selfhost.ps1 -G2` (both generations with `-g2`, `-O0`): generation two's objects and listings are generation one's, 61 of 61 units, libcpp and the runtime; it is the
+    harness's check `selfhost-g2-O0`, beside `selfhost-g-O0` and `selfhost-g-O2`, which run as before.
+  - by hand, not done here: Visual Studio's debugger on the `-g2` program (test 20 leaves
+    `sandbox\out\dbgtypes\types0-g2-ms.exe`): `g_ops.get()`, `g_impl.first(2)` and `Ops::count()` in a watch,
+    the members of `mem::Ops` in the class view; and what it makes of `g_impl.other()`, the override that DIA
+    lists without code (section 11, (2)).
+- Stage 5 (2026-11-26): the source checksums, and the row's cost table. Measured first what cl 19.52 writes
+  (section 11's note of this stage): an entry of the file table with its SHA-256, which files the table names, a
+  name that only `#line` gives, a header under two spellings. Then: `CvSha256` (cv/) is the hash; the preprocessor
+  tells the driver of the bytes of every file it reads (`PpFileObserver`), the driver puts each file's SHA-256
+  into the `CvModule` (`CvSource`), and under `-g` `CvFiles` writes cl's table from it: every file the unit read,
+  each entry with kind 3 and the 32 bytes; `CvCheck` holds the table; `cppparse --sha256` prints a file's
+  checksum. Without `-g` nothing changes. Where the code differs from the text is section 11's note. The exit
+  tests, measured (the compiler built from this commit by devenv Release|x64 and by the suite's cl /W4, which
+  write the same object; cl 19.52, llvm-readobj and llvm-pdbutil of the same Visual Studio, GRIDE's link as the
+  harness finds it):
+  - the hash (test 22): `--sha256` gives the digests the standard has for its examples (the empty message,
+    "abc", the messages of 448 and 896 bits, a million "a"), and what `Get-FileHash` gives for 29 files of 1 to
+    1,048,576 bytes with lengths around a block's end, the padding's limit (55 and 56 bytes) and the 65,521 bytes
+    it reads at a time, and for one of 536,870,913 bytes, whose length in bits is beyond 32 bits. Once by hand:
+    files of 2^32 and of 2^32 + 5 bytes, as `Get-FileHash` has them (22 s each, 190 MB a second).
+  - the exit test (test 22): examples\sample-dbg\sums.cpp with its header sums.h and `<vector>`, built with `-g`
+    and `-g2` at `-O0` and `-O2`. The object's file table has 19 entries, the files cl /Z7's object of the unit
+    names (the unit, sums.h, 17 headers of the library), each 40 bytes with kind 3 and the SHA-256 of its file,
+    the same bytes cl has for it; the table is read from the object's bytes by the test and by llvm-readobj, and
+    `-g2`'s is `-g`'s. Linked with /DEBUG by Microsoft's link and by GRIDE's, neither saying anything:
+    `SymGetSourceFileChecksum` returns for the unit, for sums.h and for the other 17 the file's own SHA-256, from
+    either PDB (examples\sample-dbg-driver\dbgsum.cpp); from the build without `-g` it returns none for the three
+    files that table has. A line added to sums.cpp and to sums.h: the checksums both PDBs hold are no longer the
+    files' (they are those of the files as they were built); built again, the table and both PDBs hold the new
+    ones. A unit whose `#line` directives name a file that does not exist and one it does not read, and which
+    includes a header twice, the second time with its name in capitals: no checksum for either of the first two
+    and one entry for the header, in cl's table as in cppparse's.
+  - the own sources (test 22, over test 20's objects; 62 units and libcpp): all 2,506 entries of the 63 objects'
+    tables are their files' SHA-256 (172 files; 40 a unit, 21.0 MB read and hashed in all), and without the
+    option none of the 956 entries has one: a line table names 38 % of the files a unit reads.
+  - invariant 1. Without an option the objects and listings are the bytes the compiler of the commit before
+    (a351769) writes, both run on this commit's sources: the own sources, libcpp, the runtime and the example
+    units that compile alone (153 of 202 units) at `-O0`, `-O2` and `-O2 --eh=cl`: 918 files, none differs, none
+    is written by one compiler only. cvsame `-Listings` without an option against `-g` and against `-g2`, the
+    same units at the three: 918 pairs, every one differs in debug information only, none violates; no unit has
+    a `CvCheck` message; llvm-pdbutil (`dump -types -symbols -l`, which reads the line tables through the file
+    table) reads all 918 `-g` and `-g2` objects without an error. Against the `-g` objects of the commit before,
+    cvsame `-DebugOnly`: 459 pairs, nothing but the contents of `.debug$S` sections differs (the file table, and
+    the offsets by which the line tables name its entries); the 153 `-g` objects grow by 363,700 bytes, 0.7 %
+    (the own sources' by 237,092, 0.66 %).
+  - invariant 2: `selfhost.ps1` without an option, with `-G` and with `-G2`, at `-O0` and at `-O2`: generation
+    two's objects and listings are generation one's in all six runs (their times are in the table below); test
+    21's `-j 1` against `-j 4` as before, the description's text now with the sources. A header edited while its
+    unit compiles (a probe by hand): the object has the checksum of the text that was compiled.
+  - the cost of the row (section 6, row 5), measured on a machine that did nothing else (Core i5-10400T, 6
+    cores; the compiler the suite builds with cl /O2): the self-host, which compiles the 62 own sources, libcpp
+    and the runtime one after another, twice (stage 1 with the compiler cl built, stage 2 with the one stage 1
+    built, itself compiled at that level), one run each; the own sources and libcpp alone, four processes at a
+    time, the median of three runs; and generation one's 64 objects linked into the compiler with /DEBUG
+    /INCREMENTAL:NO by each linker, the median of three links (every program runs). A percentage is against the
+    column without an option at that level:
+
+    | | `-O0` | `-O0 -g` | `-O0 -g2` | `-O2` | `-O2 -g` | `-O2 -g2` |
+    |---|---|---|---|---|---|---|
+    | the 64 objects, bytes | 28,780,535 | 36,190,975 (+25.7 %) | 45,941,299 (+59.6 %) | 31,913,502 | 40,010,342 (+25.4 %) | 49,760,802 (+55.9 %) |
+    | self-host, stage 1 | 76 s | 78 s (+3 %) | 85 s (+12 %) | 178 s | 186 s (+4 %) | 192 s (+8 %) |
+    | self-host, stage 2 | 134 s | 143 s (+7 %) | 169 s (+26 %) | 251 s | 260 s (+4 %) | 273 s (+9 %) |
+    | self-host, both, as `selfhost.ps1` runs | 210 s | 222 s | 255 s | 429 s | 446 s | 466 s |
+    | 63 units, four at a time | 23.4 s | 24.7 s (+6 %) | 26.8 s (+15 %) | 55.1 s | 58.0 s (+5 %) | 59.3 s (+8 %) |
+    | Microsoft's link /DEBUG | 0.31 s | 0.33 s | 0.37 s | 0.30 s | 0.34 s | 0.35 s |
+    | its PDB, bytes | 13,176,832 | 15,519,744 (+17.8 %) | 17,387,520 (+32.0 %) | 13,201,408 | 15,642,624 (+18.5 %) | 17,510,400 (+32.6 %) |
+    | GRIDE's link /DEBUG | 1.13 s | 1.22 s | 1.32 s | 0.94 s | 1.05 s | 1.25 s |
+    | its PDB, bytes | 14,450,688 | 16,941,056 (+17.2 %) | 18,894,848 (+30.8 %) | 14,397,440 | 16,977,920 (+17.9 %) | 18,931,712 (+31.5 %) |
+
+    Read: `-g` costs a quarter more object bytes, a sixth more PDB, and 3 to 7 % of compile time; `-g2` three
+    fifths more object bytes, a third more PDB, and 8 to 15 % of compile time with the compiler cl built (26 %
+    with a compiler that is itself compiled at `-O0`, where describing every class's member functions is slow
+    code). Link time grows by a few hundredths of a second with Microsoft's link and by one to three tenths with
+    GRIDE's. The times are single runs for the self-host: a second run of the three `-O0` columns, on sources
+    three small edits earlier, gave 73, 79 and 85 s for stage 1 and 135, 145 and 170 s for stage 2.
+    The checksums themselves cost no time that shows: the compiler of the commit before takes 23.8 s, 25.1 s and
+    26.9 s for the three `-O0` columns of the four-at-a-time row and 59.2 s for `-O2 -g`. Without /DEBUG the link of
+    the columns without an option takes 0.28 s and 0.26 s with Microsoft's link, 0.99 s and 0.82 s with GRIDE's.
+    The sizes of the stages before stand in their entries; they are not comparable row by row (the sources grew,
+    and stage 1's 59 objects were without the variables).
+  - by hand, not done here: Visual Studio's debugger with "Require source files to exactly match the original
+    version" on: test 22 leaves `sandbox\out\dbgsums\sums0-ms.exe`, built before the test edits `src\sums.cpp`
+    (the debugger should refuse the edited file for it), and `sums0-edited-ms.exe`, built after (it should take
+    it).
+
+What is left of the design, none of it begun: the rows of their own that section 6 names (inlinee records,
+which wait for section 10's L3; value tracking for scalars that are assigned more than once, 4.3 c; the source
+lines of types, `LF_UDT_SRC_LINE`), the requests of section 10, which are GRIDE3's (D1 to D9, L1 to L5), and the
+checks by hand: the two sessions in Visual Studio's debugger on vars.exe, at `-O0` (stage 2's list) and at `-O2`
+(stage 3's), with the shorter looks at the `-g2` program (stage 4) and at the checksums (stage 5).
+
 In one paragraph: with a new option `-g` an object carries, beside today's line tables, its types in a `.debug$T`
 section of its own (cl's /Z7 form, no type server) and, in `.debug$S`, the globals, the user-defined type names
 and every function's parameters and locals. A function whose variables all live in the frame for the whole
@@ -264,8 +522,13 @@ Limits that stay after M10 (each is a later row or a recorded limit):
   keeps the call's line, as today, and the inlined function's own variables are not shown. A later row; it
   needs GRIDE's link to carry those records first (section 10).
 - No column numbers (cl writes none either: its `DEBUG_S_LINES` have flags 0 in every probe).
-- Member functions are listed in their class's type only from stage 4 on (section 6); until then a debugger
-  cannot offer `obj.method()` in an expression. GRIDE's debugger calls no functions at all.
+- Member functions are listed in their class's type with `-g2` only (stage 4, section 6): the functions the class
+  declares. Without it a debugger cannot offer `obj.method()` in an expression. With it one case is left out on
+  purpose: an override that is first reached through a later base's table is listed, but a reader that goes by
+  DIA does not find its code (section 11, the note of stage 4), so it cannot be called from an expression. Not
+  listed: what the compiler generates, the instances of a member template, a conversion function to a template's
+  instance, a function, an array or a pointer to member (cl's spelling of those in a member's name is not
+  measured). GRIDE's debugger calls no functions at all.
 - A class that both cl and cppparse describe in one program (mix.ps1's links) is two records of one name when
   the two differ in detail (cl lists members cppparse does not, such as `__vecDelDtor`); the PDB holds both and
   a debugger takes one. Layout and data members are the same in both when both compiled the same headers, as
@@ -625,7 +888,10 @@ multiply-assigned scalars and member-function calls from the debugger are named 
 ### 5.1 The option and the object
 
 `-g` (with `--compile6 --obj`; it means nothing to the older pipeline and to `--assemble`). Without it the
-object is what the compiler writes today, byte for byte (procedure names: question 10). With it:
+object is what the compiler writes today, byte for byte (procedure names: question 10). `-g2` is `-g` with the
+member functions in the classes (stage 4: the size criterion put them behind an option of their own); it changes
+`.debug$T` and the type indices and `S_UDT` records of `.debug$S`, nothing else, and the listing is `-g`'s. With
+`-g`:
 
 - one section `.debug$T` (flags as `.debug$S`: initialized, discardable, read, 1-byte alignment):
   `CV_SIGNATURE_C13` (4), then the type records, indices from 0x1000 in the order they are written;
@@ -634,7 +900,11 @@ object is what the compiler writes today, byte for byte (procedure names: questi
 - in a COMDAT function's associative `.debug$S`: its procedure with its variables; a COMDAT variable (a static
   member of a class template's instantiation, a static local of an inline function, a vftable) gets an
   associative `.debug$S` with its `S_GDATA32`, as cl does, so the record goes when the COMDAT goes;
-- the file table's entries carry SHA-256 checksums of the sources (type 3, 32 bytes), as cl 19.52's (stage 5).
+- the file table's entries carry SHA-256 checksums of the sources (type 3, 32 bytes), as cl 19.52's (stage 5): of
+  each file's bytes as the preprocessor read them, and the table names every file the unit read, as cl's does,
+  where without `-g` it names the files that have code. An entry is then 40 bytes where it is 8 without `-g`, so
+  the line tables name their files by other offsets. A name the unit read no file by (one a `#line` directive
+  gives) has an entry without a checksum, as in cl's objects.
 
 Where the new things go is part of the contract, because it is what makes goal 4 checkable by bytes (Coff.cpp
 numbers the sections .text, .data, .rdata, [.CRT$XCU], [.xdata, .pdata], [.debug$S], each COMDAT with its
@@ -673,11 +943,11 @@ is complete at the end of the unit, so that `shape->` opens in the debugger whic
 | pointer, reference | `LF_POINTER` {type, attributes 0x1000C; 0x1002C for a reference; bit 10 for a `const` pointer itself} |
 | pointer to data member, to member function | `LF_POINTER` mode 2 or 3 {type, attributes with the size `TypeTable::sizeOf` gives, the class, the model: single, multiple, virtual inheritance or unspecified, from `memberPointerModel`} |
 | array | `LF_ARRAY` {element, index type 0x23, size in bytes}; an array of arrays nests |
-| function type | `LF_PROCEDURE` {result, convention 0, parameter count, `LF_ARGLIST`}; a member function `LF_MFUNCTION` {result, class, type of `this`, this adjustment 0, `LF_ARGLIST`}; `...` is a last argument of type 0 and is counted, as cl counts it |
+| function type | `LF_PROCEDURE` {result, convention 0, parameter count, `LF_ARGLIST`}; a member function `LF_MFUNCTION` {result, class, type of `this`, this adjustment 0, `LF_ARGLIST`}; `...` is a last argument of type 0 and is counted, as cl counts it. From stage 4 as cl 19.52 writes them: the type of `this` a plain pointer to the (const) class, none for a static member function; the function attributes: 2 a constructor, 4 with it for a class with virtual bases, 1 a class result that comes back the C++ way (every class result of a non-static member function, a class that is no plain aggregate from any other function) |
 | enum | `LF_ENUM` {count, properties, 0x74, `LF_FIELDLIST` of `LF_ENUMERATE` {value, name}, name, unique name} |
 | class, struct | forward reference and definition: `LF_CLASS` / `LF_STRUCTURE` {member count, properties, `LF_FIELDLIST`, derived 0, vtable shape, size, name, unique name} |
 | union | forward reference and definition: `LF_UNION` {member count, properties, `LF_FIELDLIST`, size, name, unique name} (no derived and no shape field) |
-| in the field list | `LF_BCLASS` {base, offset} per non-virtual base; `LF_VBCLASS` / `LF_IVBCLASS` {base, type of the vbptr, vbptr offset, index in the vbtable} per direct / indirect virtual base (from `Symbol::vbtables`); `LF_VFUNCTAB` {pointer to an `LF_VTSHAPE` of the slot count} for a vfptr the class introduces; `LF_MEMBER` {access, type, offset, name} per field, the type an `LF_BITFIELD` {type, width, position} for a bit-field; `LF_STMEMBER` per static member; `LF_NESTTYPE` per nested class, enum and typedef; from stage 4 `LF_ONEMETHOD` / `LF_METHOD` + `LF_METHODLIST` per member function |
+| in the field list | `LF_BCLASS` {base, offset} per non-virtual base; `LF_VBCLASS` / `LF_IVBCLASS` {base, type of the vbptr, vbptr offset, index in the vbtable} per direct / indirect virtual base (from `Symbol::vbtables`); `LF_VFUNCTAB` {pointer to an `LF_VTSHAPE` of the slot count} for a vfptr the class introduces; `LF_MEMBER` {access, type, offset, name} per field, the type an `LF_BITFIELD` {type, width, position} for a bit-field; `LF_STMEMBER` per static member; `LF_NESTTYPE` per nested class, enum and typedef; with `-g2` (stage 4) `LF_ONEMETHOD` {access and kind, `LF_MFUNCTION`, the vftable slot's offset where the function introduces one, name} per member function the class declares, the functions of an overloaded name as one `LF_METHOD` {count, `LF_METHODLIST`, name}; the members in declaration order |
 | a field list beyond 64 KB | continued through `LF_INDEX` |
 
 Rules:
@@ -696,7 +966,9 @@ Rules:
   adjusted `this` (an override reached through a secondary base's table) work on the adjusted pointer, and the
   field tells the reader to undo it. cppparse's put `this` right themselves at entry (IrGen.cpp 5363: the
   adjusted value is stored into the `this` slot before the first statement), so the frame's `this` is the
-  object and a nonzero field would make a reader adjust twice. What it costs: 5.3, the entry sequence.
+  object and a nonzero field would make a reader adjust twice. What it costs: 5.3, the entry sequence. (Stage 4:
+  this holds for the type a procedure's own symbol names. The type a class lists for such a function under `-g2`
+  carries cl's number, what a caller adds to the object's address: section 11, the note of stage 4.)
 - A record is at most 0xFF00 bytes. A name that would exceed it (deep template names) is cut as cl cuts it, the
   unique name kept whole when it fits; stage 1 measures cl's cut before writing it.
 - A typedef has no record of its own in CodeView: it is named by an `S_UDT` (namespace scope) or an
@@ -949,8 +1221,8 @@ variable.
 
 | file | change |
 |---|---|
-| driver/main.cpp, Compiler.cpp | `-g`; the `CvModule` from the compilation to `writeCoffObject`; `<name>-cv6.txt` with the other dumps |
-| frontend/ | nothing: the facts exist, and scopes come from Sema's own (no end lines in the AST) |
+| driver/main.cpp, Compiler.cpp | `-g`; the `CvModule` from the compilation to `writeCoffObject`; `<name>-cv6.txt` with the other dumps; from stage 5 the sources' checksums into the `CvModule`, and `--sha256` |
+| frontend/ | nothing: the facts exist, and scopes come from Sema's own (no end lines in the AST). (Stage 5: the preprocessor tells an observer of the bytes of every file it reads, for the checksums; section 11) |
 | middle/IrGen.cpp | marks source locals, their block and by-address parameters; stamps every instruction's scope; asks `CvFromSema` for type numbers (locals, the function, globals, static locals); fills `IrFunction::blocks`, `debugAliases` (before it rewrites a named result's type), `debugEntry` |
 | middle/CvFromSema.cpp (new) | semantic types and symbols to `CvModule` descriptions: classes with bases, fields, tables; names by cl's rules; constants, typedefs; reads Sema only |
 | middle/Ssa.cpp, Optimizer.cpp | `debugTemps`: recorded at promotion, renamed or erased by the passes that replace or remove temporaries, verified after the last; `staleStores` where a store is removed; `scope` copied with `line`; the inliner's three duties (5.4) |
@@ -1024,9 +1296,9 @@ The test programs (examples\sample-dbg, driver in sample-dbg-driver, both extend
 | 0 (done 2026-11-20, see the status) | Source layout (section 9): cppparse/cv/ with the classes marked "from"; Coff.cpp calls them; nothing else changes | every .asm and .obj of the suite, lib, life, eh, matrix and the self-host is byte for byte what the commit before wrote (the comparison script of M7's stage 0) |
 | 1 (done 2026-11-20, see the status) | First cvsame, the comparator of invariant 1, and with it the rule of 5.1 for added sections and symbols. Then, by question 10, cl's spelling of procedure names for every object, a commit of its own. Then `-g`: `CvTypes` and its records, `CvModule`, `CvFromSema`, `CvNames`; the procedure's type; `S_GDATA32` / `S_LDATA32` (static locals at function level until stage 2), `S_CONSTANT`, `S_UDT`; a COMDAT variable's section; `CvCheck` (a) and the relocation rule of (b); `<name>-cv6.txt`. Before the records are written, the missing measurements of 5.2 (anonymous unions, unnamed bit-fields, empty classes, cl's cut of a long name) | the spelling commit: cvsame says nothing but `.debug$S` changed, in every object of the suite. types.cpp and types2.cpp at `-O0` and `-O2`: dbghelp's facts equal the program's own; the type tree equal to cl /Z7's after the normalisation; the mixed-types program; both linkers without a message, GRIDE's PDB giving the driver the same output; llvm-pdbutil dumps every object without an error. Invariant 1 over the suite; libcpp, the samples and the own sources compile with `-g` and pass `CvCheck`; self-host with `-g`, generation two identical; the `-g` self-host's objects (about 80) linked with /DEBUG by both linkers, PDB size and link time recorded; object bytes and compile time with and without `-g` recorded (own sources, sample-lib) |
 | 2 (done 2026-11-24, see the status) | First the measurements: the DIA reader on cl's /O2 object; DIA's parameters of a member function and of a variadic one; the `S_FRAMEPROC` flags cl sets. Then variables at `-O0`: source locals, scope numbers through IrGen, by-address parameters; `;@proc`, `;@prologend`, `;@epilog`, `;@block`, `;@scope`, `;@local`, `;@gone`, `;@static`; `CvScopes`; both procedure forms; `S_FRAMEPROC`, `DbgStart` / `DbgEnd`; `CvCheck` (b) and the frame part of (c); all three exception models | the value harness at `-O0` with `--eh=table`, `sjlj` and `cl` (a checkpoint inside a handler and inside a cleanup's destructor): every parameter listed, every variable but a never-read parameter present and right, in the checkpoint's caller, in the frames above it and at the next line; the DIA reader agrees; gride-dbg's `dv` on vars.exe equal from both linkers; the link variants; the session in Visual Studio; invariant 1; counted on the own sources and recorded: procedures in each form, blocks in pieces, never-read parameters; sizes and time |
-| 3 | Variables at `-O1` and up: `debugTemps` through Ssa and the optimiser with its verifier; `staleStores`; the inliner's duties; named results; `;@var`, `;@loc` with the volatile-register rule; `S_DEFRANGE_REGISTER`; functions without a frame; `CvRegisters` whole; `CvCheck` (c) | the value harness at `-O1`, `-O2`, `-O3`: no wrong value, in the caller, above it and at the next line; the minimum present; the share of source variables with a place counted on the own sources and recorded (expected below 88 %: section 3.6's count includes named results and scalars with removed stores); self-host with `-g` at `-O2`, generation two identical, `-j 1` and `-j 4` equal; invariant 1 at every level; the own sources and the suite compiled with `-g -O2` pass `CvCheck` (c); the suite under a compiler built with `-g -O2`; the link variants |
-| 4 | Member functions in the types: `LF_ONEMETHOD`, `LF_METHOD`, `LF_METHODLIST`, `LF_MFUNCTION` for declared members, vftable offsets of introducing virtual functions | types.cpp's tree equal to cl's with member functions (cl's compiler-generated entries apart); `.debug$T` bytes with and without them on the own sources and sample-lib: they stay in under `-g` if the objects grow by less than a quarter, else they become `-g2` and the numbers are recorded |
-| 5 | SHA-256 checksums in the file table; README, help text, next-targets; the measurements as a table in this document's status | dbghelp returns the checksum (`SymGetSourceFileChecksum`) equal to the source's own SHA-256, and no longer equal after the source is edited; the cost table: objects, PDB, compile and link time with and without `-g`, both linkers, the self-host included |
+| 3 (done 2026-11-25, see the status) | Variables at `-O1` and up: `debugTemps` through Ssa and the optimiser with its verifier; `staleStores`; the inliner's duties; named results; `;@var`, `;@loc` with the volatile-register rule; `S_DEFRANGE_REGISTER`; functions without a frame; `CvRegisters` whole; `CvCheck` (c) | the value harness at `-O1`, `-O2`, `-O3`: no wrong value, in the caller, above it and at the next line; the minimum present; the share of source variables with a place counted on the own sources and recorded (expected below 88 %: section 3.6's count includes named results and scalars with removed stores); self-host with `-g` at `-O2`, generation two identical, `-j 1` and `-j 4` equal; invariant 1 at every level; the own sources and the suite compiled with `-g -O2` pass `CvCheck` (c); the suite under a compiler built with `-g -O2`; the link variants |
+| 4 (done 2026-11-25, see the status: behind `-g2`) | Member functions in the types: `LF_ONEMETHOD`, `LF_METHOD`, `LF_METHODLIST`, `LF_MFUNCTION` for declared members, vftable offsets of introducing virtual functions | types.cpp's tree equal to cl's with member functions (cl's compiler-generated entries apart); `.debug$T` bytes with and without them on the own sources and sample-lib: they stay in under `-g` if the objects grow by less than a quarter, else they become `-g2` and the numbers are recorded |
+| 5 (done 2026-11-26, see the status) | SHA-256 checksums in the file table; README, help text, next-targets; the measurements as a table in this document's status | dbghelp returns the checksum (`SymGetSourceFileChecksum`) equal to the source's own SHA-256, and no longer equal after the source is edited; the cost table: objects, PDB, compile and link time with and without `-g`, both linkers, the self-host included |
 | later, own rows | inlinee records (after section 10's L3); value tracking for multiply-assigned scalars (4.3 c); source lines of types | |
 
 Stages 3 and 4 do not depend on each other. The order stands because the size decision of stage 4 wants the
@@ -1120,7 +1392,8 @@ half, debugging a `-O0` program with variables and types, is closed.
 2. At `-O1` and up: the variables in memory and those with one definition (4.3 b), with multiply-assigned
    scalars listed as optimised out and left to a later row? Or `-O0` only for M10 (4.3 a), which removes
    stage 3?
-3. Member functions in the types: by the size criterion of stage 4, or decided now (in, or never)?
+3. Member functions in the types: by the size criterion of stage 4, or decided now (in, or never)? (Stage 4,
+   2026-11-25: the criterion gave `-g2`; the status has the numbers.)
 4. A class parameter passed by address described as a reference (5.3), where cl writes the class itself and
    dbghelp then shows wrong values: agreed, with cl's form as the fallback if Visual Studio needs it?
 5. May the cpp repository's tests use GRIDE3's link.exe and gride-dbg.exe when they are on the machine (a path
@@ -1159,15 +1432,16 @@ Visual Studio project and its filters, README).
 |---|---|---|---|
 | CvRecord.hpp/.cpp | `CvBytes` | the byte helpers: little-endian fields, numeric leaves, padding of symbol and type records, a relocation as {offset, symbol, kind} | Coff.cpp `put16/32` uses in the helpers, `pad4`, `symbolRecord` |
 | CvSection.hpp/.cpp | `CvSection` | one `.debug$S`: the signature and its subsections with their relocations | Coff.cpp `debugSubsection`, `fillDebugSection` |
-| CvFiles.hpp/.cpp | `CvFiles` | the module's file table: checksum entries and string table; SHA-256 from stage 5 | Coff.cpp `DebugFiles` |
+| CvFiles.hpp/.cpp | `CvFiles` | the module's file table: checksum entries and string table; from stage 5 an entry carries the SHA-256 the `CvModule` has for its file | Coff.cpp `DebugFiles` |
+| CvSha256.hpp/.cpp | `CvSha256` | SHA-256 (FIPS 180-4): a message in pieces, its digest; the digest of a file on disk (`--sha256`). The driver hashes with it what the preprocessor read | new (stage 5) |
 | CvLines.hpp/.cpp | `CvLines` | a function's `DEBUG_S_LINES` from its (offset, line) pairs | Coff.cpp `lineTable` |
 | CvSymbols.hpp/.cpp | `CvSymbols` | the symbol records: `S_OBJNAME`, `S_COMPILE3`, a procedure with its `S_END`; from stage 1 the module's data, constants and UDTs; from stage 2 `S_FRAMEPROC`, the plain form (`S_REGREL32`, `S_BLOCK32`) and the ranged form (`S_LOCAL` with frame ranges, full-scope places and none); from stage 3 the register ranges | Coff.cpp `moduleSymbols`, `procedureSymbols`; the rest new |
-| CvModule.hpp/.cpp | `CvModule`, `CvType`, `CvClass`, `CvVariable`, `CvTypedef` | the module's debug description (5.4): type descriptions by number, classes with members and bases, globals, constants, typedef names; its text dump | new (stage 1) |
-| CvTypes.hpp/.cpp | `CvTypes` | `.debug$T`: a description to its records, each record once, indices in order of first use, forward references | new (stage 1) |
-| CvNames.hpp/.cpp | `CvNames`, `CvTypeText` | cl's display names (3.4): the spelling rules for a type inside a name, a template-id, a value argument, a scope, a conversion function; `CvFromSema` describes a name to them piece by piece | new (stage 1); X86.cpp `displayName` moved here as `fromIrName` |
+| CvModule.hpp/.cpp | `CvModule`, `CvType`, `CvClass`, `CvVariable`, `CvTypedef` | the module's debug description (5.4): type descriptions by number, classes with members and bases, globals, constants, typedef names; its text dump. From stage 4 `CvMethod`: a member function as its class lists it (type, access, kind, vftable slot), and a function type's attributes and this adjustment. From stage 5 `CvSource`: a source file the unit read, with its checksum | new (stage 1) |
+| CvTypes.hpp/.cpp | `CvTypes` | `.debug$T`: a description to its records, each record once, indices in order of first use, forward references; from stage 4 the member functions of a class (`LF_ONEMETHOD`, `LF_METHOD` with its `LF_METHODLIST`) | new (stage 1) |
+| CvNames.hpp/.cpp | `CvNames`, `CvTypeText` | cl's display names (3.4): the spelling rules for a type inside a name, a template-id, a value argument, a scope, a conversion function; `CvFromSema` describes a name to them piece by piece. From stage 4 the type of a conversion function as its class's member list spells it (`operator const char *`, `operator struct ns::S`) | new (stage 1); X86.cpp `displayName` moved here as `fromIrName` |
 | CvScopes.hpp/.cpp | `CvScopes` | a function's blocks: each one's pieces of code from the `;@scope` offsets, one piece or several, nesting, the variables of each, the procedure's form | new (stage 2) |
 | CvRegisters.hpp/.cpp | `CvRegisters` | CodeView's register number for a register name and a value's size and kind: a table per register, volatile or not | new (stage 2: RBP; stage 3: the rest) |
-| CvCheck.hpp/.cpp | `CvCheck` | the invariants of 5.5/4 over what the writer is about to write: (a) types, (b) symbols, (c) places against the instructions' write sets | new (stage 1: a; stage 2: b; stage 3: c) |
+| CvCheck.hpp/.cpp | `CvCheck` | the invariants of 5.5/4 over what the writer is about to write: (a) types, (b) symbols, (c) places against the instructions' write sets | new (stage 1: a; stage 2: b; stage 3: c; stage 4: in (a) a listed function's attributes, its type an `LF_MFUNCTION`, an overloaded name's list; stage 5: the file table's entries and the files the line tables name) |
 
 What stays where it is: the object writer (Coff.cpp), which records the markers' offsets and each
 instruction's written registers in its parallel encoding, and in its sequential loop hands a function's markers
@@ -1177,7 +1451,8 @@ the `CvModule`; the unique-name mangling in backend/MangleSema.cpp.
 
 ## 10. Requests to GRIDE3
 
-GRIDE's link needs nothing to take the objects of stages 0 to 5: every record kind this design writes is one
+GRIDE's link needs nothing to take the objects of stages 0 to 5 (stage 5 measured it for the checksums: the
+PDB of GRIDE's link gives dbghelp every file's SHA-256 as Microsoft's does): every record kind this design writes is one
 pdb.cpp already carries (3.3; the review read it again: `type_refs` covers every leaf of 5.2, `S_BLOCK32`,
 `S_LOCAL` and the `S_DEFRANGE_*` forms are carried with the scopes' parent and end filled in, the TPI hash
 stream lets forward references resolve), and the prototype's PDBs from GRIDE's link read the same as
@@ -1201,6 +1476,11 @@ GRIDE's link (toolchain\Windows\LINK\src\pdb.cpp):
   struct, union or enumeration it points at need not go into the globals: Microsoft's link leaves it out, and
   DIA then lists no typedef for it (`DIA2Dump -t` on the types program: 22 such lines for cl's /Z7 objects from
   GRIDE's PDB against 1 from Microsoft's, 25 against 2 for cppparse's). dbghelp's view is the same from both.
+- **L5** (found in stage 5, 2026-11-26; nothing waits for it). The source files of a program: dbghelp
+  (`SymEnumSourceFiles`) lists one file more from GRIDE's PDB than from Microsoft's for test 22's program, 786
+  against 785: the C runtime's `minkernel\crts\ucrt\src\appcrt\tran\copysign.c`, with its checksum. Every other
+  file and every checksum is the same from both, cppparse's and cl's objects' alike; not looked into (an
+  object of a library that Microsoft's link leaves out of the PDB when nothing of it is kept?).
 
 GRIDE's debugger (toolchain\Windows\DBG\src\main.cpp), each measured on cl's own /Z7 objects, so none is a
 matter of cppparse's records:
@@ -1424,6 +1704,300 @@ Notes from the development, where the code and this text differ:
   against what the encoder knows: the prologue up to `.endprolog`, each funclet's up to its own, and each epilogue
   from its `;@epilog` to the end of the `ret` behind it (the encoder records the ends of `ret`s as of calls). (10) The
   value harness is test 21 (5.6's test 19); the self-host with `-g` is the harness's check `selfhost-g-O0`.
+- 2026-11-25, stage 3, the optimiser's tables. Where the code differs from 5.3, 5.4 and risk 2: (1) 5.4 has Ssa.cpp
+  record the pair at the promotion. Most single-assignment locals never reach it: the passes before SSA forward the
+  stored value to every read in the block, the local is then never loaded, and dead store elimination removes its
+  store (in vars.cpp at `-O2`: `sum`, `total`, `r`, `w`, `mine`, `got`, `half`, `twice`, `flag`, all but the
+  parameters). So the pair is also recorded there, in `deadStores`, when the store that goes is the variable's only
+  one and none was removed before; the local is then marked `staleStores` and has its entry. (2) "Passes that replace
+  temporary a by b rename the entry" is right only while b is not computed again: b has a's value where a was
+  defined, but b is defined elsewhere, and in a loop the variable keeps what it was assigned while b is computed
+  anew (`for (...) { a = f(i); if (i == 3) b = a; }`: `b`'s entry would be `a`'s temporary, which changes in every
+  round). An entry therefore says whether it is exact, that is, whether its temporary is defined where the variable
+  is assigned: the instruction before the store, a constant materialised at the store, a parameter's load at the
+  function's start. An exact entry holds wherever its temporary is live. An entry that a pass renamed, or that was
+  recorded from a store of another variable's value (`int b = a;`), is not exact, and the verifier keeps it only if
+  its temporary's definition lies on no cycle of the function (it runs once, so the variable, once assigned, is
+  equal to it; before the assignment the variable has no value to be wrong about). (3) The rename is in one place,
+  `replaceTempUses` (Optimizer.cpp), which copy propagation and both store-to-load forwardings go through (and, for
+  the entries recorded before it, in Ssa.cpp where the loads of a promoted local become that local's value); value
+  numbering, local CSE, phi simplification and the algebraic rewriting turn an instruction into a copy of the same
+  result, which copy propagation then removes, so they keep the table without code of their own; a temporary that
+  dead code elimination removes and a phi's result that SSA destruction defines by copies end at the verifier
+  (not defined exactly once). X86.cpp's own forwarding at lowering (`constantsIntoOperands`) is not taught the
+  table: a temporary it drops has no interval and so no place. (4) An adjusted `this` is not `IrFunction::debugEntry`
+  (stage 2's note 2 already dropped that field) but a rule: a parameter's one store counts as its one definition when
+  it is of scope -1, the entry sequence, which runs once before the first statement. (5) `IrLocal::promoted` is new:
+  X86.cpp cannot tell a promoted parameter from one that stays in its slot by the code alone (both are loaded at
+  the entry). (6) The tables are filled under `-g` only (`IrFunction::debugType` not 0); invariant 1's comparison
+  is what shows that no code depends on them. The verifier takes the successors from the instructions and leaves
+  the function's own lists alone. (7) The inliner's duties were done in stage 2 but for the two new marks, which it
+  clears with the others; a callee's `debugTemps` and `debugAliases` are simply not copied. (8) The grep risk 2 asks
+  for, over cppparse/middle, backend and eh: a `StoreLocal` leaves the code in `IrFunction::removeStore` (called by
+  `deadStores` twice and by `removeDeadRegions` for the flags of an unwind region that is gone), in Ssa.cpp's
+  promotion (every store of a promoted local; the local is marked `promoted`), and with a block nothing reaches
+  (`eraseBlocks`: a store that never ran); nowhere else. X86.cpp's lowering forwards stored values and keeps the
+  stores. (9) A named result's alias is recorded by IrGen where it rewrites the variable's type (`localDecl`), with
+  the block Sema gives the declaration.
+- 2026-11-25, stage 3, the places. Where the code differs from 5.3, 5.4, 5.5 and section 9: (1) `;@loc <n> <register>
+  <bytes>` names the register by its 64-bit (or xmm) name and the bytes of the value; `CvRegisters` gives the number of
+  that part. (2) 5.4 expects a temporary that is "coalesced into another register for part of its life". There is
+  none: the allocator gives an interval one register or one spill slot, and the steps after it (a parameter kept in
+  its argument register, a result in rax, an argument computed in its register) settle the whole interval. So a
+  variable has one place, and the markers say only where it is valid. (3) Where a range ends: 5.4 has it end behind
+  the last use, or at that instruction when it also writes the register. X86.cpp does not ask which: a register's
+  range ends before the last instruction of a block that reads the temporary (that instruction's own result may take
+  the register over), with one exception, a callee-saved register whose last reader is a call: the range ends
+  behind the `call` instruction itself and before the result is moved in, so that the frame is seen with the
+  variable from inside the call. A spill slot's range ends behind the last reader (nothing but the temporary's own
+  definition writes the slot). (4) A range is opened at a block's start by liveness and closed at the last reader,
+  per block; everything is closed at an epilogue, at a funclet's entry and before the dispatch stubs, whose code is
+  no instruction of the IR. A range that starts in the entry sequence is cut to `DbgStart`. (5) The volatile
+  registers a variable can be in are rax, rcx, rdx, r8 to r11, xmm2 and xmm3; their ranges end before a call, a
+  throw, and the catch and try operations (`m_clobbers`), and those in rax, rcx and rdx also before an intrinsic and
+  a thread-local's address, whose sequences use the three beside their operands. (6) A variable takes its
+  temporary's place only if the temporary's type has the variable's size and kind (integer or pointer of 1, 2, 4 or
+  8 bytes; float; double); a temporary of equal value and another width is no place. (7) The encoder has no table of
+  mnemonics but a chain of tests (and one table, the SSE instructions'); `writtenRegisters` stands before
+  `Encoder::instruction` and names each mnemonic that function encodes. It is recorded for a PROC that has a `;@var`
+  only. `CvCheck` (c) also holds the register ranges against the prologue and epilogue windows, which 5.5 asks of
+  the frame ranges alone. (8) `CvCheck` (b)'s "fits the type's kind and size" reads the type from `.debug$T`: a
+  fundamental type, a pointer or reference, an enumeration, a modifier of one; a class or an array in a register
+  would not be held against anything, and none is written. (9) At every level a parameter that the function reads
+  from its argument register alone (X86.cpp `m_paramInReg`) is not stored in the frame and so has no frame place;
+  stage 2 asked only "never read". At `-O0` no function has such a parameter (the entry block holds no load), and
+  the `-O0` objects are the bytes they were. (10) X86.cpp keeps the liveness sets it computes for the intervals
+  (`m_liveIn`, `m_liveOut`); the allocator reads them as before. (11) 5.4 opens a parameter's range "where the
+  function's code begins, in its incoming register or its slot". It opens behind the load that is the parameter's
+  definition, the first instructions of the body; before it (the prologue, which lies before `DbgStart` anyway) the
+  incoming register is not described. A parameter that is consumed by the instruction right behind its load has
+  an empty range and is listed as optimised out (`b` in `int f(int a, int b) { return a * b + a; }`).
+- 2026-11-25, stage 3, the exit tests. (1) Section 6's minimum for `-O1` and up ("the parameters that are not
+  assigned, the variables whose address is taken, the single-definition locals that live across the call") cannot be
+  asked of a parameter as such: a parameter whose last use lies before the checkpoint is dead there, its register
+  may hold something else, and its range has ended (in vars.cpp nearly every parameter). The minimum is therefore
+  written per checkpoint, in the program's text: a `+` before a variable that lives in memory or has one definition
+  and is needed behind the checkpoint; `dbgvars -optimized` fails when such a variable has no place, and for any
+  other accepts a missing place and no wrong value. `this` is often not among them either: a member's address
+  computed before the checkpoint is what lives on, not `this` (`Counter::add`); `Both::get` reads a member behind
+  the checkpoint so that its adjusted `this` is checked. (2) The harness's functions are kept out of line by the
+  `_AddressOfReturnAddress` intrinsic; without it `-O3` inlines `many` and `refs` into `main` and the caller of
+  their checkpoints is `main`, whose listing has none of their variables (section 2's limit). The intrinsic costs
+  each function one instruction and a register for its unused result. (3) Risk 7's count came out high and its
+  remedy was taken: the three instructions SSA destruction makes without a source (the copies on an edge, the
+  jump of a split edge, a phi) take a scope from their neighbour, as the risk says; `line` is left alone (the line
+  table of an object without `-g` stays what it is). (4) "The suite under a compiler built with `-g -O2`" is the
+  suite run with the compiler `selfhost.ps1 -G -Lvl 2` leaves (out\selfhost-g); it is not a check of the harness,
+  since by invariant 1 that compiler's code is the bytes of the `-O2` self-host's, which `suite-self` runs. (5) The
+  share of variables with a place is counted on the listings' markers (`;@local`, `;@var` with a `;@loc` that names
+  a place, `;@gone`), by a script of the lane; a variable counts as placed when it has a place over any of the
+  code. (6) The harness has 24 checks with `selfhost-g-O2`.
+- 2026-11-25, stage 3, the review of its code. An independent read of the three parts' code (its one question: where
+  can a place be wrong) found three ways, each closed in the third part, and two smaller points. (1) A variable with
+  one store left after an earlier store was removed (`x = 5; ...; x = v;`, the first overwritten in its block) had
+  an entry at Ssa.cpp's promotion; between the two stores the variable is 5 while `v`'s temporary, defined earlier
+  (or an exact one moved there by loop-invariant motion), is live. Ssa.cpp now asks what `deadStores` asked already:
+  no entry for a local with `staleStores`. The first note's "before the assignment the variable has no value to be
+  wrong about" holds for such a local only. (2) The verifier's cycles were those of the branches and of each
+  `trybegin`'s own block. A handler that resumes closes a cycle from every block of its region (a loop that tries
+  again): the variable keeps the round before's value while the value it will be assigned is computed anew. The
+  verifier now gives every block every handler as a successor; `retry` in vars.cpp is the shape, and with the fault
+  put back the harness says `x = 21, the program says 11`. (3) In cl's model a value of the function that a catch
+  funclet does not touch stays in its callee-saved register, which is right for the code (the runtime restores it at
+  the continuation) and wrong as a place while the funclet runs: the register is the runtime's then. In a funclet's
+  blocks a register is now a place only for what the funclet computes itself (it opens behind its definition); a
+  frame slot stays one. Not reproduced by a test: it needs the runtime to use that register before it calls the
+  funclet. (4) The entry `deadStores` records for an adjusted `this` was replaced at the promotion by the incoming
+  value's (a lost place, not a wrong one); it stays now. (5) The loads of the parameters and the constants for
+  uninitialised reads that Ssa.cpp puts at the function's start carried scope 0, so `;@prologend` came before the
+  entry sequence in a promoted function; they carry scope -1, and `DbgStart` is behind the entry sequence again
+  (5.3). Sound by the same read: the renames, the inliner and unrolling, `removeStore` as the only way out for a
+  store, one slot per spilled temporary, the takeover of a dying operand's register at the last reader, folded
+  addresses and fused compares (no interval, no place), the closing at epilogues, funclet entries and stubs, the
+  ranges' arithmetic in `CvScopes`, the registers' numbers, and `writtenRegisters` (no mnemonic understated).
+- 2026-11-25, stage 4. Measured first, cl 19.52 (/Z7 /Od; the lane's probes mf.cpp, p2.cpp, p3.cpp and p4.cpp, 60
+  classes; llvm-pdbutil, llvm-readobj; DIA and dbghelp on the linked programs): (a) A class's field list holds its
+  members in the order of their declarations, the functions among the data members: `LF_ONEMETHOD` {attributes,
+  type, the slot's offset in the vftable where the function introduces one, name}; an overloaded name is one
+  `LF_METHOD` {count, list, name} where the name is first declared, with an `LF_METHODLIST` of {attributes, 0, type,
+  the slot's offset} in which the last declared comes first. The class's member count has every function of such a
+  name (9 for one data member and eight functions of five names). (b) The attributes are the access and the kind:
+  none, 1 virtual (an override), 2 static, 4 introducing virtual, 5 pure virtual, 6 pure and introducing; a
+  covariant override, which cl gives a slot of its own, is 1. The slot's offset is eight times its place in the
+  vftable that holds it (`D::own` 32 behind four inherited slots; two overloads the last declared first, as Sema
+  places them). (c) `LF_MFUNCTION`: the type of `this` is a plain pointer to the class, to the const class in a const
+  member function, the very type the function's own `this` record has; cl 19.52 writes no const pointer there, which
+  stage 1 had taken from older objects (its own runtime's types still have it). A static member function is an
+  `LF_MFUNCTION` without a `this` type. The function attributes: 2 on a constructor, 6 on a constructor of a class
+  with virtual bases, 1 ("returns cxx udt") where a class result comes back the C++ way: every class result of a
+  non-static member function, and from any other function (a pointer to function's type too) a class that is no
+  plain aggregate, which is the code generator's rule for the hidden result pointer without the size (27 result
+  types: a plain struct of 16 bytes, one with an array, a static member or a private member function, a union and
+  an empty struct are not marked; one with a base, a constructor, a destructor, a copy assignment, a non-public
+  data member, a member that has a destructor, a const or a reference member is, and so is a class the unit never
+  defines; one defined behind the function's declaration counts by its definition). (d) The this adjustment is not 0
+  for an override that a later base's table holds first: `D::h` 16, through a virtual base `L::vf` 24 and `M::vf`
+  56 (the base's place in the class's own layout), 0 for a destructor: the numbers Sema keeps as
+  `Symbol::thisAdjust`. (e) Names: a constructor under the class's own name with its arguments (`Tm<int>`),
+  `~Tm<int>`, operators as in the procedures' names. A conversion function's type is spelled a third way there, as
+  a declaration reads: `operator const char *`, `operator struct p3::S`, `operator const class p3::C &`, `operator
+  union p3::Un`, `operator enum p3::E`, `operator char **`, `operator const char *const *`, `operator volatile const
+  struct p3::S *`, `operator unsigned __int64`; and, measured and not written (5): `operator struct
+  p3::Box<struct p3::Box<int> > *`, `operator struct p3::Box<char const *>`, `operator int (__cdecl p3::S::* )(int)
+  const`, `operator int (*)[3]`, `operator void (__cdecl *)(void)`. (f) cl lists no member template, none of its
+  instances and no friend. It lists, marked compiler-generated (100h), what it generates: the implicit
+  constructors and `operator=` of a class that needs them, `__vecDelDtor`, `__local_vftable_ctor_closure`, and for
+  a covariant override the return-adjusting thunk as a second function of the name. A class without a name
+  (`struct { int z; int zf(); } g;`) lists no function. An `operator=` that is no copy
+  assignment is not listed where the class declares no copy assignment (`struct A { A& operator=(int); };` lists
+  nothing; beside a declared copy assignment both are listed). (g) Class properties: 4h for any operator function,
+  `new`, `delete` and conversions among them, an `operator=` only if it is the copy assignment; 20h for a copy
+  assignment (by value and by non-const reference too); 40h for a conversion function; 4h and 20h also where cl
+  lists its own `operator=`. (h) cl writes the definition of every complete class that a listed function's type
+  names (a parameter by reference, a result by pointer), as for a data member's. Microsoft's link keeps a
+  definition in the PDB only when a symbol leads to it (an `S_UDT`, which cl writes for the classes the unit uses).
+  (i) The readers: DIA gives a function a class lists its code (an address, and then the procedure's qualified name)
+  only when a procedure of that name has the same type index; its flag for a static function is not set from the
+  member list (a function without a `this` type is one); dbghelp tells neither access nor kind nor what is
+  compiler-generated.
+  Where the code differs from 5.1, 5.2, section 6 and section 9: (1) The option. By the criterion of row 4 the
+  member functions are `-g2` (`CPPPARSE_G=2`): the status has the numbers. `-g2` describes after the unit's code
+  is generated (`CvFromSema::finish`), so its listing is `-g`'s byte for byte and only `.debug$T`, the type
+  indices in `.debug$S` and the `S_UDT` records differ. One thing comes with the functions that is not a
+  function: a member typedef is an `LF_NESTTYPE` where its type needs no class described for it alone (stage 1's
+  note, 4), and the functions' types describe more classes, so a class completed behind them may list a typedef
+  under `-g2` that it does not list under `-g` (cl lists it). (2) The this adjustment. 5.2 says 0 for every function,
+  for the reason given there, and that stands for the type a procedure's symbol names. The type a class lists for
+  the same function says cl's number, because there it tells a caller where the function expects `this`, and
+  cppparse's functions are entered as cl's are. A function with an adjustment so has two `LF_MFUNCTION` records
+  where cl has one, and by (i) DIA lists it in its class without code. That is the conservative side: with one
+  record of 0 a reader that calls the function would pass the object's address where the function expects the
+  base's; with one record of cl's number a reader of a frame would move a `this` that is already right. (3) Two
+  corrections of stage 1's function types reach `-g` too, since a procedure has one type at both levels: the type
+  of `this` is a plain pointer as in (c), and the attributes of (c) are written on `LF_PROCEDURE` and
+  `LF_MFUNCTION` (stage 1 wrote 0). `-g`'s objects are therefore not byte for byte stage 3's: the own sources'
+  are 21,316 bytes (0.06 %) smaller at `-O0`, the type of `this` being a record the function's `this` variable
+  has already. `CvFromSema` asks the code generator the one fact Sema does not record, whether a
+  class is a plain aggregate to the calling convention (`CvResultRule`, which IrGen is: `podForReturn`). (4)
+  Listed are the functions a class's definition declares; not what the compiler generates (cl lists its own
+  under names cppparse does not have), not a member template's instances. A declared `operator=` that is no copy
+  assignment is listed where cl by (f) lists none. A volatile member function is listed, with a `this` that is
+  not volatile: Sema keeps no volatile on a member function (next-targets, G42). (5) A conversion function is
+  listed when its type is one whose spelling (e) has: a fundamental type, a class or enumeration that is no
+  template's instance, not local to a function and has a name, a pointer to those or to a pointer, a reference to
+  those, with their qualifiers but for a volatile pointer; any other is not listed, since a wrong name would be a
+  member the debugger offers and cannot find. (6) The properties 4h, 20h and 40h are set from what the class
+  declares, under `-g2` only; cl's 4h and 20h for its own `operator=` are not. (7) The test. Section 6 has the
+  type tree through dbghelp; by (i) the member functions are read through DIA by a driver of their own
+  (examples\sample-dbg-driver\diatypes.cpp), which leaves out what is marked compiler-generated: test 20 has its
+  lines equal for cl's build and for `-g2`'s, from both linkers' PDBs and in the mixed program, and none for `-g`.
+  The record trees themselves were compared once by a scratch script over llvm-pdbutil's dumps of both compilers'
+  objects (the status). The properties are not compared (cl's bits for its own members). (8) Section 9: no class
+  of its own; `CvMethod` stands in CvModule.hpp beside `CvMember`, the records are `CvTypes`', the spelling of (e)
+  `CvNames`'. (9) The classes a listed function's type names are described as 5.2 has it for every written
+  record, which is cl's rule by (h); it is most of the size (`.debug$T` of the own sources 4.0 MB without the
+  member functions, 13.1 MB with). A narrower rule (a class that only a member function's type names stays a
+  forward reference) was not tried: it is not what cl writes.
+  (10) The self-host with `-g2` is `selfhost.ps1 -G2` and the harness's check `selfhost-g2-O0`: 25 checks.
+  The review of the code (an independent read with nine probes against cl's objects; its question: where can a
+  wrong record be written) found the byte layouts, the kinds, slots and adjustments over multiple and virtual
+  inheritance, the attributes on 39 result types, the names, what is not listed, `CvCheck`'s reader, invariant 1
+  and the determinism sound, and five things, all taken: a class result of a type the unit never defines was not
+  marked as returned the C++ way, which cl marks (at `-g` too; fixed, (c)); an unnamed class listed its
+  functions where cl lists none (fixed, (f)); `Compare-Object` on an empty list would have thrown in the test
+  (it fails with a line now); `CvCheck` did not hold a static function against its type's missing `this`, nor
+  the list entry's padding (it does); nothing ran invariant 2 for `-g2` ((10)). Two wrong records it found were
+  the front end's, each with its row. The volatile member function (G42) stays. The other was an override in a
+  class that names a virtual base before the polymorphic base it overrides (`struct J2 : virtual VR, P1 { int
+  r(); };` over `VR::r` and `P1::r`): Sema left `P1`'s slot to `P1::r`, so the adjustment listed was 32 where cl
+  has 0, which was what cppparse's own code did and not what cl's does (G45). That row is closed (2026-11-26, in
+  Sema; nothing in the CodeView code changed): the override is in `P1`'s table, the function takes this at the
+  object, and the class's list says 0 as cl's does. types.cpp `mem::RunJ` holds it in test 20: DIA's lines for
+  `run` (adjust 0) and `stay` (32, first held by the virtual base's table) are those of cl /Z7's build; with the
+  three classes the program's sum is 138 and DIA lists 102 lines (dbghelp 427, 208 facts).
+  Found in the front end on the way, not this row's (next-targets G42 to G45): a member function's `volatile` is
+  dropped (its decorated name is the non-volatile one); a conversion function to a type that a member typedef
+  names, or to a pointer to member, is refused; a qualified name does not find a member of the named namespace's
+  unnamed namespace; the override of G45 (fixed since).
+- 2026-11-26, stage 5. Measured first, cl 19.52 (/Z7 /Od and /O2; the lane's probes fm.cpp and fn.cpp with seven
+  headers, line.cpp, and test 22's sums.cpp; llvm-readobj `--codeview --codeview-subsection-bytes`, dbghelp on the
+  linked programs): (a) An entry of `DEBUG_S_FILECHKSMS` is {the offset of the name in the string table (4 bytes),
+  20h, 03h, the 32 bytes of the SHA-256, two zeros}: 40 bytes. The checksum is of the file's bytes as they are on
+  disk, line ends and a byte order mark included: it is what `Get-FileHash` gives. There is one table, in the
+  module's `.debug$S`; the line tables of the COMDAT functions' sections name its entries by their offsets. cl
+  without /Z7 writes no `.debug$S` at all. (b) cl's table names every file the unit includes, whether it has code
+  or not (a header with a macro alone, one with declarations only, an empty one): 8 files for fn.cpp, 19 for
+  sums.cpp, of which its line tables name four. The order is not that of the inclusions. (c) A file that only a
+  `#line` directive names has an entry without a checksum (kind 0, 8 bytes), also where a file of that name
+  exists. (d) Both linkers carry the entries into the PDB as they are; dbghelp's `SymGetSourceFileChecksum`
+  returns the kind and the bytes, and kind 0 with no bytes for an entry without a checksum.
+  Where the code differs from 5.1, 5.5, 5.6, section 6 and section 9: (1) Under `-g` and `-g2` only. 5.1 lists the
+  checksums among what `-g` adds and says that without it the object is what it was, byte for byte; that decides
+  it (the status has the comparison). An object without the option keeps its entries without a checksum, so a
+  debugger cannot hold a source against a program built without `-g`. (2) Which files. Under `-g` the table names
+  every file the unit read, as cl's does by (b): first the unit and each header in the order of reading, then any
+  name a function gives that is none of them (a `#line` name). 5.1 speaks of the entries' checksums only; the
+  entries for files without code are new, about three fifths of all on the own sources (the status has the
+  count), and with the checksums they cost 0.7 % of the `-g` objects' bytes. The first form of this stage kept
+  the table to the files with code; the count showed that cl's table costs next to nothing, and with the
+  module's description holding every file read (3) it is one loop. Without `-g` the table is what it was: the
+  files a line table refers to. A unit that has variables and no function with lines has the table in the module
+  section `-g` gives it. (3) Whose bytes. The checksum is of the bytes the preprocessor read, as cl's is of what
+  cl read. The first form of this stage read each file a second time when the object was written; the review
+  showed a header edited while its unit compiles getting the edited text's checksum beside line tables of the old
+  text, without a word. So the front end changes, where 5.6 says "frontend/: nothing": `Preprocessor` tells a
+  `PpFileObserver` of every file it reads, once a file, with the bytes as read (`readFileBytes`; the byte order
+  mark is dropped behind it), and only when one is set, which the driver does under `-g` alone: without it the
+  preprocessor reads as before. The driver's `SourceChecksums` hashes the bytes with `CvSha256` into the
+  `CvModule`'s sources (`CvSource`) under the name the line tables use (`debugPath` in common/PathUtil, the rule
+  `IrGen::setFiles` had inline), and `CvFiles` asks the module. A name is matched whatever the case of its letters
+  (a file is read once, under its first spelling). The object so stays a function of the listing and the
+  `CvModule` (4.4 b), and `<name>-cv6.txt` lists the sources with their checksums. By (c) a name that only `#line`
+  gives gets none, which falls out of this: the unit read no file by it. (4) Section 9 had the SHA-256 in
+  `CvFiles`. It is a class of its own, `CvSha256`: FIPS 180-4 as written there, a word an `unsigned long` held to
+  32 bits (so a 64-bit long gives the same), the length counted in bytes in 64 bits; a message of 2^61 bytes or
+  more, whose length in bits the padding cannot say, has no digest (refused, not wrong). `ofFile` reads through
+  C's `FILE`, whose error indicator tells a failed read from the file's end; a stream gives both as a short count,
+  and the review showed a read that fails in the middle of a file (a locked range) taken for the end. (5)
+  `CvCheck` holds the file table as well (`files`: every entry whole, its name a string of the string table, no
+  checksum or a SHA-256, zeros behind it; every file a line table's own bytes name is an entry's start), which
+  5.5/4 does not list. (6) `--sha256 <file>...`, an option the design does not have: the driver prints the
+  checksum of each file. The test needs it (the standard's examples are no sources of a unit), and it is what a
+  user holds a file against. (7) The exit test asks dbghelp for every file of the table, not for the unit and one
+  header alone, and reads the object's table two more ways (the test's own reader of the bytes, llvm-readobj).
+  "No longer equal after the source is edited" is shown on the programs as they are (the PDB's checksum against
+  the edited file) and then on the rebuilt ones. (8) An object rebuilt from its listing (`--compile6 --obj
+  name.asm`) has no `CvModule`, so no checksums and the table of the files with code: section 2's limit, unchanged.
+  (9) Not measured: what Visual Studio's debugger does with the checksums (its option "require source files to
+  exactly match the original version"); the status lists it for the sessions by hand. (10) No request to GRIDE3
+  comes of this stage: GRIDE's link carries the checksums as 3.3 said it would. One thing seen on the way is
+  section 10's L5.
+  The review of the code (an independent read with probes of its own: the class against Windows' BCrypt on every
+  length from 0 to 300 bytes in one piece, in every split in two and in steps of 1 to 129, 49,366 checks, the
+  same with `long` made 64 bits wide, and compiled by cppparse itself at `-O0` to `-O3`; 2^61 - 1 bytes taken and
+  2^61 refused; files of 512 MB and of 4,294,967,299 bytes; the entries against cl's byte for byte; a header under
+  five spellings; test 22 run against the compiler of the commit before, which fails it in the hash, the table,
+  the comparison with cl and both linkers' PDBs, and against a compiler that swaps two files' checksums, which
+  fails it in eight checks) found the class, the layout, invariant 1 and the determinism sound, and these, all
+  taken: the second read of (3), with the `#line` names of (c) that it hashed where cl has none; the read error of
+  (4); a line of the test that said "kind SHA256" of whatever llvm-readobj read (it now requires kind 3); `add`
+  never entered with a block begun, by the compiler or by the test (`ofFile` reads pieces of 65,521 bytes, no
+  multiple of a block, and the test has files around that length); `CvCheck` held the line tables' files by what
+  the writer meant to write, not by the tables' bytes (`fileOf`); a note printed even under `-q` (gone with the
+  second read). It also notes what stays: a path outside the ANSI code page cannot be opened, and names go into
+  the string table as ANSI bytes, neither of this stage. That review read the first form; (2) and (3) as they
+  stand were made after it. What holds them is test 22 (cl's table and cppparse's name the same files; a `#line`
+  name has no checksum), a probe by hand (a header edited 1.5 s into its unit's compilation: the object has the
+  checksum of the text that was compiled; a file with a locked range: `--sha256` says it cannot read it), and a
+  second pass of the review over the code as it stands, by reading alone. It found no defect and three things,
+  all taken: a header included a second time with its name in another case of letters had a second entry, where
+  cl's table, measured for it, has one (`CvFiles::entry` now takes the spelling the file was first read by; test
+  22 has the case); `CvCheck` did not hold the unit's sources to have their checksums, so an observer that is
+  not set would have shown in the test alone (it holds the first entries, the sources, to kind 3); the driver
+  left the observer's pointer set behind its input (reset). Measured for it as well: a `#line` that names a file
+  the unit did read, the unit itself, shares that file's entry with its checksum, in cl's table as in
+  cppparse's. Left as it is: a file reached under a relative and under an absolute spelling of one path is read
+  twice by the preprocessor (its cache goes by the path as given) and keeps the first reading's checksum.
 
 ## Appendix: the probes
 

@@ -1426,6 +1426,62 @@ $rtOut = Build-Runtime "out\x64\cppparse_rt.obj"
     # cl spells it, an unsigned 32-bit number (cl's object has ?get@VL@@WPPPPPPMI@EAAPEAUY@@XZ; it was W?DI@) (G16)
     if ($asmCov.Contains('?get@VL@@WPPPPPPMI@EAAPEAUY@@XZ') -and -not $asmCov.Contains('@VL@@W?')) { Write-Host "  ok   covariant-vbase.cpp (-O0): the adjustor thunk with a negative adjustment is named as cl's (WPPPPPPMI@)" }
     else { Write-Host "  FAIL covariant-vbase.cpp (-O0): the adjustor thunk of VL::get is not named ?get@VL@@WPPPPPPMI@EAAPEAUY@@XZ"; $failed++ }
+    # vbase-first.cpp: classes that name a virtual base before the polymorphic base whose function they override (G45:
+    # the override was left out of the table at offset 0, a call through that base reached the base's function). Built
+    # by cl (the reference, /Od) and by cppparse at -O0 and -O2 in each of the three exception models: the programs
+    # print the same lines. And every vftable of cl's listing is in cppparse's -O0 listing with the same slots, the
+    # adjustor thunks by their names (W<adjustment>), those of namespace covm apart (G47, the file says why)
+    function Get-VfTables([string]$asm) {
+        $tables = @{}; $cur = $null
+        foreach ($l in (Get-Content $asm)) {
+            if ($l -match '^(\?\?_7\S+)\s+DQ\s+FLAT:\S+') { $cur = $Matches[1]; $tables[$cur] = @(); continue }      # cl: the label on the line before the first slot
+            if ($l -match '^(\?\?_7\S+)\s+LABEL\s+QWORD') { $cur = $Matches[1]; $tables[$cur] = @(); continue }      # cppparse: a line of its own
+            if ($null -ne $cur -and $l -match '^\s+DQ\s+(?:FLAT:|OFFSET\s+)(\S+)') { $tables[$cur] += $Matches[1]; continue }
+            $cur = $null
+        }
+        return $tables
+    }
+    $clOut = & $cl /nologo /c /EHsc /W3 /Od /FAs "/Faout\x64\vbfirst_cl.asm" "/Foout\x64\vbfirst_cl.obj" "..\examples\sample-front\vbase-first.cpp" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-front\vbase-first.cpp" }
+    $clOut = Link-Program @("out\x64\vbfirst_cl.obj") "out\x64\vbfirst_cl.exe" | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl's object of sample-front\vbase-first.cpp does not link" }
+    $wantVbf = ((& ".\out\x64\vbfirst_cl.exe" 2>&1 | Out-String) -replace "`r", "")
+    $vbfLines = @($wantVbf -split "`n" | Where-Object { $_.Trim() }).Count
+    if ($LASTEXITCODE -ne 0 -or $vbfLines -lt 80) { Write-Host "  FAIL vbase-first.cpp: cl's build exits with $LASTEXITCODE and prints $vbfLines lines"; $failed++ }
+    else {
+        foreach ($lvl in @(0, 2)) {
+            $sameIn = @()
+            foreach ($eh in @("table", "sjlj", "cl")) {
+                $nm = "vbfirst_${lvl}_$eh"
+                Remove-Item "out\x64\${nm}6.obj", "out\x64\${nm}6.asm" -ErrorAction SilentlyContinue
+                $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+                $c6 = & $exe --compile6 "-O$lvl" "--eh=$eh" --obj --msvc-mangling -I ..\include -o out\x64 -n $nm "..\examples\sample-front\vbase-first.cpp" 2>&1 | Out-String
+                $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+                if ($rc -ne 0 -or -not (Test-Path "out\x64\${nm}6.obj")) { Write-Host "  FAIL --compile6 of sample-front\vbase-first.cpp at -O$lvl --eh=${eh}:"; Write-Host ($c6 -split "`n" | Where-Object { $_ -match 'error' } | Select-Object -First 6); $failed++; continue }
+                $clOut = Link-Program @("out\x64\${nm}6.obj", "out\x64\cppparse_rt.obj") "out\x64\${nm}.exe" | Out-String
+                if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL link of ${nm}6.obj:"; Write-Host $clOut; $failed++; continue }
+                $got = ((& ".\out\x64\${nm}.exe" 2>&1 | Out-String) -replace "`r", "")
+                if ($LASTEXITCODE -eq 0 -and $got -eq $wantVbf) { $sameIn += $eh; continue }
+                Write-Host "  FAIL vbase-first.cpp (-O$lvl --eh=$eh, exit $LASTEXITCODE) differs from cl's build:"
+                $wantL = $wantVbf -split "`n"; $gotL = $got -split "`n"; $shown = 0
+                for ($li = 0; $li -lt [Math]::Max($wantL.Count, $gotL.Count) -and $shown -lt 8; $li++) { if ($wantL[$li] -ne $gotL[$li]) { Write-Host "         cl:       $($wantL[$li])"; Write-Host "         cppparse: $($gotL[$li])"; $shown++ } }
+                $failed++
+            }
+            if ($sameIn.Count -eq 3) { Write-Host "  ok   vbase-first.cpp (-O$lvl): the overrides reach the tables of the bases named after a virtual base; prints what cl's build prints in the models $($sameIn -join ', ') ($vbfLines lines)" }
+        }
+        if (Test-Path "out\x64\vbfirst_0_table6.asm") {
+            $clVf = Get-VfTables "out\x64\vbfirst_cl.asm"; $ourVf = Get-VfTables "out\x64\vbfirst_0_table6.asm"
+            $vfDiff = @(); $vfSame = 0; $vfApart = 0
+            foreach ($k in ($clVf.Keys | Sort-Object)) {
+                if ($k -match '@covm@@') { $vfApart++; continue }
+                if (-not $ourVf.ContainsKey($k)) { $vfDiff += "$k is not in cppparse's listing"; continue }
+                $slotsCl = $clVf[$k] -join ' '; $slotsOur = $ourVf[$k] -join ' '
+                if ($slotsCl -eq $slotsOur) { $vfSame++ } else { $vfDiff += "${k}: cl [$slotsCl], cppparse [$slotsOur]" }
+            }
+            if ($vfDiff.Count -eq 0 -and $vfSame -ge 200) { Write-Host "  ok   vbase-first.cpp (-O0): the $vfSame vftables hold what cl's hold, slot for slot, adjustor thunks included ($vfApart of namespace covm apart, G47)" }
+            else { Write-Host "  FAIL vbase-first.cpp (-O0): $($vfDiff.Count) vftable(s) differ from cl's, $vfSame are the same:"; $vfDiff | Select-Object -First 8 | ForEach-Object { Write-Host "         $_" }; $failed++ }
+        }
+    }
     # a pointer and a reference to an array in a function's decorated name, as cl's (front2.cpp tiarray::byPtr, byRef)
     $asmF2 = if (Test-Path "out\x64\front2_06.asm") { Get-Content "out\x64\front2_06.asm" -Raw } else { "" }
     if ($asmF2.Contains('?byPtr@tiarray@@YAHPEAY02H@Z PROC') -and $asmF2.Contains('?byRef@tiarray@@YAHAEAY01$$CBH@Z PROC')) { Write-Host "  ok   front2.cpp (-O0): a pointer and a reference to an array decorate as cl's (PEAY02H, AEAY01`$`$CBH)" }
@@ -1613,6 +1669,10 @@ $rtOut = Build-Runtime "out\x64\cppparse_rt.obj"
     #   - mixed: types.cpp by cppparse -g and types2.cpp by cl /Z7 in one program (the classes of types.h are then in the
     #     PDB from both compilers): the facts hold as before
     #   - llvm-pdbutil (where Visual Studio has it) dumps the -g objects without an error
+    #   - the member functions (stage 4): sample-dbg-driver\diatypes.cpp (cl, the DIA SDK of Visual Studio, where there
+    #     is one) lists every member function of the program's classes with its access, kind (static, virtual, the
+    #     vftable slot it introduces, pure), type and this adjustment: the same lines for cl's build and for cppparse's,
+    #     what cl generates itself apart, from both linkers' PDBs and in the mixed program
     # and at -O0 the self-compiled objects of test 19 against the same sources compiled with -g: cvsame over all of them
     $failed = 0
     $tdir = "$Sandbox\out\dbgtypes"
@@ -1626,6 +1686,13 @@ $rtOut = Build-Runtime "out\x64\cppparse_rt.obj"
     # (an object file name, not a folder: "/Fo<folder>\" ends in \" when the path has a space, which cl reads as a quote)
     $clOut = Build-Program @("/EHsc", "/W3", "/Fo$tdir\dbgtypes.obj", "..\examples\sample-dbg-driver\dbgtypes.cpp") @("$tdir\dbgtypes.obj") "$tdir\dbgtypes.exe" | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg-driver\dbgtypes.cpp" }
+    $diaSdk = "$VsRoot\DIA SDK"
+    $diaTypes = ""
+    if (Test-Path "$diaSdk\include\dia2.h") {
+        $clOut = Build-Program @("/EHsc", "/W3", "/I$diaSdk\include", "/Fo$tdir\diatypes.obj", "..\examples\sample-dbg-driver\diatypes.cpp") @("$tdir\diatypes.obj", "diaguids.lib", "ole32.lib", "oleaut32.lib", "advapi32.lib") "$tdir\diatypes.exe" @("/LIBPATH:$diaSdk\lib\amd64") | Out-String
+        if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg-driver\diatypes.cpp" }
+        $diaTypes = "$tdir\diatypes.exe"
+    }
     foreach ($u in "types", "types2") {
         $clOut = & $cl /nologo /c /EHsc /W3 /Od /Z7 /X /I..\include "/Fo$tdir\$u-cl.obj" "..\examples\sample-dbg\$u.cpp" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg\$u.cpp" }
@@ -1653,7 +1720,10 @@ $rtOut = Build-Runtime "out\x64\cppparse_rt.obj"
         $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
         $own = @(& $texe 2>&1 | ForEach-Object { "$_".TrimEnd() }); $rc = $LASTEXITCODE
         $drv = @(& "$tdir\dbgtypes.exe" $texe -types -local localSizes s_local -local localSizesOther s_local 2>&1 | ForEach-Object { "$_".TrimEnd() }); $drc = $LASTEXITCODE
+        $meth = @(); $mrc = 0
+        if ($diaTypes -ne "") { $meth = @(& $diaTypes "$diaSdk\bin\amd64\msdia140.dll" $texe 2>&1 | ForEach-Object { "$_".TrimEnd() }); $mrc = $LASTEXITCODE }
         $ErrorActionPreference = $eap
+        if ($mrc -ne 0) { Write-Host "  FAIL ${what}: diatypes exits with ${mrc}: $($meth | Select-Object -First 2)"; return $null }
         if ($rc -ne 0 -or $own.Count -lt 100) { Write-Host "  FAIL ${what}: the program exits with $rc and prints $($own.Count) lines"; return $null }
         $set = New-Object 'System.Collections.Generic.HashSet[string]'; foreach ($l in $drv) { $null = $set.Add($l) }
         $missing = @($own | Where-Object { -not $set.Contains($_) })
@@ -1662,106 +1732,154 @@ $rtOut = Build-Runtime "out\x64\cppparse_rt.obj"
             $missing | Select-Object -First 8 | ForEach-Object { Write-Host "         $_" }
             return $null
         }
-        return @{ Own = $own; About = (Select-About $own $drv) }
+        return @{ Own = $own; About = (Select-About $own $drv); Methods = (Select-About $own $meth) }
     }
+    # the member functions of two builds, as DIA lists them: the same lines, and enough of them
+    function Test-Methods([string]$what, $a, $b, [string]$ok) {
+        if ($diaTypes -eq "") { return 0 }
+        if (@($a.Methods).Count -eq 0 -or @($b.Methods).Count -eq 0) { Write-Host "  FAIL ${what}: DIA lists $(@($a.Methods).Count) and $(@($b.Methods).Count) member functions in the program's classes"; return 1 }
+        $d = @(Compare-Object @($a.Methods) @($b.Methods))
+        if ($d.Count -eq 0 -and @($b.Methods).Count -ge 90) { Write-Host "  ok   ${what}: $ok ($(@($b.Methods).Count) lines: access, kind, vftable slot, type, this adjustment)"; return 0 }
+        Write-Host "  FAIL ${what}: the member functions DIA lists differ in $($d.Count) of $(@($b.Methods).Count) lines:"
+        $d | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }
+        return 1
+    }
+    if ($diaTypes -eq "") { Write-Host "  note the DIA SDK is not found: the member functions of the classes are not compared" }
     $clBuild = Test-TypesBuild "cl /Z7's build" $linkExe @("$tdir\types-cl.obj", "$tdir\types2-cl.obj") "types-cl"
     if ($null -eq $clBuild) { $failed++ }
     foreach ($lvl in @(0, 2)) {
-        $plain = "$tdir\plain$lvl"; $withG = "$tdir\g$lvl"
-        New-Item -ItemType Directory -Force $plain, $withG | Out-Null
-        $bad = @()
-        foreach ($u in "types", "types2") {
-            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-            $null = & $exe --compile6 "-O$lvl" -g0 --obj --msvc-mangling -q -I ..\include -o $plain -n $u "..\examples\sample-dbg\$u.cpp" 2>&1
-            $c6 = & $exe --compile6 "-O$lvl" -g --obj --msvc-mangling -q -I ..\include -o $withG -n $u "..\examples\sample-dbg\$u.cpp" 2>&1 | Out-String
-            $ErrorActionPreference = $eap
-            if (-not (Test-Path "$plain\${u}6.obj") -or -not (Test-Path "$withG\${u}6.obj")) { $bad += $u; Write-Host $c6 }
-        }
-        if ($bad.Count) { Write-Host "  FAIL --compile6 -O$lvl of sample-dbg\$($bad -join ', ')"; $failed++; continue }
-        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-        $same = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -A $plain -B $withG -Listings 2>&1 | Out-String
-        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
-        if ($rc -eq 0 -and $same -match '2 pair\(s\): 0 the same \(listings too\), 2 differ in debug information only, 0 violate') { Write-Host "  ok   -O${lvl}: with -g the two objects and listings are what they are without it but for CodeView (cvsame)" }
-        else { Write-Host "  FAIL -O${lvl}: cvsame on the objects without and with -g (exit $rc):"; Write-Host $same; $failed++ }
-        $hdr = & $dumpbin /nologo /headers "$withG\types6.obj" | Out-String
-        if ($hdr -notmatch '\.debug\$T name') { Write-Host "  FAIL -O${lvl}: types6.obj has no .debug`$T"; $failed++ }
-        $objs = @("$withG\types6.obj", "$withG\types26.obj")
-        $ms = Test-TypesBuild "-O$lvl, Microsoft's link" $linkExe $objs "types$lvl-ms"
-        if ($null -eq $ms) { $failed++; continue }
-        Write-Host "  ok   -O${lvl}: link /DEBUG says nothing; all $($ms.Own.Count) facts the program prints of its types and variables are the PDB's (dbghelp)"
-        if ($null -ne $clBuild) {
-            $d = @(Compare-Object $clBuild.About $ms.About)
-            if ($d.Count -eq 0) { Write-Host "  ok   -O${lvl}: dbghelp's description of the program's types ($($ms.About.Count) lines: members with their types, bases, enumerators) is the one of cl /Z7's build" }
-            else { Write-Host "  FAIL -O${lvl}: $($d.Count) lines of the type description differ from cl /Z7's build:"; $d | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
-        }
-        $mixed = Test-TypesBuild "-O$lvl, types.cpp by cppparse and types2.cpp by cl" $linkExe @("$withG\types6.obj", "$tdir\types2-cl.obj") "types$lvl-mixed-ms"
-        if ($null -eq $mixed) { $failed++ }
-        elseif (@(Compare-Object $ms.About $mixed.About).Count -eq 0) { Write-Host "  ok   -O${lvl}: mixed with cl /Z7's object of types2.cpp, the facts hold and the description is the same" }
-        else { Write-Host "  FAIL -O${lvl}: mixed with cl's object the description differs"; $failed++ }
-        if ($grideLink -ne "") {
-            $gr = Test-TypesBuild "-O$lvl, GRIDE's link" $grideLink $objs "types$lvl-gr"
-            $grMixed = Test-TypesBuild "-O$lvl, mixed, GRIDE's link" $grideLink @("$withG\types6.obj", "$tdir\types2-cl.obj") "types$lvl-mixed-gr"
-            if ($null -eq $gr -or $null -eq $grMixed) { $failed++ }
-            elseif (@(Compare-Object $ms.About $gr.About).Count -eq 0 -and @(Compare-Object $ms.About $grMixed.About).Count -eq 0) { Write-Host "  ok   -O${lvl}: GRIDE's link says nothing, and its PDB gives the driver the same $($gr.About.Count) lines, mixed too" }
-            else { Write-Host "  FAIL -O${lvl}: the driver's lines differ between Microsoft's PDB and GRIDE's"; Compare-Object $ms.About $gr.About | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
-        } else { Write-Host "  note -O${lvl}: GRIDE not found, its link is not tried" }
-        if (Test-Path $pdbutil) {
-            $perr = @()
-            foreach ($o in $objs) {
+        $plain = "$tdir\plain$lvl"
+        New-Item -ItemType Directory -Force $plain | Out-Null
+        $msOfG = $null
+        # -g, and -g2: the same and the member functions in the classes
+        foreach ($gopt in @("-g", "-g2")) {
+            $at = "-O$lvl $gopt"
+            $members = $gopt -eq "-g2"
+            $withG = if ($members) { "$tdir\g2-$lvl" } else { "$tdir\g$lvl" }
+            New-Item -ItemType Directory -Force $withG | Out-Null
+            $bad = @()
+            foreach ($u in "types", "types2") {
                 $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-                $dump = @(& $pdbutil dump -types -symbols $o 2>&1 | ForEach-Object { "$_" }); $prc = $LASTEXITCODE
+                if (-not $members) { $null = & $exe --compile6 "-O$lvl" -g0 --obj --msvc-mangling -q -I ..\include -o $plain -n $u "..\examples\sample-dbg\$u.cpp" 2>&1 }
+                $c6 = & $exe --compile6 "-O$lvl" $gopt --obj --msvc-mangling -q -I ..\include -o $withG -n $u "..\examples\sample-dbg\$u.cpp" 2>&1 | Out-String
                 $ErrorActionPreference = $eap
-                # the tool's own complaints (the word "error" alone may be part of a name)
-                $perr += @($dump | Where-Object { $_ -match '(?i)^\s*error\b|: error:|llvm-pdbutil(\.exe)?:|corrupt|invalid (type|record|leaf)|unknown (leaf|record|symbol)' } | Select-Object -First 2)
-                if ($prc -ne 0) { $perr += "exit $prc on $o" }
-                if ($dump.Count -lt 50) { $perr += "only $($dump.Count) lines for $o" }
+                if (-not (Test-Path "$plain\${u}6.obj") -or -not (Test-Path "$withG\${u}6.obj")) { $bad += $u; Write-Host $c6 }
             }
-            if ($perr.Count -eq 0) { Write-Host "  ok   -O${lvl}: llvm-pdbutil dumps the types and symbols of both objects without an error" }
-            else { Write-Host "  FAIL -O${lvl}: llvm-pdbutil: $($perr -join ' | ')"; $failed++ }
+            if ($bad.Count) { Write-Host "  FAIL --compile6 $at of sample-dbg\$($bad -join ', ')"; $failed++; continue }
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $same = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -A $plain -B $withG -Listings 2>&1 | Out-String
+            $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+            if ($rc -eq 0 -and $same -match '2 pair\(s\): 0 the same \(listings too\), 2 differ in debug information only, 0 violate') { Write-Host "  ok   ${at}: the two objects and listings are what they are without it but for CodeView (cvsame)" }
+            else { Write-Host "  FAIL ${at}: cvsame on the objects without and with $gopt (exit $rc):"; Write-Host $same; $failed++ }
+            if ($members) {
+                # the member functions are described when the unit's code is generated: the listing, markers and all, is -g's
+                $differ = @("types", "types2" | Where-Object { (Get-FileHash "$withG\${_}6.asm").Hash -ne (Get-FileHash "$tdir\g$lvl\${_}6.asm").Hash })
+                if ($differ.Count -eq 0) { Write-Host "  ok   ${at}: the two listings are -g's, byte for byte" }
+                else { Write-Host "  FAIL ${at}: the listing of $($differ -join ', ') is not -g's"; $failed++ }
+            }
+            $hdr = & $dumpbin /nologo /headers "$withG\types6.obj" | Out-String
+            if ($hdr -notmatch '\.debug\$T name') { Write-Host "  FAIL ${at}: types6.obj has no .debug`$T"; $failed++ }
+            $objs = @("$withG\types6.obj", "$withG\types26.obj")
+            $tag = if ($members) { "types$lvl-g2" } else { "types$lvl" }
+            $ms = Test-TypesBuild "$at, Microsoft's link" $linkExe $objs "$tag-ms"
+            if ($null -eq $ms) { $failed++; continue }
+            Write-Host "  ok   ${at}: link /DEBUG says nothing; all $($ms.Own.Count) facts the program prints of its types and variables are the PDB's (dbghelp)"
+            if ($null -ne $clBuild) {
+                $d = @(Compare-Object $clBuild.About $ms.About)
+                if ($d.Count -eq 0) { Write-Host "  ok   ${at}: dbghelp's description of the program's types ($($ms.About.Count) lines: members with their types, bases, enumerators) is the one of cl /Z7's build" }
+                else { Write-Host "  FAIL ${at}: $($d.Count) lines of the type description differ from cl /Z7's build:"; $d | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
+                if ($members) { $failed += (Test-Methods $at $clBuild $ms "the member functions DIA lists in the program's classes are those of cl /Z7's build, what cl generates itself apart") }
+            }
+            if (-not $members) {
+                $msOfG = $ms
+                if ($diaTypes -ne "" -and @($ms.Methods).Count -ne 0) { Write-Host "  FAIL ${at}: DIA lists $(@($ms.Methods).Count) member functions in the classes, which are -g2's"; $failed++ }
+            }
+            elseif ($null -ne $msOfG -and @(Compare-Object $msOfG.About $ms.About).Count -ne 0) { Write-Host "  FAIL ${at}: dbghelp's description of the types is not -g's"; $failed++ }
+            $mixed = Test-TypesBuild "$at, types.cpp by cppparse and types2.cpp by cl" $linkExe @("$withG\types6.obj", "$tdir\types2-cl.obj") "$tag-mixed-ms"
+            if ($null -eq $mixed) { $failed++ }
+            elseif (@(Compare-Object $ms.About $mixed.About).Count -eq 0) { Write-Host "  ok   ${at}: mixed with cl /Z7's object of types2.cpp, the facts hold and the description is the same" }
+            else { Write-Host "  FAIL ${at}: mixed with cl's object the description differs"; $failed++ }
+            if ($members -and $null -ne $mixed) { $failed += (Test-Methods "$at, mixed" $ms $mixed "the member functions are the same lines") }
+            if ($grideLink -ne "") {
+                $gr = Test-TypesBuild "$at, GRIDE's link" $grideLink $objs "$tag-gr"
+                $grMixed = Test-TypesBuild "$at, mixed, GRIDE's link" $grideLink @("$withG\types6.obj", "$tdir\types2-cl.obj") "$tag-mixed-gr"
+                if ($null -eq $gr -or $null -eq $grMixed) { $failed++ }
+                elseif (@(Compare-Object $ms.About $gr.About).Count -eq 0 -and @(Compare-Object $ms.About $grMixed.About).Count -eq 0) { Write-Host "  ok   ${at}: GRIDE's link says nothing, and its PDB gives the driver the same $($gr.About.Count) lines, mixed too" }
+                else { Write-Host "  FAIL ${at}: the driver's lines differ between Microsoft's PDB and GRIDE's"; Compare-Object $ms.About $gr.About | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
+                if ($members -and $null -ne $gr -and $null -ne $grMixed) {
+                    $failed += (Test-Methods "$at, GRIDE's link" $ms $gr "the member functions from GRIDE's PDB are the lines from Microsoft's")
+                    $failed += (Test-Methods "$at, mixed, GRIDE's link" $ms $grMixed "the member functions are the same lines")
+                }
+            } else { Write-Host "  note ${at}: GRIDE not found, its link is not tried" }
+            if (Test-Path $pdbutil) {
+                $perr = @(); $listed = 0
+                foreach ($o in $objs) {
+                    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+                    $dump = @(& $pdbutil dump -types -symbols $o 2>&1 | ForEach-Object { "$_" }); $prc = $LASTEXITCODE
+                    $ErrorActionPreference = $eap
+                    # the tool's own complaints (the word "error" alone may be part of a name)
+                    $perr += @($dump | Where-Object { $_ -match '(?i)^\s*error\b|: error:|llvm-pdbutil(\.exe)?:|corrupt|invalid (type|record|leaf)|unknown (leaf|record|symbol)' } | Select-Object -First 2)
+                    if ($prc -ne 0) { $perr += "exit $prc on $o" }
+                    if ($dump.Count -lt 50) { $perr += "only $($dump.Count) lines for $o" }
+                    $listed += @($dump | Where-Object { $_ -match '- LF_ONEMETHOD \[|- Method \[type = ' }).Count
+                }
+                # (the classes list their member functions with -g2 alone: LF_ONEMETHOD, and LF_METHOD with its LF_METHODLIST)
+                if ($members -and $listed -lt 100) { $perr += "only $listed member functions are listed in the classes of the two objects" }
+                if (-not $members -and $listed -ne 0) { $perr += "$listed member functions are listed in the classes, which are -g2's" }
+                if ($perr.Count -eq 0) { Write-Host "  ok   ${at}: llvm-pdbutil dumps the types and symbols of both objects without an error; the classes list $listed member functions" }
+                else { Write-Host "  FAIL ${at}: llvm-pdbutil: $($perr -join ' | ')"; $failed++ }
+            }
         }
     }
-    # invariant 1 on the compiler's own sources: test 19's objects (-O0, out\self6) and the same units with -g
-    if ($env:CPPPARSE_G -eq "1") { Write-Host "  note CPPPARSE_G=1: test 19's objects have -g already, the own sources are not compared" }
+    # invariant 1 on the compiler's own sources: test 19's objects (-O0, out\self6) and the same units with -g, and
+    # with -g2 (the member functions of every class the compiler has)
+    if ($env:CPPPARSE_G -eq "1" -or $env:CPPPARSE_G -eq "2") { Write-Host "  note CPPPARSE_G=$($env:CPPPARSE_G): test 19's objects have -g already, the own sources are not compared" }
     elseif (Test-Path "$Sandbox\out\self6\main6.obj") {
-        $gdir = "$Sandbox\out\self6g"
-        New-Item -ItemType Directory -Force $gdir | Out-Null
-        Get-ChildItem $gdir -File | Remove-Item
-        $gJobs = New-Object System.Collections.ArrayList
-        foreach ($j in $selfJobs) { $null = $gJobs.Add(@{ Name = $j.Name; Args = ($j.Args -replace [regex]::Escape("-o `"$selfDir`""), "-g -o `"$gdir`"") }) }
-        $gStart = Get-Date
-        $running = New-Object System.Collections.ArrayList
-        $next = 0; $gBad = @()
-        while ($next -lt $gJobs.Count -or $running.Count -gt 0) {
-            while ($next -lt $gJobs.Count -and $running.Count -lt $slots) {
-                $job = $gJobs[$next]; $next++
-                $proc = Start-Process -FilePath $exe -ArgumentList $job.Args -WorkingDirectory $Sandbox -NoNewWindow -PassThru -RedirectStandardOutput "$gdir\$($job.Name).out" -RedirectStandardError "$gdir\$($job.Name).err"
-                $null = $proc.Handle
-                $null = $running.Add(@{ Job = $job; Proc = $proc })
+        $sizeG = 0
+        foreach ($gopt in @("-g", "-g2")) {
+            $gdir = if ($gopt -eq "-g2") { "$Sandbox\out\self6g2" } else { "$Sandbox\out\self6g" }
+            New-Item -ItemType Directory -Force $gdir | Out-Null
+            Get-ChildItem $gdir -File | Remove-Item
+            $gJobs = New-Object System.Collections.ArrayList
+            foreach ($j in $selfJobs) { $null = $gJobs.Add(@{ Name = $j.Name; Args = ($j.Args -replace [regex]::Escape("-o `"$selfDir`""), "$gopt -o `"$gdir`"") }) }
+            $gStart = Get-Date
+            $running = New-Object System.Collections.ArrayList
+            $next = 0; $gBad = @()
+            while ($next -lt $gJobs.Count -or $running.Count -gt 0) {
+                while ($next -lt $gJobs.Count -and $running.Count -lt $slots) {
+                    $job = $gJobs[$next]; $next++
+                    $proc = Start-Process -FilePath $exe -ArgumentList $job.Args -WorkingDirectory $Sandbox -NoNewWindow -PassThru -RedirectStandardOutput "$gdir\$($job.Name).out" -RedirectStandardError "$gdir\$($job.Name).err"
+                    $null = $proc.Handle
+                    $null = $running.Add(@{ Job = $job; Proc = $proc })
+                }
+                $null = $running[0].Proc.WaitForExit(250)
+                foreach ($r in @($running)) {
+                    if (-not $r.Proc.HasExited) { continue }
+                    $running.Remove($r)
+                    if ($r.Proc.ExitCode -ne 0 -or -not (Test-Path "$gdir\$($r.Job.Name)6.obj")) { $gBad += "$($r.Job.Name) (exit $($r.Proc.ExitCode))" }
+                }
             }
-            $null = $running[0].Proc.WaitForExit(250)
-            foreach ($r in @($running)) {
-                if (-not $r.Proc.HasExited) { continue }
-                $running.Remove($r)
-                if ($r.Proc.ExitCode -ne 0 -or -not (Test-Path "$gdir\$($r.Job.Name)6.obj")) { $gBad += "$($r.Job.Name) (exit $($r.Proc.ExitCode))" }
+            if ($gBad.Count -ne 0) { Write-Host "  FAIL with $gopt $($gBad.Count) own unit(s) are not compiled: $($gBad -join ', ')"; Get-Content "$gdir\$(($gBad[0] -split ' ')[0]).err" -ErrorAction SilentlyContinue | Select-Object -First 4 | ForEach-Object { Write-Host "    $_" }; $failed++ }
+            else {
+                $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+                $same = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -A $selfDir -B $gdir -Listings -Quiet 2>&1 | Out-String
+                $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+                $sizeA = (Get-ChildItem "$selfDir\*.obj" | Measure-Object Length -Sum).Sum; $sizeB = (Get-ChildItem "$gdir\*.obj" | Measure-Object Length -Sum).Sum
+                if ($rc -eq 0 -and $same -match "$($gJobs.Count) pair\(s\): 0 the same \(listings too\), $($gJobs.Count) differ in debug information only, 0 violate") {
+                    $beside = if ($gopt -eq "-g2" -and $sizeG -gt 0) { "; {0:P1} more than -g's" -f ($sizeB / $sizeG - 1) } else { "" }
+                    Write-Host ("  ok   the {0} own sources and libcpp with {5} ({1:N0} s): every object and listing is what it is without it but for CodeView (cvsame); {2:N0} bytes of objects without -g, {3:N0} with ({4:P0} more{6})" -f $selfUnits, ((Get-Date) - $gStart).TotalSeconds, $sizeA, $sizeB, ($sizeB / $sizeA - 1), $gopt, $beside)
+                } else { Write-Host "  FAIL cvsame on the own sources without and with $gopt (exit $rc):"; Write-Host $same; $failed++ }
+                if ($gopt -eq "-g") { $sizeG = $sizeB }
             }
-        }
-        if ($gBad.Count -ne 0) { Write-Host "  FAIL with -g $($gBad.Count) own unit(s) are not compiled: $($gBad -join ', ')"; Get-Content "$gdir\$(($gBad[0] -split ' ')[0]).err" -ErrorAction SilentlyContinue | Select-Object -First 4 | ForEach-Object { Write-Host "    $_" }; $failed++ }
-        else {
-            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-            $same = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -A $selfDir -B $gdir -Listings -Quiet 2>&1 | Out-String
-            $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
-            $sizeA = (Get-ChildItem "$selfDir\*.obj" | Measure-Object Length -Sum).Sum; $sizeB = (Get-ChildItem "$gdir\*.obj" | Measure-Object Length -Sum).Sum
-            if ($rc -eq 0 -and $same -match "$($gJobs.Count) pair\(s\): 0 the same \(listings too\), $($gJobs.Count) differ in debug information only, 0 violate") {
-                Write-Host ("  ok   the {0} own sources and libcpp with -g ({1:N0} s): every object and listing is what it is without it but for CodeView (cvsame); {2:N0} bytes of objects without -g, {3:N0} with ({4:P0} more)" -f $selfUnits, ((Get-Date) - $gStart).TotalSeconds, $sizeA, $sizeB, ($sizeB / $sizeA - 1))
-            } else { Write-Host "  FAIL cvsame on the own sources without and with -g (exit $rc):"; Write-Host $same; $failed++ }
         }
     }
     if ($failed -ne 0) { throw "$failed CodeView type check(s) failed" }
 
     Write-Host ""
     Write-Host "=== Test 21: CodeView variables (-g): the value harness, read back through dbghelp and DIA ==="
-    # row M10, docs\design-codeview.md stage 2. sample-dbg\vars.cpp (functions of every shape the design names) by -g -O0
-    # in each exception model, with sample-dbg-driver\varsck.cpp (cl: checkpoint, ckPush, ckPop), linked with /DEBUG:
+    # row M10, docs\design-codeview.md stages 2 and 3. sample-dbg\vars.cpp (functions of every shape the design names) by
+    # -g at -O0, and at -O1, -O2 and -O3 (below), in each exception model, with sample-dbg-driver\varsck.cpp (cl:
+    # checkpoint, ckPush, ckPop), linked with /DEBUG:
     #   - with -g the object and listing are what they are without it but for CodeView (cvsame)
     #   - dbgvars.exe (cl, dbghelp, the Win32 debug API) stops at every checkpoint and compares every variable the PDB gives
     #     a place for with what the program says it holds: in the checkpoint's caller, in the frames above it that
@@ -1794,16 +1912,20 @@ $rtOut = Build-Runtime "out\x64\cppparse_rt.obj"
         $diaExe = "$vdir\diavars.exe"
     }
     # links one build and runs dbgvars on it (and DIA with -Dia); returns the program's path or "" after a failure
-    function Test-VarsBuild([string]$what, [string]$linker, [string[]]$inputs, [string[]]$opts, [string]$exeName, [switch]$Dia) {
+    # -Optimized: a build at -O1 and up, where a variable may be listed without a place (dbgvars -optimized) but the ones
+    # the program's texts mark must have theirs, and at least 60 values are read back
+    function Test-VarsBuild([string]$what, [string]$linker, [string[]]$inputs, [string[]]$opts, [string]$exeName, [switch]$Dia, [switch]$Optimized) {
         $vexe = "$vdir\$exeName.exe"
         $lo = & $linker /nologo @opts /SUBSYSTEM:CONSOLE "/OUT:$vexe" @inputs "out\x64\cppparse_rt.obj" @libs 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path $vexe) -or $lo.Trim() -ne "") { Write-Host "  FAIL ${what}: link $($opts -join ' ') (it has to say nothing):"; Write-Host $lo; return "" }
         $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-        $got = & "$vdir\dbgvars.exe" $vexe -places "$vdir\$exeName.places.txt" 2>&1 | Out-String; $rc = $LASTEXITCODE
+        $dvArgs = @($vexe, "-places", "$vdir\$exeName.places.txt"); if ($Optimized) { $dvArgs += "-optimized" }
+        $got = & "$vdir\dbgvars.exe" @dvArgs 2>&1 | Out-String; $rc = $LASTEXITCODE
         $ErrorActionPreference = $eap
-        $sum = [regex]::Match($got, 'dbgvars: (\d+) checkpoints, (\d+) next lines, (\d+) values compared, (\d+) failures')
-        if ($rc -ne 0 -or -not $sum.Success -or [int]$sum.Groups[1].Value -lt 19 -or [int]$sum.Groups[2].Value -ne [int]$sum.Groups[1].Value) { Write-Host "  FAIL ${what}: dbgvars (exit $rc):"; ($got -split "`n") | Where-Object { $_ -match 'FAIL|dbgvars:' } | Select-Object -First 12 | ForEach-Object { Write-Host "       $($_.Trim())" }; return "" }
-        Write-Host "  ok   ${what}: $($sum.Groups[1].Value) checkpoints, $($sum.Groups[3].Value) values right in the caller, the frames above and at the next line (dbghelp)"
+        $sum = [regex]::Match($got, 'dbgvars: (\d+) checkpoints, (\d+) next lines, (\d+) values compared, (\d+) failures; (\d+) times a variable without a place')
+        if ($rc -ne 0 -or -not $sum.Success -or [int]$sum.Groups[1].Value -lt 23 -or [int]$sum.Groups[2].Value -ne [int]$sum.Groups[1].Value -or ($Optimized -and [int]$sum.Groups[3].Value -lt 60)) { Write-Host "  FAIL ${what}: dbgvars (exit $rc):"; ($got -split "`n") | Where-Object { $_ -match 'FAIL|dbgvars:' } | Select-Object -First 12 | ForEach-Object { Write-Host "       $($_.Trim())" }; return "" }
+        if ($Optimized) { Write-Host "  ok   ${what}: $($sum.Groups[1].Value) checkpoints, $($sum.Groups[3].Value) values right in the caller, the frames above and at the next line, none wrong, the marked ones all there; $($sum.Groups[5].Value) times a variable without a place (dbghelp)" }
+        else { Write-Host "  ok   ${what}: $($sum.Groups[1].Value) checkpoints, $($sum.Groups[3].Value) values right in the caller, the frames above and at the next line (dbghelp)" }
         if ($Dia -and $diaExe -ne "") {
             # DIA at the same addresses: the same variables with the same places (dbghelp lists "this" as a local, DIA as
             # the object pointer: its kind is not compared)
@@ -1874,7 +1996,448 @@ $rtOut = Build-Runtime "out\x64\cppparse_rt.obj"
         if ($hits -eq $bps.Count -and $vals -gt 30 -and @(Compare-Object $answers[$msExe] $answers[$grideExe]).Count -eq 0) { Write-Host "  ok   gride-dbg stops at $hits checkpoint lines and dv lists $vals variables in the frame, the same lines from both linkers' programs" }
         else { Write-Host "  FAIL gride-dbg: $hits of $($bps.Count) breakpoints hit, $vals variables in the frame; from the two linkers' programs:"; Compare-Object $answers[$msExe] $answers[$grideExe] | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
     } elseif ($grideLink -ne "") { Write-Host "  note gride-dbg not found, it is not tried" }
+    # stage 3, the optimiser's tables (docs\design-codeview.md 5.4), read in the IR dump of vars.cpp at -O2 with -g: which
+    # variables have one definition (a temporary), which lost a store. A parameter that is not assigned has its incoming
+    # value (the adjusted "this" in Both::get), a local assigned once the value it was assigned; a variable assigned
+    # twice, and the scalars of a function whose handler resumes, have none
+    $tdir = "$vdir\tables"
+    New-Item -ItemType Directory -Force $tdir | Out-Null
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $c6 = & $exe --compile6 -O2 -g --eh=table --obj --msvc-mangling -q -I ..\include -o $tdir -n vars "..\examples\sample-dbg\vars.cpp" 2>&1 | Out-String
+    $ErrorActionPreference = $eap
+    if (-not (Test-Path "$tdir\vars-ir6.txt")) { Write-Host "  FAIL --compile6 -O2 -g of sample-dbg\vars.cpp:"; Write-Host $c6; $failed++ }
+    else {
+        $tables = @{}; $after = $false; $cur = ""
+        foreach ($l in Get-Content "$tdir\vars-ir6.txt") {
+            if ($l -match '^--- after') { $after = $true; continue }
+            if ($l -match '^=====') { $after = $false; continue }
+            if (-not $after) { continue }
+            if ($l -match '^function ([^(]+)') { $cur = $Matches[1].Trim(); $tables[$cur] = @{ Names = @{}; One = @(); Stale = @() }; continue }
+            if ($cur -eq "") { continue }
+            if ($l -match '^  local(\d+): .*\[-g (\S+) T\d+ block ([^\]]*)\]') { $local = $Matches[1]; $shown = $Matches[2]; $marks = $Matches[3]; $tables[$cur].Names[$local] = $shown; if ($marks -like '*a store removed*') { $tables[$cur].Stale += $shown } }
+            elseif ($l -match '^  -g: .*one definition: (.*)$') { foreach ($m in [regex]::Matches($Matches[1], 'local(\d+) = t\d+')) { $n = $tables[$cur].Names[$m.Groups[1].Value]; if ($n) { $tables[$cur].One += $n } } }
+        }
+        $wrong = @()
+        foreach ($w in @(@("many", "a b c d e f g h sum", ""), @("params", "used", "unused __formal changed"), @("Both::get", "this k r", ""), @("nested", "a mid deep", "top"),
+                         @("sum", "", "s i"), @("floats", "f d half twice", ""), @("resumes", "", "v observed extra"), @("leaf", "q w", ""))) {
+            $t = $tables[$w[0]]
+            if (-not $t) { $wrong += "$($w[0]): not in the dump"; continue }
+            foreach ($n in @($w[1] -split ' ' | Where-Object { $_ })) { if ($t.One -notcontains $n) { $wrong += "$($w[0]): $n has no definition" } }
+            foreach ($n in @($w[2] -split ' ' | Where-Object { $_ })) { if ($t.One -contains $n) { $wrong += "$($w[0]): $n has one, and is assigned more than once or lives in memory" } }
+        }
+        if ($tables["resumes"] -and $tables["resumes"].Stale -notcontains "observed") { $wrong += "resumes: observed is not marked as having lost a store" }
+        if ($wrong.Count -eq 0) { Write-Host "  ok   -O2: the optimiser's tables name the one definition of the variables that have one (the IR dump of vars.cpp), and the scalar that lost a store" }
+        else { Write-Host "  FAIL -O2: the optimiser's tables of vars.cpp:"; $wrong | Select-Object -First 10 | ForEach-Object { Write-Host "       $_" }; $failed++ }
+    }
+    # stage 3 (docs\design-codeview.md section 6, row 3): the value harness at -O1, -O2 and -O3 in each exception model.
+    # With -g the code is what it is without it (cvsame); the compiler's own check of the records and of every register
+    # range against the code it encoded (CvCheck (b), (c)) says nothing; dbgvars -optimized finds no wrong value in a
+    # checkpoint's caller, in the frames above it and at the next line, every declared parameter listed, the variables
+    # the texts mark ("+") in their places, and reads 60 values or more; DIA gives the same variables the same places;
+    # the -O2 objects through the link variants and both linkers; -j 1 and -j 4 write the same object
+    $optMs = ""; $optGride = ""
+    foreach ($lvl in 1, 2, 3) {
+        foreach ($eh in "table", "sjlj", "cl") {
+            $plain = "$vdir\plain-$eh-O$lvl"; $withG = "$vdir\g-$eh-O$lvl"
+            New-Item -ItemType Directory -Force $plain, $withG | Out-Null
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $null = & $exe --compile6 "-O$lvl" -g0 "--eh=$eh" --obj --msvc-mangling -q -I ..\include -o $plain -n vars "..\examples\sample-dbg\vars.cpp" 2>&1
+            $c6 = & $exe --compile6 "-O$lvl" -g "--eh=$eh" --obj --msvc-mangling -q -I ..\include -o $withG -n vars "..\examples\sample-dbg\vars.cpp" 2>&1 | Out-String
+            $ErrorActionPreference = $eap
+            if (-not (Test-Path "$plain\vars6.obj") -or -not (Test-Path "$withG\vars6.obj") -or $c6 -match 'CodeView|internal error') { Write-Host "  FAIL --compile6 -O$lvl -g --eh=$eh of sample-dbg\vars.cpp:"; Write-Host $c6; $failed++; continue }
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $same = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -A $plain -B $withG -Listings 2>&1 | Out-String
+            $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+            if ($rc -ne 0 -or $same -notmatch '1 pair\(s\): 0 the same \(listings too\), 1 differ in debug information only, 0 violate') { Write-Host "  FAIL -O$lvl --eh=${eh}: cvsame on the object without and with -g (exit $rc):"; Write-Host $same; $failed++; continue }
+            $inRegister = @(Select-String -Path "$withG\vars6.asm" -Pattern '^;@loc \d+ [a-z]').Count
+            if ($inRegister -lt 20) { Write-Host "  FAIL -O$lvl --eh=${eh}: $inRegister places in a register in the listing of vars.cpp (;@loc), 20 or more expected"; $failed++; continue }
+            Write-Host "  ok   -O$lvl --eh=${eh}: with -g the object and listing are what they are without it but for CodeView (cvsame); $inRegister places in a register pass the compiler's own check"
+            $inputs = @("$withG\vars6.obj", "$vdir\varsck.obj")
+            $r = Test-VarsBuild "-O$lvl --eh=$eh, Microsoft's link" $linkExe $inputs @("/DEBUG", "/INCREMENTAL:NO") "vars-$eh-O$lvl-ms" -Dia -Optimized
+            if ($r -eq "") { $failed++ } elseif ($lvl -eq 2 -and $eh -eq "table") { $optMs = $r }
+            if ($lvl -ne 2 -or $eh -ne "table") { continue }
+            # the link variants, on the -O2 object of the table model
+            $lo = & $libExe /nologo "/OUT:$vdir\vars-O2.lib" "$withG\vars6.obj" 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL lib of the -O2 vars6.obj:"; Write-Host $lo; $failed++ }
+            foreach ($v in @(@("/DEBUG", "incremental"), @("/DEBUG /OPT:REF,ICF", "optref"), @("/DEBUG /INCREMENTAL:NO", "lib"))) {
+                $vin = if ($v[1] -eq "lib") { @("$vdir\vars-O2.lib", "$vdir\varsck.obj") } else { $inputs }
+                $what = if ($v[1] -eq "lib") { "the object from a static library" } else { $v[0] }
+                if ((Test-VarsBuild "-O2 --eh=table, Microsoft's link, $what" $linkExe $vin @($v[0] -split ' ') "vars-$eh-O2-ms-$($v[1])" -Optimized) -eq "") { $failed++ }
+            }
+            if ($grideLink -ne "") {
+                $optGride = Test-VarsBuild "-O2 --eh=table, GRIDE's link" $grideLink $inputs @("/DEBUG", "/INCREMENTAL:NO") "vars-$eh-O2-gr" -Dia -Optimized
+                if ($optGride -eq "") { $failed++ }
+                foreach ($v in @(@("/DEBUG /OPT:REF,ICF", "optref"), @("/DEBUG", "lib"))) {
+                    $vin = if ($v[1] -eq "lib") { @("$vdir\vars-O2.lib", "$vdir\varsck.obj") } else { $inputs }
+                    $what = if ($v[1] -eq "lib") { "the object from a static library" } else { $v[0] }
+                    if ((Test-VarsBuild "-O2 --eh=table, GRIDE's link, $what" $grideLink $vin @($v[0] -split ' ') "vars-$eh-O2-gr-$($v[1])" -Optimized) -eq "") { $failed++ }
+                }
+            }
+            # the same object whatever the number of threads (invariant 2)
+            $one = "$vdir\g-O2-j1"; $four = "$vdir\g-O2-j4"
+            New-Item -ItemType Directory -Force $one, $four | Out-Null
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $null = & $exe --compile6 -O2 -g --eh=table --obj --msvc-mangling -q -j 1 -I ..\include -o $one -n vars "..\examples\sample-dbg\vars.cpp" 2>&1
+            $null = & $exe --compile6 -O2 -g --eh=table --obj --msvc-mangling -q -j 4 -I ..\include -o $four -n vars "..\examples\sample-dbg\vars.cpp" 2>&1
+            $ErrorActionPreference = $eap
+            $differ = @(); foreach ($n in "vars6.obj", "vars6.asm", "vars-cv6.txt") { if (-not (Test-Path "$one\$n") -or -not (Test-Path "$four\$n") -or (Get-FileHash "$one\$n").Hash -ne (Get-FileHash "$four\$n").Hash) { $differ += $n } }
+            if ($differ.Count -eq 0) { Write-Host "  ok   -O2 -g: -j 1 and -j 4 write the same object, listing and description" }
+            else { Write-Host "  FAIL -O2 -g: -j 1 and -j 4 differ in $($differ -join ', ')"; $failed++ }
+        }
+    }
+    # gride-dbg on the -O2 programs of both linkers: the same answers to dv (a variable in a register shows as GRIDE's
+    # debugger shows it today, docs\design-codeview.md section 10, D4 to D6; what is compared is that the two PDBs agree;
+    # a reference in a register is printed as the register's value, an address of the run, which is taken out)
+    if ($grideDbg -ne "" -and (Test-Path $grideDbg) -and $optGride -ne "" -and $optMs -ne "") {
+        $vlines = @(Get-Content "..\examples\sample-dbg\vars.cpp")
+        $bps = @(); for ($k = 0; $k -lt $vlines.Count; ++$k) { if ($vlines[$k] -match '^\s+checkpoint\("fn=(refs|params|sum|Both::get|blocks|handler|floats|regs|makeBig)') { $bps += ($k + 1) } }
+        $cmds = @(); foreach ($l in $bps) { $cmds += "bp ``vars.cpp:$l``" }; foreach ($l in $bps) { $cmds += "g"; $cmds += "dv /t /V" }
+        $answers = @{}
+        foreach ($pe in $optMs, $optGride) {
+            $in = "$pe.dbg.in.txt"; $out = "$pe.dbg.out.txt"
+            [IO.File]::WriteAllText($in, (($cmds + "q") -join "`n") + "`n", (New-Object System.Text.ASCIIEncoding))
+            $p = Start-Process -FilePath $grideDbg -ArgumentList "`"$pe`"" -WorkingDirectory $vdir -RedirectStandardInput $in -RedirectStandardOutput $out -RedirectStandardError "$pe.dbg.err.txt" -NoNewWindow -PassThru
+            if (-not $p.WaitForExit(120000)) { $p.Kill() }
+            $answers[$pe] = @(Get-Content $out | ForEach-Object { $_ -replace '[0-9a-f]{8}`[0-9a-f]{8}', 'ADDR' -replace '\+0x[0-9a-f]+:', '+OFF:' -replace '^vars-table-O2-(ms|gr)!', 'vars!' -replace ' = \d{9,}$', ' = ADDR' })
+        }
+        $hits = @($answers[$optMs] | Where-Object { $_ -match '^Breakpoint \d+ hit' }).Count
+        if ($hits -eq $bps.Count -and @(Compare-Object $answers[$optMs] $answers[$optGride]).Count -eq 0) { Write-Host "  ok   -O2: gride-dbg stops at $hits checkpoint lines and dv prints the same $($answers[$optMs].Count) lines from both linkers' programs" }
+        else { Write-Host "  FAIL -O2: gride-dbg: $hits of $($bps.Count) breakpoints hit; from the two linkers' programs:"; Compare-Object $answers[$optMs] $answers[$optGride] | Select-Object -First 8 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
+    }
     if ($failed -ne 0) { throw "$failed CodeView variable check(s) failed" }
+
+    Write-Host ""
+    Write-Host "=== Test 22: CodeView source checksums (-g): the SHA-256 of each source in the file table, read back through dbghelp ==="
+    # row M10, docs\design-codeview.md stage 5. With -g every entry of an object's file table (DEBUG_S_FILECHKSMS) carries
+    # the SHA-256 of its source file, of the bytes the preprocessor read, as cl 19.52's /Z7 objects do; a debugger holds
+    # a source against it.
+    #   - the hash (cv\CvSha256): cppparse --sha256 on the messages of the standard's examples (FIPS 180-4) against their
+    #     known digests, on files of the lengths around the padding's limits (0, 55, 56, 63, 64, 65 bytes and more) against
+    #     Get-FileHash, and on one file of 2^29 + 1 bytes, whose length in bits does not fit 32 bits
+    #   - sample-dbg\sums.cpp and sums.h, copied to out\dbgsums\src (the test edits them), built with -g and -g2 at -O0
+    #     and -O2: cvsame against the object without (debug information changes no code); every entry of the object's file
+    #     table has kind 3 and 32 bytes, the SHA-256 of the file it names (the table read from the object's bytes here and,
+    #     where Visual Studio has it, by llvm-readobj); -g2's table is -g's; without the option the table has the files
+    #     with code alone and no entry has a checksum
+    #   - the same unit by cl /Z7: the two tables name the same files, every one the unit includes, and each entry is
+    #     cl's (kind, checksum, 40 bytes)
+    #   - linked with /DEBUG by Microsoft's link and, where GRIDE is found, by GRIDE's, neither saying anything:
+    #     sample-dbg-driver\dbgsum.cpp (cl, dbghelp: SymEnumSourceFiles, SymGetSourceFileChecksum) gives the file's own
+    #     SHA-256 for the unit, for its header and for every other file of the table; without -g it gives none
+    #   - a unit whose #line directives name a file that does not exist and one it does not read: those entries have no
+    #     checksum, in cl's object as in cppparse's; it includes a header twice, in two spellings: one entry in both
+    #   - the unit and its header edited (a line added to each): the checksums the PDBs hold are no longer the files';
+    #     built again, they are
+    #   - the compiler's own sources with -g (test 20's objects): every entry of every object's table is its file's SHA-256
+    $failed = 0
+    $sdir = "$Sandbox\out\dbgsums"
+    New-Item -ItemType Directory -Force $sdir, "$sdir\src", "$sdir\len" | Out-Null
+    Get-ChildItem $sdir -File -Recurse | Remove-Item
+    $linkExe = "$Msvc\bin\Hostx64\x64\link.exe"
+    $gride = & { . "$Sandbox\scripts\toolset.ps1"; ,@($GrideRoot, $GrideLink) }
+    $grideLink = $gride[1]
+    $readobj = "$VsRoot\VC\Tools\Llvm\x64\bin\llvm-readobj.exe"
+    $libs = @("libucrt.lib", "libvcruntime.lib", "libcmt.lib", "kernel32.lib", "legacy_stdio_definitions.lib")
+    $shaOf = @{}
+    function Get-Sha([string]$path) {
+        if (-not $shaOf.ContainsKey($path)) { $shaOf[$path] = if (Test-Path -LiteralPath $path) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLower() } else { "no such file" } }
+        return $shaOf[$path]
+    }
+    # what cppparse --sha256 prints for the files of a folder, by file name
+    function Get-CppparseSha([string]$pattern) {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $lines = @(& $exe --sha256 $pattern 2>&1 | ForEach-Object { "$_" })
+        $ErrorActionPreference = $eap
+        $map = @{}
+        foreach ($l in $lines) { if ($l -match '^([0-9a-f]{64})  (.+)$') { $map[(Split-Path $Matches[2] -Leaf)] = $Matches[1] } }
+        return $map
+    }
+    # the hash: the standard's examples (FIPS 180-4 and its example file: "abc", the empty message, the messages of 448
+    # and 896 bits, a million "a") against their digests
+    $ascii = New-Object System.Text.ASCIIEncoding
+    $known = @(
+        @("empty.bin", "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        @("abc.bin", "abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        @("bits448.bin", "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
+        @("bits896.bin", "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu", "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1"),
+        @("million-a.bin", ("a" * 1000000), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
+    )
+    foreach ($k in $known) { [IO.File]::WriteAllBytes("$sdir\len\$($k[0])", $ascii.GetBytes($k[1])) }
+    # ... and files of every length around a block's end and the padding's limit (a message of 55 bytes is the longest
+    # that fits one block with its padding) and around the 65,521 bytes --sha256 reads at a time (no multiple of a
+    # block, so the larger files go through a block that is begun), with bytes of every value, against Get-FileHash
+    $lengths = @(1, 2, 54, 55, 56, 57, 62, 63, 64, 65, 118, 119, 120, 121, 127, 128, 129, 4095, 4096, 4097, 65520, 65521, 65522, 65535, 65536, 65537, 131042, 131079, 1048576)
+    foreach ($n in $lengths) { $b = New-Object byte[] $n; (New-Object System.Random $n).NextBytes($b); [IO.File]::WriteAllBytes("$sdir\len\len$n.bin", $b) }
+    $got = Get-CppparseSha "$sdir\len\*.bin"
+    $wrong = @()
+    foreach ($k in $known) { if ($got[$k[0]] -ne $k[2]) { $wrong += "$($k[0]): $($got[$k[0]]), the standard has $($k[2])" } }
+    foreach ($f in (Get-ChildItem "$sdir\len\*.bin")) { if ($got[$f.Name] -ne (Get-Sha $f.FullName)) { $wrong += "$($f.Name): $($got[$f.Name]), Get-FileHash has $(Get-Sha $f.FullName)" } }
+    if ($wrong.Count -eq 0 -and $got.Count -eq $known.Count + $lengths.Count) { Write-Host "  ok   cppparse --sha256: the $($known.Count) messages of the standard's examples have their digests, and $($lengths.Count) files of 1 to 1,048,576 bytes (55, 56, 63, 64, 65 among them) the ones of Get-FileHash" }
+    else { Write-Host "  FAIL cppparse --sha256 ($($got.Count) of $($known.Count + $lengths.Count) files answered):"; $wrong | Select-Object -First 6 | ForEach-Object { Write-Host "         $_" }; $failed++ }
+    # 2^29 + 1 bytes: 2^32 + 8 bits, a length that needs the upper half of the 64-bit field the padding ends with
+    $big = "$sdir\len\big.raw"
+    $fs = [IO.File]::Create($big); $fs.SetLength(536870913); $fs.Position = 536870912; $fs.WriteByte(0x61); $fs.Close()
+    $got = Get-CppparseSha $big
+    if ($got["big.raw"] -and $got["big.raw"] -eq (Get-Sha $big)) { Write-Host "  ok   cppparse --sha256: a file of 536,870,913 bytes (its length in bits is beyond 32 bits) has the digest of Get-FileHash" }
+    else { Write-Host "  FAIL cppparse --sha256 on a file of 536,870,913 bytes: $($got['big.raw']), Get-FileHash has $(Get-Sha $big)"; $failed++ }
+    Remove-Item $big
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $none = & $exe --sha256 "$sdir\len\no-such-file.bin" 2>&1 | Out-String; $rc = $LASTEXITCODE
+    $ErrorActionPreference = $eap
+    if ($rc -eq 0 -or $none -match '[0-9a-f]{64}') { Write-Host "  FAIL cppparse --sha256 of a file that does not exist: exit $rc, $none"; $failed++ }
+
+    # the file table of an object, read from its bytes: the first .debug$S that has a DEBUG_S_FILECHKSMS (F4h) and a
+    # DEBUG_S_STRINGTABLE (F3h) subsection; an entry is {the name's offset in the string table (4 bytes), the checksum's
+    # length (1), its kind (1), the checksum, zeros to four bytes}. Returns the entries in order: Name, Kind, Sum, Size
+    function Read-FileTable([string]$objPath) {
+        $b = [IO.File]::ReadAllBytes($objPath)
+        $count = [BitConverter]::ToUInt16($b, 2)
+        $first = 20 + [BitConverter]::ToUInt16($b, 16)
+        $latin = [Text.Encoding]::GetEncoding(28591)
+        for ($s = 0; $s -lt $count; $s++) {
+            $h = $first + 40 * $s
+            if ($b[$h] -ne 0x2E -or $latin.GetString($b, $h, 8) -ne '.debug$S') { continue }
+            $size = [BitConverter]::ToUInt32($b, $h + 16); $at = [BitConverter]::ToUInt32($b, $h + 20)
+            $sums = $null; $names = $null
+            $p = $at + 4
+            while ($p + 8 -le $at + $size) {
+                $kind = [BitConverter]::ToUInt32($b, $p); $len = [BitConverter]::ToUInt32($b, $p + 4)
+                if ($kind -eq 0xF4) { $sums = @(($p + 8), $len) } elseif ($kind -eq 0xF3) { $names = @(($p + 8), $len) }
+                $p += 8 + $len; $p += (4 - ($p - $at) % 4) % 4
+            }
+            if ($null -eq $sums -or $null -eq $names) { continue }
+            $out = New-Object System.Collections.ArrayList
+            $q = $sums[0]; $end = $sums[0] + $sums[1]
+            while ($q + 6 -le $end) {
+                $nameAt = $names[0] + [BitConverter]::ToUInt32($b, $q); $n = $b[$q + 4]; $kind = $b[$q + 5]
+                $z = $nameAt; while ($z -lt $names[0] + $names[1] -and $b[$z] -ne 0) { $z++ }
+                $sum = ""; for ($i = 0; $i -lt $n; $i++) { $sum += $b[$q + 6 + $i].ToString("x2") }
+                $entry = 6 + $n; $entry += (4 - $entry % 4) % 4
+                $pad = 0; for ($i = 6 + $n; $i -lt $entry; $i++) { $pad += $b[$q + $i] }
+                $null = $out.Add([pscustomobject]@{ Name = $latin.GetString($b, $nameAt, $z - $nameAt); Kind = [int]$kind; Sum = $sum; Size = $entry; Padding = $pad })
+                $q += $entry
+            }
+            return ,@($out)
+        }
+        return ,@()
+    }
+    # what is wrong with a table whose every entry should carry its file's SHA-256, in cl's form (40 bytes an entry)
+    function Test-Sums($table) {
+        $bad = @()
+        foreach ($e in $table) {
+            if ($e.Kind -ne 3 -or $e.Sum.Length -ne 64 -or $e.Size -ne 40 -or $e.Padding -ne 0) { $bad += "$($e.Name): kind $($e.Kind), $($e.Sum.Length / 2) bytes, an entry of $($e.Size)" }
+            elseif ($e.Sum -ne (Get-Sha $e.Name)) { $bad += "$($e.Name): $($e.Sum), the file has $(Get-Sha $e.Name)" }
+        }
+        return $bad
+    }
+    function Build-Sums([string]$opt, [int]$lvl, [string]$dir) {
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        if (Test-Path "$dir\sums6.obj") { Remove-Item "$dir\sums6.obj" }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $c6 = & $exe --compile6 "-O$lvl" $opt --obj --msvc-mangling -q -I ..\include -o $dir -n sums "$sdir\src\sums.cpp" 2>&1 | Out-String
+        $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or -not (Test-Path "$dir\sums6.obj")) { Write-Host "  FAIL --compile6 -O$lvl $opt of sample-dbg\sums.cpp:"; Write-Host $c6; return $false }
+        return $true
+    }
+    # links the object with /DEBUG and runs the program; the linker has to say nothing
+    function Link-Sums([string]$what, [string]$linker, [string]$obj, [string]$out) {
+        if (Test-Path $out) { Remove-Item $out }
+        $lo = & $linker /nologo /DEBUG /INCREMENTAL:NO /SUBSYSTEM:CONSOLE "/OUT:$out" $obj "out\x64\cppparse_rt.obj" @libs 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $out) -or $lo.Trim() -ne "") { Write-Host "  FAIL $what, link /DEBUG (it has to say nothing):"; Write-Host $lo; return $false }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $run = & $out 2>&1 | Out-String; $rc = $LASTEXITCODE
+        $ErrorActionPreference = $eap
+        if ($rc -ne 0 -or $run -notmatch 'sum 400') { Write-Host "  FAIL ${what}: the program exits with $rc and prints $run"; return $false }
+        return $true
+    }
+    # the checksums a program's PDB holds, as dbghelp gives them: the file's path in lower case -> "<kind> <digits>"
+    function Get-PdbSums([string]$program) {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        $lines = @(& "$sdir\dbgsum.exe" $program 2>&1 | ForEach-Object { "$_".TrimEnd() }); $rc = $LASTEXITCODE
+        $ErrorActionPreference = $eap
+        $map = @{}
+        if ($rc -ne 0) { return $map }
+        foreach ($l in $lines) { if ($l -match '^(\S+) (\S+) (.+)$') { $map[$Matches[3].ToLower()] = "$($Matches[1]) $($Matches[2])" } }
+        return $map
+    }
+    # the files of a table whose checksum in the PDB is not the given one ("sha256 <the file's own>" where none is given)
+    function Compare-PdbSums($table, $pdb, [string]$want = "") {
+        $bad = @()
+        foreach ($e in $table) {
+            $w = if ($want -ne "") { $want } else { "sha256 " + (Get-Sha $e.Name) }
+            if ($pdb[$e.Name.ToLower()] -ne $w) { $bad += "$($e.Name): the PDB has '$($pdb[$e.Name.ToLower()])', expected '$w'" }
+        }
+        return $bad
+    }
+    Copy-Item "..\examples\sample-dbg\sums.cpp", "..\examples\sample-dbg\sums.h" "$sdir\src"
+    $unit = "$sdir\src\sums.cpp"; $header = "$sdir\src\sums.h"
+    $clOut = Build-Program @("/EHsc", "/W3", "/Fo$sdir\dbgsum.obj", "..\examples\sample-dbg-driver\dbgsum.cpp") @("$sdir\dbgsum.obj") "$sdir\dbgsum.exe" | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg-driver\dbgsum.cpp" }
+    $clOut = & $cl /nologo /c /EHsc /W3 /Od /Z7 /X /I..\include "/Fo$sdir\sums-cl.obj" $unit 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $clOut; throw "cl could not compile sample-dbg\sums.cpp" }
+    $clTable = Read-FileTable "$sdir\sums-cl.obj"
+    $programs = @()          # the -O0 -g programs, for the edit below
+    foreach ($lvl in @(0, 2)) {
+        $at = "-O$lvl -g"
+        $plain = "$sdir\plain$lvl"; $withG = "$sdir\g$lvl"; $withG2 = "$sdir\g2-$lvl"
+        if (-not ((Build-Sums "-g0" $lvl $plain) -and (Build-Sums "-g" $lvl $withG) -and (Build-Sums "-g2" $lvl $withG2))) { $failed++; continue }
+        $violations = @()
+        foreach ($d in $withG, $withG2) {
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $same = & powershell -NoProfile -ExecutionPolicy Bypass -File "$Sandbox\scripts\cvsame.ps1" -A $plain -B $d -Listings 2>&1 | Out-String
+            $rc = $LASTEXITCODE; $ErrorActionPreference = $eap
+            if ($rc -ne 0 -or $same -notmatch '1 pair\(s\): 0 the same \(listings too\), 1 differ in debug information only, 0 violate') { $violations += $same }
+        }
+        if ($violations.Count -eq 0) { Write-Host "  ok   ${at}: the object and listing are what they are without it but for CodeView, with -g2 too (cvsame)" }
+        else { Write-Host "  FAIL ${at}: cvsame on the objects without and with -g, -g2:"; Write-Host ($violations -join "`n"); $failed++ }
+        $tPlain = Read-FileTable "$plain\sums6.obj"; $tG = Read-FileTable "$withG\sums6.obj"; $tG2 = Read-FileTable "$withG2\sums6.obj"
+        $names = @($tG | ForEach-Object { $_.Name })
+        $bad = @(Test-Sums $tG)
+        if ($names -notcontains $unit) { $bad += "the table does not name $unit" }
+        if ($names -notcontains $header) { $bad += "the table does not name $header" }
+        if ($tG.Count -lt 3) { $bad += "the table names $($tG.Count) file(s): the unit, its header and a header of the library are expected" }
+        if ((($tG2 | ForEach-Object { "$($_.Name) $($_.Kind) $($_.Sum)" }) -join "|") -ne (($tG | ForEach-Object { "$($_.Name) $($_.Kind) $($_.Sum)" }) -join "|")) { $bad += "-g2's table is not -g's" }
+        # without the option: the files a line table names (the unit, its header, one of the library at least), each of
+        # them in -g's table too, no checksum, 8 bytes an entry (what every object had before stage 5)
+        $plainNames = @($tPlain | ForEach-Object { $_.Name })
+        if ($plainNames -notcontains $unit -or $plainNames -notcontains $header -or $tPlain.Count -lt 3) { $bad += "the object without -g names $($plainNames -join ', ')" }
+        if (@($plainNames | Where-Object { $names -notcontains $_ }).Count -ne 0) { $bad += "the object without -g names a file -g's table does not" }
+        if ($tPlain.Count -ge $tG.Count) { $bad += "-g's table ($($tG.Count) files) should name more than the $($tPlain.Count) files that have code" }
+        $withSum = @($tPlain | Where-Object { $_.Kind -ne 0 -or $_.Sum -ne "" -or $_.Size -ne 8 })
+        if ($withSum.Count -ne 0) { $bad += "the object without -g has $($withSum.Count) entries that are not {kind 0, no checksum, 8 bytes}" }
+        if ($bad.Count -eq 0) { Write-Host "  ok   ${at}: the file table's $($tG.Count) entries (the unit, sums.h and $($tG.Count - 2) headers of the library: every file the unit reads) each carry kind 3 and the 32 bytes of the file's SHA-256, 40 bytes an entry; -g2's table is the same; without the option the table has the $($tPlain.Count) files with code and no checksum" }
+        else { Write-Host "  FAIL ${at}: the object's file table:"; $bad | Select-Object -First 8 | ForEach-Object { Write-Host "         $_" }; $failed++ }
+        if (Test-Path $readobj) {
+            # a second reader of the same bytes: llvm-readobj's FileChecksum blocks, in order
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+            $dump = @(& $readobj --codeview "$withG\sums6.obj" 2>&1 | ForEach-Object { "$_" }); $rrc = $LASTEXITCODE
+            $ErrorActionPreference = $eap
+            $theirs = @(); $cur = $null; $inSum = $false
+            foreach ($l in $dump) {
+                if ($l -match '^\s*FileChecksum \{') { $cur = @{ Name = ""; Kind = ""; Sum = "" }; $inSum = $false }
+                elseif ($null -eq $cur) { continue }
+                elseif ($l -match '^\s*Filename: (.+) \(0x[0-9A-Fa-f]+\)\s*$') { $cur.Name = $Matches[1] }
+                elseif ($l -match '^\s*ChecksumKind: \S+ \(0x([0-9A-Fa-f]+)\)') { $cur.Kind = [Convert]::ToInt32($Matches[1], 16) }
+                elseif ($l -match '^\s*ChecksumBytes \(') { $inSum = $true }
+                elseif ($inSum -and $l -match '^\s*[0-9A-Fa-f]{4}: ((?:[0-9A-Fa-f]{2,8} ?)+)') { $cur.Sum += ($Matches[1] -replace ' ', '').ToLower() }
+                elseif ($l -match '^\s*\}') { $theirs += "$($cur.Name) $($cur.Kind) $($cur.Sum)"; $cur = $null }
+            }
+            $ours = @($tG | ForEach-Object { "$($_.Name) $($_.Kind) $($_.Sum)" })
+            $notSha = @($theirs | Where-Object { $_ -notmatch ' 3 [0-9a-f]{64}$' })
+            if ($rrc -eq 0 -and $theirs.Count -ne 0 -and $theirs.Count -eq $ours.Count -and $notSha.Count -eq 0 -and @(Compare-Object $ours $theirs).Count -eq 0) { Write-Host "  ok   ${at}: llvm-readobj reads the same $($theirs.Count) entries from the object, each with its name, kind 3 (SHA256) and those 32 bytes" }
+            else { Write-Host "  FAIL ${at}: llvm-readobj (exit $rrc) reads $($theirs.Count) entries, $($notSha.Count) of them without a SHA-256; this test reads $($ours.Count):"; Compare-Object $ours $theirs | Select-Object -First 6 | ForEach-Object { Write-Host "         $($_.SideIndicator) $($_.InputObject)" }; $failed++ }
+        } else { Write-Host "  note ${at}: llvm-readobj is not found, the table is read by this test alone" }
+        # cl's table of the same unit: the same files, every one the unit includes (cl in its own order), with the same bytes
+        $clBy = @{}; foreach ($e in $clTable) { $clBy[$e.Name.ToLower()] = $e }
+        $bad = @()
+        $lower = @($names | ForEach-Object { $_.ToLower() })
+        foreach ($e in $clTable) { if ($lower -notcontains $e.Name.ToLower()) { $bad += "$($e.Name) is in cl's table alone" } }
+        foreach ($e in $tG) {
+            $c = $clBy[$e.Name.ToLower()]
+            if ($null -eq $c) { $bad += "$($e.Name) is not in cl's table" }
+            elseif ($c.Kind -ne $e.Kind -or $c.Sum -ne $e.Sum -or $c.Size -ne $e.Size) { $bad += "$($e.Name): cl has kind $($c.Kind), $($c.Sum), an entry of $($c.Size)" }
+        }
+        $clBad = @(Test-Sums $clTable)
+        if ($bad.Count -eq 0 -and $clBad.Count -eq 0 -and $clTable.Count -eq $tG.Count) { Write-Host "  ok   ${at}: the table names the $($clTable.Count) files cl /Z7's object names, and each entry is cl's for that file (kind, checksum, 40 bytes)" }
+        else { Write-Host "  FAIL ${at}: against the file table of cl /Z7's object ($($clTable.Count) entries, $($clBad.Count) of them not their file's SHA-256):"; ($bad + $clBad) | Select-Object -First 8 | ForEach-Object { Write-Host "         $_" }; $failed++ }
+        # through the linkers: the PDB's checksum of every file of the table is the file's own
+        $linkers = @(,@("Microsoft's link", $linkExe, "ms"))
+        if ($grideLink -ne "") { $linkers += ,@("GRIDE's link", $grideLink, "gr") } else { Write-Host "  note ${at}: GRIDE not found, its link is not tried" }
+        foreach ($lk in $linkers) {
+            $program = "$sdir\sums$lvl-$($lk[2]).exe"
+            if (-not (Link-Sums "$at, $($lk[0])" $lk[1] "$withG\sums6.obj" $program)) { $failed++; continue }
+            $pdb = Get-PdbSums $program
+            $bad = @(Compare-PdbSums $tG $pdb)
+            if ($pdb.Count -ne 0 -and $bad.Count -eq 0) { Write-Host "  ok   ${at}, $($lk[0]): it says nothing; dbghelp returns for sums.cpp, sums.h and the other $($tG.Count - 2) files of the table the SHA-256 of the file (SymGetSourceFileChecksum)" }
+            else { Write-Host "  FAIL ${at}, $($lk[0]): the PDB's checksums ($($pdb.Count) source files) are not the files':"; $bad | Select-Object -First 6 | ForEach-Object { Write-Host "         $_" }; $failed++; continue }
+            if ($lvl -eq 0) { $programs += ,@($lk[0], $lk[1], $program, $lk[2]) }
+            if ($lvl -eq 0) {
+                # without -g the PDB has the files and no checksum for them
+                $noSum = "$sdir\sums$lvl-plain-$($lk[2]).exe"
+                if (-not (Link-Sums "-O$lvl without -g, $($lk[0])" $lk[1] "$plain\sums6.obj" $noSum)) { $failed++; continue }
+                $bad = @(Compare-PdbSums $tPlain (Get-PdbSums $noSum) "none -")
+                if ($bad.Count -eq 0) { Write-Host "  ok   -O$lvl without -g, $($lk[0]): dbghelp finds the same $($tPlain.Count) files and no checksum for them" }
+                else { Write-Host "  FAIL -O$lvl without -g, $($lk[0]):"; $bad | Select-Object -First 6 | ForEach-Object { Write-Host "         $_" }; $failed++ }
+            }
+        }
+    }
+    # a name the unit read no file by: #line gives a function the file "sums-gone.y", which does not exist, and another
+    # one sums.h, which exists and which this unit does not include. Neither has a checksum, in cl's table or in
+    # cppparse's: a checksum is of bytes that were compiled, never of a file that merely has the name. And a header
+    # the unit includes twice, the second time with its name in capitals, each time for a function: one entry
+    $lineUnit = "$sdir\src\sumsline.cpp"; $twice = "$sdir\src\sumstwice.h"
+    [IO.File]::WriteAllText($twice, "inline int SUMS_FN(int x) { return x + 1; }`r`n")
+    [IO.File]::WriteAllText($lineUnit, "#define SUMS_FN first`r`n#include `"sumstwice.h`"`r`n#undef SUMS_FN`r`n#define SUMS_FN second`r`n#include `"SUMSTWICE.H`"`r`nint plain(int x) { return first(x) + second(x); }`r`n#line 100 `"sums-gone.y`"`r`nint generated(int x) { return x * 2; }`r`n#line 200 `"$($header -replace '\\', '/')`"`r`nint named(int x) { return x * 3; }`r`n")
+    New-Item -ItemType Directory -Force "$sdir\line" | Out-Null
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+    $c6 = & $exe --compile6 -O0 -g --obj --msvc-mangling -q -I ..\include -o "$sdir\line" -n sumsline $lineUnit 2>&1 | Out-String
+    $clOut = & $cl /nologo /c /W3 /Od /Z7 "/Fo$sdir\line\sumsline-cl.obj" $lineUnit 2>&1 | Out-String
+    $ErrorActionPreference = $eap
+    if (-not (Test-Path "$sdir\line\sumsline6.obj") -or -not (Test-Path "$sdir\line\sumsline-cl.obj")) { Write-Host "  FAIL the unit with #line is not compiled:"; Write-Host $c6; Write-Host $clOut; $failed++ }
+    else {
+        $bad = @()
+        foreach ($who in @(,@("cppparse", "$sdir\line\sumsline6.obj")) + @(,@("cl", "$sdir\line\sumsline-cl.obj"))) {
+            $t = Read-FileTable $who[1]
+            $own = @($t | Where-Object { $_.Name -eq $lineUnit }); $gone = @($t | Where-Object { $_.Name -like "*\sums-gone.y" }); $other = @($t | Where-Object { $_.Name -eq $header })
+            $both = @($t | Where-Object { $_.Name -eq $twice })       # (-eq compares without regard to case)
+            if ($t.Count -ne 4 -or $own.Count -ne 1 -or $gone.Count -ne 1 -or $other.Count -ne 1 -or $both.Count -ne 1) { $bad += "$($who[0])'s table names $(@($t | ForEach-Object { $_.Name }) -join ', ')"; continue }
+            if ($own[0].Kind -ne 3 -or $own[0].Sum -ne (Get-Sha $lineUnit)) { $bad += "$($who[0]): the unit's entry is not its SHA-256" }
+            if ($both[0].Kind -ne 3 -or $both[0].Sum -ne (Get-Sha $twice)) { $bad += "$($who[0]): the entry of the header included twice is not its SHA-256" }
+            foreach ($e in $gone[0], $other[0]) { if ($e.Kind -ne 0 -or $e.Sum -ne "" -or $e.Size -ne 8) { $bad += "$($who[0]): $($e.Name) has kind $($e.Kind), $($e.Sum)" } }
+        }
+        if ($bad.Count -eq 0) { Write-Host "  ok   a file that only #line names (one that does not exist, and sums.h, which the unit does not read) has an entry without a checksum beside the unit's SHA-256, and a header included under two spellings of its name one entry, in cl's table as in cppparse's" }
+        else { Write-Host "  FAIL the file table of a unit with #line:"; $bad | ForEach-Object { Write-Host "         $_" }; $failed++ }
+    }
+    # the sources edited: the checksums the PDBs hold are those of the files as they were, no longer theirs
+    if ($programs.Count -ne 0) {
+        $old = @{ $unit = (Get-Sha $unit); $header = (Get-Sha $header) }
+        foreach ($f in $unit, $header) { [IO.File]::AppendAllText($f, "// a line test 22 adds: the file is no longer the one the program was built from`r`n"); $shaOf.Remove($f) }
+        if ((Get-Sha $unit) -eq $old[$unit] -or (Get-Sha $header) -eq $old[$header]) { Write-Host "  FAIL the edited sources have the SHA-256 they had"; $failed++ }
+        foreach ($pr in $programs) {
+            $pdb = Get-PdbSums $pr[2]
+            $bad = @()
+            foreach ($f in $unit, $header) {
+                $has = $pdb[$f.ToLower()]
+                if ($has -ne "sha256 $($old[$f])") { $bad += "$(Split-Path $f -Leaf): the PDB has '$has', not the checksum of the file as it was built" }
+                if ($has -eq "sha256 $(Get-Sha $f)") { $bad += "$(Split-Path $f -Leaf): the PDB's checksum is the edited file's" }
+            }
+            if ($bad.Count -eq 0) { Write-Host "  ok   sums.cpp and sums.h edited, $($pr[0]): the checksums its PDB holds are no longer the files' SHA-256 (they are those of the files as they were built)" }
+            else { Write-Host "  FAIL sums.cpp and sums.h edited, $($pr[0]):"; $bad | ForEach-Object { Write-Host "         $_" }; $failed++ }
+        }
+        # ... and built again they are the files' once more
+        if (Build-Sums "-g" 0 "$sdir\g0-edited") {
+            $tE = Read-FileTable "$sdir\g0-edited\sums6.obj"
+            $bad = @(Test-Sums $tE)
+            foreach ($pr in $programs) {
+                $program = "$sdir\sums0-edited-$($pr[3]).exe"
+                if (Link-Sums "the edited sources, $($pr[0])" $pr[1] "$sdir\g0-edited\sums6.obj" $program) { $bad += @(Compare-PdbSums $tE (Get-PdbSums $program)) } else { $bad += "$($pr[0]) did not link" }
+            }
+            if ($bad.Count -eq 0 -and $tE.Count -ge 3) { Write-Host "  ok   built again from the edited sources: the object's table and the PDB(s) of $($programs.Count) linker(s) hold the new SHA-256 of sums.cpp and sums.h" }
+            else { Write-Host "  FAIL built again from the edited sources:"; $bad | Select-Object -First 6 | ForEach-Object { Write-Host "         $_" }; $failed++ }
+        } else { $failed++ }
+    }
+    # the compiler's own sources: test 20's -g objects (test 19's own under CPPPARSE_G), every entry of every table
+    $ownG = if ($env:CPPPARSE_G -eq "1" -or $env:CPPPARSE_G -eq "2") { $selfDir } else { "$Sandbox\out\self6g" }
+    if (Test-Path "$ownG\main6.obj") {
+        $entries = 0; $bad = @(); $files = @{}; $objects = @(Get-ChildItem "$ownG\*.obj")
+        foreach ($o in $objects) {
+            $t = Read-FileTable $o.FullName
+            if ($t.Count -eq 0) { $bad += "$($o.Name) has no file table" }
+            $entries += $t.Count
+            foreach ($e in $t) { $files[$e.Name.ToLower()] = $true }
+            $bad += @(Test-Sums $t | ForEach-Object { "$($o.Name): $_" })
+        }
+        if ($bad.Count -eq 0 -and $entries -gt $objects.Count) { Write-Host ("  ok   the own sources and libcpp with -g: all {0:N0} entries of the {1} objects' file tables carry the SHA-256 of their file ({2} files)" -f $entries, $objects.Count, $files.Count) }
+        else { Write-Host "  FAIL the own sources with -g: $($bad.Count) of $entries file table entries are not their file's SHA-256:"; $bad | Select-Object -First 8 | ForEach-Object { Write-Host "         $_" }; $failed++ }
+        if ($ownG -ne $selfDir) {
+            # ... and test 19's objects, without the option, have none
+            $withSum = 0; $entries = 0
+            foreach ($o in (Get-ChildItem "$selfDir\*.obj")) { $t = Read-FileTable $o.FullName; $entries += $t.Count; $withSum += @($t | Where-Object { $_.Kind -ne 0 -or $_.Sum -ne "" -or $_.Size -ne 8 }).Count }
+            if ($withSum -eq 0 -and $entries -ne 0) { Write-Host ("  ok   the own sources without -g: none of the {0:N0} entries has a checksum" -f $entries) }
+            else { Write-Host "  FAIL the own sources without -g: $withSum of $entries file table entries have a checksum"; $failed++ }
+        }
+    }
+    if ($failed -ne 0) { throw "$failed CodeView checksum check(s) failed" }
     Write-Host ""
     if ($KnownDifferences -ne 0) { Write-Host "=== $KnownDifferences known difference(s) under GRIDE's link, each printed above (docs\design-selfhost.md 4.6) ===" }
     Write-Host "=== cppparse: build and all tests succeeded ==="

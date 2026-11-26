@@ -118,8 +118,33 @@ struct IrLocal {
     int         debugParam;  // a parameter: its place among the declared ones (0: "this" or the first); -1: a local
     int         block;       // the block scope that declares it (IrFunction::debugBlocks; 0: the function's)
     bool        byAddress;   // a class parameter passed by address: listed as a reference to the class
+    // what the optimiser did to it, for the places at -O1 and up (5.3): its frame slot is its place only when neither is set
+    bool        staleStores; // a pass removed a store to it (IrFunction::removeStore): the slot may hold an older value
+    bool        promoted;    // Ssa.cpp made it temporaries: nothing writes the slot (its place: IrFunction::debugTemps, or none)
     IrLocal() : type(0), size(8), align(8), addressTaken(false), isParam(false), isThis(false), nonNull(false), ehFlag(false),
-                source(false), debugType(0), debugParam(-1), block(0), byAddress(false) {}
+                source(false), debugType(0), debugParam(-1), block(0), byAddress(false), staleStores(false), promoted(false) {}
+};
+
+// -g, -O1 and up (docs/design-codeview.md 5.4): the temporary that is the one definition of a local Ssa.cpp promoted.
+// exact: the temporary is defined where the variable is assigned (the instruction before the store, or the load of a
+// parameter at the function's start), so the two are equal wherever the temporary is live. Not exact (a pass put a
+// temporary of equal value in its place, or the variable was assigned another variable's value): they are equal only
+// while that temporary is not computed again, which the verifier asks for after the last pass (its definition lies in
+// no cycle of the function)
+struct IrDebugTemp {
+    int  temp;
+    bool exact;
+    IrDebugTemp() : temp(-1), exact(false) {}
+};
+
+// -g: a named result built in the caller's object (IrGen's m_nrvo, -O1 and up) has no slot of its own: it is listed
+// as a reference to its type at the place of the local that holds the hidden result pointer (5.3)
+struct IrDebugAlias {
+    std::string name;        // as the source names it
+    int         type;        // a reference to the variable's type, a number in the module's CvModule
+    int         block;       // the block scope that declares it (0: the function's)
+    int         local;       // the local that holds the hidden result pointer
+    IrDebugAlias() : type(0), block(0), local(-1) {}
 };
 
 // -g: a static local of a function, for the S_LDATA32 in the function's symbols
@@ -158,13 +183,24 @@ struct IrFunction {
     std::vector<int>         debugBlocks;  // its block scopes that declare a variable: the parent of block k (1, 2, ...) at
                                            // [k - 1], 0 for the function's own; numbered in the order IrGen meets them
     bool                     debugInline;  // declared inline (S_FRAMEPROC's "marked inline", as cl sets it)
-    bool                     debugOptimized; // the optimiser ran on it (-O1 and up): until stage 3 its variables have no place
+    bool                     debugOptimized; // the optimiser ran on it (-O1 and up): a variable's place is what 5.3 says there
+    std::map<int, IrDebugTemp> debugTemps;   // -O1 and up: a promoted local (its index) -> the temporary that is its one
+                                             // definition. Ssa.cpp fills it; a pass that puts temporary b in the place of
+                                             // a renames the entry (Optimizer.cpp replaceTempUses), a pass that cannot
+                                             // say erases it; verified after the last pass. Erasing an entry is always
+                                             // right: the variable then has no place
+    std::vector<IrDebugAlias> debugAliases;  // its named result, when IrGen built it in the caller's object
     bool                     keepsFrame; // it calls _AddressOfReturnAddress (TargetIntrinsics): it keeps its frame at every level and
                                          // is never inlined, so [rbp+8] is its own return address
 
     IrFunction() : fn(0), nextTemp(1), retType(0), paramCount(0), hasThis(false), hasTry(false), linkOnce(false), internal(false), replaceable(false), variadic(false), sourceLine(0), debugType(0), debugInline(false), debugOptimized(false), keepsFrame(false) {}
     int  newTemp(const Type* t) { tempTypes[nextTemp] = t; return nextTemp++; }
     int  newBlock(const std::string& label);
+    // the one way a pass takes a store to a local out of the code (docs/design-codeview.md 5.4, risk 2): the
+    // instruction becomes a nop and the local is marked (IrLocal::staleStores), so that -g never describes a slot
+    // whose latest value was not written. (Ssa.cpp's promotion drops every load and store of a local and marks it
+    // 'promoted'; a block nothing reaches goes with its stores, which never ran)
+    void removeStore(IrInst& in);
     void computeCfg();
     // temporaries live on entry to and on exit from every block, with the successors taken from the branches;
     // extraSuccs (optional, one list per block) adds edges no instruction names: the back end's exception edges

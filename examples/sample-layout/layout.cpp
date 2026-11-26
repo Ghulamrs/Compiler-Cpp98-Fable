@@ -293,6 +293,35 @@ long pvLife() { g_pvLog = 0; long built; { PVD d; built = g_pvLog; g_pvLog = 0; 
 int  pvCopy(const PVD& d) { PVD c(d); return c.probe(); }
 int  pvMemptr(const PVD& d, int PVL::* pm, int (PV::*pf)() const) { return d.*pm * 10000 + (d.*pf)(); }
 
+// a virtual base named before the polymorphic base (row G45)
+long g_fvLog = 0;
+static bool fvBoth(const FP* p, const FV* v, int want) { return p->r() == want && v->r() == want; }
+FV::FV() : v(1) { g_fvLog = g_fvLog * 10 + (r() == 1 ? 1 : 0); }
+FV::~FV() { g_fvLog = g_fvLog * 10 + (r() == 1 ? 6 : 0); }
+int FV::r() const { return v; }
+int FV::s() const { return 2; }
+FP::FP() : p(3) { g_fvLog = g_fvLog * 10 + (r() == 3 ? 2 : 0); }
+FP::~FP() { g_fvLog = g_fvLog * 10 + (r() == 3 ? 5 : 0); }
+int FP::r() const { return p; }
+int FP::t() const { return 4; }
+FJ::FJ() : j(5) { g_fvLog = g_fvLog * 10 + (fvBoth(this, this, 55) ? 3 : 0); }
+FJ::~FJ() { g_fvLog = g_fvLog * 10 + (fvBoth(this, this, 55) ? 4 : 0); }
+int FJ::r() const { return j + 50; }
+int FN::r() const { return 60; }
+int FN::s() const { return 61; }
+FW::FW() : w(7) {}
+int FW::r() const { return w + 70; }
+int  fvCallP(const FP* p) { return p->r() * 100 + p->t(); }
+int  fvCallV(const FV* p) { return p->r() * 100 + p->s(); }
+int  fvCallJ(const FJ* p) { const FP* b = p; const FV* v = p; const int a = p->r(); return a == b->r() && a == v->r() ? a * 100 : 0; }
+FP*  fvMakeJ() { return new FJ; }
+FV*  fvMakeN() { return new FN; }
+FP*  fvMakeW() { return new FW; }
+void fvDeleteP(FP* p) { delete p; }
+void fvDeleteV(FV* p) { delete p; }
+long fvLife() { g_fvLog = 0; long built; { FJ j; built = g_fvLog; g_fvLog = 0; } return built * 1000 + g_fvLog; }
+int  fvMemptr(const FJ& j, int (FP::*pf)() const, int (FJ::*jf)() const) { return (j.*pf)() * 1000 + (j.*jf)(); }
+
 int g_ovLog = 0;
 OV::OV() : o(0) {}
 int OV::a() const { return 1 + o; }

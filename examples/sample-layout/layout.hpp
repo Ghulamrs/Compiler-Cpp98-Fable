@@ -219,7 +219,9 @@ void deleteDNArray(DN* p);
     X(sizeof(int MP::*)) X(sizeof(int (MP::*)() const)) X(sizeof(int MQ::*)) X(sizeof(int (MQ::*)() const)) X(sizeof(int VL::*)) \
     X(sizeof(int (VL::*)() const)) X(sizeof(MH)) X(LAYOUT_FIELD(MH, x)) X(sizeof(RC)) X(LAYOUT_BASE(RC, RB)) X(LAYOUT_FIELD(RC, c)) \
     X(sizeof(PV)) X(sizeof(PVL)) X(LAYOUT_FIELD(PVL, l)) X(sizeof(PVD)) X(LAYOUT_BASE(PVD, PVR)) X(LAYOUT_FIELD(PVD, d)) \
-    X(sizeof(PVX)) X(LAYOUT_FIELD(PVX, x)) X(sizeof(PVN)) X(LAYOUT_FIELD(PVN, n)) X(sizeof(PVN2)) X(LAYOUT_FIELD(PVN2, n2))
+    X(sizeof(PVX)) X(LAYOUT_FIELD(PVX, x)) X(sizeof(PVN)) X(LAYOUT_FIELD(PVN, n)) X(sizeof(PVN2)) X(LAYOUT_FIELD(PVN2, n2)) \
+    X(sizeof(FJ)) X(LAYOUT_BASE(FJ, FP)) X(LAYOUT_FIELD(FJ, j)) X(sizeof(FN)) X(LAYOUT_FIELD(FN, n)) X(sizeof(FL)) \
+    X(sizeof(FW)) X(LAYOUT_BASE(FW, FP)) X(LAYOUT_BASE(FW, FL)) X(LAYOUT_FIELD(FW, w))
 
 // ---- virtual bases (MSVC: vbptr, vbtables, the "most derived" flag, the vbase destructor ??_D) -----------
 // A class with virtual bases shares the vbptr of its first non-virtual base that has one or gets its own after
@@ -290,6 +292,31 @@ void pvDelete(PV* p);                      // delete p: PV's virtual destructor,
 long pvLife();                             // a PVD on cppparse's stack: the log of its construction * 1000 + the log of its destruction
 int  pvCopy(const PVD& d);                 // a copy's probe()
 int  pvMemptr(const PVD& d, int PVL::* pm, int (PV::*pf)() const);   // d.*pm * 10000 + (d.*pf)()
+
+// ---- a virtual base named before the polymorphic base (row G45) ---------------------------------------------
+// FJ names its virtual base FV before FP and overrides r(), which both have: the override is in the table at offset
+// 0, FP's, and takes this at the object (cl's this adjustor 0); FV's table reaches it through a thunk (cl's vtordisp
+// thunk, FJ having a constructor). FN is the shape without a constructor (a plain adjustor), and FW's first base has
+// its only vfptr inside its virtual base. The constructors and destructors (in layout.cpp) call r() through both
+// bases and log a digit when it is the function the stage must see. Both compilers build the objects, call through
+// every base and delete them; cl derives FK from FJ.
+extern long g_fvLog;
+struct FV { int v; FV(); virtual ~FV(); virtual int r() const; virtual int s() const; };                        // r 1, s 2
+struct FP { int p; FP(); virtual ~FP(); virtual int r() const; virtual int t() const; };                        // r 3, t 4
+struct FJ : virtual FV, FP { int j; FJ(); ~FJ(); int r() const; };                                              // r 55
+struct FN : virtual FV, FP { int n; int r() const; int s() const; };                                            // r 60, s 61
+struct FL : virtual FV { int l; };
+struct FW : FL, FP { int w; FW(); int r() const; };                                                             // r 77
+int  fvCallP(const FP* p);                 // p->r() * 100 + p->t()
+int  fvCallV(const FV* p);                 // p->r() * 100 + p->s()
+int  fvCallJ(const FJ* p);                 // p->r() * 100 when the calls through FJ*, FP* and FV* agree, else 0
+FP*  fvMakeJ();                            // new FJ
+FV*  fvMakeN();
+FP*  fvMakeW();
+void fvDeleteP(FP* p);                     // delete p: FP's virtual destructor
+void fvDeleteV(FV* p);
+long fvLife();                             // an FJ on cppparse's stack: the log of its construction * 1000 + the log of its destruction
+int  fvMemptr(const FJ& j, int (FP::*pf)() const, int (FJ::*jf)() const);   // (j.*pf)() * 1000 + (j.*jf)()
 
 // ---- covariant returns through a secondary base (cl's return-adjusting thunks) ------------------------------
 // RC::self overrides RB::self with a covariant return type and RB is at 16 in RC: cl gives RC::self a slot of its

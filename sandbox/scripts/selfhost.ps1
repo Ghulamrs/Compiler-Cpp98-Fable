@@ -26,9 +26,10 @@
 # both generations runs with -g (through the environment variable CPPPARSE_G, which the self-built compiler reads as
 # the starting one does), in folders of its own (out\selfobj-g, out\selfhost-g, out\selfobj2-g, out\selfhost2-g).
 # Generation two's objects and listings must be generation one's: the type indices and every record are a function
-# of the source, whichever compiler built the compiler.
-param([string]$Lvl = "0", [switch]$SkipCompile, [switch]$SkipBootstrap, [string]$Compiler = "", [string]$Linker = "", [switch]$Relink, [switch]$G)
-if ($G) { $env:CPPPARSE_G = "1" }
+# of the source, whichever compiler built the compiler. -G2 is the same with -g2 (the member functions in the classes,
+# CPPPARSE_G=2), in folders out\selfobj-g2 and so on.
+param([string]$Lvl = "0", [switch]$SkipCompile, [switch]$SkipBootstrap, [string]$Compiler = "", [string]$Linker = "", [switch]$Relink, [switch]$G, [switch]$G2)
+if ($G2) { $env:CPPPARSE_G = "2" } elseif ($G) { $env:CPPPARSE_G = "1" }
 . "$PSScriptRoot\toolset.ps1"
 if ($Compiler -ne "") { $Exe = (Resolve-Path $Compiler).Path }
 $gride = ($Linker -eq "gride")
@@ -40,7 +41,7 @@ if ($gride) {
 Write-Host "=== starting compiler: $Exe ==="
 # the folders: generation one's objects and its exe (with libcpp's object, the runtime's and the reference of
 # CheckSample), generation two's. With -Relink the objects are read where the default run left them
-$debugTag = if ($G) { "-g" } else { "" }
+$debugTag = if ($G2) { "-g2" } elseif ($G) { "-g" } else { "" }
 $tag = $(if ($gride) { "-gride" } else { "" }) + $debugTag
 $obj1 = "out\selfobj$tag"; $host1 = "out\selfhost$tag"; $obj2 = "out\selfobj2$tag"; $host2 = "out\selfhost2$tag"
 $from1 = $obj1; $lib1 = $host1; $from2 = $obj2; $lib2 = $host2
@@ -52,7 +53,7 @@ $ErrorActionPreference = "Continue"
 $started = Get-Date
 $units = $OwnSources
 # what a folder of objects was compiled as; -Relink requires it of both generations
-$stamp = "-O$Lvl" + $(if ($env:CPPPARSE_EH) { " --eh=$env:CPPPARSE_EH" } else { "" }) + $(if ($env:CPPPARSE_G -eq "1") { " -g" } else { "" })
+$stamp = "-O$Lvl" + $(if ($env:CPPPARSE_EH) { " --eh=$env:CPPPARSE_EH" } else { "" }) + $(if ($env:CPPPARSE_G -eq "1") { " -g" } elseif ($env:CPPPARSE_G -eq "2") { " -g2" } else { "" })
 function SameBytes([string]$a, [string]$b) {
     if (-not (Test-Path $a) -or -not (Test-Path $b)) { return $false }
     return [System.Linq.Enumerable]::SequenceEqual([byte[]][System.IO.File]::ReadAllBytes("$Sandbox\$a"), [byte[]][System.IO.File]::ReadAllBytes("$Sandbox\$b"))

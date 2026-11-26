@@ -89,9 +89,13 @@ dashed box = base class not defined in the parsed files.
 --obj            write the .obj with cppparse's own COFF writer (version 5)
 --msvc-mangling  MSVC-compatible decorated names, so MSVC code links with plain C++ declarations
 -g               version 6 (--compile6): CodeView types and variables in the object (.debug$T, and the globals,
-                 constants, type names, parameters and locals in .debug$S) beside the line tables every object has, and
-                 <name>-cv6.txt; the code is the same bytes with and without it. Off by default (-g0);
-                 CPPPARSE_G=1 in the environment sets it (see "Debug information")
+                 constants, type names, parameters and locals in .debug$S) beside the line tables every object has, every
+                 source file of the unit with its SHA-256 in the file table, and <name>-cv6.txt; the code is the same bytes with
+                 and without it. Off by default (-g0); CPPPARSE_G=1 in the environment sets it (see "Debug information")
+-g2              -g, and every class lists the member functions it declares, as cl's /Z7 types do (about a quarter
+                 more object bytes than -g on the compiler's own sources); CPPPARSE_G=2 in the environment sets it
+--sha256         print the SHA-256 of each input file's bytes ("<64 digits>  <file>") and exit: the checksum -g
+                 records of a source file
 -E               version 6: preprocess only and print the result (like cl /EP)
 --parse6         version 6: parse with the new front end (counts, syntax errors, <name>-ast6.txt)
 --sema6          version 6: --parse6 plus semantic analysis (<name>-sym6.txt)
@@ -420,9 +424,15 @@ cppparse's code to its file and line; without `/DEBUG` the linker drops the sect
 lines of three functions back. Not provided: inlinee line records, column numbers.
 
 With `-g` (off by default; `-g0` is the default spelled out, and `CPPPARSE_G=1` in the environment sets `-g` for
-a run that names neither) an object also carries its types and its variables, as cl's `/Z7` objects do: stages 1
-and 2 of row M10's plan (docs/design-codeview.md). At `-O0` a debugger shows every parameter and local with its
-value; at `-O1` and up the variables are listed without a place until stage 3.
+a run that names neither) an object also carries its types, its variables and the checksums of its sources, as
+cl's `/Z7` objects do: row M10, stages 1 to 5 of its plan (docs/design-codeview.md, whose status has what each
+costs: objects, PDB, compile and link time). `-g2` (`CPPPARSE_G=2`) is `-g` with the member functions in
+the classes, below. At `-O0` a debugger shows every parameter and local with its
+value. At `-O1` and up it shows the variables that live in memory (an object, an array, a variable whose address is
+taken) and those with one definition (a parameter that is not assigned, a local assigned once), each where its value
+is, a register or a frame slot, over the code where it lives; a variable assigned more than once, one whose value
+the optimiser folded away, and any variable at an address where its value is in no place the compiler vouches for
+is listed as optimised out. A place is never a guess: giving one up is always allowed, a wrong one is an error.
 
 - `.debug$T` holds the type records of every type the unit's functions and variables have: the fundamental types
   by CodeView's own indices, `LF_MODIFIER` (`const`, `volatile`), `LF_POINTER` (pointers, references, pointers to
@@ -433,8 +443,21 @@ value; at `-O1` and up the variables are listed without a place until stage 3.
   position; the members of an anonymous union or struct as members of the class), the static members and the
   nested types. Every class and enumeration carries cl's display name and the type descriptor's decorated name
   (`.?AVCircle@geom@@`) as its unique name, so that a linker makes one type of cl's record and cppparse's, and
-  two units' classes of one name in their unnamed namespaces stay two. Member functions are not listed yet
-  (the plan's stage 4).
+  two units' classes of one name in their unnamed namespaces stay two. A function's type carries cl's
+  attributes (a constructor, one of a class with virtual bases, a class result that comes back through the hidden
+  pointer the C++ way), a member function's the class and the type of `this`.
+- With `-g2` a class's field list also holds the member functions the class declares, in the order of the
+  declarations among the data members: `LF_ONEMETHOD` with the access, the kind (static, virtual, introducing a
+  vftable slot at its offset, pure) and the function's `LF_MFUNCTION`; the functions of an overloaded name as one
+  `LF_METHOD` with an `LF_METHODLIST`; constructors under the class's name, the destructor, operators, and
+  conversion functions with their type as cl spells it there (`operator const char *`, `operator struct
+  ns::S`). The type a class lists for an override that is entered through a later base's table says by how much
+  `this` is moved for it, as cl's does (the function's own procedure says 0: it puts `this` right at entry).
+  The classes that the functions' types name are described too. Not listed: what the compiler generates (cl
+  lists its own implicit members and `__vecDelDtor`), the instances of a member template, a conversion function
+  to a template's instance, a function, an array or a pointer to member. They are an option of their own for
+  their size: the compiler's own sources' objects grow by 26 % with `-g` at `-O0` and by 60 % with `-g2`
+  (`.debug$T` 4.0 MB and 13.1 MB), sample-lib's by 19 % and 29 %.
 - `.debug$S` gets the procedure's type on its `S_GPROC32` / `S_LPROC32`, with `DbgStart` behind the entry
   sequence (the parameters' copies into the frame, and a `this` put right in a function entered with an adjusted
   one) and `DbgEnd` at its epilogue; `S_FRAMEPROC` (the frame's size and saved registers, RBP as the base of the
@@ -445,7 +468,12 @@ value; at `-O1` and up the variables are listed without a place until stage 3.
   variable, all in the procedure (dbghelp does not look into the blocks of such a procedure), each with its place:
   the frame slot over the whole function (`S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE`) for the function's own
   variables, the frame slot over its block's pieces of code (`S_DEFRANGE_REGISTER_REL` with the holes as gaps) for
-  a block's, none and the flag "optimised out" where there is no place. A block scope is the code IrGen generated
+  a block's, none and the flag "optimised out" where there is no place. At `-O1` and up a variable with one
+  definition has the place of that value over ranges of the code: `S_DEFRANGE_REGISTER` with the part of the register
+  that holds it, as cl names it (`EBX` for an `int`, `SIL` for a `bool`, `XMM6_0` for a `float`, `XMM6L` for a
+  `double`), or `S_DEFRANGE_REGISTER_REL` for a spilled value's slot; a range in a register a call does not keep
+  ends before every call, so that a frame above the top one never shows what a callee left there; a result built in
+  the caller's object is listed as a reference at the hidden result pointer's place. A block scope is the code IrGen generated
   for its statements: every IR instruction carries the number of its block (`;@scope` in the listing), so handlers,
   landing pads and funclets placed behind the function's `ret` are pieces of their block. A class passed by value
   that the calling convention passes by address is listed as a reference to the class, so that every reader shows
@@ -457,6 +485,17 @@ value; at `-O1` and up the variables are listed without a place until stage 3.
   whose definition was written and for the typedef names of namespace scope. A COMDAT variable (a static member of
   a class template's instantiation, a vftable) has its record in an associative `.debug$S` of its own, which goes
   when the COMDAT goes.
+- The file table of the module's `.debug$S` (`DEBUG_S_FILECHKSMS`). Without `-g` it names the source files the
+  line tables refer to, the unit and every header that has code, and an entry is the name alone (8 bytes: no
+  checksum, kind 0). With `-g` it is cl 19.52's table: it names every file the unit read, the unit and each
+  header it includes, with code or without, and an entry carries the SHA-256 of the file's bytes as the
+  preprocessor read them (a byte order mark and the line ends as they are on disk; a file edited while the unit
+  compiles keeps the checksum of what was compiled), in cl's form (40 bytes: the name's offset, length 32, kind
+  3, the 32 bytes, two zeros). The linker puts it in the PDB, and a debugger holds the source file it is about to
+  show against it (dbghelp's `SymGetSourceFileChecksum`; Visual Studio's "require source files to exactly match
+  the original version"). `cppparse --sha256 <file>...` prints the same checksum of any file on disk. A name that
+  only a `#line` directive gives, of a file the unit did not read, has an entry without a checksum, as in cl's
+  objects.
 - `<name>-cv6.txt` is the description the records are written from (`CvModule`): every type, class, variable and
   typedef name by number.
 
@@ -464,30 +503,59 @@ The code is the same bytes with and without `-g`. A section `-g` adds comes behi
 without it (`.drectve` included) and its section symbol behind every symbol, so no relocation of the code is
 renumbered; a debug record names only symbols the object defines, so the symbol table gains no external; the
 listing differs by marker lines alone (`;@proc T<n> <frame> <saved> <flags>` after `;@debug`, `;@block`,
-`;@local`, `;@gone`, `;@static` for the blocks and variables, `;@prologend`, `;@epilog` and `;@scope` among the
-code), which name types by their number in the description. `CvCheck` checks the records as they are about to be
+`;@local`, `;@gone`, `;@var`, `;@static` for the blocks and variables, `;@prologend`, `;@epilog`, `;@scope` and
+`;@loc` among the code), which name types by their number in the description. `CvCheck` checks the records as they are about to be
 written (every type index a record holds is a fundamental type's or below the record's own; no record over FF00h
 bytes; a unique name on every class; a procedure's parameter records first and as many as its type says, never
 `S_REGREL32` and `S_LOCAL` in one procedure, every block inside its parent and apart from its siblings, a frame
 range inside the function, ascending, its gaps inside it and none over a prologue, a funclet's entry or an
-epilogue), and a violation is an internal error, not a debugger that shows nothing.
+epilogue; a register of the table and of the variable's size and kind, and inside its range no instruction that
+writes it, by the encoder's own record of what each instruction writes; every entry of the file table whole, named
+in the string table, without a checksum or with a SHA-256, and every file a line table names an entry), and a
+violation is an internal error, not a debugger that shows nothing or something wrong.
 Test 20 builds `examples\sample-dbg\types.cpp` and `types2.cpp`, one program whose first unit prints what it
 knows of its own types (sizes, member offsets measured in objects, bit-fields found by storing into them, base
 offsets, enumerators); `examples\sample-dbg-driver\dbgtypes.cpp` (cl, dbghelp: `SymEnumTypes`,
 `SymGetTypeInfo`) prints the same facts from the PDB, and every line of the program must be one of the driver's.
 The driver's whole description of those types must be the same text for cl `/Z7`'s build of the source, for the
 program mixed of cppparse's object and cl's, and from the PDB of GRIDE's link where GRIDE is found; the objects
-with `-g` are compared with those without by cvsame, the two units and all own sources. Test 21 is the value
+with `-g` are compared with those without by cvsame, the two units and all own sources. The same is done with
+`-g2`, whose listing must be `-g`'s byte for byte; `examples\sample-dbg-driver\diatypes.cpp` (cl, the DIA SDK)
+then lists every member function of the program's classes with its access, kind, vftable slot, type and this
+adjustment (namespace `mem` of types.cpp has each kind: overloads, static, virtual introducing and overriding,
+pure, const, constructors and a destructor, operators, conversion functions, a class template's members, overrides
+entered through a second base and through a virtual base, a covariant one), and the lines must be those of cl
+`/Z7`'s build, what cl generates itself apart, from both linkers' PDBs; with `-g` DIA must list none. Test 21 is the value
 harness: `examples\sample-dbg\vars.cpp` has functions of every shape the design names (many parameters of every
 kind, references, classes by value in a register and by address, a parameter never read, an unnamed one, a
 variadic function, `this`, an override reached through a second base, destructors, sibling blocks of one name, a
 loop, a static local, a handler's variable, a destructor run while an exception passes, a `catch (...)` that
-resumes, floats, a `bool` and a `char`) call `checkpoint` (cl's `varsck.cpp`) with what their variables hold;
+resumes, floats, a `bool` and a `char`, a named result, values that live across a call in callee-saved integer
+and xmm registers and in spill slots, a value whose last use is a call's argument, a variable that is another's
+value, one assigned once inside a loop) call `checkpoint` (cl's `varsck.cpp`) with what their variables hold;
 `examples\sample-dbg-driver\dbgvars.cpp` (cl, dbghelp and the Win32 debug API) stops at every checkpoint and compares
 every variable the PDB gives a place for, in the caller, in the frames above it and at the first address of the
 caller's next line, in each exception model, through Microsoft's link and GRIDE's and the link variants
 (incremental, `/OPT:REF,ICF`, a static library); `diavars.cpp` (the DIA SDK) must give the same places, and
-gride-dbg's `dv` the same lines from both linkers' programs.
+gride-dbg's `dv` the same lines from both linkers' programs. At `-O0` every variable must have its place; at `-O1`,
+`-O2` and `-O3` (`dbgvars -optimized`) a variable may be listed without one, the ones the program marks must have
+theirs (what lives in memory, and what has one definition and is needed behind the checkpoint), and no value may
+be wrong, in a register (read from the frame's context, the unwound one in the frames above) or in memory; the
+test also compiles the program with `-j 1` and `-j 4` and wants the same object. The harness runs the self-host
+with `-g` at `-O0` and at `-O2` (`selfhost-g-O0`, `selfhost-g-O2`): generation two identical, and every register
+range of the compiler's own code held against its instructions by `CvCheck`; and with `-g2` at `-O0`
+(`selfhost-g2-O0`, `selfhost.ps1 -G2`). Test 22 is the check of the checksums: `cppparse --sha256` on the messages
+of the standard's examples (FIPS 180-4) and on files of the lengths around the padding's limits against
+`Get-FileHash`, one of them with a length in bits beyond 32 bits; `examples\sample-dbg\sums.cpp` and `sums.h` built with
+`-g` and `-g2` at `-O0` and `-O2`, every entry of the object's file table the SHA-256 of its file (read from the
+object's bytes, and by llvm-readobj), the table naming the files cl `/Z7`'s object names, each entry cl's for
+that file; the program linked with
+`/DEBUG` by Microsoft's link and by GRIDE's, and `examples\sample-dbg-driver\dbgsum.cpp` (cl, dbghelp:
+`SymEnumSourceFiles`, `SymGetSourceFileChecksum`) returning each file's own SHA-256 from either PDB, none for
+the build without `-g`; a unit whose `#line` directives name files it does not read, which have no checksum in
+cl's table or in cppparse's, and which includes a header under two spellings, one entry in both; the two sources
+edited, after which the PDBs' checksums are no longer the files', and
+built again, after which they are; and every file table entry of the compiler's own sources' `-g` objects.
 
 The rule that debug information changes no code has its comparator, `sandbox\scripts\cvsame.ps1`: given two objects, or two
 folders of objects, it says whether the second is the first but for CodeView (the first one's sections and symbol
@@ -508,7 +576,7 @@ Compiles the `.cpp` files of `driver`, `common`, `frontend`, `middle`, `backend`
 builds with `/O2` into `sandbox/cppparse.exe`; `-Config Debug` builds with
 `/Od /Zi /RTC1 /D_DEBUG /MTd` and links with `/DEBUG` into
 `sandbox/debug/cppparse.exe` next to its `.pdb`, with objects kept apart in
-`obj/debug`. `-NoTests` stops after the build. The test groups (21) run
+`obj/debug`. `-NoTests` stops after the build. The test groups (22) run
 against whichever configuration was built. Test 17 holds the
 front-end regressions of `examples/sample-front/`: units that must be
 rejected with their diagnostics and no object, and programs whose output
@@ -529,7 +597,9 @@ both generations compile with `-g`, in folders of their own). Test 20 is
 the check of `-g`: the types program of `examples/sample-dbg` read back
 through dbghelp, against cl `/Z7`'s build and mixed with it, and cvsame
 over its objects and over test 19's; test 21 the parameters and locals,
-the value harness (see "Debug information").
+the value harness; test 22 the SHA-256 checksums of the sources in the
+file table, read back through dbghelp from both linkers' PDBs (see
+"Debug information").
 
 A Visual Studio 2022 solution does the same build inside the IDE:
 `cpp\cppparse.sln` with the project `cppparse\cppparse.vcxproj` (x64,
@@ -566,7 +636,7 @@ checkout against it and exits 1 on any difference,
 process, prints one `PASS` or `FAIL` line per check with its time (a failure also prints the end of its log; the
 logs are in `sandbox/out/harness/`) and exits 0 only when every check that ran passed: the suite (`build-cppparse.ps1`),
 `selfhost.ps1 -Lvl 0` and `-Lvl 2`, each followed by the relink of its objects with GRIDE's link (`selfhost.ps1
--Linker gride -Relink`, below), `selfhost.ps1 -Lvl 0 -G` (both generations with `-g`, generation two identical),
+-Linker gride -Relink`, below), `selfhost.ps1 -Lvl 0 -G` and `-Lvl 2 -G` (both generations with `-g`, generation two identical), `-Lvl 0 -G2` (with `-g2`),
 the suite under the `-O2` self-built compiler as GRIDE's link made it and as
 Microsoft's did (`build-cppparse.ps1 -Exe out\selfhost-gride\cppparse-self.exe`, then `-Exe
 out\selfhost\cppparse-self.exe`), `mix.ps1`, `maps.ps1`, `cprog.ps1`, `matrix.ps1`, `strict98.ps1`, `lib.ps1` and `life.ps1` at
@@ -893,18 +963,24 @@ compiler they belong to; every folder is an include directory of the build (`bui
 - `cv/`: CodeView debug information, as classes the object writer calls: `CvRecord` (`CvBytes`, bytes with their
   relocations: little-endian fields, names, padding, a symbol record), `CvSymbols` (the symbol records:
   `S_OBJNAME`, `S_COMPILE3`, a procedure's `S_GPROC32` or `S_LPROC32` with its `S_END`), `CvLines` (a function's
-  `DEBUG_S_LINES` table), `CvFiles` (the module's file table: checksum entries and string table) and `CvSection`
+  `DEBUG_S_LINES` table), `CvFiles` (the module's file table: an entry per source file, with `-g` for every file
+  the unit read and with its SHA-256; and the string table), `CvSha256` (the hash of FIPS 180-4, with which the driver takes each source's checksum
+  from the bytes the preprocessor read: `PpFileObserver` in `frontend/Pp`) and `CvSection`
   (one `.debug$S`: the signature and its subsections), and `CvNames` (the names the records show, in cl's
   spelling: a type inside a name, a template-id, a scope; cl's cut of a long name). For `-g`: `CvModule` (what
   the module's types and variables are made from, free of the front end's classes: `CvType`, `CvClass`,
-  `CvVariable`, `CvTypedef`; its text is `<name>-cv6.txt`), `CvTypes` (the records of `.debug$T`: each once,
+  `CvVariable`, `CvTypedef`, `CvSource` (a source file with its checksum), and for `-g2` `CvMethod`, a member
+  function as its class lists it; its text is
+  `<name>-cv6.txt`), `CvTypes` (the records of `.debug$T`: each once,
   indices in the order of first use, a class by its forward reference inside records), `CvSymbols`' data records
   (`S_GDATA32`, `S_LDATA32`, `S_CONSTANT`, `S_UDT`) and procedure records (`S_FRAMEPROC`, `S_REGREL32`,
   `S_BLOCK32`, `S_LOCAL` and its places), `CvScopes` (a procedure's block scopes from the `;@scope` offsets, one
-  piece of code or several, the procedure's form and its variables' records) and `CvCheck` (the invariants of the
-  records, checked on the bytes about to be written, and the frame ranges against the code's prologues and
-  epilogues). Which sections an object has, where the ones `-g` adds go, and the code offsets of the `;@line` and
-  position markers are the object writer's and stay in `Coff`. The description itself is filled by
+  piece of code or several, the procedure's form and its variables' records, the ranges between the `;@loc`
+  markers), `CvRegisters` (CodeView's number for the part of a register that holds a value of a size and kind, a
+  table per register) and `CvCheck` (the invariants of the records, checked on the bytes about to be written, and
+  the frame and register ranges against the code: its prologues and epilogues, the registers each instruction
+  writes; the file table's entries). Which sections an object has, where the ones `-g` adds go, the code offsets of the `;@line` and position
+  markers and the registers an instruction writes are the object writer's and stay in `Coff`. The description itself is filled by
   `middle/CvFromSema`, the one file that sees both the semantic analysis and `cv/`; it only reads Sema.
 - `analyzer/`: the version 1 to 5 pipeline: project reading and the old compile path kept until the version 6
   pipeline replaces it: `Lexer`, `Parser`, `Model`, `CodeBase`, `ProjectReader`, `Ast`, `BodyParser`, `TypeCheck`,
@@ -1222,7 +1298,14 @@ compares the sizes, vtordisps and vbtables of 50 classes with cl's
 `pvbase::` (calls through every base during construction and destruction,
 delete, copies, arrays, `.*`/`->*`) against cl at -O0 and -O2; test 13
 (sample-layout PV..PVN2) builds, calls and deletes such objects across the
-compilers, cl's derived class PVE with cl's vtordisp thunks included;
+compilers, cl's derived class PVE with cl's vtordisp thunks included.
+A class that names a virtual base before the polymorphic base whose
+function it overrides (`J2 : virtual VR, P1 { int r(); }`) overrides in
+both tables, in P1's at offset 0 with this at the object (row G45):
+`examples/sample-front/vbase-first.cpp` (test 17) prints what cl's build
+prints at -O0 and -O2 in the three exception models and its 222 vftables
+hold cl's slots, and sample-layout FV..FW with cl's derived class FK
+(test 13) crosses the compilers;
 eh.ps1 ehCatchVbase catches a thrown class with virtual bases as a virtual
 base, by value and by reference, and a thrown pointer to one as a pointer
 to a virtual base, found through the pointed-to object's vbtable (the

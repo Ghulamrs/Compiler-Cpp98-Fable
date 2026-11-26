@@ -120,6 +120,14 @@ int IrFunction::newBlock(const std::string& label)
     return b.id;
 }
 
+void IrFunction::removeStore(IrInst& in)
+{
+    if (in.op == IrInst::StoreLocal && !in.args.empty() && in.args[0].kind == IrOperand::Local && in.args[0].id >= 0 &&
+        static_cast<size_t>(in.args[0].id) < locals.size()) locals[static_cast<size_t>(in.args[0].id)].staleStores = true;
+    in.op = IrInst::Nop;
+    in.args.clear();
+}
+
 void IrFunction::computeCfg()
 {
     for (size_t i = 0; i < blocks.size(); ++i) { blocks[i].succs.clear(); blocks[i].preds.clear(); }
@@ -201,13 +209,18 @@ std::string printIr(const IrFunction& f)
           << (l.isParam ? "  (parameter)" : "") << (l.addressTaken ? "  address-taken" : "");
         if (debug && l.source)
             s << "  [-g " << l.debugName << " T" << l.debugType << " block " << l.block
-              << (l.debugParam >= 0 ? " parameter " + intToString(l.debugParam) : std::string()) << (l.byAddress ? " by address" : "") << "]";
+              << (l.debugParam >= 0 ? " parameter " + intToString(l.debugParam) : std::string()) << (l.byAddress ? " by address" : "")
+              << (l.promoted ? ", promoted" : "") << (l.staleStores ? ", a store removed" : "") << "]";
         s << "\n";
     }
     if (debug) {
         s << "  -g: type T" << f.debugType << (f.debugInline ? ", inline" : "");
         for (size_t k = 0; k < f.debugBlocks.size(); ++k) s << (k ? ", " : "; blocks ") << (k + 1) << " in " << f.debugBlocks[k];
         for (size_t k = 0; k < f.debugStatics.size(); ++k) s << (k ? ", " : "; static ") << f.debugStatics[k].name << " T" << f.debugStatics[k].type << " block " << f.debugStatics[k].block;
+        for (size_t k = 0; k < f.debugAliases.size(); ++k) s << (k ? ", " : "; named result ") << f.debugAliases[k].name << " T" << f.debugAliases[k].type << " block " << f.debugAliases[k].block << " at local" << f.debugAliases[k].local;
+        size_t n = 0;
+        for (std::map<int, IrDebugTemp>::const_iterator t = f.debugTemps.begin(); t != f.debugTemps.end(); ++t, ++n)
+            s << (n ? ", " : "; one definition: ") << "local" << t->first << " = t" << t->second.temp << (t->second.exact ? "" : " (of equal value)");
         s << "\n";
     }
     for (size_t i = 0; i < f.notes.size(); ++i) s << "  note: " << f.notes[i] << "\n";

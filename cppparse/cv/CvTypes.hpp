@@ -11,7 +11,9 @@
 //                                     size, then {the class, the representation}}
 //     LF_ARRAY (1503h)                {element, index type 23h, size in bytes, ""}
 //     LF_PROCEDURE (1008h)            {result, convention 0, attributes 0, parameter count, LF_ARGLIST}
-//     LF_MFUNCTION (1009h)            {result, class, type of this, 0, 0, parameter count, LF_ARGLIST, this adjustment 0}
+//     LF_MFUNCTION (1009h)            {result, class, type of this (0: static), convention 0, attributes, parameter
+//                                     count, LF_ARGLIST, this adjustment}; the attributes of both: 1 a class result
+//                                     returned the C++ way, 2 a constructor, 4 of a class with virtual bases
 //     LF_ARGLIST (1201h)              {count, types}; "..." is a last type 0
 //     LF_ENUM (1507h)                 {count, properties, underlying type, LF_FIELDLIST, name, unique name}
 //     LF_CLASS (1504h), LF_STRUCTURE (1505h)   {member count, properties, LF_FIELDLIST, derived 0, LF_VTSHAPE, size,
@@ -21,8 +23,17 @@
 //                                     LF_VFUNCTAB (1409h) {0, pointer to the LF_VTSHAPE}; LF_MEMBER (150Dh) {access,
 //                                     type, offset, name}, a bit-field's type an LF_BITFIELD (1205h) {type, width,
 //                                     position}; LF_STMEMBER (150Eh) {access, type, name}; LF_NESTTYPE (1510h) {0, type,
-//                                     name}; LF_ENUMERATE (1502h) {access, value, name}; a list that would pass FF00h
-//                                     bytes continues in another through LF_INDEX (1404h) {0, list}
+//                                     name}; LF_ENUMERATE (1502h) {access, value, name}; a member function
+//                                     LF_ONEMETHOD (1511h) {attributes, LF_MFUNCTION, the slot's offset in the vftable
+//                                     if it introduces one, name}, the functions of an overloaded name LF_METHOD
+//                                     (150Fh) {count, LF_METHODLIST, name}; a list that would pass FF00h bytes
+//                                     continues in another through LF_INDEX (1404h) {0, list}
+//     LF_METHODLIST (1206h)           per function {attributes, 0, LF_MFUNCTION, the slot's offset if it introduces one}
+//                                     a function's attributes: its access (1 private, 2 protected, 3 public) and, from
+//                                     bit 2, 1 virtual (an override), 2 static, 4 introducing virtual, 5 pure virtual,
+//                                     6 pure introducing virtual
+// The members stand in the order of their declarations, the functions among the data members, an overloaded name
+// where it is first declared; a class's member count has every function of such a name.
 //     LF_VTSHAPE (000Ah)              {slot count, one 4-bit descriptor per slot: 5, a 64-bit pointer}
 // Inside a record a class is named by its forward reference (properties 80h, no members, size 0), which is written
 // before the first record that names it; so every index a record holds is a fundamental type or below the record's
@@ -31,7 +42,8 @@
 // a pointer then leads to its members in whichever object the debugger stops.
 // Properties, as cl sets them: 80h forward reference, 200h has a unique name (always: linkers and readers resolve a
 // forward reference by name, and two units may each have a class of one name), 8h nested, 10h contains nested
-// types, 2h has a constructor or destructor, 100h local to a function, 400h on a union's definition.
+// types, 2h has a constructor or destructor, 100h local to a function, 400h on a union's definition; 4h declares an
+// operator function, 20h a copy assignment, 40h a conversion function.
 //
 // Strict C++98.
 #ifndef CPPPARSE_CVTYPES_HPP

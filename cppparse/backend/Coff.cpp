@@ -16,6 +16,7 @@
 // Strict C++98.
 #include "Coff.hpp"
 #include "CvCheck.hpp"
+#include "CvRegisters.hpp"
 #include "CvModule.hpp"
 #include "CvScopes.hpp"
 #include "CvNames.hpp"
@@ -332,9 +333,11 @@ struct Chunk {
     std::vector<std::pair<unsigned long, int> > lines;    // .line (the listing's ;@line markers): code offset, source line, in offset order
     std::vector<std::pair<unsigned long, int> > cvMarks;  // .cvmark (-g: the listing's position markers): code offset, the marker's number
     std::vector<unsigned long>                retEnds;    // the code offsets just behind every ret (-g: CvCheck's epilogues)
+    bool                                      recordWrites;   // -g: the PROC has a variable in a register (;@var): 'writes' is kept
+    std::vector<std::pair<unsigned long, unsigned long> > writes;   // the offset of every instruction and the registers it writes (writtenRegisters), for CvCheck (c)
     std::vector<std::string>                  errors;
     int                                       instructions;
-    Chunk() : prologEnd(-1), maxAlign(1), instructions(0) {}
+    Chunk() : prologEnd(-1), maxAlign(1), recordWrites(false), instructions(0) {}
 };
 
 
@@ -499,6 +502,7 @@ void Encoder::shrinkJumps()
             for (size_t l = 0; l < m_c.lines.size(); ++l) if (m_c.lines[l].first >= end) m_c.lines[l].first -= removed;   // the line records move with the code
             for (size_t k = 0; k < m_c.cvMarks.size(); ++k) if (m_c.cvMarks[k].first >= end) m_c.cvMarks[k].first -= removed;
             for (size_t k = 0; k < m_c.retEnds.size(); ++k) if (m_c.retEnds[k] >= end) m_c.retEnds[k] -= removed;
+            for (size_t k = 0; k < m_c.writes.size(); ++k) if (m_c.writes[k].first >= end) m_c.writes[k].first -= removed;
             f.at = f.opcodeAt + 1;
             f.shortForm = true;
             changed = true;
@@ -539,6 +543,8 @@ void Encoder::finish()
     m_c.fixups.clear();
 }
 
+unsigned long writtenRegisters(const std::string& mn, const std::vector<Operand>& ops);   // beside Encoder::instruction
+
 bool Encoder::codeLine(const std::string& raw, int line)
 {
     std::string text = trimWs(raw);
@@ -576,6 +582,7 @@ bool Encoder::codeLine(const std::string& raw, int line)
     if (!instruction(mn, ops, line)) { m_c.bytes.resize(before); return false; }
     if (mn == "call") m_c.callEnds.push_back(pos());
     else if (mn == "ret") m_c.retEnds.push_back(pos());
+    if (m_c.recordWrites) m_c.writes.push_back(std::make_pair(static_cast<unsigned long>(before), writtenRegisters(mn, ops)));
     ++m_c.instructions;
     if (m_pendingLine >= 0) { m_c.lines.push_back(std::make_pair(pos(), m_pendingLine)); m_pendingLine = -1; }
     return true;
@@ -776,6 +783,47 @@ const SseOp kSse[] = {
     {"cvtsi2sd",0xF2,0x2A,2},{"cvtsi2ss",0xF3,0x2A,2},
     {"cvttsd2si",0xF2,0x2C,3},{"cvttss2si",0xF3,0x2C,3},{"cvtsd2si",0xF2,0x2D,3},{"cvtss2si",0xF3,0x2D,3}
 };
+
+// The registers an instruction writes, as a mask of CvRegisters' families (rax 0 ... r15 15, xmm0 16 ... xmm15 31):
+// what CvCheck (c) holds a variable's register range against (docs/design-codeview.md 5.5/4, risk 9). It stands beside
+// Encoder::instruction and names every mnemonic that function encodes, by what the instruction does to its operands
+// and to the registers it uses without naming them (mul and div: rax and rdx; cdq and cqo: rdx; a call: every
+// volatile register; push, pop, ret, leave: rsp). It is asked only for a line that was encoded, so a mnemonic it does
+// not name is one added to the encoder and not here: that one counts as writing every register, and a range that
+// holds it fails the check instead of passing unseen
+unsigned long writtenRegisters(const std::string& mn, const std::vector<Operand>& ops)
+{
+    const size_t n = ops.size();
+    const unsigned long rax = CvRegisters::bit(0), rdx = CvRegisters::bit(2), rsp = CvRegisters::bit(4), rbp = CvRegisters::bit(5);
+    const unsigned long first = n == 0 ? 0 : ops[0].kind == Operand::Reg ? CvRegisters::bit(ops[0].reg) : ops[0].kind == Operand::Xmm ? CvRegisters::bit(16 + ops[0].reg) : 0;
+    const unsigned long second = n < 2 ? 0 : ops[1].kind == Operand::Reg ? CvRegisters::bit(ops[1].reg) : ops[1].kind == Operand::Xmm ? CvRegisters::bit(16 + ops[1].reg) : 0;
+    if (n == 0) {
+        if (mn == "ret") return rsp;
+        if (mn == "leave") return rsp | rbp;
+        if (mn == "cqo" || mn == "cdq") return rdx;
+        if (mn == "cdqe" || mn == "cwde") return rax;
+        if (mn == "nop" || mn == "int3" || mn == "ud2") return 0;
+        return CvRegisters::allMask();
+    }
+    if (mn == "int") return 0;
+    // the comparisons set flags only
+    if (mn == "cmp" || mn == "test" || mn == "ucomisd" || mn == "comisd" || mn == "ucomiss" || mn == "comiss") return 0;
+    for (size_t k = 0; k < sizeof(kSse) / sizeof(kSse[0]); ++k) if (mn == kSse[k].name) return first;   // (a store's first operand is memory)
+    if (mn == "movq" || mn == "movd" || mn == "mov" || mn == "lea" || mn == "movzx" || mn == "movsx" || mn == "movsxd") return first;
+    if (mn == "add" || mn == "or" || mn == "adc" || mn == "sbb" || mn == "and" || mn == "sub" || mn == "xor") return first;
+    if (mn == "imul") return n == 1 ? rax | rdx : first;
+    if (mn == "mul" || mn == "div" || mn == "idiv") return rax | rdx;
+    if (mn == "not" || mn == "neg" || mn == "inc" || mn == "dec") return first;
+    if (mn == "rol" || mn == "ror" || mn == "rcl" || mn == "rcr" || mn == "shl" || mn == "shr" || mn == "sal" || mn == "sar") return first;
+    if (mn.size() > 3 && mn.compare(0, 3, "set") == 0) return first;
+    if (mn[0] == 'j') return 0;                               // jmp and the conditional jumps
+    if (mn == "call") return CvRegisters::volatileMask();
+    if (mn == "push") return rsp;
+    if (mn == "pop") return rsp | first;
+    if (mn == "xadd" || mn == "xchg") return first | second;
+    if (mn == "cmpxchg") return rax | first;
+    return CvRegisters::allMask();
+}
 
 bool Encoder::instruction(const std::string& mn, std::vector<Operand>& ops, int line)
 {
@@ -1348,7 +1396,9 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
         //                                           its place in the frame
         //   ;@static <block> T<n> <symbol> <name>   a static local
         //   ;@prologend, ;@epilog, ;@scope <id>     positions in the code: the encoder records their offsets (.cvmark)
-        if (current && (marker == ";@prologend" || marker == ";@epilog" || marker.compare(0, 8, ";@scope ") == 0)) {
+        //   ;@var <n> <block> T<n> <p|l>[r] <name>  a variable whose place the ;@loc markers of its number give
+        //   ;@loc <n> <register> <bytes> | [rbp-N] | -   a position: from here on variable <n> is there, or nowhere
+        if (current && (marker == ";@prologend" || marker == ";@epilog" || marker.compare(0, 8, ";@scope ") == 0 || marker.compare(0, 6, ";@loc ") == 0)) {
             current->lines.push_back(std::make_pair(lineNo, ".cvmark " + numText(static_cast<long>(current->positions.size()))));
             current->positions.push_back(marker);
             continue;
@@ -1386,6 +1436,19 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
             v.byAddress = kind.size() > 1 && kind[1] == 'r';
             if (placed && at.size() > 5 && at.compare(0, 4, "[rbp") == 0) v.offset = (at[4] == '-' ? -1 : 1) * atol(at.c_str() + 5);
             if (current && !v.name.empty()) current->debug.variables.push_back(v);
+            continue;
+        }
+        if (marker.compare(0, 6, ";@var ") == 0) {
+            std::istringstream fields(marker.substr(6));
+            std::string type, kind;
+            CvFrameVariable v;
+            fields >> v.ranged >> v.block >> type >> kind;
+            std::getline(fields, v.name);
+            v.name = trimWs(v.name);
+            v.type = type.size() > 1 && type[0] == 'T' ? atoi(type.c_str() + 1) : 0;
+            v.param = !kind.empty() && kind[0] == 'p';
+            v.byAddress = kind.size() > 1 && kind[1] == 'r';
+            if (current && !v.name.empty() && v.ranged >= 0) { current->debug.variables.push_back(v); current->chunk.recordWrites = true; }
             continue;
         }
         if (marker.compare(0, 9, ";@static ") == 0) {
@@ -1514,7 +1577,11 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
     for (size_t i = 0; i < blocks.size(); ++i) if (!blocks[i].chunk.lines.empty() && !blocks[i].sourceFile.empty()) anyLines = true;
     size_t debugIndex = 0;
     if (anyLines) { Section d; d.name = ".debug$S"; d.characteristics = kDebugFlags; debugIndex = secs.size(); secs.push_back(d); }
-    CvFiles debugFiles;
+    // -g: the file table names every file the unit read, not only those a line table refers to, and every entry
+    // carries the SHA-256 of its file, which the description has of the bytes that were compiled (cl's table; a
+    // debugger holds a file against its checksum before it shows the file)
+    CvFiles debugFiles(debugInfo);
+    std::vector<unsigned long> namedFiles;         // the entries the line tables name, for CvCheck
     CvSection mainDebug;
     if (anyLines) mainDebug.symbols().addModule(objName);
     // -g: the type records, written as the symbols below ask for them, here in this sequential loop only, so that
@@ -1575,6 +1642,7 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
             const bool internal = !publics.count(blocks[i].name);
             const unsigned long fileEntry = debugFiles.entry(blocks[i].sourceFile);
             const CvLines lines(blocks[i].name, fileEntry, codeSize, c.lines);
+            if (debugInfo) namedFiles.push_back(CvCheck::fileOf(lines.table().bytes()));   // as the table's bytes say it
             // -g: the procedure's type; a marker that names a type the description does not have is an error of
             // cppparse (CvCheck (a): no T<n> is unresolved)
             CvProcedureMarks& marks = blocks[i].debug;
@@ -1608,6 +1676,7 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
                 }
                 std::vector<std::string> problems;
                 CvCheck::frameRanges(blocks[i].name, scopes.offsetRanges(), windows, problems);
+                CvCheck::registerRanges(blocks[i].name, scopes.registerRanges(), c.writes, windows, problems);
                 for (size_t k = 0; k < problems.size() && k < 10; ++k) result.errors.push_back("CodeView: " + problems[k]);
             }
             else procSymbols.beginProcedure(blocks[i].name, blocks[i].displayName, codeSize, internal, procType);
@@ -1746,8 +1815,9 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
         }
         debugSymbolRecords.push_back(moduleSymbols.records().bytes());
         if (!anyLines && moduleSymbols.records().size() != before) {
+            // (a unit without a function that has lines: its module section is -g's, and has the file table too)
             Section d; d.name = ".debug$S"; d.characteristics = kDebugFlags;
-            fillDebugSection(d, lateModule, 0);
+            fillDebugSection(d, lateModule, &debugFiles);
             lateSections.push_back(d); lateHasSymbol.push_back(0);
         }
         if (debugTypes.count() != 0) {
@@ -1761,6 +1831,12 @@ static bool assembleCoffNamed(const std::string& masmText, const std::string& ob
             for (size_t k = 0; k < debugSymbolRecords.size(); ++k) { CvCheck::symbols(debugSymbolRecords[k], typeCount, problems); CvCheck::procedures(debugSymbolRecords[k], bytes, problems); }
             for (size_t k = 0; k < problems.size() && k < 10; ++k) result.errors.push_back("CodeView: " + problems[k]);
         }
+    }
+    if (debugInfo) {
+        // the file table as it will be written, checked (CvCheck)
+        std::vector<std::string> problems;
+        CvCheck::files(debugFiles.checksums().bytes(), debugFiles.strings().bytes(), namedFiles, static_cast<unsigned long>(debugInfo->sources().size()), problems);
+        for (size_t k = 0; k < problems.size() && k < 10; ++k) result.errors.push_back("CodeView: " + problems[k]);
     }
     if (anyLines) fillDebugSection(secs[debugIndex], mainDebug, &debugFiles);
     if (!directives.empty()) {

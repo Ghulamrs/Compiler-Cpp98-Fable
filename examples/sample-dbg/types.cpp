@@ -8,6 +8,7 @@
 #include "types.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace geom {
@@ -102,6 +103,143 @@ void Circle::report()
 
 } // namespace geom
 
+// The member functions a class's type lists (stage 4 of docs/design-codeview.md): each kind once. The driver
+// sample-dbg-driver\diatypes.cpp reads them from the PDB through DIA, and the lines must be the ones of cl /Z7's build
+// of this source, what cl generates itself apart (implicit constructors and operator=, __vecDelDtor, the thunk of a
+// covariant override).
+namespace mem {
+
+struct Value { int v; };
+
+class Ops {
+public:
+    Ops() : m_n(0) {}
+    explicit Ops(int n) : m_n(n) {}
+    Ops(const Ops& o) : m_n(o.m_n) {}
+    ~Ops() {}
+    Ops& operator=(const Ops& o) { m_n = o.m_n; return *this; }
+    Ops& operator+=(int d) { m_n += d; return *this; }
+    Ops operator+(const Ops& o) const { return Ops(m_n + o.m_n); }
+    bool operator==(const Ops& o) const { return m_n == o.m_n; }
+    int operator()(int a, int b) const { return a + b + m_n; }
+    int operator[](int i) const { return m_n + i; }
+    Ops& operator++() { ++m_n; return *this; }
+    Ops operator++(int) { Ops old(*this); ++m_n; return old; }
+    Ops* operator->() { return this; }
+    void* operator new(size_t bytes) { return std::malloc(bytes); }
+    void operator delete(void* p) { std::free(p); }
+    // conversion functions: their names hold the type as a declaration reads
+    operator int() const { return m_n; }
+    operator const char*() const { return "ops"; }
+    operator Value() const { Value x; x.v = m_n; return x; }
+    operator const Value*() const { return 0; }
+    operator geom::Color() const { return geom::Red; }
+    // an overloaded name: one entry, its functions in a list
+    void set(int n) { m_n = n; }
+    void set(int a, int b) { m_n = a + b; }
+    void set(double d) { m_n = static_cast<int>(d); }
+    int get() const { return m_n; }
+    Value value() const { Value x; x.v = m_n; return x; }      // a class result of a member: the C++ way
+    int sum(int first, ...) const { return first + m_n; }
+    static Ops make(int n) { return Ops(n); }
+    static Value plain() { Value x; x.v = 1; return x; }       // of a static member: a plain aggregate, in rax
+    static int count() { return 3; }
+    static int count(int more) { return 3 + more; }
+protected:
+    void guarded() { ++m_n; }
+private:
+    void hidden() { --m_n; }
+    int m_n;
+};
+
+struct Iface {
+    virtual ~Iface() {}
+    virtual int first() = 0;
+    virtual int first(int scale) = 0;
+    virtual int second() const { return 2; }
+    int i;
+};
+struct Other {
+    virtual int other() { return 1; }
+    virtual void pure() const = 0;
+    int o;
+};
+// other and pure are first held by Other's table, the second: they are called with this at Other
+struct Impl : Iface, Other {
+    Impl() : z(0) {}
+    virtual int first() { return 1; }
+    virtual int first(int scale) { return scale; }
+    virtual int other() { return 5; }
+    virtual void pure() const {}
+    virtual int fresh() { return 6; }
+    int z;
+};
+struct Abstract : Other {
+    virtual void pure() const = 0;      // an override that is pure
+    virtual int more() = 0;             // pure, with a slot of its own
+};
+struct Concrete : Abstract {
+    virtual void pure() const {}
+    virtual int more() { return 7; }
+};
+
+struct VRoot { virtual int root() { return 1; } int vr; };
+struct VLeft : virtual VRoot { virtual int root() { return 2; } virtual int left() { return 2; } int vl; };
+struct VRight : virtual VRoot { virtual int right() { return 3; } int vrt; };
+struct VJoin : VLeft, VRight {
+    VJoin() : vj(0) {}
+    explicit VJoin(int v) : vj(v) {}
+    virtual int root() { return 4; }
+    virtual int right() { return 5; }
+    virtual int join() { return 6; }
+    int vj;
+};
+
+// a class that names a virtual base before the polymorphic base whose function it overrides (next-targets, row G45):
+// run is first held by the table at 0, RunP's, and is called with this at the object (adjustment 0); stay is held by
+// the table inside RunV alone
+struct RunV { virtual int run() { return 1; } virtual int stay() { return 2; } int rv; };
+struct RunP { virtual int run() { return 3; } int rp; };
+struct RunJ : virtual RunV, RunP {
+    virtual int run() { return 4; }
+    virtual int stay() { return 5; }
+    int rj;
+};
+
+struct Self { virtual Self* self() { return this; } int s; };
+struct SelfDerived : Other, Self {
+    virtual SelfDerived* self() { return this; }    // covariant, Self not at 0
+    virtual void pure() const {}
+    int sd;
+};
+
+template <class T> struct Holder {
+    T v;
+    Holder() : v() {}
+    explicit Holder(const T& x) : v(x) {}
+    T get() const { return v; }
+    void put(const T& x) { v = x; }
+    static T zero() { return T(); }
+    virtual T vget() { return v; }
+    operator T() const { return v; }
+    struct Slot { T held; T take() const { return held; } };
+};
+
+union Either {
+    int i; float f;
+    Either() : i(0) {}
+    int asInt() const { return i; }
+    void setFloat(float x) { f = x; }
+};
+
+struct Nest {
+    struct In { int inner(int a) { return a + n; } static int count() { return 1; } int n; };
+    int outer(In* p) { return p ? p->n : m; }
+    int m;
+};
+
+} // namespace mem
+
 template <class T> struct Box { T v; struct Inner { T w; char tail; }; Inner in; static T shared; };
 template <class T> T Box<T>::shared;
 
@@ -138,6 +276,19 @@ shared::Pair g_pair1 = { 1, 2.0 };
 shared::Arr<double, 3> g_arr1;
 shared::Counter g_counter1;
 shared::Mode g_mode1 = shared::On;
+mem::Value g_value = { 9 };
+mem::Ops g_ops;
+mem::Impl g_impl;
+mem::Concrete g_concrete;
+mem::VJoin g_join;
+mem::SelfDerived g_selfDerived;
+mem::RunJ g_runJ;
+mem::Holder<int> g_holderInt;
+mem::Holder<geom::Point> g_holderPoint;
+mem::Holder<int>::Slot g_slot;
+mem::Either g_either;
+mem::Nest g_nest;
+mem::Nest::In g_nestIn;
 
 void factSize(const char* type, unsigned long long bytes) { std::printf("size %s %d\n", type, (int)bytes); }
 void factMember(const char* type, const char* member, long long offset) { std::printf("member %s %s %d\n", type, member, (int)offset); }
@@ -159,6 +310,54 @@ void factBits(const char* type, const char* member, const void* object, unsigned
 #define BITS(name, T, m) { T object; std::memset(&object, 0, sizeof object); object.m -= 1; factBits(name, #m, &object, sizeof object); }
 
 static int add(int a, int b) { return a + b; }
+
+namespace mem {
+
+const int kMembers = 138;
+
+// the classes above, by the facts the driver compares, and their functions called once
+static int report()
+{
+    SIZE("mem::Value", Value); MEMBER("mem::Value", g_value, v);
+    SIZE("mem::Ops", Ops);
+    SIZE("mem::Iface", Iface); MEMBER("mem::Iface", static_cast<Iface&>(g_impl), i);
+    SIZE("mem::Other", Other); MEMBER("mem::Other", static_cast<Other&>(g_impl), o);
+    SIZE("mem::Impl", Impl); MEMBER("mem::Impl", g_impl, z);
+    BASE("mem::Impl", g_impl, Iface, "mem::Iface"); BASE("mem::Impl", g_impl, Other, "mem::Other");
+    SIZE("mem::Abstract", Abstract); SIZE("mem::Concrete", Concrete);
+    SIZE("mem::VRoot", VRoot); SIZE("mem::VLeft", VLeft); SIZE("mem::VRight", VRight); SIZE("mem::VJoin", VJoin);
+    MEMBER("mem::VJoin", g_join, vj); BASE("mem::VJoin", g_join, VLeft, "mem::VLeft"); BASE("mem::VJoin", g_join, VRight, "mem::VRight");
+    SIZE("mem::RunV", RunV); SIZE("mem::RunP", RunP); SIZE("mem::RunJ", RunJ); MEMBER("mem::RunJ", g_runJ, rj);
+    BASE("mem::RunJ", g_runJ, RunP, "mem::RunP");
+    SIZE("mem::Self", Self); SIZE("mem::SelfDerived", SelfDerived); MEMBER("mem::SelfDerived", g_selfDerived, sd);
+    BASE("mem::SelfDerived", g_selfDerived, Other, "mem::Other"); BASE("mem::SelfDerived", g_selfDerived, Self, "mem::Self");
+    SIZE("mem::Holder<int>", Holder<int>); MEMBER("mem::Holder<int>", g_holderInt, v);
+    SIZE("mem::Holder<geom::Point>", Holder<geom::Point>); MEMBER("mem::Holder<geom::Point>", g_holderPoint, v);
+    SIZE("mem::Holder<int>::Slot", Holder<int>::Slot); MEMBER("mem::Holder<int>::Slot", g_slot, held);
+    SIZE("mem::Either", Either); MEMBER("mem::Either", g_either, i); MEMBER("mem::Either", g_either, f);
+    SIZE("mem::Nest", Nest); MEMBER("mem::Nest", g_nest, m);
+    SIZE("mem::Nest::In", Nest::In); MEMBER("mem::Nest::In", g_nestIn, n);
+    GLOBAL(g_value); GLOBAL(g_ops); GLOBAL(g_impl); GLOBAL(g_concrete); GLOBAL(g_join); GLOBAL(g_selfDerived); GLOBAL(g_holderInt);
+    GLOBAL(g_holderPoint); GLOBAL(g_slot); GLOBAL(g_either); GLOBAL(g_nest); GLOBAL(g_nestIn); GLOBAL(g_runJ);
+    // what the functions give, through the tables where they are virtual: kMembers in all
+    Ops a(2);
+    a.set(1); a.set(1, 2); a.set(4.0); a += 1; ++a; a++;                         // 7
+    Ops b = a + Ops::make(1);                                                     // 8
+    int sum = a.get() + b.get() + a(1, 1) + a[1] + static_cast<int>(a) + a.value().v + Ops::plain().v + Ops::count() + Ops::count(1) + a.sum(1, 2) + a->get();
+    Iface& iface = g_impl; Other& other = g_impl; Other& made = g_concrete;
+    VRoot& root = g_join; VRight& right = g_join; Self& self = g_selfDerived;
+    sum += iface.first() + iface.first(2) + iface.second() + other.other() + g_impl.fresh() + static_cast<Abstract&>(g_concrete).more();
+    other.pure(); made.pure();
+    sum += root.root() + right.right() + g_join.join() + g_join.left() + (self.self() == &g_selfDerived ? 1 : 0);
+    RunP& runP = g_runJ; RunV& runV = g_runJ;
+    sum += runP.run() + runV.run() + runV.stay();                                // 4 + 4 + 5
+    g_holderInt.put(3); g_slot.held = 2; g_nestIn.n = 1; g_either.setFloat(0.0f);
+    sum += g_holderInt.get() + g_holderInt.vget() + Holder<int>::zero() + static_cast<int>(g_holderInt) + g_slot.take() + g_holderPoint.get().x
+         + g_either.asInt() + g_nest.outer(&g_nestIn) + g_nestIn.inner(1) + Nest::In::count();
+    return (a == b ? 1 : 0) + sum;
+}
+
+} // namespace mem
 
 namespace geom {
 
@@ -207,12 +406,14 @@ int reportAll()
     factGlobal("geom::Shape::count", sizeof(Shape::count)); factGlobal("Box<int>::shared", sizeof(Box<int>::shared));
     // the members of this unit's Node, through its variable (the second unit has another Node)
     factMember("g_node1", "a", (const char*)&g_node1.a - (const char*)&g_node1); factMember("g_node1", "b", (const char*)&g_node1.b - (const char*)&g_node1);
+    const int members = mem::report();
     reportSecondUnit();
     // every variable is used, so that none is left out of the object
     g_pointers.fn = add; g_pointers.md = &Point::y; g_op = add; g_multi.touch(); Box<int>::shared = g_box.v;
     const int used = g_counter + s_hidden + kLimit + g_point.x + g_alias.y + (int)g_size64 + g_op(1, 2) + g_pointers.fn(1, 1) + g_table[1][2] + calls + g_name[0]
                    + (int)g_multi.area() + g_counter1.next() + g_mode1 + Shape::count + g_color + (int)sizeof(g_empty);
-    return used != 0 ? 0 : 1;
+    if (members != mem::kMembers) std::printf("mem::report gives %d, not %d\n", members, mem::kMembers);
+    return used != 0 && members == mem::kMembers ? 0 : 1;
 }
 
 } // namespace geom

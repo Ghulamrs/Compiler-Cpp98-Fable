@@ -24,6 +24,7 @@
 #define CPPPARSE_IRGEN_HPP
 
 #include "CodeBase.hpp"
+#include "CvFromSema.hpp"
 #include "Ir.hpp"
 #include "Sema.hpp"
 #include "Types.hpp"
@@ -36,9 +37,7 @@
 
 namespace cppparse {
 
-class CvFromSema;
-
-class IrGen {
+class IrGen : public CvResultRule {
 public:
     IrGen(sema::Program& program, sema::TypeTable& semaTypes);
     ~IrGen();
@@ -54,7 +53,9 @@ public:
     void setNamedReturnElision(bool on) { m_nrvoEnabled = on; }
     // -g: every function gets the number of its type's description, the variables with static storage are listed
     // (docs/design-codeview.md 5.4). It fills fields nothing reads to decide anything: the code is the same without
-    void setDebugInfo(CvFromSema* cv) { m_cv = cv; }
+    void setDebugInfo(CvFromSema* cv) { m_cv = cv; if (cv) cv->setResultRule(this); }
+    // CvResultRule: what the description asks the code generator (a class result that comes back the C++ way)
+    virtual bool plainAggregate(const sema::Type* classType) const { return podForReturn(classType, 0); }
     // --eh=table: every object with a destructor gets a try region of its own whose landing pad destroys it (cl's
     // states), no constructed flag; the setjmp model keeps the flags and one unwind handler per function
     void setEhModel(EhModel model) { m_tableEh = model != EhModelSjlj; m_clEh = model == EhModelCl; }   // the table model's regions: one per object with a destructor (cl's model has them too)

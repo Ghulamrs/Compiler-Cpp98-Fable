@@ -1423,6 +1423,22 @@ bool overridesAny(const Symbol* m, const Symbol* cls)
     return false;
 }
 
+// whether m, a function declared in a class, overrides v, a virtual function of a base, held against every part of
+// the two declarations: the name, the signature, each parameter's own type where sameSignature compares the kinds
+// alone (a parameter with a top-level const or volatile: two classes or two enumerations pass there), and for a
+// conversion function the type it converts to (its name is the type as it is written, "operator T"). The slot of
+// the primary table that row G45 gives an override is held against this, so that it takes no function there which
+// the looser comparison of the other searches would take for the same (next-targets, row G49)
+bool overridesExactly(const Symbol* m, const Symbol* v)
+{
+    if (!m || !v || v->isDestructor || v->isConstructor || v->name != m->name || !sameSignature(v->type, m->type)) return false;
+    for (size_t i = 0; i < m->type->params.size(); ++i) {
+        const Type* x = m->type->params[i]; const Type* y = v->type->params[i];
+        if (x != y && (x->kind != y->kind || x->inner != y->inner || x->decl != y->decl || x->memberClass != y->memberClass)) return false;
+    }
+    return m->isConversion == v->isConversion && (!m->isConversion || m->type->inner == v->type->inner);
+}
+
 // the move of a covariant result from the class overrider m returns (a pointer or reference to) to the one root,
 // the overridden function, returns: 0 when they are the same class or the base is at offset 0, -1 when the base is
 // reached through a virtual base
@@ -2884,6 +2900,13 @@ void Sema::completeClass(Symbol* cls)
             Symbol* v = cls->vtable[s];
             if (v == over || (over && v->overrides && v->name == m->name && sameSignature(v->type, m->type)) || (m->isDestructor && v->isDestructor)) { hits.push_back(std::make_pair(static_cast<size_t>(0), s)); break; }
         }
+        // "over" is the first function found in the order the bases are named: one of another base when a virtual base,
+        // or a base whose only vfptr lies in its virtual base, is named before the primary base. The function of the
+        // primary table that m overrides is then looked for in that table itself (J2 : virtual VR, P1 { int r(); }
+        // overrides P1::r in the table at 0 as well as VR::r, and is reached there with this at the object; row G45)
+        if (hits.empty() && m->ownerClass == cls && !m->isConstructor && !m->isDestructor)
+            for (size_t s = 0; s < cls->vtable.size(); ++s)
+                if (overridesExactly(m, cls->vtable[s])) { hits.push_back(std::make_pair(static_cast<size_t>(0), s)); break; }
         for (size_t t = 1; t < tables.size(); ++t)
             for (size_t s = 0; s < tables[t].fns.size(); ++s) {
                 Symbol* v = tables[t].fns[s];

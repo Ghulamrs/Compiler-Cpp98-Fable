@@ -72,7 +72,14 @@ bool readResponseFile(const std::string& path, std::vector<std::string>& args);
 void findSourceFiles(const std::string& dir, std::vector<std::string>& headers, std::vector<std::string>& sources,
                      std::vector<std::string>& dirsWithHeaders, int depth = 0,
                      const std::vector<std::string>* excluded = 0, std::vector<std::string>* skipped = 0);
+// the file's text: its bytes without a UTF-8 byte order mark at their start
 bool readFile(const std::string& p, std::string& out);
+// the file's bytes as they are on disk, and the byte order mark taken from a text read that way
+bool readFileBytes(const std::string& p, std::string& out);
+void dropByteOrderMark(std::string& text);
+// a source file as a debugger is told of it, and as cl records it: the absolute path with "." and ".." resolved,
+// with backslashes
+std::string debugPath(const std::string& p);
 bool writeFile(const std::string& p, const std::string& content);
 
 } // namespace cppparse

@@ -4237,6 +4237,16 @@ void IrGen::localDecl(cxx::Decl* d)
             LValue rl; rl.kind = LValue::Mem; rl.addr = load(sl, sl.type, line); rl.type = vt;
             // the name is in scope in its own initializer (A a = &a): reads go through the hidden pointer
             m_slots[var] = m_sretSlot;
+            if (m_cv) {
+                // -g: it has no slot of its own; listed as a reference to its type at the place of the hidden result
+                // pointer, with the type it has before the next line rewrites it (docs/design-codeview.md 5.3)
+                IrDebugAlias alias;
+                alias.name = var->name;
+                alias.type = m_cv->typeOf(m_semaTypes.reference(vt));
+                alias.block = debugBlock(var);
+                alias.local = m_sretSlot;
+                m_out->debugAliases.push_back(alias);
+            }
             var->type = m_semaTypes.reference(vt);
             initObject(rl, vt, var, id, line);
             if (needsDtor(vt)) registerCleanup(m_sretSlot, vt, true, 2, line);
@@ -5346,11 +5356,7 @@ void IrGen::setFiles(const std::vector<std::string>& files)
 {
     // as cl records them: absolute paths with backslashes (a debugger opens the file from the line table alone)
     m_files.clear();
-    for (size_t i = 0; i < files.size(); ++i) {
-        std::string p = normalizePath(absolutePath(files[i]));
-        for (size_t k = 0; k < p.size(); ++k) if (p[k] == '/') p[k] = '\\';
-        m_files.push_back(p);
-    }
+    for (size_t i = 0; i < files.size(); ++i) m_files.push_back(debugPath(files[i]));
 }
 
 void IrGen::prologue(Symbol* fn)

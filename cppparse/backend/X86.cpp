@@ -305,10 +305,43 @@ private:
     {
         if (!debugMarks()) return;
         if (!m_prologEndOut) { m_out << ";@prologend\n"; m_prologEndOut = true; }
+        debugCloseAll();
         debugScope(-1);
         m_out << ";@epilog\n";
     }
     void debugVariables();
+    // -g at -O1 and up (docs/design-codeview.md 5.3, 5.4): a variable whose one definition is a temporary
+    // (IrFunction::debugTemps) is where that temporary is. placeOf is the one answer to "where is this temporary":
+    // use() and def() read and write every operand through it, and the ;@loc markers are written from it, so a
+    // marker says what the emitted code does. A place holds for the temporary's whole life (the allocator gives a
+    // value one register or one slot); it is announced over the code where the value is in it and nothing else is:
+    //   - from behind the instruction that defines the temporary, and at a block's start when it is live into it;
+    //   - to the last instruction of the block that uses it, when it is not live out of the block: before that
+    //     instruction (which may compute its own result in the register), but behind a call instruction itself when
+    //     the place is a callee-saved register (the call keeps it, the result is moved in after the return), and
+    //     behind the instruction when the place is a frame slot (which only this temporary's definition writes);
+    //   - a volatile register (rax, rcx, rdx, r8 to r11, xmm2, xmm3) never across a call or another operation that
+    //     destroys those (m_clobbers): its range ends before that instruction. The frames above the top one are
+    //     looked up inside their call instruction, where the unwound context has the callee-saved registers only.
+    //     rax, rcx and rdx also not across the sequences that use them beside their operands (an intrinsic, a
+    //     thread-local's address);
+    //   - never in an epilogue, a funclet's entry or the stubs behind the blocks (everything is closed there).
+    // Giving up a place is always right: the variable is then listed as not available at that address
+    struct Place { int kind; bool isFloat, isVolatile; std::string reg; int slot; Place() : kind(0), isFloat(false), isVolatile(false), slot(0) {} };   // kind 0: nowhere; 1: a register; 2: a frame slot
+    Place placeOf(int temp) const;
+    struct DebugVar { int temp; std::string place; bool isVolatile, isScratch, inFrame, open; DebugVar() : temp(-1), isVolatile(false), isScratch(false), inFrame(false), open(false) {} };
+    std::vector<DebugVar>            m_debugVars;        // by the number ;@var gave it
+    std::vector<std::set<int> >      m_liveIn, m_liveOut;   // the temporaries live into and out of every block (computeIntervals)
+    std::map<int, std::vector<int> > m_debugLastUse;     // a listed temporary -> per block, the index of the last instruction that reads it (-1: none)
+    std::vector<size_t>              m_debugAfterCall;   // the variables whose range ends behind the call instruction being emitted
+    bool debugRanged(int temp, const Type* type, bool byAddress, int block, int debugType, char kind, const std::string& name);
+    bool debugInFrame(size_t local) const;
+    void debugPlace(size_t var, bool open);
+    void debugBlockStart(size_t b);
+    void debugBefore(const IrInst& in, size_t b, size_t i);
+    void debugAfter(const IrInst& in, size_t b, size_t i);
+    void debugAfterCall();
+    void debugCloseAll() { for (size_t v = 0; v < m_debugVars.size(); ++v) debugPlace(v, false); }
     // a register parameter that is only read, by loads at the very start of the function (before anything can
     // overwrite its argument register), is used straight from that register and never stored to the frame
     void analyzeParams();
@@ -393,12 +426,14 @@ void X86Function::clEmitFunclets()
         const int owner = m_clf.owner(b);
         if (owner != m_curFunclet) {
             m_curFunclet = owner;
+            debugCloseAll();  // -g: the funclet's entry saves registers and sets rbp: no variable is described there
             debugScope(-1);   // -g: rbp is the function's from the funclet's lea on (its first statement's ;@scope)
             m_clf.entry(static_cast<size_t>(owner), m_frameSize, m_openEnd, *this);
             m_openEnd = false;
         }
         const EhClFunclets::Funclet& fc = m_clf.at(static_cast<size_t>(owner));
         if (fc.jump) {
+            debugCloseAll();
             // one destructor call on a local: its address from the establisher frame, and a jump
             const std::vector<IrInst>& hi = m_f.blocks[b].insts;
             for (size_t i = 0; i < hi.size(); ++i) {
@@ -409,9 +444,11 @@ void X86Function::clEmitFunclets()
         }
         m_out << label(static_cast<int>(b)) << ":" << (m_f.blocks[b].label.empty() ? "" : "        ; " + m_f.blocks[b].label) << "\n";
         if (fc.isCatch) clStates(m_regions.in(b));
+        debugBlockStart(b);
         for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) emitInst(m_f.blocks[b].insts[i], static_cast<int>(b));
     }
     m_curFunclet = -1;
+    debugCloseAll();
     if (m_openEnd) line("int 3");
     // a handler's HandlerType from its catchparam: the adjectives, the type descriptor, the variable the runtime builds
     std::vector<EhClFunclets::Handler> handlers(m_clf.count());
@@ -620,7 +657,8 @@ void X86Function::computeIntervals()
     // copies sit in edge blocks laid out after the loop) must not give the value's register to another one
     // (with table regions, the exception edges count: a value a landing pad's handler needs stays in its place
     // across every call that may throw to it)
-    std::vector<std::set<int> > liveIn, liveOut;
+    std::vector<std::set<int> >& liveIn = m_liveIn;
+    std::vector<std::set<int> >& liveOut = m_liveOut;
     m_f.computeLiveness(liveIn, liveOut, m_tableEh ? &m_regions.edges() : 0);
     for (size_t b = 0; b < m_f.blocks.size(); ++b) {
         for (std::set<int>::const_iterator t = liveIn[b].begin(); t != liveIn[b].end(); ++t) {
@@ -1225,15 +1263,15 @@ std::string X86Function::use(const IrOperand& o, const std::string& scratch)
     bool fl = opIsFloat(o);
     switch (o.kind) {
     case IrOperand::Temp: {
-        std::map<int, Interval>::iterator it = m_intervals.find(o.id);
-        if (it == m_intervals.end()) { line("xor " + reg32(scratch) + ", " + reg32(scratch) + "        ; undefined temporary"); return scratch; }
-        if (it->second.reg >= 0) return it->second.isFloat ? fregName(it->second.reg) : kIntRegs[it->second.reg];
-        if (it->second.isFloat) {
+        const Place p = placeOf(o.id);
+        if (p.kind == 0) { line("xor " + reg32(scratch) + ", " + reg32(scratch) + "        ; undefined temporary"); return scratch; }
+        if (p.kind == 1) return p.reg;
+        if (p.isFloat) {
             std::string xr = fl ? scratch : "xmm5";
-            line("movsd " + xr + ", real8 ptr [rbp-" + intToString(it->second.slot) + "]");
+            line("movsd " + xr + ", real8 ptr [rbp-" + intToString(p.slot) + "]");
             return xr;
         }
-        line("mov " + scratch + ", qword ptr [rbp-" + intToString(it->second.slot) + "]");
+        line("mov " + scratch + ", qword ptr [rbp-" + intToString(p.slot) + "]");
         return scratch;
     }
     case IrOperand::Imm: {
@@ -1270,12 +1308,32 @@ std::string X86Function::memOperand(const IrOperand& addr)
 std::string X86Function::def(int temp, bool isFloat, const std::string& scratch, int& spill)
 {
     spill = 0;
-    std::map<int, Interval>::iterator it = m_intervals.find(temp);
-    if (it == m_intervals.end()) return scratch;
-    if (it->second.reg >= 0) return it->second.isFloat ? fregName(it->second.reg) : kIntRegs[it->second.reg];
-    spill = it->second.slot;
+    const Place p = placeOf(temp);
+    if (p.kind == 0) return scratch;
+    if (p.kind == 1) return p.reg;
+    spill = p.slot;
     (void)isFloat;
     return scratch;
+}
+
+// where a temporary is, for the whole of its life: the register the allocator (or the coalescing after it) gave its
+// interval, else its spill slot; nowhere when it has no interval (an address folded into its reader, a comparison
+// fused with its branch, a byte tested where it lies, a value the lowering dropped)
+X86Function::Place X86Function::placeOf(int temp) const
+{
+    Place p;
+    std::map<int, Interval>::const_iterator it = m_intervals.find(temp);
+    if (it == m_intervals.end()) return p;
+    p.isFloat = it->second.isFloat;
+    if (it->second.reg >= 0) {
+        p.kind = 1;
+        p.reg = it->second.isFloat ? fregName(it->second.reg) : std::string(kIntRegs[it->second.reg]);
+        p.isVolatile = it->second.isFloat ? it->second.reg >= kFloatRegCount : it->second.reg >= kIntRegCount;
+    } else {
+        p.kind = 2;
+        p.slot = it->second.slot;
+    }
+    return p;
 }
 
 void X86Function::finish(int temp, int spill, bool isFloat, const std::string& reg)
@@ -1376,6 +1434,7 @@ void X86Function::emitCall(const IrInst& in, const char* callee)
         m_m.useExtern(target);
         line("call " + target);
     }
+    debugAfterCall();
     if (in.dst >= 0) {
         bool fl = tempIsFloat(in.dst);
         // the callee (an MSVC-compiled one too) defines only the low bytes of a narrow result: a 1- or 2-byte one is
@@ -1396,6 +1455,8 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
     // the line table (a comment to ml64, read by the COFF writer): the source line of the code from here on
     if (!m_f.sourceFile.empty() && in.line > 0 && in.line != m_lastLine) { m_out << ";@line " << in.line << "\n"; m_lastLine = in.line; }
     debugScope(in.scope);
+    const size_t instIndex = static_cast<size_t>(&in - &m_f.blocks[static_cast<size_t>(blockIndex)].insts[0]);
+    if (!m_debugVars.empty()) debugBefore(in, static_cast<size_t>(blockIndex), instIndex);
     comment(in.str());
     bool dstFloat = in.dst >= 0 && tempIsFloat(in.dst);
     int spill = 0;
@@ -1911,6 +1972,7 @@ void X86Function::emitInst(const IrInst& in, int blockIndex)
         break;
     default: break;
     }
+    if (!m_debugVars.empty()) debugAfter(in, static_cast<size_t>(blockIndex), instIndex);
 }
 
 // table model: the landing pad at which this frame goes on when an exception passes the code being emitted: the pad
@@ -1992,9 +2054,46 @@ std::string X86Function::catchType(int hb) const
 // the pushed registers, the bytes of the pushed registers with rbp, the flags as cl sets them: the base of the locals
 // and of the parameters, RBP; "optimised for speed", which cl sets at /Od too; "marked inline"; "has EH" for a function
 // with exception regions); its blocks; then its variables, the parameters first in their order, then the locals in
-// the order they were declared: in the frame (;@local, the offset from rbp), or without a place (;@gone: a parameter
-// the function never reads is not stored at -O0; a function without a frame; until stage 3, every variable of an
-// optimised function); its static locals
+// the order they were declared: in the frame (;@local, the offset from rbp), in its temporary's place over ranges of
+// the code (;@var, its ;@loc markers follow in the code), or without a place (;@gone); its static locals.
+// A frame slot is a variable's place when the code keeps the variable there: at -O0 every variable but a parameter the
+// function never reads (it is not stored); at -O1 and up a variable that Ssa.cpp did not promote and no store to which
+// was removed (IrLocal::promoted, staleStores; 5.3). A variable with one definition (IrFunction::debugTemps) is where
+// that temporary is. A named result built in the caller's object is listed by address at the place of the local that
+// holds the hidden result pointer
+bool X86Function::debugInFrame(size_t l) const
+{
+    const IrLocal& v = m_f.locals[l];
+    if (m_frameless || v.promoted || v.staleStores) return false;
+    // a parameter the function never reads, or reads from its register alone, is not stored in the frame
+    if (v.isParam && !m_f.variadic && static_cast<int>(l) < m_f.paramCount && (!m_paramUsed[l] || m_paramInReg[l])) return false;
+    return true;
+}
+
+// the variable 'name' as its one definition, temporary 'temp': ;@var, when the temporary has a place and holds a
+// value of the variable's size and kind (a narrower or wider temporary of equal value is no place for it)
+bool X86Function::debugRanged(int temp, const Type* type, bool byAddress, int block, int debugType, char kind, const std::string& name)
+{
+    const Place p = placeOf(temp);
+    const Type* tt = m_f.typeOf(temp);
+    if (p.kind == 0 || !tt) return false;
+    const bool address = byAddress || !type || type->kind == Type::Pointer || type->kind == Type::Reference;
+    const bool isFloat = !address && isFloatType(type);
+    const int size = address ? 8 : typeSize(type);
+    const bool tempAddress = tt->kind == Type::Pointer || tt->kind == Type::Reference;
+    if (isFloat != p.isFloat || isFloat != (!tempAddress && isFloatType(tt)) || size != (tempAddress ? 8 : typeSize(tt))) return false;
+    if (isFloat ? (size != 4 && size != 8) : (size != 1 && size != 2 && size != 4 && size != 8)) return false;
+    DebugVar v;
+    v.temp = temp;
+    v.isVolatile = p.kind == 1 && p.isVolatile;
+    v.isScratch = p.kind == 1 && (p.reg == "rax" || p.reg == "rcx" || p.reg == "rdx");
+    v.inFrame = p.kind == 2;
+    v.place = p.kind == 1 ? p.reg + " " + intToString(size) : "[rbp-" + intToString(p.slot) + "]";
+    m_out << ";@var " << m_debugVars.size() << " " << block << " T" << debugType << " " << kind << (byAddress ? "r" : "") << " " << name << "\n";
+    m_debugVars.push_back(v);
+    return true;
+}
+
 void X86Function::debugVariables()
 {
     const int pushed = 8 * static_cast<int>(m_usedIntRegs.size());
@@ -2012,13 +2111,95 @@ void X86Function::debugVariables()
         const size_t l = static_cast<size_t>(order[k].second);
         const IrLocal& v = m_f.locals[l];
         const char kind = v.debugParam >= 0 ? 'p' : 'l';
-        bool placed = !m_frameless && !m_f.debugOptimized;
-        if (v.isParam && !m_f.variadic && static_cast<int>(l) < m_f.paramCount && !m_paramUsed[l]) placed = false;   // never read: not stored
-        if (placed) m_out << ";@local " << v.block << " T" << v.debugType << " [rbp" << (m_localOffset[l] > 0 ? "-" : "+") << (m_localOffset[l] > 0 ? m_localOffset[l] : -m_localOffset[l]) << "] " << kind << (v.byAddress ? "r" : "") << " " << v.debugName << "\n";
+        const std::map<int, IrDebugTemp>::const_iterator one = m_f.debugTemps.find(static_cast<int>(l));
+        if (one != m_f.debugTemps.end()) {
+            if (!debugRanged(one->second.temp, v.type, v.byAddress, v.block, v.debugType, kind, v.debugName)) m_out << ";@gone " << v.block << " T" << v.debugType << " " << kind << " " << v.debugName << "\n";
+        }
+        else if (debugInFrame(l)) m_out << ";@local " << v.block << " T" << v.debugType << " [rbp" << (m_localOffset[l] > 0 ? "-" : "+") << (m_localOffset[l] > 0 ? m_localOffset[l] : -m_localOffset[l]) << "] " << kind << (v.byAddress ? "r" : "") << " " << v.debugName << "\n";
         else m_out << ";@gone " << v.block << " T" << v.debugType << " " << kind << " " << v.debugName << "\n";
     }
+    for (size_t a = 0; a < m_f.debugAliases.size(); ++a) {
+        const IrDebugAlias& r = m_f.debugAliases[a];
+        if (r.local < 0 || static_cast<size_t>(r.local) >= m_f.locals.size()) continue;
+        const size_t l = static_cast<size_t>(r.local);
+        const std::map<int, IrDebugTemp>::const_iterator one = m_f.debugTemps.find(r.local);
+        if (one != m_f.debugTemps.end()) {
+            if (!debugRanged(one->second.temp, m_f.locals[l].type, true, r.block, r.type, 'l', r.name)) m_out << ";@gone " << r.block << " T" << r.type << " l " << r.name << "\n";
+        }
+        else if (debugInFrame(l)) m_out << ";@local " << r.block << " T" << r.type << " [rbp" << (m_localOffset[l] > 0 ? "-" : "+") << (m_localOffset[l] > 0 ? m_localOffset[l] : -m_localOffset[l]) << "] lr " << r.name << "\n";
+        else m_out << ";@gone " << r.block << " T" << r.type << " l " << r.name << "\n";
+    }
+    // the last instruction of each block that reads each listed temporary
+    for (size_t k = 0; k < m_debugVars.size(); ++k) m_debugLastUse[m_debugVars[k].temp].assign(m_f.blocks.size(), -1);
+    if (!m_debugVars.empty())
+        for (size_t b = 0; b < m_f.blocks.size(); ++b)
+            for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) {
+                const IrInst& in = m_f.blocks[b].insts[i];
+                for (size_t x = 0; x < in.args.size(); ++x) {
+                    if (in.args[x].kind != IrOperand::Temp) continue;
+                    const std::map<int, std::vector<int> >::iterator u = m_debugLastUse.find(in.args[x].id);
+                    if (u != m_debugLastUse.end()) u->second[b] = static_cast<int>(i);
+                }
+            }
     for (size_t s = 0; s < m_f.debugStatics.size(); ++s)
         m_out << ";@static " << m_f.debugStatics[s].block << " T" << m_f.debugStatics[s].type << " " << m_m.globalSymbol(m_f.debugStatics[s].global) << " " << m_f.debugStatics[s].name << "\n";
+}
+
+// ;@loc <var> <register> <bytes> | [rbp-N] | -: from the next instruction on the variable is there, or nowhere
+void X86Function::debugPlace(size_t var, bool open)
+{
+    DebugVar& v = m_debugVars[var];
+    if (v.open == open) return;
+    v.open = open;
+    m_out << ";@loc " << var << " " << (open ? v.place : std::string("-")) << "\n";
+}
+
+// (in a funclet of cl's model a register is a place only for what the funclet itself computes, which opens behind its
+// definition: a value of the function that the funclet does not touch stays in its callee-saved register, but while
+// the funclet runs that register is the runtime's, and is the function's again only at the continuation. A slot is
+// the frame's, in the funclet too)
+void X86Function::debugBlockStart(size_t b)
+{
+    for (size_t k = 0; k < m_debugVars.size(); ++k)
+        debugPlace(k, b < m_liveIn.size() && m_liveIn[b].count(m_debugVars[k].temp) != 0 && (m_curFunclet < 0 || m_debugVars[k].inFrame));
+}
+
+void X86Function::debugBefore(const IrInst& in, size_t b, size_t i)
+{
+    const bool call = in.op == IrInst::Call || in.op == IrInst::VCall;
+    // what destroys the volatile registers (computeIntervals' m_clobbers), and the sequences that use rcx, rdx and rax
+    // beside their operands (writesArgReg)
+    const bool clobber = call || in.op == IrInst::Throw || in.op == IrInst::CatchParam || in.op == IrInst::CatchEnd ||
+                         in.op == IrInst::TryBegin || in.op == IrInst::TryEnd;
+    const bool scratch = in.op == IrInst::Intrinsic || in.op == IrInst::AddrTls;
+    m_debugAfterCall.clear();
+    for (size_t k = 0; k < m_debugVars.size(); ++k) {
+        DebugVar& v = m_debugVars[k];
+        if (!v.open) continue;
+        if ((v.isVolatile && clobber) || (v.isScratch && scratch)) { debugPlace(k, false); continue; }
+        if (in.dst == v.temp) { debugPlace(k, false); continue; }
+        const bool last = m_debugLastUse[v.temp][b] == static_cast<int>(i) && !m_liveOut[b].count(v.temp);
+        if (!last || v.inFrame) continue;                  // (a slot's range ends behind the instruction: debugAfter)
+        if (!v.isVolatile && call) m_debugAfterCall.push_back(k);
+        else debugPlace(k, false);
+    }
+}
+
+void X86Function::debugAfterCall()
+{
+    for (size_t k = 0; k < m_debugAfterCall.size(); ++k) debugPlace(m_debugAfterCall[k], false);
+    m_debugAfterCall.clear();
+}
+
+void X86Function::debugAfter(const IrInst& in, size_t b, size_t i)
+{
+    debugAfterCall();   // (an instruction that is no call after all)
+    for (size_t k = 0; k < m_debugVars.size(); ++k) {
+        DebugVar& v = m_debugVars[k];
+        const bool live = m_liveOut[b].count(v.temp) != 0 || m_debugLastUse[v.temp][b] > static_cast<int>(i);
+        if (in.dst == v.temp) debugPlace(k, live);
+        else if (v.open && !live) debugPlace(k, false);
+    }
 }
 
 void X86Function::emitBody()
@@ -2058,9 +2239,11 @@ void X86Function::emitBody()
             if (o == m_hotCount) { m_out << m_label << "_exit:\n"; debugEpilog(); line("ret"); }
             const size_t b = static_cast<size_t>(m_order[o]);
             m_out << label(static_cast<int>(b)) << ":" << (m_f.blocks[b].label.empty() ? "" : "        ; " + m_f.blocks[b].label) << "\n";
+            debugBlockStart(b);
             for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) emitInst(m_f.blocks[b].insts[i], static_cast<int>(b));
         }
         if (m_hotCount >= m_order.size()) { m_out << m_label << "_exit:\n"; debugEpilog(); line("ret"); }
+        debugCloseAll();
         if (m_openEnd) line("int 3");
         m_out << m_label << " ENDP\n\n";
         return;
@@ -2127,6 +2310,7 @@ void X86Function::emitBody()
         m_out << label(static_cast<int>(b)) << ":" << (m_f.blocks[b].label.empty() ? "" : "        ; " + m_f.blocks[b].label) << "\n";
         if (m_cl) clStates(m_regions.in(b));
         else if (m_tableEh) m_ranges.set(m_regions.in(b), *this);
+        debugBlockStart(b);
         for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) emitInst(m_f.blocks[b].insts[i], static_cast<int>(b));
     }
     if (m_cl) { m_clStack.clear(); m_clf.endStates(*this); }
@@ -2154,8 +2338,10 @@ void X86Function::emitBody()
         const size_t b = static_cast<size_t>(m_order[o]);
         m_out << label(static_cast<int>(b)) << ":" << (m_f.blocks[b].label.empty() ? "" : "        ; " + m_f.blocks[b].label) << "\n";
         if (m_tableEh) m_ranges.set(m_regions.in(b), *this);
+        debugBlockStart(b);
         for (size_t i = 0; i < m_f.blocks[b].insts.size(); ++i) emitInst(m_f.blocks[b].insts[i], static_cast<int>(b));
     }
+    debugCloseAll();   // -g: the dispatch stubs follow
     if (m_tableEh) m_ranges.set(std::vector<long>(), *this);
     // version 5: one dispatch stub per try region: pop the frame, try the catch clauses in order, else rethrow.
     // With tables the stub is the region's landing pad, and runs in the regions around the region (a rethrow

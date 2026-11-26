@@ -54,6 +54,16 @@ struct RD : RC { RD* self() { return this; } RD* six(int p, int q, int r, int s,
 // by cppparse's calls through PV*; cppparse's constructors and destructors run inside cl's
 struct PVE : PVD { int e; PVE() : e(9) { g_pvLog = g_pvLog * 10 + (probe() == 1024 ? 7 : 0); } ~PVE() { g_pvLog = g_pvLog * 10 + (probe() == 1024 ? 8 : 0); } int f() const { return e + 1; } };
 
+// a class cl derives from cppparse's FJ (a virtual base named before the polymorphic base, row G45), overriding r:
+// cl's tables for both bases, reached by cppparse's calls; cppparse's constructors and destructors run inside cl's
+// and see FJ::r through both bases, FV moved from where FJ alone has it (the vtordisp)
+struct FK : FJ {
+    int k;
+    FK() : k(9) { const FP* p = this; const FV* v = this; g_fvLog = g_fvLog * 10 + (p->r() == 99 && v->r() == 99 ? 7 : 0); }
+    ~FK() { const FP* p = this; const FV* v = this; g_fvLog = g_fvLog * 10 + (p->r() == 99 && v->r() == 99 ? 8 : 0); }
+    int r() const { return k + 90; }
+};
+
 // a class cl derives from cppparse's OW: cppparse's calls reach its overriders through cl's table
 struct CW : OW {
     int f(int) const { return 201; }
@@ -529,6 +539,74 @@ int main()
         pvDelete(pe);
         expect("cl's PVE deleted by cppparse: log", g_pvLog, 8569);
         g_pvLog = 0;
+    }
+    printf("a virtual base named before the polymorphic base: the override in both tables, by both compilers\n");
+    {
+        g_fvLog = 0;
+        {
+            FJ j;
+            expect("FJ built by cl, cppparse's constructors: log", g_fvLog, 123);
+            expect("cl's calls through FP*", static_cast<FP*>(&j)->r() * 100 + static_cast<FP*>(&j)->t(), 5504);
+            expect("cl's calls through FV*", static_cast<FV*>(&j)->r() * 100 + static_cast<FV*>(&j)->s(), 5502);
+            expect("cl's direct call (this at the object)", j.r(), 55);
+            expect("cppparse's calls through FP*", fvCallP(&j), 5504);
+            expect("cppparse's calls through FV*", fvCallV(&j), 5502);
+            expect("cppparse's calls through every base", fvCallJ(&j), 5500);
+            expect("pointers to members on FJ (cppparse)", fvMemptr(j, &FP::r, &FJ::r), 55055);
+            expect("pointers to members on FJ (cl)", (j.*(&FP::r))() * 1000 + (j.*(&FJ::r))(), 55055);
+            g_fvLog = 0;
+        }
+        expect("FJ destroyed by cl, cppparse's destructors: log", g_fvLog, 456);
+        g_fvLog = 0;
+        FP* p = fvMakeJ();
+        expect("FJ built by cppparse: log", g_fvLog, 123);
+        expect("cl's calls into cppparse's FJ through FP*", p->r() * 100 + p->t(), 5504);
+        expect("cl's calls into cppparse's FJ through FV*", dynamic_cast<FV*>(p)->r() * 100 + dynamic_cast<FV*>(p)->s(), 5502);
+        g_fvLog = 0;
+        delete p;
+        expect("cppparse's FJ deleted by cl through FP*: log", g_fvLog, 456);
+        p = new FJ;
+        g_fvLog = 0;
+        fvDeleteP(p);
+        expect("cl's FJ deleted by cppparse through FP*: log", g_fvLog, 456);
+        FV* v = new FJ;
+        g_fvLog = 0;
+        fvDeleteV(v);
+        expect("cl's FJ deleted by cppparse through FV*: log", g_fvLog, 456);
+        expect("an FJ on cppparse's stack: log", fvLife(), 123456);
+        // without a constructor: each compiler's own tables, the other's calls
+        FN n;
+        expect("FN: cl's calls", static_cast<FP*>(&n)->r() * 10000 + static_cast<FV*>(&n)->r() * 100 + static_cast<FV*>(&n)->s(), 606061);
+        expect("FN: cppparse's calls into cl's object", fvCallP(&n) * 10000 + fvCallV(&n), 60046061);
+        v = fvMakeN();
+        expect("FN: cl's calls into cppparse's object", v->r() * 10000 + v->s() * 100 + dynamic_cast<FP*>(v)->r(), 606160);
+        expect("FN: cppparse's calls into its own", fvCallV(v) * 10000 + fvCallP(dynamic_cast<FP*>(v)), 60616004);
+        fvDeleteV(v);
+        // the first base's only vfptr is its virtual base's
+        FW w;
+        expect("FW: cl's calls", static_cast<FP*>(&w)->r() * 10000 + static_cast<FV*>(&w)->r() * 100 + static_cast<FL*>(&w)->r(), 777777);
+        expect("FW: cppparse's calls", fvCallP(&w) * 10000 + fvCallV(&w), 77047702);
+        p = fvMakeW();
+        expect("FW: cl's calls into cppparse's object", p->r() * 100 + dynamic_cast<FV*>(p)->r(), 7777);
+        g_fvLog = 0;
+        delete p;
+        expect("cppparse's FW deleted by cl through FP*: log", g_fvLog, 56);
+        // cl's class derived from FJ: cppparse's constructors run inside cl's
+        g_fvLog = 0;
+        {
+            FK k;
+            expect("FK built by cl: log", g_fvLog, 1237);
+            expect("cppparse's calls of cl's override through FP*", fvCallP(&k), 9904);
+            expect("cppparse's calls of cl's override through FV*", fvCallV(&k), 9902);
+            expect("cppparse's calls of cl's override through every base", fvCallJ(&k), 9900);
+            expect("cl's call through FJ*", static_cast<FJ*>(&k)->r(), 99);
+            g_fvLog = 0;
+        }
+        expect("FK destroyed by cl: log", g_fvLog, 8456);
+        p = new FK;
+        g_fvLog = 0;
+        fvDeleteP(p);
+        expect("cl's FK deleted by cppparse through FP*: log", g_fvLog, 8456);
     }
     printf("covariant returns through a secondary base: cl's return-adjusting thunks, by both compilers\n");
     {

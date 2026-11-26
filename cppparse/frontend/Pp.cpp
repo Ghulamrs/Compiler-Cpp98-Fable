@@ -265,10 +265,19 @@ int Preprocessor::addFile(const std::string& path)
     return static_cast<int>(m_files.size() - 1);
 }
 
+bool Preprocessor::readSource(const std::string& path, std::string& text)
+{
+    if (!m_opt.observer) return readFile(path, text);
+    if (!readFileBytes(path, text)) return false;
+    m_opt.observer->fileRead(path, text);
+    dropByteOrderMark(text);
+    return true;
+}
+
 bool Preprocessor::run(const std::string& path)
 {
     std::string text;
-    if (!readFile(path, text)) { diag(PpDiag::Error, -1, 0, "cannot read " + path); return false; }
+    if (!readSource(path, text)) { diag(PpDiag::Error, -1, 0, "cannot read " + path); return false; }
     return runText(path, text);
 }
 
@@ -487,7 +496,7 @@ void Preprocessor::includeDirective(std::vector<PpToken>& line, size_t at, int f
     std::map<std::string, std::string>::iterator c = m_fileCache.find(key);
     if (c == m_fileCache.end()) {
         std::string text;
-        if (!readFile(found, text)) { diag(PpDiag::Error, fileIndex, ln, "cannot read " + found); return; }
+        if (!readSource(found, text)) { diag(PpDiag::Error, fileIndex, ln, "cannot read " + found); return; }
         c = m_fileCache.insert(std::make_pair(key, text)).first;
     }
     int f = addFile(found);

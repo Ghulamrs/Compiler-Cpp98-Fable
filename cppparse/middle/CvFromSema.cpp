@@ -225,7 +225,8 @@ std::string CvFromSema::functionName(const Symbol* fn)
 
 // ---- the module's description (-g) ---------------------------------------------------------------------------------
 
-CvFromSema::CvFromSema(const sema::TypeTable& types, CvModule& module) : m_semaTypes(types), m_module(module), m_completed(0), m_unnamed(0), m_vftableEntry(0)
+CvFromSema::CvFromSema(const sema::TypeTable& types, CvModule& module)
+    : m_semaTypes(types), m_module(module), m_rule(0), m_methods(false), m_completed(0), m_unnamed(0), m_vftableEntry(0)
 {
 }
 
@@ -275,6 +276,7 @@ int CvFromSema::describe(const sema::Type* t, bool unqualified)
     }
     case sema::Type::Function:
         d.kind = CvType::Procedure; d.to = t->inner ? describe(t->inner, false) : basic(0x03); d.variadic = t->variadic;
+        if (returnsUdt(t->inner, false)) d.attributes |= CvType::FnReturnsUdt;
         for (size_t i = 0; i < t->params.size(); ++i) d.params.push_back(describe(t->params[i], false));
         n = m_module.add(d);
         break;
@@ -297,11 +299,10 @@ int CvFromSema::describe(const sema::Type* t, bool unqualified)
         d.bytes = unspecified ? (toFunction ? 24UL : 12UL) : static_cast<unsigned long>(m_semaTypes.sizeOf(t));
         d.model = (toFunction ? 4 : 0) + (unspecified ? 4 : virt ? 3 : multiple ? 2 : 1);
         if (toFunction) {
-            // the member function's type: its class, and this as cl types it, a const pointer to the (const) class
-            CvType self; self.kind = CvType::Pointer; self.isConst = true; self.to = d.ofClass;
-            if (t->inner->constMethod) { CvType c; c.kind = CvType::Modifier; c.isConst = true; c.to = d.ofClass; self.to = m_module.add(c); }
-            CvType f; f.kind = CvType::MemberFunction; f.ofClass = d.ofClass; f.thisType = m_module.add(self);
+            // the member function's type: its class, and this as cl types it, a pointer to the (const) class
+            CvType f; f.kind = CvType::MemberFunction; f.ofClass = d.ofClass; f.thisType = thisType(d.ofClass, t->inner->constMethod);
             f.to = t->inner->inner ? describe(t->inner->inner, false) : basic(0x03); f.variadic = t->inner->variadic;
+            if (returnsUdt(t->inner->inner, true)) f.attributes |= CvType::FnReturnsUdt;
             for (size_t i = 0; i < t->inner->params.size(); ++i) f.params.push_back(describe(t->inner->params[i], false));
             d.to = m_module.add(f);
         }
@@ -316,28 +317,162 @@ int CvFromSema::describe(const sema::Type* t, bool unqualified)
     return n;
 }
 
+// the type of this in a member function of the class described as type 'ofClass': a pointer to the class, to the
+// const class in a const member function (cl 19.52 writes the pointer itself without const, the type the function's
+// own "this" record has)
+int CvFromSema::thisType(int ofClass, bool constMethod)
+{
+    std::map<int, int>& memo = constMethod ? m_thisConst : m_this;
+    std::map<int, int>::const_iterator it = memo.find(ofClass);
+    if (it != memo.end()) return it->second;
+    CvType self; self.kind = CvType::Pointer; self.to = ofClass;
+    if (constMethod) { CvType c; c.kind = CvType::Modifier; c.isConst = true; c.to = ofClass; self.to = m_module.add(c); }
+    const int n = m_module.add(self);
+    memo[ofClass] = n;
+    return n;
+}
+
+// cl's "returns cxx udt": a result of class type by value that comes back the C++ way. From a non-static member
+// function every class does; from any other function a class that is no plain aggregate (the code generator's rule
+// for the hidden result pointer, less the size: a plain struct of 16 bytes is returned through the pointer and not
+// marked); a class the unit never defines is marked. Measured on cl 19.52 for 27 result types
+bool CvFromSema::returnsUdt(const sema::Type* result, bool nonStaticMember) const
+{
+    if (!result || result->kind != sema::Type::Class) return false;
+    if (nonStaticMember || !result->decl || !result->decl->isDefinition) return true;
+    return m_rule && !m_rule->plainAggregate(result);
+}
+
 int CvFromSema::functionType(const Symbol* fn)
 {
+    return describeFunction(fn, false);
+}
+
+// listed: the type a class's member list names for fn (below); else the type of fn's own procedure
+int CvFromSema::describeFunction(const Symbol* fn, bool listed)
+{
     if (!fn || !fn->type || fn->type->kind != sema::Type::Function) return 0;
+    const long adjust = fn->isVirtual ? fn->thisAdjust : 0;
+    if (listed && adjust == 0) listed = false;           // one type for both
+    std::map<const Symbol*, int>& memo = listed ? m_listedTypes : m_functionTypes;
+    std::map<const Symbol*, int>::const_iterator it = memo.find(fn);
+    if (it != memo.end()) return it->second;
     const sema::Type* ft = fn->type;
     const Symbol* owner = fn->ownerClass;
+    // a constructor (an instance of a constructor template too, as functionName reads it)
+    const bool ctor = fn->isConstructor || (owner && fn->instantiatedFrom && !fn->templateArgs.empty() && fn->instantiatedFrom->name == owner->ctorName());
     CvType f;
     f.kind = owner ? CvType::MemberFunction : CvType::Procedure;
     // a constructor and a destructor return nothing, as cl types them
-    f.to = ft->inner && !fn->isConstructor && !fn->isDestructor ? typeOf(ft->inner) : basic(0x03);
+    const bool noResult = !ft->inner || ctor || fn->isDestructor;
+    f.to = noResult ? basic(0x03) : typeOf(ft->inner);
     if (f.to == 0) f.to = basic(0x03);
     f.variadic = ft->variadic;
     for (size_t i = 0; i < ft->params.size(); ++i) f.params.push_back(typeOf(ft->params[i]));
+    if (!noResult && returnsUdt(ft->inner, owner && !fn->isStatic)) f.attributes |= CvType::FnReturnsUdt;
     if (owner) {
         if (!owner->type) return 0;
         f.ofClass = describe(owner->type, true);
-        if (!fn->isStatic) {
-            CvType self; self.kind = CvType::Pointer; self.isConst = true; self.to = f.ofClass;
-            if (ft->constMethod) { CvType c; c.kind = CvType::Modifier; c.isConst = true; c.to = f.ofClass; self.to = m_module.add(c); }
-            f.thisType = m_module.add(self);
-        }
+        if (!fn->isStatic) f.thisType = thisType(f.ofClass, ft->constMethod);
+        if (ctor) f.attributes |= owner->vbases.empty() ? CvType::FnConstructor : CvType::FnConstructor | CvType::FnConstructorVbases;
+        // The adjustment of this (docs/design-codeview.md 5.2). An override that is first reached through a table
+        // of a later base is called with this moved to that base's vfptr, Symbol::thisAdjust bytes into the object;
+        // cl's functions work on that pointer and say so on their one type. cppparse's put this right at entry
+        // (the frame's this is the object): the procedure's own type says 0, so that no reader of a frame adjusts
+        // twice, and the type the class lists says what a caller of the function passes, as cl's does
+        if (listed) f.thisAdjust = adjust;
     }
-    return m_module.add(f);
+    const int n = m_module.add(f);
+    memo[fn] = n;
+    return n;
+}
+
+// The type of a conversion function as its name in the class's member list holds it (CvNames, declared...); false
+// for a type outside what was measured: that function is not listed
+bool CvFromSema::declaredText(const sema::Type* t, std::string& out, int depth)
+{
+    if (!t || depth > kMaxDepth) return false;
+    switch (t->kind) {
+    case sema::Type::Pointer: {
+        std::string to;
+        if (t->isVolatile || !t->inner || t->inner->kind == sema::Type::Reference || !declaredText(t->inner, to, depth + 1)) return false;
+        out = CvNames::declaredPointer(to, t->isConst);
+        return true;
+    }
+    case sema::Type::Reference: {
+        std::string to;
+        if (!t->inner || t->inner->kind == sema::Type::Pointer || t->inner->kind == sema::Type::Reference || !declaredText(t->inner, to, depth + 1)) return false;
+        out = CvNames::declaredReference(to);
+        return true;
+    }
+    case sema::Type::Class: case sema::Type::Enum: {
+        const Symbol* d = t->decl;
+        if (!d || d->name.empty()) return false;
+        const std::string name = qualifiedName(d, InType, depth + 1);
+        // (an instantiation's arguments, a local class's function are spelled a third way there: not listed)
+        if (name.find('<') != std::string::npos || name.find('?') != std::string::npos || isLocalTo(d->scope)) return false;
+        out = CvNames::declaredNamed(t->kind == sema::Type::Enum ? "enum" : d->isUnion ? "union" : d->isStruct ? "struct" : "class", name, t->isConst, t->isVolatile);
+        return true;
+    }
+    case sema::Type::NullPtr: case sema::Type::Array: case sema::Type::Function: case sema::Type::MemberPointer: case sema::Type::Dependent: case sema::Type::Error:
+        return false;
+    default:
+        if (basicIndex(t->kind) == 0) return false;
+        out = CvNames::declaredBasic(basicName(t->kind), t->isConst, t->isVolatile);
+        return true;
+    }
+}
+
+// A member function m that cls declares, as the class's type lists it (stage 4 of docs/design-codeview.md): the
+// functions the class's definition declares, constructors, destructor, operators and conversion functions among
+// them, each name once where it is first declared, its functions the last declared first, as cl orders an overloaded
+// name's list. Not listed: what the compiler generates (cl lists its own, marked so: implicit constructors,
+// operator=, __vecDelDtor), a member template and its instances (cl lists neither), a friend, a function whose type
+// cannot be described whole, a conversion function whose type's spelling is not measured.
+// 'at': a name -> its member in 'members' (looked up, never walked); facts: the class's properties the functions set
+void CvFromSema::method(const Symbol* cls, const Symbol* m, std::vector<CvMember>& members, std::map<std::string, size_t>& at, CvClass& facts)
+{
+    if (m->kind != Symbol::Function || m->ownerClass != cls || m->isImplicit || m->isFriendDecl || m->isDependentContext) return;
+    if (!m->type || m->type->kind != sema::Type::Function) return;
+    if (m->instantiatedFrom && !m->templateArgs.empty()) return;      // an instance of a member template
+    const sema::Type* ft = m->type;
+    // cl's properties of the class: an operator function (an assignment only if it is the copy assignment, which
+    // complete() adds), a conversion function
+    if (m->isConversion) facts.hasConversion = facts.hasOperator = true;
+    else if (m->isOperator && m->name != "operator=") facts.hasOperator = true;
+    std::string name;
+    if (m->isConstructor) name = ownName(cls, InType, 0);
+    else if (m->isDestructor) name = "~" + ownName(cls, InType, 0);
+    else if (m->isConversion) {
+        std::string type;
+        if (!declaredText(ft->inner, type, 0)) return;
+        name = CvNames::conversionOperator(type);
+    }
+    else name = m->name;
+    if (name.empty()) return;
+    // the whole type, or no entry: a parameter without a description would read as "..."
+    bool whole = !ft->inner || m->isConstructor || m->isDestructor || typeOf(ft->inner) != 0;
+    for (size_t p = 0; p < ft->params.size() && whole; ++p) whole = typeOf(ft->params[p]) != 0;
+    if (!whole) return;
+    CvMethod fn;
+    fn.type = describeFunction(m, true);
+    if (fn.type == 0) return;
+    fn.access = accessOf(m->access);
+    if (m->isStatic) fn.kind = CvMethod::Static;
+    else if (m->isVirtual) {
+        const bool intro = m->overrides == 0;
+        if (intro && m->vtableSlot < 0) return;                        // (no slot known: not described)
+        fn.kind = m->isPureVirtual ? (intro ? CvMethod::PureIntroVirtual : CvMethod::PureVirtual) : (intro ? CvMethod::IntroVirtual : CvMethod::Virtual);
+        if (intro) fn.vftableOffset = 8L * m->vtableSlot;
+    }
+    std::map<std::string, size_t>::const_iterator known = at.find(name);
+    if (known == at.end()) {
+        CvMember x;
+        x.kind = CvMember::Method; x.name = name; x.methods.push_back(fn);
+        at[name] = members.size();
+        members.push_back(x);
+    }
+    else members[known->second].methods.insert(members[known->second].methods.begin(), fn);
 }
 
 int CvFromSema::classOf(const Symbol* cls)
@@ -481,9 +616,13 @@ void CvFromSema::complete(int classNumber)
             bases.push_back(x);
         }
     }
+    CvClass facts;
+    std::map<std::string, size_t> methodAt;
     if (cls->members) {
         for (size_t i = 0; i < cls->members->order.size(); ++i) {
             const Symbol* m = cls->members->order[i];
+            // (a class without a name lists none, as cl's does not)
+            if (m->kind == Symbol::Function) { if (m_methods && !cls->name.empty()) method(cls, m, members, methodAt, facts); continue; }
             CvMember x;
             x.name = m->name; x.access = accessOf(m->access);
             if (m->kind == Symbol::Variable && m->isMember && !m->name.empty()) {
@@ -516,6 +655,12 @@ void CvFromSema::complete(int classNumber)
     c.bases = bases; c.members = members; c.hasNested = hasNested;
     c.size = cls->size > 0 ? static_cast<unsigned long>(cls->size) : 0UL;
     c.hasConstructor = cls->hasUserCtor || cls->hasDtor;
+    if (m_methods && !cls->name.empty()) {
+        // (a copy assignment the class declares is an operator and an assignment to cl; another operator= is neither)
+        c.hasAssignment = cls->hasCopyAssign;
+        c.hasOperator = facts.hasOperator || cls->hasCopyAssign;
+        c.hasConversion = facts.hasConversion;
+    }
     if (!cls->vftables.empty() && cls->vftables[0].offset == 0 && !cls->vftables[0].vbase) {
         c.vtableSlots = static_cast<int>(cls->vftables[0].fns.size());
         c.ownVfptr = cls->vftables[0].introducedBy == cls;

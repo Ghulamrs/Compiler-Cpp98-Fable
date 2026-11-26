@@ -12,7 +12,7 @@
 //                                     function or a variable, a pointer to a data member its offset
 //     a scope                         ns::Box<int>::get; an unnamed namespace `anonymous namespace'; a class local
 //                                     to a function `use'::`2'::Local, the number the block's (2: the body)
-//     a conversion function           operator int *
+//     a conversion function           operator int *; in its class's member list operator const char * (below)
 // A type is put together as C declarators are read, from the inside out, so it is built in two halves (CvTypeText):
 // what stands left of the declarator and what stands right of it ("int (" and ")[3]" around the "*" of a pointer
 // to an array).
@@ -68,6 +68,18 @@ public:
     // the scope of what is declared in block number 'block' of the function shown as 'function'
     static std::string localScope(const std::string& function, long block);
     static std::string conversionOperator(const std::string& type) { return "operator " + type; }
+
+    // ---- a conversion function's type in its class's member list (-g) ----
+    // There cl writes the type as a declaration reads, not as in a procedure's name: the qualifiers before the type
+    // ("const char *", both as "volatile const"), a class with its key ("struct p3::S", "const class p3::C &",
+    // "union p3::Un", "enum p3::E"), a pointer's own const behind its star and a star right behind a star ("char **",
+    // "const char *const *"). Measured on cl 19.52 for the fundamental types, classes and enumerations, pointers to
+    // them and to pointers, references to them; who asks (CvFromSema) lists no function whose type is outside these.
+    static std::string declaredBasic(const std::string& cxxName, bool isConst, bool isVolatile);
+    // key: "struct", "class", "union" or "enum"
+    static std::string declaredNamed(const std::string& key, const std::string& qualifiedName, bool isConst, bool isVolatile);
+    static std::string declaredPointer(const std::string& to, bool isConst);
+    static std::string declaredReference(const std::string& to) { return to + " &"; }
 
     // ---- the names of type records (-g) ----
     // The same spelling, with two scopes written another way than in a procedure's name: an unnamed namespace is
